@@ -1,0 +1,30 @@
+{
+  "name": "lynn",
+  "productName": "Lynn",
+  "private": true,
+  "version": "0.0.1",
+  "description": "风铃 Lynn — 本地优先、插件化的桌面 AI 个人助理（指挥者形态）。薄壳 + Pi 运行时 + 三档插件 + MCP。",
+  "license": "MIT",
+  "main": "dist/main/main.js",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.main.json",
+    "build:renderer": "vite build",
+    "build:main": "tsc -p tsconfig.main.json",
+    "build": "npm run typecheck && npm run build:renderer && npm run build:main",
+    "start": "electron .",
+    "dev": "npm run build && electron ."
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.5.0",
+    "@types/react": "^18.3.5",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "electron": "^31.3.0",
+    "typescript": "^5.5.4",
+    "vite": "^5.4.3"
+  }
+}
