@@ -11,6 +11,7 @@
     "build:renderer": "vite build",
     "build:main": "tsc -p tsconfig.main.json",
     "build": "npm run typecheck && npm run build:renderer && npm run build:main",
+    "test": "npm run build:main && node --test",
     "start": "electron .",
     "dev": "npm run build && electron ."
   },
