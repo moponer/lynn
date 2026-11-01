@@ -4,30 +4,34 @@
 
 本地优先、插件化的桌面 AI 个人助理——**她是指挥者，不是执行者**：她组队、派单、盯进度、审查证据、向你汇报。基于 [earendil-works/pi](https://github.com/earendil-works/pi) 生态，薄壳 + 三档插件 + MCP 能力外挂。
 
-> 当前状态：**M0 前期脚手架**。内核侧为 MockKernel（纯内存模拟指挥环），渲染层界面闭环可跑；接入 Pi 运行时（JSON-RPC over stdio）后仅替换主进程内核层，渲染层契约不变。
+> 当前状态：**M0 · 真实后端直连**。主进程内置 OpenAI 兼容流式内核（DeepSeek / GLM / Kimi / Qwen / Ollama…自配），风铃的管理工具 8 件套以 function-calling 真实执行，团队/成员档案落 `~/.lynn/`。尚未接 Pi 运行时（接入后仅替换内核层，契约不变）。
 
 ## 运行
 
 ```bash
 npm install
 npm run build   # typecheck + renderer(vite) + main(tsc)
+npm test        # build:main + node --test（28 条）
 npm start       # electron .
 ```
 
-要求 Node ≥ 22.19（Pi 生态的 engines 约束；当前机器 22.15 只影响未来接 Pi，Mock 阶段不影响）。
+首次启动点右上角 ⚙：填 Base URL / API Key / 模型（Key 用系统 safeStorage 加密存本机，可先「测试连接」再保存）。
 
 ## 结构
 
 ```
 src/
-├── shared/contract.ts    # 类型化 IPC 契约（唯一契约，单一来源）
+├── shared/contract.ts    # 类型化 IPC 契约（RPC + 事件流，唯一契约）
 ├── main/
-│   ├── main.ts           # Electron 薄壳：窗口 + IPC 转发（无 Agent 逻辑）
-│   ├── preload.ts        # contextBridge 暴露 window.lynn.rpc
-│   └── mock-kernel.ts    # MockKernel：指挥环内存模拟（受理/派单/回报/审批/汇报）
-└── renderer/             # React 界面：三栏作战室
-    ├── App.tsx           # 状态 + RPC 数据流（Mock 阶段轮询，接 Pi 后换事件推送）
-    └── components/       # TopBar / Channel(流水线+指挥卡) / Board / Composer / Avatar / EvidenceModal
+│   ├── main.ts           # Electron 薄壳：窗口 + IPC 转发 + safeStorage（无 Agent 逻辑）
+│   ├── preload.ts        # contextBridge：window.lynn.rpc / onEvent
+│   ├── kernel.ts         # 内核：流式对话循环 + 管理工具 8 件套真实执行 + 指挥板推导
+│   ├── llm.ts            # OpenAI 兼容 SSE 客户端（工具调用增量聚合）
+│   ├── settings.ts       # ~/.lynn/settings.json（Key 加密）
+│   ├── team-store.ts     # 成员书面岗位 Markdown + ~/.lynn/team 布局
+│   ├── management-tools.ts # 8 件套硬约束（收窄/打回上限/证据原则/审计）
+│   └── plugin-manifest.ts  # 插件 manifest v1 校验器 + 版本闸门
+└── renderer/             # React 三栏作战室（指挥频道流式渲染 / 指挥板 / 设置面板）
 ```
 
 ## 设计基线

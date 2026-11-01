@@ -1,0 +1,101 @@
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+
+/**
+ * 设置与数据根（§4.7）：一切落 `~/.lynn/`（可用 LYNN_HOME 覆盖，单测用）。
+ * API Key 用 Electron safeStorage 加密落盘；不可用时降级明文并打标——
+ * 文件在用户本机，但绝不把 Key 明文发给渲染层（§4.2.7 凭据代理红线）。
+ */
+
+export interface StoredModelConfig {
+  provider: string;
+  baseUrl: string;
+  model: string;
+  apiKey: { encrypted: boolean; data: string };
+  updatedAt: string;
+}
+
+interface SettingsFile {
+  model?: StoredModelConfig;
+}
+
+export function defaultDataRoot(): string {
+  return process.env.LYNN_HOME || path.join(os.homedir(), ".lynn");
+}
+
+export class SettingsStore {
+  constructor(
+    readonly dataRoot: string,
+    /** safeStorage 的两个函数由 main.ts 注入（便于单测替换） */
+    private readonly encrypt: (plain: string) => Buffer,
+    private readonly isEncryptionAvailable: () => boolean,
+  ) {}
+
+  private get file(): string {
+    return path.join(this.dataRoot, "settings.json");
+  }
+
+  private read(): SettingsFile {
+    if (!fs.existsSync(this.file)) return {};
+    try {
+      return JSON.parse(fs.readFileSync(this.file, "utf-8")) as SettingsFile;
+    } catch {
+      return {};
+    }
+  }
+
+  private write(s: SettingsFile): void {
+    fs.mkdirSync(this.dataRoot, { recursive: true });
+    fs.writeFileSync(this.file, JSON.stringify(s, null, 2), "utf-8");
+  }
+
+  getModel(): StoredModelConfig | null {
+    return this.read().model ?? null;
+  }
+
+  saveModel(input: {
+    provider: string;
+    baseUrl: string;
+    model: string;
+    apiKey?: string;
+    previous?: StoredModelConfig | null;
+  }): StoredModelConfig {
+    let apiKey: StoredModelConfig["apiKey"];
+    if (input.apiKey !== undefined && input.apiKey !== "") {
+      const canEncrypt = this.isEncryptionAvailable();
+      apiKey = canEncrypt
+        ? { encrypted: true, data: this.encrypt(input.apiKey).toString("base64") }
+        : { encrypted: false, data: input.apiKey };
+    } else if (input.previous?.apiKey) {
+      apiKey = input.previous.apiKey; // 未填 = 沿用旧 Key
+    } else {
+      throw new Error("首次配置必须填写 API Key");
+    }
+    const cfg: StoredModelConfig = {
+      provider: input.provider || input.previous?.provider || "OpenAI 兼容",
+      baseUrl: input.baseUrl.replace(/\/+$/, ""),
+      model: input.model,
+      apiKey,
+      updatedAt: new Date().toISOString(),
+    };
+    const s = this.read();
+    s.model = cfg;
+    this.write(s);
+    return cfg;
+  }
+}
+
+/** 读回明文 Key（只供主进程发请求用） */
+export function loadApiKey(
+  store: SettingsStore,
+  decrypt: (blob: Buffer) => string,
+): string | null {
+  const m = store.getModel();
+  if (!m) return null;
+  try {
+    return m.apiKey.encrypted ? decrypt(Buffer.from(m.apiKey.data, "base64")) : m.apiKey.data;
+  } catch {
+    return null;
+  }
+}

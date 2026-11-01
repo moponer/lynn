@@ -1,119 +1,96 @@
 /**
  * Lynn 类型化 IPC 契约（唯一契约，单一来源）。
- * 渲染层与主进程只通过 `lynn:rpc` 通道以 JSON-RPC 语义通信：
- *   request  → { method: RpcMethod, params: P }
- *   response → RpcResult<method>
- * 未来接入 Pi 内核（JSON-RPC over stdio）时，本契约保持不变，
- * 主进程把调用转发到内核即可——渲染层无感。
+ * 渲染层与主进程只通过两个通道通信：
+ *   1. `lynn:rpc`     —— JSON-RPC 语义：invoke(method, params) → result
+ *   2. `lynn:event`   —— 主进程推送：流式 delta / 工具调用 / 完成 / 错误
+ * 内核当前是主进程内的直连实现（OpenAI 兼容协议 + 管理工具 8 件套）；
+ * 未来接入 Pi 运行时（JSON-RPC over stdio）时本契约保持不变。
  */
 
 // ---------- 基础枚举 ----------
 
 export type PermissionMode = "plan" | "ask" | "auto" | "full";
 
-/** 任务流水线阶段（§4.10.4 生命周期） */
-export type TaskStage =
-  | "accept" // 受理
-  | "decompose" // 拆解
-  | "staffing" // 组队
-  | "dispatch" // 派单
-  | "execute" // 执行
-  | "review" // 审查
-  | "report"; // 汇报
-
 export type TaskStatus = "running" | "waiting" | "done" | "archived";
 
 export type MemberStatus = "running" | "delivered" | "idle" | "stuck";
 
+// ---------- 模型配置（用户自配，§4.4） ----------
+
+/** 存储层的模型配置（apiKey 加密落盘，不进渲染层） */
+export interface ModelConfigStored {
+  provider: string;
+  baseUrl: string;
+  model: string;
+  /** safeStorage 加密后的 base64，或明文（不可用时降级并打标） */
+  apiKey: { encrypted: boolean; data: string };
+  updatedAt: string;
+}
+
+/** 渲染层可见的模型配置（永不含 apiKey 明文） */
+export interface ModelConfigView {
+  configured: boolean;
+  provider: string;
+  baseUrl: string;
+  model: string;
+  apiKeySet: boolean;
+}
+
 // ---------- 成员（书面岗位，§4.10.2） ----------
 
 export interface Member {
-  id: string;
   name: string;
   role: string;
-  /** 岗位一句话（决定什么时候派给他） */
   goal: string;
   status: MemberStatus;
   statusNote: string;
-  /** 0-100，执行中的进度 */
   progress: number;
-  /** 已用 token / 预算 token */
   budgetUsed: number;
   budgetTotal: number;
-  /** 打回次数 / 上限 */
   rejections: number;
   rejectionLimit: number;
   toolWhitelist: string[];
-  /** 头像底色（mock 阶段用，正式版由形象/头像插件决定） */
   color: string;
 }
 
 export interface Team {
   id: string;
   name: string;
+  status: "active" | "paused" | "dissolved";
   members: Member[];
-}
-
-// ---------- 任务与卷宗（§4.8） ----------
-
-export interface Task {
-  id: string;
-  title: string;
-  stage: TaskStage;
-  /** 已完成的阶段数（用于执行 x/y 展示） */
-  stageProgress: string;
-  status: TaskStatus;
-  statusNote: string;
-  teamId: string | null;
-  deadline: string | null;
 }
 
 // ---------- 指挥频道卡片（§3.8 证据链卡） ----------
 
 export type CardKind =
   | "user" // 你的指令
-  | "accept" // 她的受理/拆解
-  | "dispatch" // 派单卡
-  | "member_report" // 成员回报卡（带证据）
-  | "review_reject" // 审查打回卡
-  | "approval" // 归集审批卡（需要你拍板）
-  | "lynn_report" // 她的汇报/进度
-  | "typing"; // 进行中指示
+  | "lynn" // 她的话（流式组装）
+  | "tool" // 工具调用卡（组队/派单/回报/审查/汇报/问询）
+  | "system"; // 系统提示（未配置模型等）
 
-export interface Evidence {
-  id: string;
-  kind: "file" | "command" | "snapshot" | "brief";
-  label: string;
-  /** 弹窗标题 */
-  title: string;
-  /** 终端/预览文本（可复跑的命令输出等） */
-  body: string;
-}
+export type ToolCardBadge = "组队" | "派单" | "回报" | "审查" | "汇报" | "需要你拍板" | "工具";
 
 export interface FeedCard {
   id: string;
   kind: CardKind;
   createdAt: string;
-  /** user/lynn 气泡文本；组织卡为空 */
+  /** user / lynn / system 的文本 */
   text?: string;
-  /** 组织卡标题，如「林工 · 抓取并清洗 9 月订单明细」 */
+  /** 是否正在流式生成（lynn 卡） */
+  streaming?: boolean;
+  /** tool 卡 */
+  badge?: ToolCardBadge;
   title?: string;
-  /** 徽章文本，如「派单」「打回 第1/3轮」 */
-  badge?: string;
   meta?: string;
   body?: string;
-  /** 卡内成员 chips */
-  members?: { id: string; name: string; role: string; color: string }[];
-  /** 证据 chips（可点开） */
-  evidence?: Evidence[];
-  /** 审批卡动作 */
-  actions?: ("approve" | "reject" | "ask")[];
+  members?: { name: string; role: string; color: string }[];
 }
 
 // ---------- 指挥板（§3.8） ----------
 
 export interface TaskTrackItem {
   id: string;
+  teamId: string;
   title: string;
   status: TaskStatus;
   statusNote: string;
@@ -121,37 +98,36 @@ export interface TaskTrackItem {
 
 export interface Decision {
   id: string;
-  /** 升级 / 口径 / 审批 … */
   from: string;
   title: string;
   detail: string;
 }
 
-export interface BudgetInfo {
-  teamUsed: number;
-  teamTotal: number;
-  lynnUsed: number;
-  membersUsed: number;
-  costYuan: number;
-}
-
 export interface BoardData {
-  team: Team | null;
+  teams: Team[];
   track: TaskTrackItem[];
   decisions: Decision[];
-  budget: BudgetInfo;
+  /** 本次会话累计 token（来自 API usage；取不到就为 0，不造假数） */
+  tokensUsed: number;
 }
 
-// ---------- 会话快照（渲染层一次拉全） ----------
+// ---------- 会话快照 ----------
 
 export interface SessionSnapshot {
   workspace: { project: string; subdir: string };
   permission: PermissionMode;
-  model: { name: string; thinking: boolean };
-  task: Task | null;
+  model: ModelConfigView;
   feed: FeedCard[];
   board: BoardData;
 }
+
+// ---------- 事件流（主进程 → 渲染层） ----------
+
+export type KernelEvent =
+  | { type: "delta"; text: string }
+  | { type: "tool"; badge: ToolCardBadge; title: string; meta?: string; body?: string; members?: FeedCard["members"] }
+  | { type: "done"; tokens: number }
+  | { type: "error"; message: string };
 
 // ---------- RPC 方法表 ----------
 
@@ -164,17 +140,31 @@ export interface RpcContracts {
     params: { mode: PermissionMode };
     result: { ok: true; mode: PermissionMode };
   };
+  /** 发送一条消息；回复经事件流推送，本调用只回执 */
   "feed.send": {
     params: { text: string };
-    result: { ok: true; cards: FeedCard[] };
+    result: { ok: true };
   };
+  /** 回答她升级上来的问题（归集审批/口径选择） */
   "decision.resolve": {
     params: { id: string; action: "approve" | "reject" | "ask" };
-    result: { ok: true; resolvedId: string };
+    result: { ok: true };
   };
-  "evidence.get": {
-    params: { id: string };
-    result: Evidence;
+  "config.get": {
+    params: void;
+    result: ModelConfigView;
+  };
+  "config.save": {
+    params: { provider: string; baseUrl: string; model: string; apiKey?: string };
+    result: { ok: true };
+  };
+  "config.test": {
+    params: { baseUrl: string; apiKey: string; model: string };
+    result: { ok: true; latencyMs: number } | { ok: false; error: string };
+  };
+  "session.new": {
+    params: void;
+    result: { ok: true };
   };
 }
 
@@ -186,12 +176,12 @@ export type RpcClient = <M extends RpcMethod>(
   ...args: RpcContracts[M]["params"] extends void ? [] : [RpcContracts[M]["params"]]
 ) => Promise<RpcContracts[M]["result"]>;
 
-/** preload 挂到 window 上的桥 */
 export interface LynnBridge {
   rpc: RpcClient;
+  /** 订阅内核事件；返回取消订阅函数 */
+  onEvent: (cb: (ev: KernelEvent) => void) => () => void;
 }
 
-// 渲染层访问桥的全局声明
 declare global {
   interface Window {
     lynn: LynnBridge;

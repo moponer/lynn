@@ -59,8 +59,6 @@ button { font: inherit; cursor: pointer; }
 .app {
   display: grid;
   height: 100vh;
-  max-width: 1720px;
-  margin-inline: auto;
   grid-template:
     "top top top" 50px
     "rail main board" minmax(0, 1fr)
@@ -552,3 +550,58 @@ body[data-mode="full"] .perm button.on { background: var(--danger); color: #2a0c
 body[data-theme="light"] .term { background: #141c22; color: #c9d6dc; }
 .evidence footer { padding: 10px 16px; border-top: 1px solid var(--line); display: flex; gap: 8px; justify-content: flex-end; align-items: center; }
 .evidence footer .foot-note { font-size: 11px; color: var(--text-faint); margin-right: auto; }
+
+/* ========== 空态与系统提示 ========== */
+.feed-empty {
+  margin: 8vh auto 0;
+  max-width: 460px;
+  text-align: center;
+  color: var(--text-dim);
+}
+.feed-empty-title {
+  font-family: var(--serif);
+  font-size: 19px;
+  color: var(--lynn);
+  margin-bottom: 10px;
+}
+.feed-empty p { font-size: 12.5px; line-height: 1.8; }
+.row.sys { justify-content: center; }
+.sys-note {
+  font-size: 12px;
+  color: var(--text-faint);
+  background: var(--surface-2);
+  border: 1px dashed var(--line-strong);
+  border-radius: 9px;
+  padding: 6px 14px;
+  max-width: 640px;
+  text-align: center;
+}
+.pre-line { white-space: pre-line; }
+.panel-empty { font-size: 12px; line-height: 1.7; }
+
+/* ========== 设置面板 ========== */
+.evidence.cfg { width: min(560px, 94vw); }
+.cfg-body { padding: 14px 16px; display: flex; flex-direction: column; gap: 12px; }
+.cfg-field { display: flex; flex-direction: column; gap: 4px; }
+.cfg-label { font-size: 11.5px; font-weight: 600; color: var(--text-dim); letter-spacing: 0.04em; }
+.cfg-field input {
+  background: var(--surface-2);
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  outline: none;
+  color: var(--text);
+  font: inherit;
+  padding: 7px 11px;
+  user-select: text;
+}
+.cfg-field input:focus { border-color: var(--accent); }
+.cfg-hint { font-size: 10.5px; color: var(--text-faint); }
+.cfg-result {
+  margin: 0 16px;
+  padding: 7px 12px;
+  border-radius: 8px;
+  font-size: 12px;
+  border: 1px solid var(--line-strong);
+}
+.cfg-result.ok { border-color: rgba(95, 191, 119, 0.4); color: var(--ok); background: rgba(95, 191, 119, 0.07); }
+.cfg-result.bad { border-color: rgba(224, 101, 79, 0.4); color: var(--danger); background: rgba(224, 101, 79, 0.07); }

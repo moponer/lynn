@@ -14,16 +14,19 @@ export function TopBar({
   theme,
   onMode,
   onTheme,
+  onSettings,
 }: {
   snap: SessionSnapshot;
   theme: "dark" | "light";
   onMode: (m: PermissionMode) => void;
   onTheme: () => void;
+  onSettings: () => void;
 }) {
+  const { model, board } = snap;
   return (
     <header className="topbar">
       <div className="ws">
-        <span className="dot" />
+        <span className="dot" style={{ background: model.configured ? "var(--accent)" : "var(--danger)" }} />
         {snap.workspace.project}
         <small>/ {snap.workspace.subdir}</small>
       </div>
@@ -36,17 +39,25 @@ export function TopBar({
       </div>
       <span className="perm-hint">{HINTS[snap.permission]}</span>
       <div className="top-right">
-        <span className="model-chip">
-          模型 <b>{snap.model.name}</b>
-          {snap.model.thinking ? " · 思考" : ""}
+        <span className="model-chip" onClick={onSettings} title="点击配置模型">
+          {model.configured ? (
+            <>
+              模型 <b>{model.model}</b>
+              <small style={{ color: "var(--text-faint)" }}> · {model.provider}</small>
+            </>
+          ) : (
+            <b style={{ color: "var(--danger)" }}>未配置模型 · 点此设置</b>
+          )}
         </span>
-        <span className="cost">
-          本月 <b>¥{snap.board.budget.costYuan.toFixed(2)}</b>
-        </span>
+        {board.tokensUsed > 0 && (
+          <span className="cost">
+            会话 <b>{(board.tokensUsed / 1000).toFixed(1)}K</b> tok
+          </span>
+        )}
         <button className="iconbtn" onClick={onTheme} title="明暗主题">
           {theme === "dark" ? "☾" : "☀"}
         </button>
-        <button className="iconbtn" title="待机 /standby">铃</button>
+        <button className="iconbtn" onClick={onSettings} title="设置">⚙</button>
       </div>
     </header>
   );
