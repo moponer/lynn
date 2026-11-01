@@ -2,40 +2,45 @@
    墨蓝作战室基调。灰蓝主色；一切动效表达状态。 */
 
 :root {
-  --bg: #0b1015;
-  --surface: #10181f;
-  --surface-2: #151f28;
-  --line: rgba(255, 255, 255, 0.07);
-  --line-strong: rgba(255, 255, 255, 0.13);
-  --text: #dee7ec;
-  --text-dim: #8da0ab;
-  --text-faint: #5b6e79;
-  --accent: #6396bc; /* 灰蓝 · 主色：进行/健康 */
-  --accent-ink: #0b1620;
-  --accent-2: #e8b04b; /* 琥珀 · 注意/待办 */
-  --danger: #e0654f; /* 朱砂 · 打回/拒绝 */
-  --lynn: #f0a6c0; /* 她的人格色：只用于"她说话" */
-  --ok: #5fbf77;
-  --radius: 10px;
+  /* Notion 风格 · 亮色（默认）：纸白内容区 + 暖灰侧栏 + 极细分隔 */
+  --bg: #ffffff;
+  --surface: #f7f6f3;
+  --surface-2: #ffffff;
+  --bubble-user: #f1f1ef;
+  --line: #ededec;
+  --line-strong: #e0deda;
+  --text: #37352f;
+  --text-dim: #787774;
+  --text-faint: #9b9a97;
+  --accent: #35618c; /* 灰蓝主色保留 */
+  --accent-ink: #ffffff;
+  --accent-2: #c08a1f;
+  --danger: #d44c33;
+  --lynn: #c05687;
+  --ok: #3b8f5a;
+  --radius: 8px;
   --serif: "Noto Serif SC", "Source Han Serif SC", serif;
   --sans: "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
   --mono: "Cascadia Code", "JetBrains Mono", Consolas, monospace;
 }
 
-body[data-theme="light"] {
-  --bg: #f4f2ed;
-  --surface: #fbfaf7;
-  --surface-2: #ffffff;
-  --line: rgba(20, 35, 45, 0.09);
-  --line-strong: rgba(20, 35, 45, 0.18);
-  --text: #1e2a32;
-  --text-dim: #5e7079;
-  --text-faint: #93a3ab;
-  --accent: #35618c;
-  --accent-ink: #f2f7fa;
-  --accent-2: #c08a1f;
-  --danger: #c44a35;
-  --lynn: #c05687;
+body[data-theme="dark"] {
+  /* Notion 风格 · 暗色 */
+  --bg: #191919;
+  --surface: #202020;
+  --surface-2: #252525;
+  --bubble-user: #2f2f2f;
+  --line: #2e2e2c;
+  --line-strong: #3f3f3d;
+  --text: #d4d4d4;
+  --text-dim: #9b9a97;
+  --text-faint: #6f6f6c;
+  --accent: #6396bc;
+  --accent-ink: #10151a;
+  --accent-2: #e8b04b;
+  --danger: #e0654f;
+  --lynn: #f0a6c0;
+  --ok: #5fbf77;
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -175,7 +180,7 @@ body[data-mode="full"] .perm button.on { background: var(--danger); color: #2a0c
   min-height: 0;
   overflow: hidden;
   position: relative;
-  background: var(--surface);
+  background: var(--bg);
   border-right: 1px solid var(--line);
 }
 .col {
@@ -187,7 +192,7 @@ body[data-mode="full"] .perm button.on { background: var(--danger); color: #2a0c
   flex: 1;
   min-height: 0;
 }
-.channel-head { padding: 12px 20px 0; border-bottom: 1px solid var(--line); background: var(--surface); }
+.channel-head { padding: 12px 20px 0; border-bottom: 1px solid var(--line); background: var(--bg); }
 .task-title { display: flex; align-items: center; gap: 10px; }
 .task-title h1 { font-size: 15.5px; font-weight: 700; }
 .tag {
@@ -235,20 +240,21 @@ body[data-mode="full"] .perm button.on { background: var(--danger); color: #2a0c
   to { opacity: 1; transform: none; }
 }
 
-.msg { padding: 9px 13px; border-radius: 12px; }
+.msg { padding: 6px 10px; border-radius: 8px; }
 .row.me .msg {
-  background: rgba(99, 150, 188, 0.14);
-  border: 1px solid rgba(99, 150, 188, 0.25);
-  border-bottom-right-radius: 4px;
+  background: var(--bubble-user);
+  border: none;
+  border-bottom-right-radius: 3px;
 }
 .row.lynn .msg {
-  background: var(--surface-2);
-  border: 1px solid var(--line);
-  border-bottom-left-radius: 4px;
+  background: transparent;
+  border: none;
+  padding-left: 0;
 }
-.row.lynn .msg .text { font-family: var(--serif); font-size: 14px; }
+.row.lynn .msg .text { font-size: 14px; }
 .msg .who { font-size: 11px; color: var(--text-dim); margin-bottom: 3px; display: flex; gap: 6px; align-items: center; }
-.row.lynn .who b { color: var(--lynn); }
+.row.lynn .who b { color: var(--lynn); font-weight: 700; }
+.row.lynn .msg .text { color: var(--text); }
 .typing-dots { display: inline-flex; gap: 3px; }
 .typing-dots i {
   width: 5px;
@@ -267,9 +273,9 @@ body[data-mode="full"] .perm button.on { background: var(--danger); color: #2a0c
 /* 组织动作卡：与聊天不同的视觉语言 */
 .op-card {
   background: var(--surface-2);
-  border: 1px solid var(--line-strong);
+  border: 1px solid var(--line);
   border-radius: var(--radius);
-  padding: 11px 14px;
+  padding: 10px 14px;
   position: relative;
 }
 .op-head { display: flex; align-items: center; gap: 8px; margin-bottom: 7px; flex-wrap: wrap; }
@@ -468,8 +474,9 @@ body[data-mode="full"] .perm button.on { background: var(--danger); color: #2a0c
 .team-name { display: flex; justify-content: space-between; align-items: center; margin-bottom: 9px; }
 .team-name b { font-size: 13px; }
 .team-name small { color: var(--text-faint); }
-.member { display: flex; gap: 9px; padding: 8px 0; border-top: 1px solid var(--line); }
+.member { display: flex; gap: 9px; padding: 8px 6px; border-top: 1px solid var(--line); border-radius: 6px; }
 .member:first-of-type { border-top: none; }
+.member:hover, .task-item:hover, .decision:hover { background: rgba(55, 53, 47, 0.04); }
 .m-avatar {
   width: 32px;
   height: 32px;
@@ -494,7 +501,7 @@ body[data-mode="full"] .perm button.on { background: var(--danger); color: #2a0c
 .meter.warn i { background: var(--accent-2); }
 .meter-cap { display: flex; justify-content: space-between; font-size: 10.5px; color: var(--text-faint); margin-top: 3px; }
 
-.task-item { display: flex; gap: 9px; padding: 7px 0; border-top: 1px solid var(--line); }
+.task-item { display: flex; gap: 9px; padding: 7px 6px; border-top: 1px solid var(--line); border-radius: 6px; }
 .task-item:first-of-type { border-top: none; }
 .task-item .t-pip { width: 9px; height: 9px; border-radius: 50%; margin-top: 5px; flex: none; }
 .task-item b { font-size: 12.5px; display: block; font-weight: 600; }

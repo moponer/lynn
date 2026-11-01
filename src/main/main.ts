@@ -24,7 +24,7 @@ function createWindow(): void {
     height: 900,
     minWidth: 1080,
     minHeight: 720,
-    backgroundColor: "#0B1015",
+    backgroundColor: "#FFFFFF",
     title: "风铃 Lynn · 指挥台",
     autoHideMenuBar: true,
     webPreferences: {

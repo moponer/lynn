@@ -32,7 +32,7 @@ const NAV_ITEMS: { icon: string; title: string }[] = [
 
 export default function App() {
   const [snap, setSnap] = useState<SessionSnapshot | null>(null);
-  const [theme, setTheme] = useState<"dark" | "light">("dark");
+  const [theme, setTheme] = useState<"dark" | "light">("light");
   const [nav, setNav] = useState(0);
   const [settingsOpen, setSettingsOpen] = useState(false);
   /** 本地流式层：delta 追加到她的话；done 后用权威快照覆盖 */
