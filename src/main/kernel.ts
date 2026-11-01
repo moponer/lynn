@@ -11,12 +11,14 @@ import type {
 import { ManagementTools } from "./management-tools";
 import { LlmError, streamChat, probeEndpoint, type ChatMessage, type ToolSchema } from "./llm";
 import { SettingsStore, loadApiKey, defaultDataRoot } from "./settings";
-import { TeamStore, memberFileName } from "./team-store";
+import { TeamStore } from "./team-store";
 
 /**
- * 内核（主进程内直连实现）：OpenAI 兼容对话 + 流式推送 + 管理工具 8 件套。
- * ——「她是指挥者」在这里成型：她的工具面只有管理动作，没有 bash/write/browser。
- * 未来接 Pi 运行时时，本文件替换为 stdio JSON-RPC 转发层，契约不变。
+ * 内核：**Pi 为底座**（§1.3）。
+ * - Agent 循环 / 模型协议：@earendil-works/pi-agent-core + pi-ai（ESM，动态加载）
+ * - 我方产品层：管理工具 8 件套（execute 桥接 Pi 的 AgentTool）、权限、审计、指挥板
+ * - 直连 OpenAI 兼容实现（llm.ts）保留为 Pi 不可用时的降级路径
+ * 渲染层契约（contract.ts）不感知以上差别。
  */
 
 const SYSTEM_PROMPT = `你是风铃（Lynn），一位常驻用户桌面的 AI 个人助理。
@@ -36,25 +38,53 @@ const SYSTEM_PROMPT = `你是风铃（Lynn），一位常驻用户桌面的 AI �
 
 当前你的能力是本机团队管理（招募/派单/审查/汇报）。办公文档、浏览器、消息平台等重能力尚未接入——用户提到时，如实告知还没装，不要假装执行。`;
 
-/** 8 件套的 OpenAI function 格式 schema */
-const TOOLS: ToolSchema[] = [
+/** CJS 环境里加载纯 ESM 的 Pi 包（未来切 Pi RPC worker 后此处整体移除） */
+const dynamicImport = new Function("specifier", "return import(specifier);") as (
+  specifier: string,
+) => Promise<Record<string, unknown>>;
+
+// ---------- Pi 侧最小类型（来自 pi-coding-agent SDK；运行时为 ESM 实体） ----------
+
+interface PiSession {
+  prompt(text: string): Promise<void>;
+  subscribe(cb: (ev: PiAgentEvent) => void): () => void;
+  waitForIdle?(): Promise<void>;
+  followUp?(text: string): Promise<unknown>;
+  steer?(text: string): Promise<unknown>;
+}
+
+interface PiModelRuntime {
+  registerProvider(providerId: string, config: Record<string, unknown>): void;
+  setRuntimeApiKey(providerId: string, apiKey: string): Promise<void>;
+  getModel(providerId: string, modelId: string): unknown;
+}
+
+interface PiAgentEvent {
+  type: string;
+  assistantMessageEvent?: { type: string; delta?: string };
+}
+
+// ---------- 我方工具定义（OpenAI JSON 与 TypeBox 双写，一份语义） ----------
+
+const TOOL_JSON: ToolSchema[] = [
   {
     type: "function",
     function: {
       name: "create_member",
-      description: "招募团队成员（书面岗位）。一次性写清：名字、岗位、单一目标、边界（不许做什么）、工具白名单、产出契约与验收标准。超过 6 人编制需要 justification。",
+      description:
+        "招募团队成员（书面岗位）：名字、岗位、单一目标、边界（不许做什么）、工具白名单、产出契约与验收标准。超过 6 人编制需要 justification。",
       parameters: {
         type: "object",
         required: ["teamId", "name", "role", "goal", "tools"],
         properties: {
-          teamId: { type: "string", description: "团队 id，不存在会自动创建；惯例用短横线小写，如 yuebao-duiji" },
+          teamId: { type: "string" },
           name: { type: "string" },
           role: { type: "string" },
           goal: { type: "string", description: "单一目标，行为收敛的关键" },
-          boundaries: { type: "array", items: { type: "string" }, description: "边界：不许做什么，可执行可判定" },
-          tools: { type: "array", items: { type: "string" }, description: "工具白名单（执行类工具发给成员，如 read/write/edit/bash/glob/grep/browser/office）" },
-          deliverable: { type: "string", description: "产出物契约" },
-          acceptance: { type: "array", items: { type: "string" }, description: "验收标准" },
+          boundaries: { type: "array", items: { type: "string" } },
+          tools: { type: "array", items: { type: "string" }, description: "执行类工具白名单，如 read/write/edit/bash/glob/grep/browser/office" },
+          deliverable: { type: "string" },
+          acceptance: { type: "array", items: { type: "string" } },
           justification: { type: "string", description: "超过 6 人编制时必填" },
         },
       },
@@ -72,9 +102,9 @@ const TOOLS: ToolSchema[] = [
           teamId: { type: "string" },
           taskId: { type: "string" },
           member: { type: "string" },
-          brief: { type: "string", description: "简报包：任务说明+完成标准+相关上下文" },
+          brief: { type: "string" },
           deadline: { type: "string" },
-          tools: { type: "array", items: { type: "string" }, description: "本次分配的工具集（必须 ⊆ 岗位白名单，只能收窄）" },
+          tools: { type: "array", items: { type: "string" }, description: "本次分配工具集，必须 ⊆ 岗位白名单" },
         },
       },
     },
@@ -95,7 +125,7 @@ const TOOLS: ToolSchema[] = [
     type: "function",
     function: {
       name: "review_result",
-      description: "登记成员的节点回报。必须附证据（文件路径/命令输出/测试结果）；无证据会被拒绝登记。",
+      description: "登记成员节点回报。必须附证据；无证据会被拒绝登记。",
       parameters: {
         type: "object",
         required: ["teamId", "taskId", "member", "text", "evidence"],
@@ -103,8 +133,8 @@ const TOOLS: ToolSchema[] = [
           teamId: { type: "string" },
           taskId: { type: "string" },
           member: { type: "string" },
-          text: { type: "string", description: "回报摘要（一段话）" },
-          evidence: { type: "array", items: { type: "string" }, description: "证据：文件路径/命令/输出摘录，至少一条" },
+          text: { type: "string" },
+          evidence: { type: "array", items: { type: "string" } },
         },
       },
     },
@@ -113,7 +143,7 @@ const TOOLS: ToolSchema[] = [
     type: "function",
     function: {
       name: "accept_or_reject",
-      description: "验收或打回。打回必须写清 what（哪里不合格）/expect（期望）/deadline（时限）；连续 3 轮打回将强制升级问用户。",
+      description: "验收或打回。打回必须写 what/expect/deadline；连续 3 轮打回将强制升级问用户。",
       parameters: {
         type: "object",
         required: ["teamId", "taskId", "member", "verdict"],
@@ -133,7 +163,7 @@ const TOOLS: ToolSchema[] = [
     type: "function",
     function: {
       name: "report_to_user",
-      description: "向用户汇报（也会显示在界面）。四件套：结论/证据/未完成项/需要用户拍板的事。",
+      description: "向用户汇报。四件套：结论/证据/未完成项/需要用户拍板的事。",
       parameters: {
         type: "object",
         required: ["teamId", "taskId", "conclusion"],
@@ -152,14 +182,11 @@ const TOOLS: ToolSchema[] = [
     type: "function",
     function: {
       name: "ask_user",
-      description: "向用户提问（口径选择、超预算决策、连续打回后的升级等）。成员没有问用户的通道，问题必须由你归集转呈。",
+      description: "向用户提问（口径、超预算、连续打回升级）。成员没有问用户的通道，问题由你归集转呈。",
       parameters: {
         type: "object",
         required: ["question"],
-        properties: {
-          question: { type: "string" },
-          context: { type: "string", description: "为什么现在必须问" },
-        },
+        properties: { question: { type: "string" }, context: { type: "string" } },
       },
     },
   },
@@ -171,10 +198,7 @@ const TOOLS: ToolSchema[] = [
       parameters: {
         type: "object",
         required: ["teamId", "keep"],
-        properties: {
-          teamId: { type: "string" },
-          keep: { type: "boolean", description: "true=保留编制下次直接调用；false=解散" },
-        },
+        properties: { teamId: { type: "string" }, keep: { type: "boolean" } },
       },
     },
   },
@@ -200,24 +224,29 @@ export class Kernel {
   private cardSeq = 0;
   private busy = false;
   private listeners = new Set<(ev: KernelEvent) => void>();
-  /** safeStorage.decryptString 由 main.ts 注入；未注入时 Key 只可能是明文存储 */
+
+  /** Pi（ESM）运行时：init() 成功后可用 */
+  private piReady = false;
+  private piCreateAgentSession: ((opts: Record<string, unknown>) => Promise<{ session: PiSession }>) | null = null;
+  private piModelRuntimeCtor: { create(opts?: Record<string, unknown>): Promise<PiModelRuntime> } | null = null;
+  private piSessionManager: { inMemory(): unknown } | null = null;
+  private session: PiSession | null = null;
+  private sessionSettingsStamp = "";
+  /** 流式中的她：runChat 里增量 patch */
+  private liveCard: FeedCard | null = null;
+
   private decryptor: ((blob: Buffer) => string) | null = null;
 
   constructor(dataRoot = defaultDataRoot()) {
     this.dataRoot = dataRoot;
-    // safeStorage 由 main.ts 注入 encrypt；测试环境 LYNN_HOME 隔离
-    this.settings = new SettingsStore(
-      dataRoot,
-      (plain) => Buffer.from(plain, "utf-8"),
-      () => false,
-    );
+    // 测试环境（LYNN_HOME 隔离）无 safeStorage；main.ts 会用真实现覆盖
+    this.settings = new SettingsStore(dataRoot, (plain) => Buffer.from(plain, "utf-8"), () => false);
     this.teamStore = new TeamStore(dataRoot);
     this.tools = new ManagementTools(this.teamStore, dataRoot);
     fs.mkdirSync(path.join(dataRoot, "session"), { recursive: true });
     this.loadSession();
   }
 
-  /** main.ts 注入 safeStorage 的加/解密（渲染层永不接触 Key） */
   setEncryptors(
     encrypt: (plain: string) => Buffer,
     isAvailable: () => boolean,
@@ -246,43 +275,28 @@ export class Kernel {
     return full;
   }
 
-  // ---------- 会话持久化（§4.8：timeline.jsonl 冷层，重启可续） ----------
+  // ---------- Pi 初始化（ESM 动态加载；失败则降级直连） ----------
 
-  private get timelineFile(): string {
-    return path.join(this.dataRoot, "session", "timeline.jsonl");
-  }
-
-  private loadSession(): void {
-    const f = this.timelineFile;
-    if (!fs.existsSync(f)) return;
-    const lines = fs.readFileSync(f, "utf-8").split("\n").filter((x) => x.trim());
-    for (const line of lines.slice(-200)) {
-      try {
-        const rec = JSON.parse(line) as { role: string; content: string };
-        if (rec.role === "user") {
-          this.history.push({ role: "user", content: rec.content });
-          this.card({ kind: "user", text: rec.content });
-        } else if (rec.role === "assistant" && rec.content) {
-          this.history.push({ role: "assistant", content: rec.content });
-          this.card({ kind: "lynn", text: rec.content });
-        }
-      } catch {
-        // 坏行跳过
-      }
+  async init(): Promise<void> {
+    try {
+      const coding = await dynamicImport("@earendil-works/pi-coding-agent");
+      this.piCreateAgentSession = coding.createAgentSession as Kernel["piCreateAgentSession"];
+      this.piModelRuntimeCtor = coding.ModelRuntime as Kernel["piModelRuntimeCtor"];
+      this.piSessionManager = coding.SessionManager as Kernel["piSessionManager"];
+      this.piReady = true;
+    } catch (err) {
+      console.warn("[kernel] Pi 加载失败，降级直连模式：", err instanceof Error ? err.message : err);
+      this.piReady = false;
     }
   }
 
-  private persist(role: "user" | "assistant", content: string): void {
-    fs.appendFileSync(this.timelineFile, JSON.stringify({ role, content, at: new Date().toISOString() }) + "\n", "utf-8");
-  }
-
-  // ---------- 工具执行 ----------
+  // ---------- 工具执行（Pi execute 与直连 tool_calls 共用） ----------
 
   private teamColor(i: number): string {
     return ["#6396BC", "#E8B04B", "#5FBF77", "#C05687", "#8DA0AB", "#C44A35"][i % 6];
   }
 
-  private async execTool(name: string, args: Record<string, unknown>): Promise<string> {
+  runTool(name: string, args: Record<string, unknown>): string {
     switch (name) {
       case "create_member": {
         this.tools.createMember(
@@ -354,11 +368,7 @@ export class Kernel {
           member: String(args.member),
           rejectReason:
             args.verdict === "reject"
-              ? {
-                  what: String(args.what ?? ""),
-                  expect: String(args.expect ?? ""),
-                  deadline: String(args.deadline ?? ""),
-                }
+              ? { what: String(args.what ?? ""), expect: String(args.expect ?? ""), deadline: String(args.deadline ?? "") }
               : undefined,
           evidence: args.evidence as string[] | undefined,
         });
@@ -432,39 +442,162 @@ export class Kernel {
     }
   }
 
-  // ---------- 对话循环 ----------
+  // ---------- Pi 会话生命周期 ----------
 
-  private async runChat(userText: string): Promise<void> {
+  private async ensureSession(): Promise<PiSession> {
     const cfg = this.settings.getModel();
     const apiKey = cfg
-      ? loadApiKey(this.settings, (b) =>
-          this.decryptor ? this.decryptor(b) : b.toString("utf-8"),
-        )
+      ? loadApiKey(this.settings, (b) => (this.decryptor ? this.decryptor(b) : b.toString("utf-8")))
       : null;
-    if (!cfg || !apiKey) {
-      this.card({
-        kind: "system",
-        text: "还没有配置模型。点右上角「⚙ 设置」，填好 Base URL / API Key / 模型后再来找我。",
-      });
-      this.emit({ type: "error", message: "尚未配置模型" });
-      return;
+    if (!cfg || !apiKey) throw new Error("no-model-config");
+    const stamp = `${cfg.baseUrl}@${cfg.model}@${cfg.updatedAt}`;
+    if (this.session && this.sessionSettingsStamp === stamp) return this.session;
+
+    // 凭据走 ModelRuntime（实验验证过的注入方式），不落 auth.json 明文
+    const runtime = await this.piModelRuntimeCtor!.create({ refreshOnCreate: false });
+    runtime.registerProvider("lynn-user", {
+      name: cfg.provider,
+      baseUrl: cfg.baseUrl,
+      api: "openai-completions",
+      apiKey,
+      models: [
+        {
+          id: cfg.model,
+          name: cfg.model,
+          reasoning: false,
+          input: ["text"],
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          contextWindow: 128000,
+          maxTokens: 8192,
+        },
+      ],
+    });
+    await runtime.setRuntimeApiKey("lynn-user", apiKey);
+    const model = runtime.getModel("lynn-user", cfg.model);
+    if (!model) throw new Error(`Pi getModel 为空: ${cfg.model}`);
+
+    await this.loadPiTools();
+    const { session } = await this.piCreateAgentSession!({
+      modelRuntime: runtime,
+      model,
+      sessionManager: this.piSessionManager!.inMemory(),
+      customTools: this.piToolCache!,
+      tools: this.piToolCache!.map((t) => (t as { name: string }).name),
+    });
+    session.subscribe((ev: PiAgentEvent) => this.onAgentEvent(ev));
+    this.session = session;
+    this.sessionSettingsStamp = stamp;
+    return session;
+  }
+
+  /** Pi AgentTool 列表（TypeBox schema；typebox 随 Pi 依赖可用） */
+  private piToolCache: unknown[] | null = null;
+
+  private async loadPiTools(): Promise<void> {
+    if (this.piToolCache) return;
+    const tb = (await dynamicImport("typebox")) as { Type: {
+      Object: (o: Record<string, unknown>) => unknown;
+      String: (o?: Record<string, unknown>) => unknown;
+      Array: (o: unknown) => unknown;
+      Boolean: (o?: Record<string, unknown>) => unknown;
+    } };
+    const T = tb.Type;
+    const self = this;
+    const s = (d?: string) => T.String(d ? { description: d } : undefined);
+    const list = (d?: string) => T.Array(s(d));
+    const tool = (name: string, label: string, description: string, params: Record<string, unknown>) => ({
+      name,
+      label,
+      description,
+      parameters: T.Object(params),
+      execute: async (_id: string, args: Record<string, unknown>): Promise<{ content: { type: string; text: string }[]; details: Record<string, never> }> => {
+        const text = self.runTool(name, args);
+        return { content: [{ type: "text", text }], details: {} };
+      },
+    });
+    this.piToolCache = [
+      tool("create_member", "招募成员", "招募团队成员（书面岗位）：名字、岗位、单一目标、边界、工具白名单、验收标准。超过 6 人编制需 justification。", {
+        teamId: s("团队 id"),
+        name: s("成员名"),
+        role: s("岗位"),
+        goal: s("单一目标"),
+        boundaries: list("边界：不许做什么"),
+        tools: list("工具白名单"),
+        deliverable: s("产出物契约"),
+        acceptance: list("验收标准"),
+        justification: s("超 6 人编制时必填"),
+      }),
+      tool("assign_task", "派单", "向成员派单，成员只拿简报包。", {
+        teamId: s(), taskId: s(), member: s(),
+        brief: s("简报包：任务+完成标准+上下文"),
+        deadline: s(), tools: list("本次分配工具集（⊆ 岗位白名单）"),
+      }),
+      tool("check_progress", "查进度", "查看任务进度摘要。", { teamId: s(), taskId: s() }),
+      tool("review_result", "登记回报", "登记成员节点回报，必须附证据。", {
+        teamId: s(), taskId: s(), member: s(), text: s("回报摘要"),
+        evidence: list("证据：文件/命令/输出，至少一条"),
+      }),
+      tool("accept_or_reject", "验收/打回", "验收或打回；打回必须 what/expect/deadline 齐全。", {
+        teamId: s(), taskId: s(), member: s(),
+        verdict: T.String({ description: "accept 或 reject" }),
+        what: s("哪里不合格"), expect: s("期望"), deadline: s("重交时限"),
+      }),
+      tool("report_to_user", "汇报", "向用户汇报：结论/证据/未完成/待拍板。", {
+        teamId: s(), taskId: s(), conclusion: s(),
+        evidence: list(), unfinished: list(), decisionsNeeded: list(),
+      }),
+      tool("ask_user", "问用户", "向用户提问并等待回答。", { question: s(), context: s("为什么现在必须问") }),
+      tool("dissolve_team", "解散/保留", "解散团队或保留编制。", { teamId: s(), keep: T.Boolean({ description: "true=保留编制" }) }),
+    ];
+  }
+
+  private onAgentEvent(ev: PiAgentEvent): void {
+    if (ev.type === "message_update" && ev.assistantMessageEvent?.type === "text_delta" && ev.assistantMessageEvent.delta) {
+      const delta = ev.assistantMessageEvent.delta;
+      if (this.liveCard) {
+        this.liveCard.text = (this.liveCard.text ?? "") + delta;
+      }
     }
+    // tool 卡片由 runTool 内 emit（带业务徽章），这里不重复
+  }
 
-    this.history.push({ role: "user", content: userText });
-    this.persist("user", userText);
+  // ---------- 对话主路径 ----------
 
-    // 流式中的"她"卡片：delta 不断追加
+  private async runChatPi(userText: string, wasBusy: boolean): Promise<void> {
+    const session = await this.ensureSession();
+
+    const live = this.card({ kind: "lynn", text: "", streaming: true });
+    this.liveCard = live;
+    try {
+      if (wasBusy && session.followUp) {
+        // 排队输入（§3.2）：她干活时你也能打字
+        await session.followUp(userText);
+      } else {
+        await session.prompt(userText);
+      }
+      await session.waitForIdle?.();
+      const finalText = live.text ?? "";
+      if (finalText.trim()) {
+        this.history.push({ role: "assistant", content: finalText });
+        this.persist("assistant", finalText);
+      }
+      live.streaming = false;
+      this.emit({ type: "done", tokens: 0 });
+    } finally {
+      this.liveCard = null;
+    }
+  }
+
+  /** 直连降级路径：Pi 不可用时仍可用（原实现保留） */
+  private async runChatDirect(userText: string, cfg: NonNullable<ReturnType<SettingsStore["getModel"]>>, apiKey: string): Promise<void> {
     const live = this.card({ kind: "lynn", text: "", streaming: true });
     const patchLive = (text: string, streaming: boolean) => {
       live.text = text;
       live.streaming = streaming;
     };
-
-    const messages: ChatMessage[] = [
-      { role: "system", content: SYSTEM_PROMPT },
-      ...this.history,
-    ];
-
+    this.history.push({ role: "user", content: userText });
+    this.persist("user", userText);
+    const messages: ChatMessage[] = [{ role: "system", content: SYSTEM_PROMPT }, ...this.history];
     try {
       for (let round = 0; round < 8; round++) {
         let roundText = "";
@@ -473,14 +606,13 @@ export class Kernel {
           apiKey,
           model: cfg.model,
           messages,
-          tools: TOOLS,
+          tools: TOOL_JSON,
           onDelta: (t) => {
             roundText += t;
             patchLive(roundText, true);
           },
         });
         this.tokensUsed += result.promptTokens + result.completionTokens;
-
         if (result.toolCalls.length > 0) {
           messages.push({
             role: "assistant",
@@ -495,7 +627,7 @@ export class Kernel {
           for (const tc of result.toolCalls) {
             let outcome: string;
             try {
-              outcome = await this.execTool(tc.name, JSON.parse(tc.arguments || "{}") as Record<string, unknown>);
+              outcome = this.runTool(tc.name, JSON.parse(tc.arguments || "{}") as Record<string, unknown>);
             } catch (err) {
               outcome = `工具执行失败：${err instanceof Error ? err.message : String(err)}。请调整后重试或如实告知用户。`;
               this.emit({ type: "tool", badge: "工具", title: `${tc.name} 失败`, body: outcome });
@@ -503,10 +635,8 @@ export class Kernel {
             messages.push({ role: "tool", tool_call_id: tc.id, name: tc.name, content: outcome });
           }
           patchLive(result.content || "", false);
-          continue; // 工具结果回传后继续下一轮
+          continue;
         }
-
-        // 最终回复
         this.history.push({ role: "assistant", content: result.content });
         this.persist("assistant", result.content);
         patchLive(result.content, false);
@@ -516,18 +646,76 @@ export class Kernel {
       patchLive((live.text || "") + "\n\n（工具轮次达到上限，先停在这里。）", false);
       this.emit({ type: "done", tokens: 0 });
     } catch (err) {
-      const msg =
-        err instanceof LlmError
-          ? `模型请求失败：${err.message}`
-          : `出错了：${err instanceof Error ? err.message : String(err)}`;
-      patchLive(live.text || msg, false);
+      const msg = err instanceof LlmError ? `模型请求失败：${err.message}` : `出错了：${err instanceof Error ? err.message : String(err)}`;
       if (!live.text) live.text = msg;
       live.streaming = false;
       this.emit({ type: "error", message: msg });
     }
   }
 
-  // ---------- 指挥板数据（真实存储推导，无假数） ----------
+  private async runChat(userText: string, wasBusy = false): Promise<void> {
+    const cfg = this.settings.getModel();
+    const apiKey = cfg
+      ? loadApiKey(this.settings, (b) => (this.decryptor ? this.decryptor(b) : b.toString("utf-8")))
+      : null;
+    if (!cfg || !apiKey) {
+      this.card({
+        kind: "system",
+        text: "还没有可用的模型配置（或 Key 无法解密——应用升级后需要重新填一次）。点右上角 ⚙ 设置。",
+      });
+      this.emit({ type: "error", message: "尚未配置模型" });
+      return;
+    }
+    try {
+      if (this.piReady) {
+        await this.runChatPi(userText, wasBusy);
+      } else {
+        await this.runChatDirect(userText, cfg, apiKey);
+      }
+    } catch (err) {
+      const msg = `出错了：${err instanceof Error ? err.message : String(err)}`;
+      if (this.liveCard) {
+        if (!this.liveCard.text) this.liveCard.text = msg;
+        this.liveCard.streaming = false;
+        this.liveCard = null;
+      } else {
+        this.card({ kind: "system", text: msg });
+      }
+      this.emit({ type: "error", message: msg });
+    }
+  }
+
+  // ---------- 会话持久化（§4.8 冷层） ----------
+
+  private get timelineFile(): string {
+    return path.join(this.dataRoot, "session", "timeline.jsonl");
+  }
+
+  private loadSession(): void {
+    const f = this.timelineFile;
+    if (!fs.existsSync(f)) return;
+    const lines = fs.readFileSync(f, "utf-8").split("\n").filter((x) => x.trim());
+    for (const line of lines.slice(-200)) {
+      try {
+        const rec = JSON.parse(line) as { role: string; content: string };
+        if (rec.role === "user") {
+          this.history.push({ role: "user", content: rec.content });
+          this.card({ kind: "user", text: rec.content });
+        } else if (rec.role === "assistant" && rec.content) {
+          this.history.push({ role: "assistant", content: rec.content });
+          this.card({ kind: "lynn", text: rec.content });
+        }
+      } catch {
+        // 坏行跳过
+      }
+    }
+  }
+
+  private persist(role: "user" | "assistant", content: string): void {
+    fs.appendFileSync(this.timelineFile, JSON.stringify({ role, content, at: new Date().toISOString() }) + "\n", "utf-8");
+  }
+
+  // ---------- 指挥板（真实存储推导） ----------
 
   private listTeams(): BoardData["teams"] {
     const dir = path.join(this.dataRoot, "team");
@@ -578,8 +766,7 @@ export class Kernel {
         const recs = this.teamStore.readAssignments(entry.name, taskId);
         if (!recs.length) continue;
         const last = recs[recs.length - 1];
-        const status =
-          last.kind === "accept" ? "done" : last.kind === "escalate" ? "waiting" : "running";
+        const status = last.kind === "accept" ? "done" : last.kind === "escalate" ? "waiting" : "running";
         track.push({
           id: taskId,
           teamId: entry.name,
@@ -635,12 +822,10 @@ export class Kernel {
 
       case "feed.send": {
         const { text } = params as { text: string };
+        const wasBusy = this.busy;
         this.card({ kind: "user", text });
-        if (this.busy) {
-          this.card({ kind: "system", text: "她正在处理上一件事——这条先排队了（M0 队列是占位，稍候自动执行）。" });
-        }
         this.busy = true;
-        void this.runChat(text).finally(() => {
+        void this.runChat(text, wasBusy).finally(() => {
           this.busy = false;
         });
         return { ok: true } as RpcContracts[M]["result"];
@@ -650,10 +835,7 @@ export class Kernel {
         const { id } = params as { id: string };
         const d = this.decisions.find((x) => x.id === id);
         this.decisions = this.decisions.filter((x) => x.id !== id);
-        this.card({
-          kind: "lynn",
-          text: `收到你对「${d?.title ?? id}」的答复，我继续推进。`,
-        });
+        this.card({ kind: "lynn", text: `收到你对「${d?.title ?? id}」的答复，我继续推进。` });
         return { ok: true } as RpcContracts[M]["result"];
       }
 
@@ -681,7 +863,6 @@ export class Kernel {
       }
 
       case "config.test": {
-        // 同步测连：返回 Promise，Electron ipcMain.handle 会 await 后再回渲染层
         const p = params as { baseUrl: string; apiKey: string; model: string };
         return probeEndpoint(p) as unknown as RpcContracts[M]["result"];
       }
@@ -690,6 +871,8 @@ export class Kernel {
         this.feed = [];
         this.history = [];
         this.tokensUsed = 0;
+        this.session = null;
+        this.sessionSettingsStamp = "";
         try {
           fs.rmSync(this.timelineFile, { force: true });
         } catch {
@@ -704,6 +887,3 @@ export class Kernel {
     }
   }
 }
-
-// 防止未使用导入在严格模式下报错（成员文件名在后续成员详情页使用）
-export const _memberFileName = memberFileName;

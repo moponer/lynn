@@ -16,6 +16,9 @@
     "dev": "npm run build && electron ."
   },
   "dependencies": {
+    "@earendil-works/pi-agent-core": "^1.4.0",
+    "@earendil-works/pi-ai": "^1.4.0",
+    "@earendil-works/pi-coding-agent": "^1.4.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },
@@ -24,7 +27,7 @@
     "@types/react": "^18.3.5",
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^4.3.1",
-    "electron": "^31.3.0",
+    "electron": "^45.2.1",
     "typescript": "^5.5.4",
     "vite": "^5.4.3"
   }

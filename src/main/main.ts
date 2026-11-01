@@ -42,7 +42,8 @@ function createWindow(): void {
   });
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  await kernel.init(); // 动态加载 Pi（ESM）；失败自动降级直连
   createWindow();
 
   // 唯一 RPC 通道
