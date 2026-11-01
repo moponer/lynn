@@ -14,6 +14,7 @@ const kernel = new Kernel();
 kernel.setEncryptors(
   (plain) => safeStorage.encryptString(plain),
   () => safeStorage.isEncryptionAvailable(),
+  (blob) => safeStorage.decryptString(blob),
 );
 
 let win: BrowserWindow | null = null;

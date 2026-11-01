@@ -200,6 +200,8 @@ export class Kernel {
   private cardSeq = 0;
   private busy = false;
   private listeners = new Set<(ev: KernelEvent) => void>();
+  /** safeStorage.decryptString 由 main.ts 注入；未注入时 Key 只可能是明文存储 */
+  private decryptor: ((blob: Buffer) => string) | null = null;
 
   constructor(dataRoot = defaultDataRoot()) {
     this.dataRoot = dataRoot;
@@ -215,9 +217,14 @@ export class Kernel {
     this.loadSession();
   }
 
-  /** main.ts 注入真正的 safeStorage 加密（渲染层永不接触 Key） */
-  setEncryptors(encrypt: (plain: string) => Buffer, isAvailable: () => boolean): void {
+  /** main.ts 注入 safeStorage 的加/解密（渲染层永不接触 Key） */
+  setEncryptors(
+    encrypt: (plain: string) => Buffer,
+    isAvailable: () => boolean,
+    decrypt: (blob: Buffer) => string,
+  ): void {
     this.settings = new SettingsStore(this.dataRoot, encrypt, isAvailable);
+    this.decryptor = decrypt;
   }
 
   onEvent(cb: (ev: KernelEvent) => void): () => void {
@@ -429,7 +436,11 @@ export class Kernel {
 
   private async runChat(userText: string): Promise<void> {
     const cfg = this.settings.getModel();
-    const apiKey = cfg ? loadApiKey(this.settings, (b) => b.toString("utf-8")) : null;
+    const apiKey = cfg
+      ? loadApiKey(this.settings, (b) =>
+          this.decryptor ? this.decryptor(b) : b.toString("utf-8"),
+        )
+      : null;
     if (!cfg || !apiKey) {
       this.card({
         kind: "system",
