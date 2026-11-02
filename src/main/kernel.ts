@@ -26,6 +26,7 @@ import { ThreadStore } from "./threads";
 import { buildTurnAttachments, searchProjectFiles, type TurnAttachments } from "./attachments";
 import { PersonaStore, composeSystemPrompt } from "./persona";
 import { MemoryStore, type MemoryKind } from "./memory";
+import { PRESETS, loadProviders, saveProviders, type ProviderEntry } from "./providers";
 import { TeamStore } from "./team-store";
 import { TaskStore } from "./task-store";
 import { TaskCase } from "./task-case";
@@ -1826,6 +1827,24 @@ export class Kernel {
         const text = this.memory.rollback(kind, versionId);
         const hot = this.hotSyncSystemPrompt();
         return { ok: true, text, hot } as RpcContracts[M]["result"];
+      }
+
+      case "providers.presets": {
+        return { presets: PRESETS } as RpcContracts[M]["result"];
+      }
+
+      case "providers.list": {
+        const { providers, error } = loadProviders(this.dataRoot);
+        return {
+          providers: providers.map((p) => ({ id: p.id, name: p.name, baseUrl: p.baseUrl, models: p.models ?? [] })),
+          ...(error ? { error } : {}),
+        } as RpcContracts[M]["result"];
+      }
+
+      case "providers.save": {
+        const { providers } = params as { providers: ProviderEntry[] };
+        saveProviders(this.dataRoot, providers ?? []);
+        return { ok: true } as RpcContracts[M]["result"];
       }
 
       case "session.abort": {

@@ -368,6 +368,25 @@ export interface RpcContracts {
     params: { kind: "user" | "memory"; versionId: string };
     result: { ok: boolean; text: string; hot: boolean };
   };
+  /** 多 provider（M2-12）：预设只是推荐值；models.yaml 增删厂商不改主程序 */
+  "providers.presets": {
+    params: void;
+    result: {
+      presets: { id: string; name: string; baseUrl: string; models: string[]; contextWindow: number; pricing?: { input: number | null; output: number | null; note?: string } }[];
+    };
+  };
+  "providers.list": {
+    params: void;
+    result: { providers: { id: string; name?: string; baseUrl: string; models: string[] }[]; error?: string };
+  };
+  "providers.save": {
+    params: { providers: { id: string; name?: string; baseUrl: string; models: string[]; contextWindow?: number }[] };
+    result: { ok: boolean };
+  };
+  "providers.discover": {
+    params: { baseUrl: string; apiKey?: string };
+    result: { models: string[]; error?: string };
+  };
   /** 停止当前这一轮（保留已产出文本） */
   "session.abort": {
     params: void;

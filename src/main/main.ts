@@ -5,6 +5,7 @@ import { autoUpdater } from "electron-updater";
 import type { RpcMethod } from "../shared/contract";
 import { Kernel } from "./kernel";
 import { resolveFeedUrl, transition, type UpdateState } from "./updater";
+import { discoverModels } from "./providers";
 
 /**
  * Electron 主进程 —— 薄壳（§4.1）。
@@ -305,6 +306,11 @@ app.whenReady().then(async () => {
       }
       if (method.startsWith("update.")) {
         return await handleUpdateRpc(method);
+      }
+      if (method === "providers.discover") {
+        const p = params as { baseUrl: string; apiKey?: string };
+        if (!p.baseUrl) return { models: [], error: "缺 baseUrl" };
+        return await discoverModels(p.baseUrl, p.apiKey);
       }
       if (method === "plugins.probe") {
         return kernel.probePlugin((params as { id: string }).id);
