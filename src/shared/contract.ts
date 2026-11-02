@@ -422,6 +422,23 @@ export interface RpcContracts {
     params: void;
     result: { ok: boolean };
   };
+  /** 知识库（M2-04）：markdown 权威 + FTS5 trigram 中文检索 */
+  "kb.search": {
+    params: { q: string; limit?: number };
+    result: { hits: { file: string; title: string; snippet: string; score: number }[]; error?: string };
+  };
+  "kb.list": {
+    params: void;
+    result: { docs: { file: string; title: string; chars: number }[]; backend: string };
+  };
+  "kb.read": {
+    params: { file: string };
+    result: { ok: boolean; title?: string; body?: string; error?: string };
+  };
+  "kb.reindex": {
+    params: void;
+    result: { indexed: number; removed: number; docs: number; dbBytes: number };
+  };
   /** 定时任务（M2-02）：调度器在核心里；单飞/补跑/陈旧清理，lastStatus 如实 */
   "schedule.add": {
     params: { name: string; prompt: string; kind: "once" | "daily" | "interval"; at?: string; time?: string; intervalMin?: number };

@@ -29,6 +29,7 @@ import { MemoryStore, type MemoryKind } from "./memory";
 import { PRESETS, loadProviders, saveProviders, type ProviderEntry } from "./providers";
 import { CalendarStore, dueReminders, parseNaturalDate } from "./calendar";
 import { SchedulerStore, recover as recoverScheduler, type DueItem } from "./scheduler";
+import { KnowledgeStore } from "./knowledge";
 import { TeamStore } from "./team-store";
 import { TaskStore } from "./task-store";
 import { TaskCase } from "./task-case";
@@ -311,6 +312,8 @@ export class Kernel {
   private scheduleTimer: NodeJS.Timeout | null = null;
   /** 系统通知通道（M2-03）：壳层注入；不依赖云推送。通知失败不影响应用内卡片（双通道） */
   private notifier: ((title: string, body: string) => void) | null = null;
+  /** 本地知识库（M2-04）：权威是 markdown 文件，FTS5 trigram 只做检索 */
+  private knowledge!: KnowledgeStore;
   /** 下一次起 worker 时开新会话（session.new 置位；起过一次即清） */
   private createFreshSession = false;
   /** 用户点了停止：本轮结束时不追加"已完成"类文案 */
@@ -351,6 +354,8 @@ export class Kernel {
     this.memory = new MemoryStore(dataRoot);
     this.calendar = new CalendarStore(dataRoot);
     this.scheduler = new SchedulerStore(dataRoot);
+    this.knowledge = new KnowledgeStore(dataRoot);
+    this.knowledge.reindex();
     const list = this.threads.list();
     const current = list[0] ?? this.threads.create("新会话");
     this.currentThreadId = current.id;
@@ -2033,6 +2038,29 @@ export class Kernel {
         const t = this.scheduler.toggle(String(id));
         if (!t) return { ok: false, error: `没有这个定时任务：${id}` } as RpcContracts[M]["result"];
         return { ok: true, enabled: t.enabled } as RpcContracts[M]["result"];
+      }
+
+      case "kb.search": {
+        const { q, limit } = params as { q: string; limit?: number };
+        const { hits, error } = this.knowledge.search(String(q ?? ""), Math.min(50, Math.max(1, Number(limit ?? 8))));
+        return { hits, ...(error ? { error } : {}) } as RpcContracts[M]["result"];
+      }
+
+      case "kb.list": {
+        return { docs: this.knowledge.list(), backend: this.knowledge.backend } as RpcContracts[M]["result"];
+      }
+
+      case "kb.read": {
+        const { file } = params as { file: string };
+        const doc = this.knowledge.read(String(file));
+        if (!doc) return { ok: false, error: `文档不存在：${file}` } as RpcContracts[M]["result"];
+        return { ok: true, title: doc.title, body: doc.body } as RpcContracts[M]["result"];
+      }
+
+      case "kb.reindex": {
+        const { indexed, removed } = this.knowledge.reindex();
+        const st = this.knowledge.stats();
+        return { indexed, removed, docs: st.docs, dbBytes: st.dbBytes } as RpcContracts[M]["result"];
       }
 
       case "session.abort": {
