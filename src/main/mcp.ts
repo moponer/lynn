@@ -33,7 +33,11 @@ export function mcpToolName(serverId: string, toolName: string): string {
 
 /** 读 <dataRoot>/mcp.json：{ servers: [...] }；坏文件当作没配，但要能被诊断 */
 export function loadMcpConfig(dataRoot: string): { servers: McpServerConfig[]; error?: string } {
-  const file = path.join(dataRoot, "mcp.json");
+  return loadMcpConfigAt(path.join(dataRoot, "mcp.json"));
+}
+
+/** 读任意路径的 mcp.json（项目级配置也走同一套校验） */
+export function loadMcpConfigAt(file: string): { servers: McpServerConfig[]; error?: string } {
   if (!fs.existsSync(file)) return { servers: [] };
   try {
     const raw = JSON.parse(fs.readFileSync(file, "utf-8")) as { servers?: unknown };

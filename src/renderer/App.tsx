@@ -342,6 +342,7 @@ export default function App() {
           ambientMode={ambientMode}
           members={desk.members.map((m) => ({ name: m.name, role: m.role }))}
           autoStart={snap.prefs.autoStart}
+          project={snap.project}
           usage={snap.usage}
           onTheme={changeTheme}
           onAvatar={changeAvatar}
@@ -353,6 +354,12 @@ export default function App() {
           }}
           onAutoStart={(v) => {
             void rpc("config.prefs", { autoStart: v }).then(() => refresh());
+          }}
+          onTrust={(trusted) => {
+            void rpc("trust.set", { trusted }).then(() => {
+              // MCP 重连是后台的：等它落完再刷快照
+              setTimeout(() => void refresh(), 800);
+            });
           }}
           onClose={() => setSettingsOpen(false)}
           onSaved={() => void refresh()}

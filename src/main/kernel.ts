@@ -19,8 +19,9 @@ import { streamChat, probeEndpoint, type ChatMessage, type ToolSchema } from "./
 import { SettingsStore, loadApiKey, defaultDataRoot } from "./settings";
 import { applyPiEnvironment } from "./pi-home";
 import { reapOrphanWorkers } from "./agent-orphans";
-import { McpRegistry, loadMcpConfig } from "./mcp";
+import { McpRegistry, loadMcpConfig, loadMcpConfigAt, type McpServerConfig } from "./mcp";
 import { CheckpointStore } from "./checkpoints";
+import { TrustStore } from "./trust";
 import { TeamStore } from "./team-store";
 import { TaskStore } from "./task-store";
 import { TaskCase } from "./task-case";
@@ -288,6 +289,9 @@ export class Kernel {
   private mcp = new McpRegistry();
   /** 逐轮文件检查点（M1-12） */
   private checkpoints!: CheckpointStore;
+  /** 项目信任（M1-13）：决定项目级 mcp.json 能不能注入工具 */
+  private trust!: TrustStore;
+  private projectRoot!: string;
   /** 下一次起 worker 时开新会话（session.new 置位；起过一次即清） */
   private createFreshSession = false;
   /** 用户点了停止：本轮结束时不追加"已完成"类文案 */
@@ -304,6 +308,10 @@ export class Kernel {
     this.taskCase = new TaskCase(dataRoot);
     this.contextStore = new ContextStore(dataRoot);
     this.checkpoints = new CheckpointStore(path.join(dataRoot, "checkpoints"));
+    this.trust = new TrustStore(dataRoot);
+    this.projectRoot = process.env.LYNN_PROJECT_DIR
+      ? path.resolve(process.env.LYNN_PROJECT_DIR)
+      : path.join(dataRoot, "project");
     this.mcp = new McpRegistry();
     this.pluginHost = new PluginHost(dataRoot);
     this.pluginSet = new PluginSetStore(dataRoot);
@@ -450,20 +458,50 @@ export class Kernel {
     await this.l1.loadAll();
     for (const e of this.l1.lastErrors) console.warn("[kernel] L1 加载失败：", e);
 
-    // L2 MCP（M0-07）：按 mcp.json 连 server，工具并入工具面；单个失败如实报错，不静默
-    const mcp = loadMcpConfig(this.dataRoot);
-    if (mcp.error) {
-      this.log("mcp_config_error", { error: mcp.error });
-      this.card({ kind: "system", text: mcp.error });
+    // L2 MCP（M0-07）：全局配置 + 已信任项目的项目级配置
+    await this.reloadMcp();
+  }
+
+  /**
+   * 重新连 MCP（M0-07 + M1-13）：全局 `mcp.json` 永远加载；项目级 `.lynn/mcp.json`
+   * 只有在项目被信任时才加载——陌生仓库不能靠一个文件把工具塞进她的工具面。
+   */
+  private async reloadMcp(): Promise<void> {
+    await this.mcp.stopAll();
+    const merged = new Map<string, McpServerConfig>();
+    const global = loadMcpConfig(this.dataRoot);
+    if (global.error) {
+      this.log("mcp_config_error", { error: global.error });
+      this.card({ kind: "system", text: global.error });
     }
-    if (mcp.servers.length) {
-      await this.mcp.startAll(mcp.servers);
-      for (const e of this.mcp.lastErrors()) {
-        this.log("mcp_server_error", e);
-        this.card({ kind: "system", text: `MCP 服务器「${e.id}」没连上：${e.message}` });
+    for (const s of global.servers) merged.set(s.id, s);
+
+    const projectFile = path.join(this.projectRoot, ".lynn", "mcp.json");
+    if (fs.existsSync(projectFile)) {
+      if (this.trust.isTrusted(this.projectRoot)) {
+        const p = loadMcpConfigAt(projectFile);
+        if (p.error) {
+          this.log("mcp_project_config_error", { error: p.error });
+          this.card({ kind: "system", text: `项目级 MCP 配置有问题：${p.error}` });
+        }
+        for (const s of p.servers) merged.set(s.id, s);
+      } else {
+        this.log("mcp_project_untrusted", { root: this.projectRoot });
+        this.card({
+          kind: "system",
+          text: `发现项目级 MCP 配置（${projectFile}），这个项目还没被信任，暂不加载。到「设置 → 权限与安全」信任后再试。`,
+        });
       }
-      this.log("mcp_ready", { tools: this.mcp.size(), fingerprint: this.mcp.fingerprint() });
     }
+
+    const servers = [...merged.values()];
+    if (!servers.length) return;
+    await this.mcp.startAll(servers);
+    for (const e of this.mcp.lastErrors()) {
+      this.log("mcp_server_error", e);
+      this.card({ kind: "system", text: `MCP 服务器「${e.id}」没连上：${e.message}` });
+    }
+    this.log("mcp_ready", { tools: this.mcp.size(), fingerprint: this.mcp.fingerprint(), projectTrusted: this.trust.isTrusted(this.projectRoot) });
   }
 
   // ---------- 工具执行（Pi execute 与直连 tool_calls 共用） ----------
@@ -1506,7 +1544,12 @@ export class Kernel {
       case "session.snapshot": {
         const cfg = this.settings.getModel();
         const snap: RpcContracts["session.snapshot"]["result"] = {
-          workspace: { project: "我的风铃", subdir: "指挥台" },
+          workspace: { project: path.basename(this.projectRoot), subdir: "指挥台" },
+          project: {
+            root: this.projectRoot,
+            trusted: this.trust.isTrusted(this.projectRoot),
+            hasMcp: fs.existsSync(path.join(this.projectRoot, ".lynn", "mcp.json")),
+          },
           permission: this.permission,
           model: {
             configured: !!cfg,
@@ -1799,6 +1842,20 @@ export class Kernel {
 
       case "config.clearKey": {
         return { ok: this.settings.clearApiKey() } as RpcContracts[M]["result"];
+      }
+
+      case "trust.set": {
+        const { trusted } = params as { trusted: boolean };
+        this.trust.setTrusted(this.projectRoot, Boolean(trusted));
+        // 重新连 MCP 是异步的：先回执，再在后台完成并落一张卡
+        void this.reloadMcp().then(() =>
+          this.card({
+            kind: "system",
+            text: trusted ? "已信任当前项目，项目级 MCP 已按配置加载。" : "已取消信任，项目级 MCP 不再加载。",
+          }),
+        );
+        this.log("trust_set", { root: this.projectRoot, trusted: Boolean(trusted) });
+        return { ok: true, trusted: Boolean(trusted), root: this.projectRoot, reloading: true } as RpcContracts[M]["result"];
       }
 
       case "session.undo": {

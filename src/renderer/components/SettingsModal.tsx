@@ -49,6 +49,7 @@ export function SettingsModal({
   ambientMode,
   members,
   autoStart,
+  project,
   usage,
   onTheme,
   onAvatar,
@@ -56,6 +57,7 @@ export function SettingsModal({
   onAmbient,
   onApplyThemeTokens,
   onAutoStart,
+  onTrust,
   onClose,
   onSaved,
 }: {
@@ -66,6 +68,7 @@ export function SettingsModal({
   ambientMode: AmbientMode;
   members: { name: string; role: string }[];
   autoStart: boolean;
+  project?: { root: string; trusted: boolean; hasMcp: boolean };
   usage: UsageView;
   onTheme: (id: ThemeId, mode: ThemeMode) => void;
   onAvatar: (on: boolean) => void;
@@ -73,6 +76,7 @@ export function SettingsModal({
   onAmbient: (m: AmbientMode) => void;
   onApplyThemeTokens: (tokens?: Record<string, string>) => void;
   onAutoStart: (v: boolean) => void;
+  onTrust?: (trusted: boolean) => void;
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -424,6 +428,26 @@ export function SettingsModal({
             <span className="sf-label">顶栏四档权限</span>
             <p className="sf-hint">计划 / 询问 / 自动 / 全权：决定她能不能直接调工具、哪些必须问你。设置里看当前档位，改档在顶栏。</p>
           </div>
+          <div className="sf-row">
+            <div className="sf-row-main">
+              <b>
+                当前项目
+                <span className={`sf-badge ${project?.trusted ? "ok" : "warn"}`}>
+                  {project?.trusted ? "已信任" : "未信任"}
+                </span>
+              </b>
+              <small className="mono">{project?.root ?? "—"}</small>
+              <small>
+                {project?.hasMcp
+                  ? "这个项目带 .lynn/mcp.json：未信任时不会加载，信任后重连。"
+                  : "项目里没有 .lynn/mcp.json。"}
+              </small>
+            </div>
+            <button type="button" className="sf-btn" onClick={() => onTrust?.(!project?.trusted)}>
+              {project?.trusted ? "取消信任" : "信任此项目"}
+            </button>
+          </div>
+
           <div className="sf-sub">
             <span className="sf-label">成员的执行边界（纵深防御，不是沙箱）</span>
             <p className="sf-hint">

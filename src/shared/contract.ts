@@ -224,6 +224,8 @@ export interface BoardData {
 
 export interface SessionSnapshot {
   workspace: { project: string; subdir: string };
+  /** 当前项目：项目级扩展只在 trusted 时加载（M1-13） */
+  project: { root: string; trusted: boolean; hasMcp: boolean };
   permission: PermissionMode;
   model: ModelConfigView;
   feed: FeedCard[];
@@ -286,6 +288,11 @@ export interface RpcContracts {
   "session.reload": {
     params: void;
     result: { ok: boolean };
+  };
+  /** 项目信任（M1-13）：未信任不加载项目级 mcp.json */
+  "trust.set": {
+    params: { trusted: boolean };
+    result: { ok: boolean; trusted: boolean; root: string; reloading: boolean };
   };
   /** 撤销上一轮的文件改动（检查点回滚：改过的还原、新建的删掉） */
   "session.undo": {
