@@ -106,7 +106,8 @@ export class AgentHost {
         ELECTRON_RUN_AS_NODE: "1",
         PI_TELEMETRY: "0",
         PI_SKIP_VERSION_CHECK: "1",
-        LYNN_RESUME: this.options.resume === false ? "0" : "1",
+        // 默认不续档：只有壳明确说"这次要续"才读旧会话，避免测试/新装翻出无关历史
+        LYNN_RESUME: this.options.resume === true ? "1" : "0",
         LYNN_MODEL_BASE_URL: this.options.model.baseUrl,
         LYNN_MODEL_API_KEY: this.options.model.apiKey,
         LYNN_MODEL: this.options.model.model,

@@ -899,7 +899,9 @@ export class Kernel {
         }
       },
       markerDir: path.join(this.dataRoot, "runtime", "workers"),
-      resume: !this.createFreshSession,
+      // 只有「这次壳里已经有对话记录」才续上次会话：全新安装/新对话不翻出旧档，
+      // 也避免测试环境里续到别的用例留下的会话。
+      resume: !this.createFreshSession && fs.existsSync(this.timelineFile),
       onEvent: (ev) => this.onAgentEvent(ev),
       onError: (message) => {
         // 运行时错误必须进对话流：只发事件的话界面会一片空白（用户只看到自己那半句）
