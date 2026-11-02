@@ -1,8 +1,7 @@
-import { exec } from "node:child_process";
 import * as fs from "node:fs";
-import * as path from "node:path";
 import { streamChat, type ChatMessage, type ToolSchema } from "./llm";
 import type { MemberProfile } from "./team-store";
+import { Toolkit, TOOLKIT_SCHEMAS, resolveWithin } from "./toolkit";
 
 /**
  * 成员运行时（M0-09：单层派单真实执行）。
@@ -47,146 +46,33 @@ export interface MemberRunResult {
   error?: string;
 }
 
-// ---------- 成员工具实现（全部在代码层强制边界） ----------
+// ---------- 成员工具实现（官方 L1 工具集，见 toolkit.ts） ----------
 
-/** 解析成员给的路径：必须落在工作区内，逃逸一律拒绝 */
-export function resolveWithin(workdir: string, target: string): string {
-  const base = path.resolve(workdir);
-  const full = path.resolve(base, target);
-  if (full !== base && !full.startsWith(base + path.sep)) {
-    throw new Error(`路径越界：${target} 不在任务工作区内。成员只能访问工作区里的文件。`);
-  }
-  return full;
-}
-
-function toolReadFile(workdir: string, args: Record<string, unknown>): string {
-  const full = resolveWithin(workdir, String(args.path ?? ""));
-  if (!fs.existsSync(full)) throw new Error(`文件不存在：${args.path}`);
-  const stat = fs.statSync(full);
-  if (stat.isDirectory()) throw new Error(`${args.path} 是目录，请用 list_dir`);
-  const body = fs.readFileSync(full, "utf-8");
-  if (body.length > 200_000) {
-    return body.slice(0, 200_000) + `\n…（已截断，共 ${stat.size} 字节）`;
-  }
-  return body;
-}
-
-function toolWriteFile(workdir: string, args: Record<string, unknown>): string {
-  const full = resolveWithin(workdir, String(args.path ?? ""));
-  const content = String(args.content ?? "");
-  fs.mkdirSync(path.dirname(full), { recursive: true });
-  fs.writeFileSync(full, content, "utf-8");
-  return `已写入 ${args.path}（${Buffer.byteLength(content, "utf-8")} 字节）。`;
-}
-
-function toolListDir(workdir: string, args: Record<string, unknown>): string {
-  const full = resolveWithin(workdir, args.path === undefined || args.path === "" ? "." : String(args.path));
-  if (!fs.existsSync(full)) throw new Error(`目录不存在：${args.path ?? "."}`);
-  const entries = fs.readdirSync(full, { withFileTypes: true });
-  if (!entries.length) return "（空目录）";
-  return entries
-    .map((e) => `${e.isDirectory() ? "[目录]" : "      "} ${e.name}`)
-    .join("\n");
-}
-
-function toolRunCommand(workdir: string, args: Record<string, unknown>): Promise<string> {
-  const command = String(args.command ?? "").trim();
-  if (!command) return Promise.resolve("命令为空。");
-  const timeoutMs = 120_000;
-  return new Promise((resolve) => {
-    exec(
-      command,
-      {
-        cwd: path.resolve(workdir),
-        timeout: timeoutMs,
-        maxBuffer: 4 * 1024 * 1024,
-        windowsHide: true,
-        env: { ...process.env },
-      },
-      (err, stdout, stderr) => {
-        const cut = (s: string) => {
-          const t = s ?? "";
-          return t.length > 8000 ? t.slice(0, 8000) + `…（截断，共 ${t.length} 字符）` : t;
-        };
-        if (err && !stdout && !stderr) {
-          if ((err as Error & { killed?: boolean }).killed) {
-            resolve(`命令超时（${timeoutMs / 1000}s）被终止：${command}`);
-          } else {
-            resolve(`命令执行失败：${err.message}`);
-          }
-          return;
-        }
-        const parts = [
-          stdout ? `stdout:\n${cut(stdout)}` : null,
-          stderr ? `stderr:\n${cut(stderr)}` : null,
-          err ? `exit code: ${err.code ?? "非零"}` : "exit code: 0",
-        ].filter(Boolean);
-        resolve(parts.join("\n"));
-      },
-    );
-  });
-}
+// 兼容旧引用：路径边界与工具实现都收敛到 toolkit 一份，成员与工作台共用
+export { resolveWithin };
 
 // ---------- 成员工具 schema（OpenAI 兼容） ----------
 
+/** 回报通道：不属于执行工具，任何白名单都不能把它剥掉（§4.10.5） */
+const SUBMIT_REPORT_SCHEMA: ToolSchema = {
+  type: "function",
+  function: {
+    name: "submit_report",
+    description:
+      "把这一单的结论交回给风铃：text 写结论与未完成项，evidence 列工作区内真实存在的文件路径（至少 1 个，没有证据不收）。",
+    parameters: {
+      type: "object",
+      properties: {
+        text: { type: "string", description: "结论 / 未完成 / 需要升级的说明" },
+        evidence: { type: "array", items: { type: "string" }, description: "工作区内相对路径，至少 1 个" },
+      },
+      required: ["text", "evidence"],
+    },
+  },
+};
+
 export function memberToolSchemas(allowed: string[]): ToolSchema[] {
-  const defs: Record<string, ToolSchema> = {
-    read_file: {
-      type: "function",
-      function: {
-        name: "read_file",
-        description: "读取工作区内一个文本文件的全部内容（超过 200KB 截断）。",
-        parameters: { type: "object", properties: { path: { type: "string", description: "工作区内相对路径" } }, required: ["path"] },
-      },
-    },
-    write_file: {
-      type: "function",
-      function: {
-        name: "write_file",
-        description: "把完整内容写入工作区内一个文件（目录不存在会自动创建；覆盖同名文件）。",
-        parameters: {
-          type: "object",
-          properties: { path: { type: "string", description: "工作区内相对路径" }, content: { type: "string", description: "完整文件内容" } },
-          required: ["path", "content"],
-        },
-      },
-    },
-    list_dir: {
-      type: "function",
-      function: {
-        name: "list_dir",
-        description: "列出工作区内一个目录的条目（默认根目录）。",
-        parameters: { type: "object", properties: { path: { type: "string", description: "工作区内相对路径，可省略" } }, required: [] },
-      },
-    },
-    run_command: {
-      type: "function",
-      function: {
-        name: "run_command",
-        description:
-          "在工作区目录里执行一条 shell 命令（120 秒超时；输出截断）。只用于完成任务必需的核算/转换，不得联网下载、不装依赖。",
-        parameters: { type: "object", properties: { command: { type: "string", description: "要执行的命令" } }, required: ["command"] },
-      },
-    },
-    submit_report: {
-      type: "function",
-      function: {
-        name: "submit_report",
-        description:
-          "向风铃提交回报（终局动作，提交后本轮执行结束）。text=做了什么与结论；evidence=证据文件相对路径列表（至少 1 项，必须真实存在于工作区）。",
-        parameters: {
-          type: "object",
-          properties: {
-            text: { type: "string", description: "回报正文：做了什么、关键口径、未完成的部分" },
-            evidence: { type: "array", items: { type: "string" }, description: "证据文件（工作区内相对路径）" },
-          },
-          required: ["text", "evidence"],
-        },
-      },
-    },
-  };
-  // 白名单只约束执行工具；submit_report 是成员唯一的回报通道，永远在
-  return allowed.filter((t) => defs[t]).map((t) => defs[t]).concat(defs.submit_report);
+  return [...TOOLKIT_SCHEMAS.filter((t) => allowed.includes(t.function.name)), SUBMIT_REPORT_SCHEMA];
 }
 
 // ---------- 成员系统提示词（档案 → 提示词，纯文本编译） ----------
@@ -226,6 +112,7 @@ export function memberSystemPrompt(input: MemberRunInput): string {
 
 export async function runMemberTask(input: MemberRunInput): Promise<MemberRunResult> {
   const chat = input.chatFn ?? streamChat;
+  const toolkit = new Toolkit(input.workdir);
   const maxTurns = Math.max(1, Math.min(input.profile.limits?.maxTurns ?? 12, 40));
   const tools = memberToolSchemas(input.tools);
   const messages: ChatMessage[] = [
@@ -268,23 +155,19 @@ export async function runMemberTask(input: MemberRunInput): Promise<MemberRunRes
     if (!input.tools.includes(name)) {
       return `工具 ${name} 不在本次分配清单里（本次只有：${input.tools.join("、")}）。需要的话在回报里写 ESCALATE 说明原因。`;
     }
-    try {
-      switch (name) {
-        case "read_file":
-          return toolReadFile(input.workdir, args);
-        case "write_file": {
-          const r = toolWriteFile(input.workdir, args);
-          input.onEvent?.({ kind: "tool", text: `写入 ${String(args.path)}` });
-          return r;
-        }
-        case "list_dir":
-          return toolListDir(input.workdir, args);
-        case "run_command":
-          return await toolRunCommand(input.workdir, args);
-        default:
-          return `未知工具：${name}`;
+        try {
+      const out = await toolkit.execute(name, args);
+      if (name === "write_file" || name === "edit_file") {
+        const ch = toolkit.changes().at(-1);
+        input.onEvent?.({
+          kind: "tool",
+          text: (name === "write_file" ? "写入 " : "修改 ") + String(args.path) + (ch ? "（+" + ch.added + "/-" + ch.removed + "）" : ""),
+        });
+      } else if (name === "run_command") {
+        input.onEvent?.({ kind: "tool", text: "执行：" + String(args.command).slice(0, 120) });
       }
-    } catch (err) {
+      return out;
+} catch (err) {
       return `工具执行失败：${err instanceof Error ? err.message : String(err)}`;
     }
   };
