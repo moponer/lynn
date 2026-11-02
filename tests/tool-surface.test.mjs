@@ -11,7 +11,7 @@ import { TeamStore } from "../dist/main/team-store.js";
  * 工具面断言（计划书 §3.1 / §4.10.3 / M0 验收）。
  *
  * 这三条不是"提示词叮嘱"，而是可执行的事实：
- *  1. 风铃只有 8 件管理工具，没有任何执行类工具；
+ *  1. 风铃只有管理工具（含 check_roster 花名册，M2-14），没有任何执行类工具；
  *  2. 她调用执行类工具名一律是"未知工具"，不会被静默执行；
  *  3. 成员白名单不得包含管理型工具（成员没有 ask_user，也不能再招募）。
  */
@@ -21,6 +21,7 @@ const LYNN_TOOLS = [
   "ask_user",
   "assign_task",
   "check_progress",
+  "check_roster",
   "create_member",
   "dissolve_team",
   "report_to_user",
@@ -58,7 +59,7 @@ const member = (over = {}) => ({
   ...over,
 });
 
-test("风铃的工具面恰好是 8 件管理工具", () => {
+test("风铃的工具面恰好是 9 件管理工具", () => {
   assert.deepEqual([...AGENT_TOOL_NAMES].sort(), LYNN_TOOLS);
 });
 

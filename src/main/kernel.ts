@@ -112,6 +112,18 @@ const TOOL_JSON: ToolSchema[] = [
   {
     type: "function",
     function: {
+      name: "check_roster",
+      description:
+        "查看班底花名册与战绩（M2-14）：各成员岗位、工具白名单与历次验收结论（做过的单/过验/被打回/升级次数）。派单前先看战绩，把活给对的人。",
+      parameters: {
+        type: "object",
+        properties: { teamId: { type: "string", description: "不传则列出全部团队" } },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "review_result",
       description: "登记成员节点回报。必须附证据；无证据会被拒绝登记。",
       parameters: {
@@ -218,7 +230,7 @@ interface QueuedInput extends QueueItem {
 }
 
 /** 计划档位下也允许的只读工具 */
-const READ_ONLY_TOOLS = new Set(["check_progress"]);
+const READ_ONLY_TOOLS = new Set(["check_progress", "check_roster"]);
 
 export class Kernel {
   readonly dataRoot: string;
@@ -951,6 +963,9 @@ export class Kernel {
           running: this.memberRuns.has(taskId),
         };
         return JSON.stringify(p, null, 2);
+      }
+      case "check_roster": {
+        return JSON.stringify(this.tools.roster(args.teamId ? String(args.teamId) : undefined), null, 2);
       }
       case "review_result": {
         return this.registerReport(

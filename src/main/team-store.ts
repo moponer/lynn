@@ -195,6 +195,17 @@ export interface AssignmentRecord {
   rejectReason?: { what: string; expect: string; deadline: string };
 }
 
+/** 成员战绩（M2-14）：历次验收结论聚合——资产，不是日志 */
+export interface MemberRecord {
+  member: string;
+  /** 参与过的任务数（去重） */
+  tasks: number;
+  accepted: number;
+  rejected: number;
+  escalations: number;
+  lastAcceptAt?: string;
+}
+
 export class TeamStore {
   constructor(readonly dataRoot: string) {}
 
@@ -351,5 +362,60 @@ export class TeamStore {
     const rec = JSON.parse(fs.readFileSync(file, "utf-8")) as TeamRecord;
     rec.status = "dissolved";
     fs.writeFileSync(file, JSON.stringify(rec, null, 2));
+  }
+
+  // ---------- 班底档案资产化（M2-14）：花名册 = 岗位档案 + 历次验收战绩 ----------
+
+  /** 单个成员的战绩：扫 assignments/*.jsonl 汇总（记录追加不可改写，聚合只读） */
+  memberRecord(teamId: string, member: string): MemberRecord {
+    const dir = path.join(this.teamDir(teamId), "assignments");
+    const rec: MemberRecord = { member, tasks: 0, accepted: 0, rejected: 0, escalations: 0 };
+    if (!fs.existsSync(dir)) return rec;
+    const seen = new Set<string>();
+    for (const f of fs.readdirSync(dir).filter((x) => x.endsWith(".jsonl"))) {
+      for (const line of fs.readFileSync(path.join(dir, f), "utf-8").split("\n").filter((x) => x.trim())) {
+        let r: AssignmentRecord;
+        try {
+          r = JSON.parse(line) as AssignmentRecord;
+        } catch {
+          continue;
+        }
+        if (r.member !== member) continue;
+        seen.add(r.taskId);
+        if (r.kind === "accept") rec.accepted += 1;
+        else if (r.kind === "reject") rec.rejected += 1;
+        else if (r.kind === "escalate") rec.escalations += 1;
+        if (r.kind === "accept" && (!rec.lastAcceptAt || r.at > rec.lastAcceptAt)) rec.lastAcceptAt = r.at;
+      }
+    }
+    rec.tasks = seen.size;
+    return rec;
+  }
+
+  /** 花名册：团队 + 成员档案 + 各自战绩（解散的队伍也保留——档案是资产） */
+  roster(teamId: string): { team: TeamRecord; members: { profile: MemberProfile; record: MemberRecord }[] } {
+    const file = path.join(this.teamDir(teamId), "team.json");
+    if (!fs.existsSync(file)) throw new Error(`团队不存在: ${teamId}`);
+    const team = JSON.parse(fs.readFileSync(file, "utf-8")) as TeamRecord;
+    const members = this.listMembers(teamId).map((profile) => ({ profile, record: this.memberRecord(teamId, profile.name) }));
+    return { team, members };
+  }
+
+  /** 所有团队一览（含解散），供花名册索引 */
+  listTeams(): TeamRecord[] {
+    const dir = path.join(this.dataRoot, "team");
+    if (!fs.existsSync(dir)) return [];
+    const out: TeamRecord[] = [];
+    for (const d of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (!d.isDirectory() || d.name.startsWith("_")) continue;
+      const f = path.join(dir, d.name, "team.json");
+      if (!fs.existsSync(f)) continue;
+      try {
+        out.push(JSON.parse(fs.readFileSync(f, "utf-8")) as TeamRecord);
+      } catch {
+        continue;
+      }
+    }
+    return out.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
 }

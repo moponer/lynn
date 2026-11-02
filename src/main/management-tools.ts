@@ -59,6 +59,7 @@ export const MANAGEMENT_ONLY_TOOLS = [
   "create_member",
   "assign_task",
   "check_progress",
+  "check_roster",
   "review_result",
   "accept_or_reject",
   "report_to_user",
@@ -159,6 +160,27 @@ export class ManagementTools {
       rejects: recs.filter((r) => r.kind === "reject").length,
       latest: latest ? { at: latest.at, kind: latest.kind, member: latest.member, text: latest.text } : null,
     };
+  }
+
+  /** 3b. check_roster —— 花名册 + 战绩（M2-14）：档案是资产，下一单派谁看历史表现 */
+  roster(teamId?: string): unknown {
+    if (teamId) return this.store.roster(teamId);
+    return this.store.listTeams().map((t) => {
+      try {
+        const r = this.store.roster(t.id);
+        return {
+          team: t,
+          members: r.members.map((m) => ({
+            name: m.profile.name,
+            role: m.profile.role,
+            tools: m.profile.tools,
+            record: m.record,
+          })),
+        };
+      } catch {
+        return { team: t, members: [] };
+      }
+    });
   }
 
   /** 4. review_result —— 审查回报；无证据不算完成（§4.10.5 证据原则） */
