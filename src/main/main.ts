@@ -1,8 +1,10 @@
 import { app, BrowserWindow, globalShortcut, ipcMain, Menu, nativeImage, Notification, safeStorage, screen, shell, Tray } from "electron";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { autoUpdater } from "electron-updater";
 import type { RpcMethod } from "../shared/contract";
 import { Kernel } from "./kernel";
+import { resolveFeedUrl, transition, type UpdateState } from "./updater";
 
 /**
  * Electron 主进程 —— 薄壳（§4.1）。
@@ -69,6 +71,106 @@ function notifyOnce(title: string, body: string): void {
   const n = new Notification({ title, body, silent: false });
   n.on("click", () => focusMain());
   n.show();
+}
+
+// ---------------- M1-23 更新器 ----------------
+
+const updateState: UpdateState = {
+  supported: false,
+  version: app.getVersion(),
+  phase: "idle",
+};
+
+function updateBroadcast(): void {
+  for (const w of BrowserWindow.getAllWindows()) {
+    w.webContents.send("lynn:event", { type: "update", state: { ...updateState } });
+  }
+}
+
+function bindUpdater(): void {
+  if (!app.isPackaged) {
+    updateState.supported = false;
+    updateState.reason = "开发环境不检查更新（打包后可用）。";
+    return;
+  }
+  const feed = resolveFeedUrl(process.env, kernel.dataRoot);
+  if (!feed) {
+    updateState.supported = false;
+    updateState.reason = "未配置更新源：在 ~/.lynn/updater.json 写 { feedUrl } 或设 LYNN_UPDATE_FEED。";
+    return;
+  }
+  updateState.supported = true;
+  updateState.feedUrl = feed;
+  autoUpdater.autoDownload = false; // 有新版本先告知，用户确认再下载
+  autoUpdater.autoInstallOnAppQuit = false;
+  autoUpdater.setFeedURL({ provider: "generic", url: feed });
+  autoUpdater.on("checking-for-update", () => void 0);
+  autoUpdater.on("update-available", (it) => {
+    Object.assign(updateState, transition(updateState, { type: "available", version: it?.version }));
+    updateBroadcast();
+    notifyOnce(`有新版本 ${it?.version ?? ""}`, "到「我的风铃 → 数据与日志」下载安装。");
+  });
+  autoUpdater.on("update-not-available", () => {
+    Object.assign(updateState, transition(updateState, { type: "not-available" }));
+    updateBroadcast();
+  });
+  autoUpdater.on("download-progress", (p) => {
+    Object.assign(updateState, transition(updateState, { type: "progress", percent: p.percent }));
+    updateBroadcast();
+  });
+  autoUpdater.on("update-downloaded", (it) => {
+    Object.assign(updateState, transition(updateState, { type: "downloaded", version: it?.version }));
+    updateBroadcast();
+    notifyOnce("更新已就绪", "重启应用即完成安装。");
+  });
+  autoUpdater.on("error", (err) => {
+    Object.assign(updateState, transition(updateState, { type: "error", message: err?.message }));
+    updateBroadcast();
+  });
+}
+
+async function handleUpdateRpc(method: string): Promise<unknown> {
+  if (method === "update.status") return { ...updateState };
+  if (!updateState.supported) {
+    if (method === "update.check") {
+      // 每次都重读配置：用户可能刚写好 updater.json
+      const feed = resolveFeedUrl(process.env, kernel.dataRoot);
+      if (feed && app.isPackaged) {
+        updateState.supported = true;
+        updateState.reason = undefined;
+        updateState.feedUrl = feed;
+        autoUpdater.setFeedURL({ provider: "generic", url: feed });
+      } else {
+        return { ...updateState, error: updateState.reason ?? "不可更新" };
+      }
+    } else {
+      return { ...updateState, error: updateState.reason ?? "不可更新" };
+    }
+  }
+  try {
+    if (method === "update.check") {
+      Object.assign(updateState, transition(updateState, { type: "checking" }));
+      await autoUpdater.checkForUpdates();
+      return { ...updateState };
+    }
+    if (method === "update.download") {
+      if (updateState.phase !== "available") return { ...updateState, error: "没有待下载的更新" };
+      updateState.phase = "downloading";
+      updateBroadcast();
+      await autoUpdater.downloadUpdate();
+      return { ...updateState };
+    }
+    if (method === "update.install") {
+      if (updateState.phase !== "downloaded") return { ...updateState, error: "更新还没下载完" };
+      quitting = true;
+      autoUpdater.quitAndInstall(false, true);
+      return { ...updateState };
+    }
+  } catch (err) {
+    Object.assign(updateState, transition(updateState, { type: "error", message: err instanceof Error ? err.message : String(err) }));
+    return { ...updateState };
+  }
+  return { ...updateState };
 }
 
 const preload = () => path.join(__dirname, "preload.js");
@@ -183,6 +285,7 @@ app.whenReady().then(async () => {
   createWindow();
   createTray();
   registerHotkey();
+  bindUpdater();
 
   // 唯一 RPC 通道
   ipcMain.handle("lynn:rpc", async (_event, method: string, params: unknown) => {
@@ -199,6 +302,9 @@ app.whenReady().then(async () => {
       if (method === "pet.focus") {
         focusMain();
         return { ok: true };
+      }
+      if (method.startsWith("update.")) {
+        return await handleUpdateRpc(method);
       }
       if (method === "plugins.probe") {
         return kernel.probePlugin((params as { id: string }).id);

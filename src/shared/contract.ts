@@ -222,6 +222,18 @@ export interface BoardData {
 
 // ---------- 会话快照 ----------
 
+/** 更新器状态（M1-23） */
+export interface UpdateStatusView {
+  supported: boolean;
+  reason?: string;
+  feedUrl?: string;
+  version: string;
+  latest?: string;
+  phase: "idle" | "available" | "downloading" | "downloaded" | "none";
+  percent?: number;
+  error?: string;
+}
+
 export interface SessionSnapshot {
   workspace: { project: string; subdir: string };
   /** 当前项目：项目级扩展只在 trusted 时加载（M1-13） */
@@ -308,6 +320,32 @@ export interface RpcContracts {
   "persona.rollback": {
     params: { id: string };
     result: { ok: boolean; text: string; hot: boolean };
+  };
+  /** 更新器（M1-23）：supported=false 时 reason 说明原因（开发环境/未配置源），不假装检查成功 */
+  "update.status": {
+    params: void;
+    result: {
+      supported: boolean;
+      reason?: string;
+      feedUrl?: string;
+      version: string;
+      latest?: string;
+      phase: "idle" | "available" | "downloading" | "downloaded" | "none";
+      percent?: number;
+      error?: string;
+    };
+  };
+  "update.check": {
+    params: void;
+    result: UpdateStatusView;
+  };
+  "update.download": {
+    params: void;
+    result: UpdateStatusView;
+  };
+  "update.install": {
+    params: void;
+    result: UpdateStatusView;
   };
   /** 停止当前这一轮（保留已产出文本） */
   "session.abort": {

@@ -106,6 +106,20 @@ export function SettingsModal({
   const [personaText, setPersonaText] = useState<string | null>(null);
   const [personaVersions, setPersonaVersions] = useState<{ id: string; savedAt: string; chars: number }[]>([]);
   const [personaMsg, setPersonaMsg] = useState("");
+  // 更新器（M1-23）：进数据页时拉一次状态
+  const [updateInfo, setUpdateInfo] = useState<{
+    supported?: boolean;
+    reason?: string;
+    version?: string;
+    latest?: string;
+    phase: "idle" | "available" | "downloading" | "downloaded" | "none";
+    percent?: number;
+    error?: string;
+  } | null>(null);
+
+  useEffect(() => {
+    if (tab === "data") void window.lynn.rpc("update.status").then(setUpdateInfo);
+  }, [tab]);
 
   const refreshPersona = async () => {
     try {
@@ -664,9 +678,50 @@ export function SettingsModal({
     }
 
     if (tab === "data") {
+      const upd = updateInfo;
+      const updMsg = upd?.error ? `更新出错：${upd.error}` : upd?.reason ?? "";
       return (
         <div className="sf-pane">
           <h3>数据与日志</h3>
+          <div className="sf-row">
+            <div className="sf-row-main">
+              <b>
+                当前版本 <span className="mono">{upd?.version ?? "…"}</span>
+                {upd?.latest && upd.latest !== upd.version && (
+                  <small> · 可更新到 <span className="mono">{upd.latest}</span></small>
+                )}
+                {upd?.phase === "downloading" && <small> · 下载中 {Math.round(upd.percent ?? 0)}%</small>}
+                {upd?.phase === "downloaded" && <small> · 已下载就绪，重启即装</small>}
+              </b>
+              {updMsg && <small>{updMsg}</small>}
+              {!updMsg && upd?.supported === false && upd.phase === "idle" && (
+                <small>{upd.reason ?? ""}</small>
+              )}
+            </div>
+            <div className="sf-inline">
+              <button
+                type="button"
+                className="sf-btn"
+                onClick={() =>
+                  void window.lynn.rpc("update.check").then((r) => {
+                    setUpdateInfo(r);
+                    if (r.phase === "available") void window.lynn.rpc("update.download").then(setUpdateInfo);
+                  })
+                }
+              >
+                检查更新
+              </button>
+              {upd?.phase === "downloaded" && (
+                <button
+                  type="button"
+                  className="sf-btn primary"
+                  onClick={() => void window.lynn.rpc("update.install").then(() => undefined)}
+                >
+                  重启安装
+                </button>
+              )}
+            </div>
+          </div>
           <div className="sf-actions">
             <button type="button" className="sf-btn" onClick={() => void window.lynn.rpc("app.openData", { kind: "data" })}>
               打开数据目录
