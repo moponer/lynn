@@ -1272,7 +1272,7 @@ export class Kernel {
           apiKey,
           model: cfg.model,
           messages,
-          tools: [...TOOL_JSON, ...this.l1.toolSchemas()],
+          tools: [...TOOL_JSON, ...this.l1.toolSchemas(), ...this.mcp.schemas()],
           onDelta: (t) => {
             roundText += t;
             patchLive(roundText, true);

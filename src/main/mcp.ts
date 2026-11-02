@@ -14,6 +14,8 @@ export interface McpServerConfig {
   enabled?: boolean;
   /** 单次请求超时（默认 15s） */
   timeoutMs?: number;
+  /** 懒加载（M1-22）：冷启动不连，模型首次命中意图（调 mcp_connect_server）才拉起 */
+  lazy?: boolean;
 }
 
 export interface McpToolDef {
@@ -53,6 +55,7 @@ export function loadMcpConfigAt(file: string): { servers: McpServerConfig[]; err
         env: s.env && typeof s.env === "object" ? s.env : {},
         enabled: s.enabled !== false,
         timeoutMs: typeof s.timeoutMs === "number" ? s.timeoutMs : DEFAULT_TIMEOUT,
+        lazy: s.lazy === true,
       });
     }
     return { servers };
@@ -214,15 +217,24 @@ export class McpClient {
   }
 }
 
+/** 意图元工具（M1-22 lazy-mcp）：模型首次想用某个懒加载 server 的能力时先调它 */
+export const MCP_CONNECT_TOOL = "mcp_connect_server";
+
 /** 多 server 的注册表：启动、列 schema、按全名分派、收尾 */
 export class McpRegistry {
   private clients = new Map<string, McpClient>();
   private names = new Map<string, { client: McpClient; tool: string }>();
   private errors: { id: string; message: string }[] = [];
+  /** 懒加载 server：冷启动不连，命中意图才拉起 */
+  private lazyCfgs = new Map<string, McpServerConfig>();
 
   async startAll(servers: McpServerConfig[]): Promise<void> {
     for (const cfg of servers) {
       if (cfg.enabled === false) continue;
+      if (cfg.lazy === true) {
+        this.lazyCfgs.set(cfg.id, cfg);
+        continue;
+      }
       const client = new McpClient(cfg);
       try {
         const tools = await client.start();
@@ -235,6 +247,24 @@ export class McpRegistry {
         await client.stop().catch(() => undefined);
       }
     }
+  }
+
+  private connectSchema(): ToolSchema {
+    const ids = [...this.lazyCfgs.keys()].sort();
+    return {
+      type: "function",
+      function: {
+        name: MCP_CONNECT_TOOL,
+        description: `连接一个按需加载的扩展 server（当前待命：${ids.length ? ids.join("、") : "无"}）。成功后它的工具会出现在你的工具面，下一轮即可直接调用；连接一次即可，不用重复调。`,
+        parameters: {
+          type: "object",
+          required: ["server"],
+          properties: {
+            server: { type: "string", enum: ids, description: "要连接的 server id" },
+          },
+        },
+      },
+    };
   }
 
   schemas(): ToolSchema[] {
@@ -250,21 +280,53 @@ export class McpRegistry {
         },
       });
     }
+    if (this.lazyCfgs.size > 0) out.push(this.connectSchema());
     return out;
   }
 
   has(full: string): boolean {
-    return this.names.has(full);
+    return this.names.has(full) || full === MCP_CONNECT_TOOL;
+  }
+
+  /** 连接懒加载 server：真拉起子进程，工具注册进工具面；失败如实抛错（保持待命可重试） */
+  private async connectLazy(serverId: string): Promise<string> {
+    const cfg = this.lazyCfgs.get(serverId);
+    if (!cfg) {
+      const ids = [...this.lazyCfgs.keys()].sort().join("、") || "无";
+      throw new Error(`没有这个按需加载的 server：${serverId}（待命清单：${ids}）`);
+    }
+    const client = new McpClient(cfg);
+    try {
+      const tools = await client.start();
+      this.clients.set(cfg.id, client);
+      const fulls: string[] = [];
+      for (const t of tools) {
+        const full = mcpToolName(cfg.id, t.name);
+        this.names.set(full, { client, tool: t.name });
+        fulls.push(full);
+      }
+      this.lazyCfgs.delete(cfg.id);
+      return `已连接 ${cfg.id}，接入 ${fulls.length} 个工具：${fulls.join("、") || "（无工具）"}。工具面已更新，下一轮即可直接调用，无需再次连接。`;
+    } catch (err) {
+      await client.stop().catch(() => undefined);
+      throw new Error(`连接 ${cfg.id} 失败：${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   async execute(full: string, args: Record<string, unknown>): Promise<string> {
+    if (full === MCP_CONNECT_TOOL) {
+      return this.connectLazy(String(args?.server ?? ""));
+    }
     const entry = this.names.get(full);
     if (!entry) throw new Error(`没有这个 MCP 工具：${full}`);
     return entry.client.call(entry.tool, args);
   }
 
   fingerprint(): string {
-    return [...this.names.keys()].sort().join(",");
+    const keys = [...this.names.keys()];
+    // lazy 待命的也计入：连上后清单变化 → 指纹变化 → worker 工具面随之刷新
+    for (const id of this.lazyCfgs.keys()) keys.push(`lazy:${id}`);
+    return keys.sort().join(",");
   }
 
   lastErrors(): { id: string; message: string }[] {
@@ -275,9 +337,14 @@ export class McpRegistry {
     return this.names.size;
   }
 
+  lazyIds(): string[] {
+    return [...this.lazyCfgs.keys()].sort();
+  }
+
   async stopAll(): Promise<void> {
     for (const client of this.clients.values()) await client.stop().catch(() => undefined);
     this.clients.clear();
     this.names.clear();
+    this.lazyCfgs.clear();
   }
 }
