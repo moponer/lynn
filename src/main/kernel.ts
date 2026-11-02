@@ -24,6 +24,7 @@ import { CheckpointStore } from "./checkpoints";
 import { TrustStore } from "./trust";
 import { ThreadStore } from "./threads";
 import { buildTurnAttachments, searchProjectFiles, type TurnAttachments } from "./attachments";
+import { PersonaStore, composeSystemPrompt } from "./persona";
 import { TeamStore } from "./team-store";
 import { TaskStore } from "./task-store";
 import { TaskCase } from "./task-case";
@@ -43,24 +44,8 @@ import { AgentHost, type RpcToolSpec } from "./agent-host";
  * 渲染层契约（contract.ts）不感知以上差别。
  */
 
-const SYSTEM_PROMPT = `你是风铃（Lynn），一位常驻用户桌面的 AI 个人助理。
-
-你的身份与做法：
-- 你是**指挥者，不是执行者**。你不亲自改文件、抓网页、做表格；你通过「成员（书面岗位）」执行：招募 → 派简报 → 跟进 → 审查（打回要写清改什么、期望什么、时限）→ 向用户汇报。
-- 完成标准先行：接到委托先写清"要做什么、什么算完成"，再决定是自己回答还是组队。闲聊/简单问答直接答，不要为小事组队。
-- 你只拥有管理型工具；执行类工具都发给成员，且每次分配的工具集只能比岗位白名单更窄。
-- 汇报 = 结论 + 证据 + 未完成项 + 需要用户拍板的事。不贴原始日志。
-- 验收不轻信自述：成员回报必须附证据（文件路径/命令输出/测试结果），否则判未完成。
-- 打回最多 3 轮，之后工具会强制你升级问用户——不要绕。
-- assign_task 会真开工：成员在后台用分配到的工具执行简报，回报后自动进入待审查，你会看到「回报」卡。派单时把工作区里的材料位置写进简报（成员只能访问任务工作区 tasks/<taskId>/workspace/），然后直接向用户说明「已派给谁、截止什么时候」，不要自己模拟成员干活。
-- 成员的简报要给全上下文：成员看不到你们的会话，只看得到简报包（§4.10.1 上下文隔离）。
-
-语气准则：
-- 称呼用户为「你」；提到自己用「我」或「风铃」。
-- 不喊大词（颠覆/赋能/重塑）；用具体动作代替形容词。
-- 简洁。汇报用短段落；不确定就问，不编造。
-
-当前你的能力是本机团队管理（招募/派单/审查/汇报）。办公文档、浏览器、消息平台等重能力尚未接入——用户提到时，如实告知还没装，不要假装执行。`;
+/** system prompt 组装（M1-17）：固定头 + persona（可编辑）+ 安全尾段强制后置 */
+// 原 SYSTEM_PROMPT 已拆入 persona.ts 的 PROMPT_HEAD / PROMPT_TAIL / DEFAULT_PERSONA
 
 // ---------- 我方工具定义（与 RPC worker / 直连共用一份语义） ----------
 
@@ -298,6 +283,8 @@ export class Kernel {
   /** 多会话线程（M1-14）：列表/状态持久化 + 当前线程 id */
   private threads!: ThreadStore;
   private currentThreadId!: string;
+  /** persona.md（M1-17）：语气人设可编辑 + 版本化 */
+  private persona!: PersonaStore;
   /** 下一次起 worker 时开新会话（session.new 置位；起过一次即清） */
   private createFreshSession = false;
   /** 用户点了停止：本轮结束时不追加"已完成"类文案 */
@@ -334,6 +321,7 @@ export class Kernel {
     this.loadSession();
     // M1-14：线程状态优先于旧的 timeline/温层重建结果
     this.threads = new ThreadStore(dataRoot);
+    this.persona = new PersonaStore(dataRoot);
     const list = this.threads.list();
     const current = list[0] ?? this.threads.create("新会话");
     this.currentThreadId = current.id;
@@ -452,6 +440,25 @@ export class Kernel {
   // ---------- 线程落盘（M1-14） ----------
 
   private threadSaveTimer: NodeJS.Timeout | null = null;
+
+  /** system prompt（M1-17）：固定头 + persona + 安全尾段；每轮现取，persona 保存后即生效 */
+  private systemPrompt(): string {
+    return composeSystemPrompt(this.persona.load());
+  }
+
+  /** persona 变更后热同步到 Pi worker；失败如实落卡（下一轮 prompt 前仍会用启动时的旧词） */
+  private hotSyncSystemPrompt(): boolean {
+    if (!this.host?.isRunning()) return false;
+    void this.host
+      .updateSystemPrompt(this.systemPrompt())
+      .catch((err) => {
+        this.card({
+          kind: "system",
+          text: `persona 已保存，但当前会话热更新失败：${err instanceof Error ? err.message : String(err)}。重启应用后生效。`,
+        });
+      });
+    return true;
+  }
 
   private persistThread(): void {
     if (!this.currentThreadId) return;
@@ -1070,7 +1077,7 @@ export class Kernel {
       entryPath: this.rpcEntryPath,
       model: { baseUrl: cfg.baseUrl, apiKey, model: cfg.model, provider: cfg.provider },
       tools,
-      systemPrompt: SYSTEM_PROMPT,
+      systemPrompt: this.systemPrompt(),
       onToolCall: async (name, args) => {
         try {
           // 三类来源同一道门禁（§4.7）：先过权限，再执行
@@ -1250,7 +1257,7 @@ export class Kernel {
         this.emit({ type: "delta", text });
       }
     };
-    const messages: ChatMessage[] = [{ role: "system", content: SYSTEM_PROMPT }, ...this.history];
+    const messages: ChatMessage[] = [{ role: "system", content: this.systemPrompt() }, ...this.history];
     try {
       for (let round = 0; round < 8; round++) {
         let roundText = "";
@@ -1730,6 +1737,30 @@ export class Kernel {
       case "files.search": {
         const { q = "", limit = 20 } = params as { q?: string; limit?: number };
         return { files: searchProjectFiles(this.projectRoot, q, limit) } as RpcContracts[M]["result"];
+      }
+
+      case "persona.get": {
+        return { text: this.persona.load() } as RpcContracts[M]["result"];
+      }
+
+      case "persona.save": {
+        const { text } = params as { text: string };
+        const versionId = this.persona.save(text);
+        // 立即生效：直连路径每轮现取；Pi worker 热更新（handle 是同步的，fire-and-forget，失败落卡）
+        const hot = this.hotSyncSystemPrompt();
+        this.log("persona_save", { chars: text.length, versionId, hot });
+        return { ok: true, versionId, hot } as RpcContracts[M]["result"];
+      }
+
+      case "persona.versions": {
+        return { versions: this.persona.versions() } as RpcContracts[M]["result"];
+      }
+
+      case "persona.rollback": {
+        const { id } = params as { id: string };
+        const text = this.persona.rollback(id);
+        const hot = this.hotSyncSystemPrompt();
+        return { ok: true, text, hot } as RpcContracts[M]["result"];
       }
 
       case "session.abort": {

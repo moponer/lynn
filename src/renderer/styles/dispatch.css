@@ -1664,3 +1664,17 @@ button.ev:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 .mention-item.on { background: var(--surface-2, rgba(128, 128, 128, 0.14)); }
 .mention-item .p { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mention-item .s { opacity: 0.5; flex-shrink: 0; font-variant-numeric: tabular-nums; }
+
+/* ---- M1-17 persona 编辑器 ---- */
+.sf-persona {
+  width: 100%;
+  min-height: 240px;
+  resize: vertical;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--surface-1, transparent);
+  color: inherit;
+  font-size: var(--fs-meta);
+  line-height: 1.6;
+  font-family: inherit;
+}

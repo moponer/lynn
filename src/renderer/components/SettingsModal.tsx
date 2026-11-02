@@ -26,11 +26,12 @@ const PRESETS = [
   { name: "MiniMax", baseUrl: "https://api.minimax.chat/v1", model: "MiniMax-M2" },
 ];
 
-type Tab = "overview" | "model" | "plugins" | "safety" | "look" | "data";
+type Tab = "overview" | "model" | "persona" | "plugins" | "safety" | "look" | "data";
 
 const NAV: { k: Tab; label: string; icon: IconName }[] = [
   { k: "overview", label: "概览", icon: "home" },
   { k: "model", label: "模型", icon: "cpu" },
+  { k: "persona", label: "人设与语气", icon: "user" },
   { k: "plugins", label: "能力与插件", icon: "layers" },
   { k: "safety", label: "权限与安全", icon: "shield" },
   { k: "look", label: "外观", icon: "pen" },
@@ -92,6 +93,29 @@ export function SettingsModal({
   const [preview, setPreview] = useState<{ pack: LynnPack; lines: string[] } | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const { all: uiPlugins, disabled: uiDisabled, errors: uiErrors, toggle: toggleUi } = useUiPlugins();
+
+  // persona.md（M1-17）：编辑 + 版本化回滚
+  const [personaText, setPersonaText] = useState<string | null>(null);
+  const [personaVersions, setPersonaVersions] = useState<{ id: string; savedAt: string; chars: number }[]>([]);
+  const [personaMsg, setPersonaMsg] = useState("");
+
+  const refreshPersona = async () => {
+    try {
+      const [g, v] = await Promise.all([
+        window.lynn.rpc("persona.get"),
+        window.lynn.rpc("persona.versions"),
+      ]);
+      setPersonaText(g.text);
+      setPersonaVersions(v.versions);
+    } catch {
+      setPersonaMsg("读不到 persona（内核未连接？）");
+    }
+  };
+
+  useEffect(() => {
+    if (tab === "persona" && personaText === null) void refreshPersona();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab]);
 
   const [plugins, setPlugins] = useState<
     { id: string; name: string; version: string; tier: string; enabled: boolean; loadable: boolean }[]
@@ -294,6 +318,82 @@ export function SettingsModal({
               {busy === "clear" ? "清除中…" : "清除 Key"}
             </button>
           </div>
+        </div>
+      );
+    }
+
+    if (tab === "persona") {
+      return (
+        <div className="sf-pane">
+          <h3>人设与语气</h3>
+          <div className="sf-hint">
+            编辑风铃的表达方式（persona.md）。保存立即生效，不用重开会话；每次保存自动留版本，可回滚。安全边界与工具规则不在此文件，改不动。
+          </div>
+          {personaText === null ? (
+            <p className="sf-empty">{personaMsg || "加载中…"}</p>
+          ) : (
+            <>
+              <textarea
+                className="sf-persona"
+                rows={14}
+                value={personaText}
+                onChange={(e) => setPersonaText(e.target.value)}
+                spellCheck={false}
+              />
+              <div className="sf-actions">
+                <button
+                  type="button"
+                  className="sf-btn primary"
+                  onClick={() => {
+                    void window.lynn.rpc("persona.save", { text: personaText }).then((r) => {
+                      setPersonaMsg(r.hot ? "已保存并热更新到当前会话。" : "已保存（下轮对话生效）。");
+                      void window.lynn.rpc("persona.versions").then((v) => setPersonaVersions(v.versions));
+                    });
+                  }}
+                >
+                  保存并生效
+                </button>
+                <button
+                  type="button"
+                  className="sf-btn"
+                  onClick={() => {
+                    void refreshPersona();
+                    setPersonaMsg("");
+                  }}
+                >
+                  放弃改动
+                </button>
+              </div>
+              {personaMsg && <div className="sf-hint">{personaMsg}</div>}
+              {personaVersions.length > 0 && (
+                <>
+                  <span className="sf-label">版本（最近 20 份）</span>
+                  <div className="sf-list">
+                    {personaVersions.map((v) => (
+                      <div className="sf-row" key={v.id}>
+                        <div className="sf-row-main">
+                          <span className="mono">{new Date(v.savedAt).toLocaleString()}</span>
+                          <span className="sf-row-sub">{v.chars} 字符</span>
+                        </div>
+                        <button
+                          type="button"
+                          className="sf-btn"
+                          onClick={() => {
+                            void window.lynn.rpc("persona.rollback", { id: v.id }).then((r) => {
+                              setPersonaText(r.text);
+                              setPersonaMsg(r.hot ? "已回滚并热更新到当前会话。" : "已回滚（下轮对话生效）。");
+                            });
+                          }}
+                        >
+                          回滚到此版
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
+            </>
+          )}
         </div>
       );
     }

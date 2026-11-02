@@ -292,6 +292,23 @@ export interface RpcContracts {
     params: { q: string; limit?: number };
     result: { files: { path: string; size: number }[] };
   };
+  /** persona.md 语气人设（M1-17） */
+  "persona.get": {
+    params: void;
+    result: { text: string };
+  };
+  "persona.save": {
+    params: { text: string };
+    result: { ok: boolean; versionId: string; /** 是否已热同步到运行中的 Pi worker（false = 无 worker 或直连，自然生效） */ hot: boolean };
+  };
+  "persona.versions": {
+    params: void;
+    result: { versions: { id: string; savedAt: string; chars: number }[] };
+  };
+  "persona.rollback": {
+    params: { id: string };
+    result: { ok: boolean; text: string; hot: boolean };
+  };
   /** 停止当前这一轮（保留已产出文本） */
   "session.abort": {
     params: void;

@@ -174,6 +174,12 @@ export class AgentHost {
   private readyResolver?: () => void;
   private readyRejecter?: (err: Error) => void;
 
+  /** persona 热更新（M1-17）：worker 侧下一轮 prompt 起用新 system prompt */
+  async updateSystemPrompt(text: string): Promise<void> {
+    if (!this.isRunning()) throw new Error("RPC worker 未运行");
+    await this.request("set_system_prompt", { systemPrompt: text });
+  }
+
   async stop(): Promise<void> {
     this.disarmWatchdog();
     const child = this.child;

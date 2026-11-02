@@ -47,6 +47,8 @@ const pendingTool = new Map(); // toolId → resolve
 let session = null;
 let busy = false;
 let toolSpecs = [];
+/** persona 热更新（M1-17）：每次构建 system prompt 时都会调，改完下一轮即生效 */
+let currentSystemPrompt = null;
 
 /**
  * JSON Schema → TypeBox。**必须无损**：required / enum / anyOf / 数组元素都要带过去，
@@ -150,6 +152,7 @@ async function init(message) {
     ...(typeof message.systemPrompt === "string" && message.systemPrompt.trim()
       ? { systemPrompt: message.systemPrompt }
       : {}),
+    systemPromptOverride: (base) => (currentSystemPrompt && currentSystemPrompt.trim() ? currentSystemPrompt : base),
   });
   await resourceLoader.reload();
 
@@ -286,6 +289,9 @@ async function handle(message) {
       return handleAbort();
     case "clear_queue":
       return handleClearQueue();
+    case "set_system_prompt":
+      currentSystemPrompt = typeof message.systemPrompt === "string" ? message.systemPrompt : null;
+      return { ok: true };
     case "get_stats":
       return handleStats();
     case "get_state":
