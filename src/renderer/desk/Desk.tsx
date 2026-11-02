@@ -213,10 +213,6 @@ function Ledger({
           </div>
         )}
 
-        <div className="note" style={{ margin: "2px 8px 0", background: "rgba(146,174,194,.05)", boxShadow: "none" }}>
-          <Icon name="lock" size="sm" />
-          全部落在 <span className="mono" style={{ color: "var(--ink-2)" }}>~/.lynn/</span> · 无遥测
-        </div>
       </div>
     </aside>
   );
@@ -855,7 +851,6 @@ function SealGlyph({ big }: { big?: boolean }) {
 // ============================ COMPOSER ============================
 
 function ComposerZone({
-  permission,
   configured,
   turn,
   queue,
@@ -865,7 +860,6 @@ function ComposerZone({
   onAbort,
   onQueue,
 }: {
-  permission: PermissionMode;
   configured: boolean;
   turn: Desk["turn"];
   queue: QueueItem[];
@@ -974,8 +968,6 @@ function ComposerZone({
 
       <div className="composer-hint">
         <span className="mono">Enter 发送 · Shift+Enter 换行</span>
-        <span className="sep">·</span>
-        <span className="mono">权限 {PERMISSIONS.find((p) => p.mode === permission)?.label ?? "询问"}</span>
         {busy && (
           <>
             <span className="sep">·</span>
@@ -1403,7 +1395,6 @@ export function DeskView({
             <Sheet job={current} feed={desk.feed} onFeedAction={onFeedAction} onExample={(t) => onSend(t, "queue")} />
           </div>
           <ComposerZone
-            permission={permission}
             configured={configured}
             turn={desk.turn}
             queue={desk.queue}

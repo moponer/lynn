@@ -18,7 +18,8 @@
     "dist": "npm run build && electron-builder --win --config electron-builder.yml",
     "perf:standby": "electron scripts/perf-run.cjs 60",
     "lint:design": "node scripts/check-design.mjs",
-    "live-check": "npm run build:main && electron scripts/live-check.cjs"
+    "live-check": "npm run build:main && electron scripts/live-check.cjs",
+    "copy:size": "node scripts/copy-size.mjs"
   },
   "dependencies": {
     "@earendil-works/pi-agent-core": "^1.4.0",

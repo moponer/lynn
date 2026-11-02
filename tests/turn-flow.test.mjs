@@ -84,6 +84,25 @@ test("询问档位：写类挂起成审批，批准后放行，拒绝后给可�
   assert.match(await pending2, /拒绝了这次/);
 });
 
+test("工具执行唯一入口：两条路径共用（计划档拒绝 / 自动档放行）", async () => {
+  const { kernel } = setup();
+  kernel.handle("permission.set", { mode: "plan" });
+  const denied = await kernel.executeToolCall("assign_task", { teamId: "t1", taskTitle: "x", member: "林工", brief: "b" });
+  assert.match(denied, /权限档位=计划/);
+
+  kernel.handle("permission.set", { mode: "auto" });
+  const started = await kernel.executeToolCall("assign_task", {
+    teamId: "t1",
+    taskTitle: "整理周报",
+    member: "林工",
+    brief: "读 csv 出第 3 节",
+  });
+  assert.equal(typeof started, "string");
+  assert.ok(!started.includes("工具执行失败"), started);
+  // 契约确认制：调用后只是"呈给用户"，不是立即开工
+  assert.ok(kernel.handle("session.snapshot").board.decisions.some((d) => d.kind === "plan"));
+});
+
 test("问答回路：回答写入下一回合的输入（不吞内容）", async () => {
   const { kernel } = setup();
   const asked = kernel.runTool("ask_user", {

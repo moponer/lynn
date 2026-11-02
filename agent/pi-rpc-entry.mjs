@@ -160,7 +160,16 @@ async function init(message) {
   let sessionManager;
   try {
     fs.mkdirSync(sessionDir, { recursive: true });
-    sessionManager = SessionManager.create(cwd, sessionDir);
+    // LYNN_RESUME=0（session.new）→ 开新档；否则续最近一次，重启应用上下文还在
+    if (process.env.LYNN_RESUME === "0") {
+      sessionManager = SessionManager.create(cwd, sessionDir);
+    } else {
+      try {
+        sessionManager = SessionManager.continueRecent(cwd, sessionDir);
+      } catch {
+        sessionManager = SessionManager.create(cwd, sessionDir);
+      }
+    }
   } catch (err) {
     write({ type: "error", message: `会话文件不可用，本次退化为内存会话：${err instanceof Error ? err.message : String(err)}` });
     sessionManager = SessionManager.inMemory();

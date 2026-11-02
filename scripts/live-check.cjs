@@ -43,6 +43,8 @@ app.whenReady().then(async () => {
     if (ev.type === "done") {
       clearTimeout(timer);
       const answer = snapshot().feed.filter((c) => c.kind === "lynn").at(-1)?.text ?? text;
+      const meta = kernel.handle("session.snapshot").usage;
+      console.log("LIVE-CHECK-SESSION:", JSON.stringify(meta));
       if (!answer.trim()) finish(5, "EMPTY_REPLY");
       else finish(0, "OK");
     }

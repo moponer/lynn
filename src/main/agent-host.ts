@@ -51,6 +51,8 @@ export interface AgentHostOptions {
   watchdogMs?: number;
   /** 运行时标记目录：写 worker pid，退出时删；下次启动据此清理孤儿 */
   markerDir?: string;
+  /** 续上一次会话（默认 true）；session.new 时传 false 开新档 */
+  resume?: boolean;
 }
 
 interface PendingRequest {
@@ -104,6 +106,7 @@ export class AgentHost {
         ELECTRON_RUN_AS_NODE: "1",
         PI_TELEMETRY: "0",
         PI_SKIP_VERSION_CHECK: "1",
+        LYNN_RESUME: this.options.resume === false ? "0" : "1",
         LYNN_MODEL_BASE_URL: this.options.model.baseUrl,
         LYNN_MODEL_API_KEY: this.options.model.apiKey,
         LYNN_MODEL: this.options.model.model,

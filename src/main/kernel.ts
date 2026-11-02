@@ -277,6 +277,8 @@ export class Kernel {
   private pendingPlans = new Map<string, PendingPlan>();
   /** 等你批准的工具调用（decisionId → 决议器） */
   private pendingApprovals = new Map<string, { resolve: (ok: boolean) => void }>();
+  /** 下一次起 worker 时开新会话（session.new 置位；起过一次即清） */
+  private createFreshSession = false;
   /** 用户点了停止：本轮结束时不追加"已完成"类文案 */
   private abortRequested = false;
 
@@ -897,6 +899,7 @@ export class Kernel {
         }
       },
       markerDir: path.join(this.dataRoot, "runtime", "workers"),
+      resume: !this.createFreshSession,
       onEvent: (ev) => this.onAgentEvent(ev),
       onError: (message) => {
         // 运行时错误必须进对话流：只发事件的话界面会一片空白（用户只看到自己那半句）
@@ -905,6 +908,7 @@ export class Kernel {
       },
     });
     await host.start();
+    this.createFreshSession = false;
     this.host = host;
     this.hostStamp = stamp;
     return host;
@@ -1688,6 +1692,7 @@ export class Kernel {
         this.feed = [];
         this.history = [];
         this.tokensUsed = 0;
+        this.createFreshSession = true;
         void this.resetAgentHost();
         try {
           fs.rmSync(this.timelineFile, { force: true });
