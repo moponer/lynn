@@ -147,7 +147,9 @@ export type ToolCardBadge =
   /** 纵深防御拦下了一条命令 */
   | "已拦截"
   /** 出站命令（已审计） */
-  | "出站";
+  | "出站"
+  /** 日程到点提醒（M2-01） */
+  | "提醒";
 
 export interface FeedCard {
   id: string;
@@ -386,6 +388,31 @@ export interface RpcContracts {
   "providers.discover": {
     params: { baseUrl: string; apiKey?: string };
     result: { models: string[]; error?: string };
+  };
+  /** 本地日历（M2-01）：自然语言录入；解析不了如实报，不猜 */
+  "calendar.add": {
+    params: { text: string; remindLead?: number };
+    result: { ok: boolean; event?: { id: number; title: string; at: string }; matched?: string; defaultedTime?: boolean; error?: string };
+  };
+  "calendar.list": {
+    params: { includePast?: boolean };
+    result: { events: { id: number; title: string; at: string; status: string }[]; backend: "sqlite" | "json" };
+  };
+  "calendar.finish": {
+    params: { id: number; status?: "done" | "canceled" };
+    result: { ok: boolean };
+  };
+  "calendar.todo.add": {
+    params: { text: string };
+    result: { ok: boolean; id: number };
+  };
+  "calendar.todo.list": {
+    params: void;
+    result: { todos: { id: number; text: string; due?: string }[] };
+  };
+  "calendar.todo.finish": {
+    params: { id: number };
+    result: { ok: boolean };
   };
   /** 停止当前这一轮（保留已产出文本） */
   "session.abort": {

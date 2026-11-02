@@ -27,6 +27,7 @@ import { buildTurnAttachments, searchProjectFiles, type TurnAttachments } from "
 import { PersonaStore, composeSystemPrompt } from "./persona";
 import { MemoryStore, type MemoryKind } from "./memory";
 import { PRESETS, loadProviders, saveProviders, type ProviderEntry } from "./providers";
+import { CalendarStore, dueReminders, parseNaturalDate } from "./calendar";
 import { TeamStore } from "./team-store";
 import { TaskStore } from "./task-store";
 import { TaskCase } from "./task-case";
@@ -301,6 +302,9 @@ export class Kernel {
   private persona!: PersonaStore;
   /** 会话记忆两层（M2-05）：USER.md 永远保留；MEMORY.md 可 diff/回滚 */
   private memory!: MemoryStore;
+  /** 本地日历（M2-01）：node:sqlite，降级 JSON 时 backend 如实标注 */
+  private calendar!: CalendarStore;
+  private reminderTimer: NodeJS.Timeout | null = null;
   /** 下一次起 worker 时开新会话（session.new 置位；起过一次即清） */
   private createFreshSession = false;
   /** 用户点了停止：本轮结束时不追加"已完成"类文案 */
@@ -339,6 +343,7 @@ export class Kernel {
     this.threads = new ThreadStore(dataRoot);
     this.persona = new PersonaStore(dataRoot);
     this.memory = new MemoryStore(dataRoot);
+    this.calendar = new CalendarStore(dataRoot);
     const list = this.threads.list();
     const current = list[0] ?? this.threads.create("新会话");
     this.currentThreadId = current.id;
@@ -473,6 +478,25 @@ export class Kernel {
     if (kind !== "user" && kind !== "memory") throw new Error(`未知记忆层：${kind}（user | memory）`);
   }
 
+  /** 到期提醒 → 事件卡（M2-01）；系统通知在 M2-03 接入 */
+  private scanReminders(): void {
+    try {
+      const due = dueReminders(this.calendar.listEvents({ includePast: false }));
+      for (const e of due) {
+        this.calendar.markNotified(e.id);
+        this.card({
+          kind: "system",
+          badge: "提醒",
+          title: e.title,
+          meta: `日程 · ${new Date(e.at).toLocaleString("zh-CN")}`,
+        });
+        this.log("reminder_fired", { id: e.id, title: e.title });
+      }
+    } catch (err) {
+      this.log("reminder_scan_error", { error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+
   /** persona/记忆变更后热同步到 Pi worker；失败如实落卡（下一轮 prompt 前仍会用启动时的旧词） */
   private hotSyncSystemPrompt(): boolean {
     if (!this.host?.isRunning()) return false;
@@ -564,6 +588,10 @@ export class Kernel {
       const reaped = reapOrphanWorkers(path.join(this.dataRoot, "runtime", "workers"), { entry });
       if (reaped.length) this.log("orphans_reaped", { pids: reaped });
     }
+    // 本地日历提醒扫描（M2-01）：分钟级；M2-02 cron 落地后并入统一调度
+    this.reminderTimer = setInterval(() => this.scanReminders(), 60_000);
+    this.reminderTimer.unref?.();
+
     // L1 插件启动加载（§4.2.1）：单个失败不影响其余，诊断留在 l1.lastErrors
     await this.l1.loadAll();
     for (const e of this.l1.lastErrors) console.warn("[kernel] L1 加载失败：", e);
@@ -1145,6 +1173,10 @@ export class Kernel {
     if (this.threadSaveTimer) {
       clearTimeout(this.threadSaveTimer);
       this.threadSaveTimer = null;
+    }
+    if (this.reminderTimer) {
+      clearInterval(this.reminderTimer);
+      this.reminderTimer = null;
     }
     this.persistThread();
     await this.resetAgentHost().catch(() => undefined);
@@ -1844,6 +1876,59 @@ export class Kernel {
       case "providers.save": {
         const { providers } = params as { providers: ProviderEntry[] };
         saveProviders(this.dataRoot, providers ?? []);
+        return { ok: true } as RpcContracts[M]["result"];
+      }
+
+      case "calendar.add": {
+        const { text, remindLead } = params as { text: string; remindLead?: number };
+        const parsed = parseNaturalDate(text);
+        if (!parsed) {
+          return {
+            ok: false,
+            error: `没识别出时间。支持的写法如：明天下午三点、下周三 14:00、3月5号上午九点、两小时后。`,
+          } as RpcContracts[M]["result"];
+        }
+        const title = parsed.rest || text.trim();
+        const ev = this.calendar.addEvent(title, parsed.at, Math.max(0, Number(remindLead ?? 0)));
+        return {
+          ok: true,
+          event: { id: ev.id, title: ev.title, at: ev.at },
+          matched: parsed.matched,
+          defaultedTime: parsed.defaultedTime,
+        } as RpcContracts[M]["result"];
+      }
+
+      case "calendar.list": {
+        const { includePast } = params as { includePast?: boolean };
+        const events = this.calendar.listEvents({ includePast }).map((e) => ({
+          id: e.id,
+          title: e.title,
+          at: e.at,
+          status: e.status,
+        }));
+        return { events, backend: this.calendar.backend } as RpcContracts[M]["result"];
+      }
+
+      case "calendar.finish": {
+        const { id, status } = params as { id: number; status?: "done" | "canceled" };
+        this.calendar.finishEvent(Number(id), status === "canceled" ? "canceled" : "done");
+        return { ok: true } as RpcContracts[M]["result"];
+      }
+
+      case "calendar.todo.add": {
+        const { text } = params as { text: string };
+        const t = this.calendar.addTodo(String(text).trim());
+        return { ok: true, id: t.id } as RpcContracts[M]["result"];
+      }
+
+      case "calendar.todo.list": {
+        const todos = this.calendar.listTodos().map((t) => ({ id: t.id, text: t.text, due: t.due }));
+        return { todos } as RpcContracts[M]["result"];
+      }
+
+      case "calendar.todo.finish": {
+        const { id } = params as { id: number };
+        this.calendar.finishTodo(Number(id));
         return { ok: true } as RpcContracts[M]["result"];
       }
 
