@@ -28,6 +28,7 @@ import { PersonaStore, composeSystemPrompt } from "./persona";
 import { MemoryStore, type MemoryKind } from "./memory";
 import { PRESETS, loadProviders, saveProviders, type ProviderEntry } from "./providers";
 import { CalendarStore, dueReminders, parseNaturalDate } from "./calendar";
+import { SchedulerStore, recover as recoverScheduler, type DueItem } from "./scheduler";
 import { TeamStore } from "./team-store";
 import { TaskStore } from "./task-store";
 import { TaskCase } from "./task-case";
@@ -305,6 +306,9 @@ export class Kernel {
   /** 本地日历（M2-01）：node:sqlite，降级 JSON 时 backend 如实标注 */
   private calendar!: CalendarStore;
   private reminderTimer: NodeJS.Timeout | null = null;
+  /** 定时任务（M2-02）：调度器在核心里；单飞 + 陈旧清理 + 休眠补跑 */
+  private scheduler!: SchedulerStore;
+  private scheduleTimer: NodeJS.Timeout | null = null;
   /** 下一次起 worker 时开新会话（session.new 置位；起过一次即清） */
   private createFreshSession = false;
   /** 用户点了停止：本轮结束时不追加"已完成"类文案 */
@@ -344,6 +348,7 @@ export class Kernel {
     this.persona = new PersonaStore(dataRoot);
     this.memory = new MemoryStore(dataRoot);
     this.calendar = new CalendarStore(dataRoot);
+    this.scheduler = new SchedulerStore(dataRoot);
     const list = this.threads.list();
     const current = list[0] ?? this.threads.create("新会话");
     this.currentThreadId = current.id;
@@ -478,6 +483,30 @@ export class Kernel {
     if (kind !== "user" && kind !== "memory") throw new Error(`未知记忆层：${kind}（user | memory）`);
   }
 
+  /** 定时任务 tick（M2-02）：单飞——一次至多派一个；错过 >10 分钟如实标 missed 补跑 */
+  private tickSchedules(): void {
+    const due = this.scheduler.due(new Date());
+    if (!due.length) return;
+    const first: DueItem = due[0];
+    if (!this.scheduler.acquire(first.task.id, new Date())) return;
+    const { task, missed } = first;
+    this.card({
+      kind: "system",
+      badge: "工具",
+      title: `定时任务触发 · ${task.name}`,
+      meta: `${missed ? "补跑（错过原定时刻）" : "准点"} · ${task.kind}`,
+      body: task.prompt,
+    });
+    // 交给风铃：作为一条消息进对话流，全程留痕
+    try {
+      this.submitTurn(`【定时任务·${task.name}${missed ? "·补跑" : ""}】${task.prompt}`);
+      this.scheduler.release(task.id, missed ? "missed" : "ok");
+    } catch (err) {
+      this.scheduler.release(task.id, "error");
+      this.card({ kind: "system", badge: "工具", title: `定时任务失败 · ${task.name}`, body: err instanceof Error ? err.message : String(err) });
+    }
+  }
+
   /** 到期提醒 → 事件卡（M2-01）；系统通知在 M2-03 接入 */
   private scanReminders(): void {
     try {
@@ -588,9 +617,15 @@ export class Kernel {
       const reaped = reapOrphanWorkers(path.join(this.dataRoot, "runtime", "workers"), { entry });
       if (reaped.length) this.log("orphans_reaped", { pids: reaped });
     }
-    // 本地日历提醒扫描（M2-01）：分钟级；M2-02 cron 落地后并入统一调度
+    // 本地日历提醒扫描（M2-01）：分钟级
     this.reminderTimer = setInterval(() => this.scanReminders(), 60_000);
     this.reminderTimer.unref?.();
+    // 定时任务（M2-02）：30s tick；启动恢复（陈旧在途清理）先行，错过的任务由首个 tick 补跑
+    const rec = this.scheduler.get();
+    const { released } = recoverScheduler(rec, new Date());
+    if (released.length) this.log("scheduler_recovered", { released });
+    this.scheduleTimer = setInterval(() => this.tickSchedules(), 30_000);
+    this.scheduleTimer.unref?.();
 
     // L1 插件启动加载（§4.2.1）：单个失败不影响其余，诊断留在 l1.lastErrors
     await this.l1.loadAll();
@@ -1177,6 +1212,10 @@ export class Kernel {
     if (this.reminderTimer) {
       clearInterval(this.reminderTimer);
       this.reminderTimer = null;
+    }
+    if (this.scheduleTimer) {
+      clearInterval(this.scheduleTimer);
+      this.scheduleTimer = null;
     }
     this.persistThread();
     await this.resetAgentHost().catch(() => undefined);
@@ -1930,6 +1969,49 @@ export class Kernel {
         const { id } = params as { id: number };
         this.calendar.finishTodo(Number(id));
         return { ok: true } as RpcContracts[M]["result"];
+      }
+
+      case "schedule.add": {
+        const p = params as { name: string; prompt: string; kind: "once" | "daily" | "interval"; at?: string; time?: string; intervalMin?: number };
+        try {
+          const task = this.scheduler.add({
+            name: String(p.name).trim() || "未命名任务",
+            prompt: String(p.prompt),
+            kind: p.kind,
+            at: p.at,
+            time: p.time,
+            intervalMin: p.intervalMin,
+          });
+          return { ok: true, task: { id: task.id, name: task.name, nextRun: task.nextRun } } as RpcContracts[M]["result"];
+        } catch (err) {
+          return { ok: false, error: err instanceof Error ? err.message : String(err) } as RpcContracts[M]["result"];
+        }
+      }
+
+      case "schedule.list": {
+        return {
+          tasks: this.scheduler.list().map((t) => ({
+            id: t.id,
+            name: t.name,
+            kind: t.kind,
+            enabled: t.enabled,
+            nextRun: t.nextRun,
+            lastRun: t.lastRun,
+            lastStatus: t.lastStatus,
+          })),
+        } as RpcContracts[M]["result"];
+      }
+
+      case "schedule.remove": {
+        const { id } = params as { id: string };
+        return { ok: this.scheduler.remove(String(id)) } as RpcContracts[M]["result"];
+      }
+
+      case "schedule.toggle": {
+        const { id } = params as { id: string };
+        const t = this.scheduler.toggle(String(id));
+        if (!t) return { ok: false, error: `没有这个定时任务：${id}` } as RpcContracts[M]["result"];
+        return { ok: true, enabled: t.enabled } as RpcContracts[M]["result"];
       }
 
       case "session.abort": {

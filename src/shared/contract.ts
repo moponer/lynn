@@ -414,6 +414,23 @@ export interface RpcContracts {
     params: { id: number };
     result: { ok: boolean };
   };
+  /** 定时任务（M2-02）：调度器在核心里；单飞/补跑/陈旧清理，lastStatus 如实 */
+  "schedule.add": {
+    params: { name: string; prompt: string; kind: "once" | "daily" | "interval"; at?: string; time?: string; intervalMin?: number };
+    result: { ok: boolean; task: { id: string; name: string; nextRun?: string } };
+  };
+  "schedule.list": {
+    params: void;
+    result: { tasks: { id: string; name: string; kind: string; enabled: boolean; nextRun?: string; lastRun?: string; lastStatus?: string }[] };
+  };
+  "schedule.remove": {
+    params: { id: string };
+    result: { ok: boolean };
+  };
+  "schedule.toggle": {
+    params: { id: string };
+    result: { ok: boolean; enabled?: boolean; error?: string };
+  };
   /** 停止当前这一轮（保留已产出文本） */
   "session.abort": {
     params: void;
