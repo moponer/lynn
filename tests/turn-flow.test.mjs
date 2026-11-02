@@ -121,3 +121,13 @@ test("问答回路：回答写入下一回合的输入（不吞内容）", async
   assert.match(reply.text, /报告用 Markdown 还是 docx/);
   assert.equal(kernel.handle("session.snapshot").board.decisions.length, 0);
 });
+
+test("命令审计落 audit.jsonl（拦截也留痕，能回查）", async () => {
+  const { root, kernel } = setup();
+  kernel.auditTool("t1", "WO-1", "林工", { kind: "cmd_blocked", command: "rm -rf /", why: "递归删除根目录", cwd: root });
+  const lines = fs.readFileSync(path.join(root, "audit.jsonl"), "utf-8").trim().split("\n");
+  const last = JSON.parse(lines.at(-1));
+  assert.equal(last.kind, "cmd_blocked");
+  assert.equal(last.taskId, "WO-1");
+  assert.match(last.command, /rm -rf/);
+});

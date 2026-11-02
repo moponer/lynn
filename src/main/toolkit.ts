@@ -21,6 +21,8 @@ export interface ToolkitOptions {
   commandTimeoutMs?: number;
   /** 单次命令输出上限（默认 8000 字符） */
   outputCap?: number;
+  /** 审计回调：命中/放行命令都留痕（M1-11，壳写 audit.jsonl） */
+  onAudit?: (ev: { kind: "cmd_blocked" | "cmd_net" | "cmd_run"; command: string; why?: string; cwd: string }) => void;
 }
 
 const READ_CAP = 200_000;
@@ -64,7 +66,11 @@ export function simpleDiff(before: string, after: string): { diff: string; added
   return { diff: out.length > DIFF_CAP ? out.slice(0, DIFF_CAP) + "…" : out, added: addedLines.length, removed: removedLines.length };
 }
 
-/** 危险命令规则（M1-11 会在这上面加审计；这里先做到"不执行明显自杀命令"） */
+/**
+ * 危险命令规则（M1-11 纵深防御，不是 OS 沙箱）：
+ * 只在明显破坏/提权/远程代码执行这些"没有正当理由"的写法上直接拒绝，
+ * 其余命令仍会执行——边界靠工作区钉扎 + 审计，而不是假装有沙箱。
+ */
 const DANGEROUS: { re: RegExp; why: string }[] = [
   { re: /\brm\s+(-[a-z]*[rf][a-z]*\s+)+(\/|~|\*)/i, why: "递归删除根目录/家目录" },
   { re: /\bdel\s+\/[fsq].*[\\/]?\*/i, why: "Windows 递归强删" },
@@ -73,8 +79,20 @@ const DANGEROUS: { re: RegExp; why: string }[] = [
   { re: /:\(\)\s*\{.*\};:/, why: "fork 炸弹" },
   { re: /\bshutdown\b|\breboot\b/i, why: "关机/重启" },
   { re: /curl[^|]*\|\s*(ba)?sh/i, why: "管道直执行远程脚本" },
+  { re: /(iwr|invoke-webrequest|curl)[^;|]*\|\s*iex/i, why: "下载后直接执行（PowerShell）" },
   { re: />\s*\/dev\/sd[a-z]/i, why: "直接写块设备" },
+  { re: /\b(bcdedit|cipher\s+\/w|vssadmin\s+delete)\b/i, why: "破坏启动/擦除卷影副本" },
+  { re: /\bnet\s+user\b.*\/add/i, why: "新建系统账户（提权）" },
+  { re: /\breg\s+add\s+HKLM/i, why: "改本机注册表（提权）" },
+  { re: /\btakeown\s+\/f\b|\bicacls\b.*\/grant\b/i, why: "改文件所有权/权限" },
+  { re: /\btaskkill\b.*\/f\s*\/im\s+(explorer|winlogon|csrss|lsass)/i, why: "强杀系统进程" },
+  { re: /\bpowershell[^|]*-(enc|encodedcommand)\b/i, why: "编码命令（隐藏意图）" },
+  { re: /\b(certutil\s+-urlcache|bitsadmin)\b/i, why: "借系统工具下载载荷" },
+  { re: /\bnc\s+.*-e\b|\bncat\s+.*-e\b/i, why: "反弹 shell" },
 ];
+
+/** 出站动作（只审计不拦）：真正的拦截要靠域名白名单，那是后续的事 */
+const OUTBOUND = /\b(curl|wget|ssh|scp|sftp|ftp|telnet|nc|ncat|Invoke-WebRequest|iwr|git\s+clone|npm\s+(i|install|publish))\b|https?:\/\//i;
 
 export class Toolkit {
   private queues = new Map<string, Promise<unknown>>();
@@ -82,12 +100,14 @@ export class Toolkit {
   private readonly root: string;
   private readonly commandTimeoutMs: number;
   private readonly outputCap: number;
+  private readonly onAudit?: ToolkitOptions["onAudit"];
 
   constructor(root: string, opts: ToolkitOptions = {}) {
     this.root = path.resolve(root);
     fs.mkdirSync(this.root, { recursive: true });
     this.commandTimeoutMs = opts.commandTimeoutMs ?? 120_000;
     this.outputCap = opts.outputCap ?? 8_000;
+    this.onAudit = opts.onAudit;
   }
 
   getRoot(): string {
@@ -271,8 +291,13 @@ export class Toolkit {
     const command = String(args.command ?? "").trim();
     if (!command) return Promise.resolve("命令为空。");
     for (const d of DANGEROUS) {
-      if (d.re.test(command)) return Promise.resolve(`已拒绝执行：${d.why}。这类命令不会自动执行。`);
+      if (d.re.test(command)) {
+        this.onAudit?.({ kind: "cmd_blocked", command, why: d.why, cwd: this.root });
+        return Promise.resolve(`已拒绝执行：${d.why}。这类命令不会自动执行（纵深防御规则，不是 OS 沙箱）。`);
+      }
     }
+    if (OUTBOUND.test(command)) this.onAudit?.({ kind: "cmd_net", command, cwd: this.root });
+    this.onAudit?.({ kind: "cmd_run", command, cwd: this.root });
     const cap = this.outputCap;
     return new Promise((resolve) => {
       exec(

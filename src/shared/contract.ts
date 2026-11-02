@@ -133,7 +133,18 @@ export interface TaskPlan {
   deadline?: string;
 }
 
-export type ToolCardBadge = "组队" | "派单" | "回报" | "审查" | "汇报" | "需要你拍板" | "工具";
+export type ToolCardBadge =
+  | "组队"
+  | "派单"
+  | "回报"
+  | "审查"
+  | "汇报"
+  | "需要你拍板"
+  | "工具"
+  /** 纵深防御拦下了一条命令 */
+  | "已拦截"
+  /** 出站命令（已审计） */
+  | "出站";
 
 export interface FeedCard {
   id: string;

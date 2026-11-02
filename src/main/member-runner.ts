@@ -34,6 +34,8 @@ export interface MemberRunInput {
   chatFn?: MemberChatFn;
   /** 进度回调（内核用来发工具卡） */
   onEvent?: (ev: { kind: "tool" | "note" | "turn"; text: string; progress?: number }) => void;
+  /** 命令审计回调（M1-11：壳写 audit.jsonl） */
+  onAudit?: (ev: { kind: "cmd_blocked" | "cmd_net" | "cmd_run"; command: string; why?: string; cwd: string }) => void;
 }
 
 export interface MemberRunResult {
@@ -112,7 +114,7 @@ export function memberSystemPrompt(input: MemberRunInput): string {
 
 export async function runMemberTask(input: MemberRunInput): Promise<MemberRunResult> {
   const chat = input.chatFn ?? streamChat;
-  const toolkit = new Toolkit(input.workdir);
+  const toolkit = new Toolkit(input.workdir, { onAudit: input.onAudit });
   const maxTurns = Math.max(1, Math.min(input.profile.limits?.maxTurns ?? 12, 40));
   const tools = memberToolSchemas(input.tools);
   const messages: ChatMessage[] = [

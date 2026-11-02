@@ -425,6 +425,13 @@ export function SettingsModal({
             <p className="sf-hint">计划 / 询问 / 自动 / 全权：决定她能不能直接调工具、哪些必须问你。设置里看当前档位，改档在顶栏。</p>
           </div>
           <div className="sf-sub">
+            <span className="sf-label">成员的执行边界（纵深防御，不是沙箱）</span>
+            <p className="sf-hint">
+              文件只能动本单工作区；明显破坏/提权/远程直执行的命令会被拦下；出站命令逐条写
+              <span className="mono"> audit.jsonl</span>。**不是 OS 级隔离**——不承诺挡住恶意二进制，只保证越界可查。
+            </p>
+          </div>
+          <div className="sf-sub">
             <span className="sf-label">数据与遥测</span>
             <p className="sf-hint">
               全部落在 <span className="mono">~/.lynn/</span>；不引入遥测（Pi 的 PI_TELEMETRY=0），出站只有你配置的模型端点。

@@ -344,6 +344,30 @@ export class Kernel {
     }
   }
 
+  /**
+   * 命令审计（M1-11）：拦截、出站、执行三类都落 `audit.jsonl`。
+   * 这是"能回查"，不是"能拦住一切"——界面上不许把它说成沙箱。
+   */
+  private auditTool(
+    teamId: string,
+    taskId: string,
+    member: string,
+    ev: { kind: "cmd_blocked" | "cmd_net" | "cmd_run"; command: string; why?: string; cwd: string },
+  ): void {
+    const rec = { at: new Date().toISOString(), kind: ev.kind, teamId, taskId, member, command: ev.command.slice(0, 500), why: ev.why, cwd: ev.cwd };
+    try {
+      fs.appendFileSync(path.join(this.dataRoot, "audit.jsonl"), JSON.stringify(rec) + "\n", "utf-8");
+    } catch {
+      /* 审计写不进去也不能影响执行，但会缺一条记录 */
+    }
+    this.log("tool_audit", { kind: ev.kind, taskId, member, why: ev.why });
+    if (ev.kind === "cmd_blocked") {
+      this.emit({ type: "tool", badge: "已拦截", title: `${member} · ${taskId}`, body: `命令被纵深防御规则拦下：${ev.why}\n${ev.command}` });
+    } else if (ev.kind === "cmd_net") {
+      this.emit({ type: "tool", badge: "出站", title: `${member} · ${taskId}`, body: `出站命令已审计：${ev.command}` });
+    }
+  }
+
   private notify(ev: KernelEvent): void {
     for (const cb of this.listeners) cb(ev);
   }
@@ -637,6 +661,7 @@ export class Kernel {
       tools: allowed,
       workdir,
       model: { baseUrl: cfg.baseUrl, apiKey, model: cfg.model },
+      onAudit: (ev) => this.auditTool(teamId, taskId, member, ev),
       onEvent: (ev) => {
         if (ev.kind === "tool") {
           this.emit({

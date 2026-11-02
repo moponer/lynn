@@ -113,3 +113,18 @@ test("simpleDiff：相同内容返回未变，纯新增只算 added", () => {
   assert.equal(d.added, 1);
   assert.equal(d.removed, 0);
 });
+
+test("审计回调：拦截 / 出站 / 执行三类都留痕（M1-11）", async () => {
+  const root = tmp();
+  const seen = [];
+  const t = new Toolkit(root, { onAudit: (e) => seen.push(e) });
+  await t.runCommand({ command: "rm -rf /" });
+  assert.equal(seen[0].kind, "cmd_blocked");
+  assert.match(seen[0].why, /根目录/);
+
+  await t.runCommand({ command: 'node -e "console.log(1)"' });
+  assert.equal(seen.at(-1).kind, "cmd_run");
+
+  await t.runCommand({ command: "echo https://example.com" });
+  assert.ok(seen.some((e) => e.kind === "cmd_net"), "带 URL 的命令要记出站审计");
+});
