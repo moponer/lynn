@@ -188,6 +188,16 @@ async function init(message) {
     if (event?.type === "message_update" && event.assistantMessageEvent?.type === "text_delta") {
       const delta = event.assistantMessageEvent.delta;
       if (delta) write({ type: "text_delta", text: delta });
+      return;
+    }
+    // 压缩是 Pi 内置行为（自动/手动），把开始与结果透给壳，界面才有交代
+    if (event?.type === "compaction_start" || event?.type === "compaction_end") {
+      write({
+        type: event.type,
+        ...(event.type === "compaction_end" && event.result
+          ? { tokensBefore: event.result.tokensBefore ?? null, tokensAfter: event.result.tokensAfter ?? null }
+          : {}),
+      });
     }
   });
   return { tools: tools.map((t) => t.name), model: modelId };

@@ -111,8 +111,10 @@ function TopRail({
       />
 
       <div
-        className="gauge"
-        title={`上下文 ${desk.usage.contextTokens} / ${desk.usage.contextWindow} · 会话累计 ${fmtTokens(desk.tokensUsed)} tokens`}
+        className={`gauge${contextPct >= 90 ? " warn" : contextPct >= 70 ? " near" : ""}`}
+        title={`上下文 ${desk.usage.contextTokens} / ${desk.usage.contextWindow} · 会话累计 ${fmtTokens(desk.tokensUsed)} tokens${
+          contextPct >= 70 ? " · 接近上限时 Pi 会自动压缩，原文保留在卷宗" : ""
+        }`}
       >
         <div className="gauge-read">
           <div className="v">{contextPct}%</div>
@@ -1262,12 +1264,25 @@ function ReviewDesk({
                 <div className="accept">
                   <div className="k">她已核对 · {ac.length} 项验收标准</div>
                   <ul>
-                    {ac.map((c, i) => (
-                      <li key={i} className={c.ok ? "ok" : "bad"}>
-                        <Icon name={c.ok ? "check" : "warn"} size="sm" />
-                        <span>{c.text}</span>
-                      </li>
-                    ))}
+                    {ac.map((c, i) => {
+                      const ref = job.evidence[i]?.ref;
+                      return (
+                        <li key={i} className={c.ok ? "ok" : "bad"}>
+                          <button
+                            type="button"
+                            className="ac-link"
+                            disabled={!ref}
+                            title={ref ? `打开 ${ref}` : "这项没有可打开的文件"}
+                            onClick={() => {
+                              if (ref) void window.lynn.rpc("evidence.open", { taskId: job.id, ref });
+                            }}
+                          >
+                            <Icon name={c.ok ? "check" : "warn"} size="sm" />
+                            <span>{c.text}</span>
+                          </button>
+                        </li>
+                      );
+                    })}
                   </ul>
                 </div>
               )}

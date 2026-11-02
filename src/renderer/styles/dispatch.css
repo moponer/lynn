@@ -1515,3 +1515,46 @@ button.ev.openable:hover { background: var(--hover-bg); }
 button.ev:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 .ev .t { color: var(--ink); }
 .ev .d { color: var(--ink-3); }
+
+/* 上下文接近上限：黄铜提醒、朱砂警告（文案在 gauge 的 title 里） */
+.gauge.near .gauge-read .v { color: var(--brass); }
+.gauge.warn .gauge-read .v { color: var(--seal); }
+
+/* 验收标准可点开证据（点了才真的打开文件） */
+.ac-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  padding: 2px 0;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 2px;
+}
+.ac-link:hover:not(:disabled) { color: var(--ink); text-decoration: underline; text-underline-offset: 3px; }
+.ac-link:disabled { cursor: default; }
+.ac-link:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+
+/* 窄窗口：右栏收成抽屉，但边缘留一个看得见的拉手（悬停即展开） */
+@media (max-width: 1280px) {
+  .right { overflow: visible; }
+  .right::after {
+    content: "编制表";
+    position: absolute;
+    left: -26px;
+    top: 18px;
+    writing-mode: vertical-rl;
+    padding: 8px 4px;
+    border-radius: 3px 0 0 3px;
+    background: var(--sheet-2);
+    color: var(--ink-3);
+    font-family: var(--f-mono);
+    font-size: var(--fs-label);
+    letter-spacing: .12em;
+    box-shadow: -6px 0 14px -12px #000;
+  }
+  .right:hover::after, .right:focus-within::after { color: var(--blue); }
+}

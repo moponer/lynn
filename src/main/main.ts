@@ -24,14 +24,26 @@ let pet: BrowserWindow | null = null;
 const preload = () => path.join(__dirname, "preload.js");
 const indexHtml = () => path.join(__dirname, "../renderer/index.html");
 
+/** 上次用的主题底色：渲染层切换时写进来，首帧直接用，避免亮色主题先闪一帧暗底 */
+function lastBackground(): string {
+  try {
+    const file = path.join(app.getPath("userData"), "appearance.json");
+    const j = JSON.parse(fs.readFileSync(file, "utf-8")) as { desk?: string };
+    if (typeof j.desk === "string" && /^#[0-9a-f]{6}$/i.test(j.desk)) return j.desk;
+  } catch {
+    /* 首次启动没有这个文件 */
+  }
+  return "#0d1116";
+}
+
 function createWindow(): void {
   win = new BrowserWindow({
     width: 1440,
     height: 900,
     minWidth: 1080,
     minHeight: 720,
-    // 首帧就是主题底色：默认夜航暗色，避免暗色主题先闪一帧白屏
-    backgroundColor: "#0d1116",
+    // 首帧就是上次的主题底色（默认夜航暗色），不闪白也不闪错色
+    backgroundColor: lastBackground(),
     show: false,
     title: "风铃 Lynn · 指挥台",
     autoHideMenuBar: true,
@@ -131,6 +143,20 @@ app.whenReady().then(async () => {
       }
       if (method === "plugins.probe") {
         return kernel.probePlugin((params as { id: string }).id);
+      }
+      if (method === "app.appearance") {
+        const p = params as { mode?: string; desk?: string };
+        if (typeof p.desk === "string") win?.setBackgroundColor(p.desk);
+        try {
+          fs.writeFileSync(
+            path.join(app.getPath("userData"), "appearance.json"),
+            JSON.stringify({ mode: p.mode, desk: p.desk }),
+            "utf-8",
+          );
+        } catch {
+          /* 写不了就下次再试 */
+        }
+        return { ok: true };
       }
       if (method === "evidence.open") {
         const p = params as { taskId: string; ref: string };

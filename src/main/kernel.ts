@@ -529,6 +529,7 @@ export class Kernel {
         },
       });
     });
+    this.setTurn({ phase: "working" });
     return approved
       ? null
       : `用户拒绝了这次「${name}」调用。不要重试同一动作，改成向用户说明或换一条路（审批拒绝不算错误轮）。`;
@@ -932,6 +933,22 @@ export class Kernel {
         this.lastDeltaEmit = now;
         this.notify({ type: "delta", text: this.liveCard.text, cardId: this.liveCard.id });
       }
+    }
+    // 压缩：Pi 内置自动压缩，界面必须给交代（否则"上下文突然变短"像丢数据）
+    if (ev.type === "compaction_start") {
+      this.card({ kind: "system", text: "上下文接近上限，正在压缩更早的对话…" });
+    }
+    if (ev.type === "compaction_end") {
+      const before = typeof ev.tokensBefore === "number" ? ev.tokensBefore : null;
+      const after = typeof ev.tokensAfter === "number" ? ev.tokensAfter : null;
+      this.card({
+        kind: "system",
+        text:
+          before !== null && after !== null
+            ? `已压缩：${before} → ${after} tokens。原文仍在卷宗，可随时回看。`
+            : "上下文已压缩。原文仍在卷宗，可随时回看。",
+      });
+      this.log("compacted", { before, after });
     }
     // 工具卡由 emit("tool") 统一落 feed，这里不重复
   }
@@ -1694,6 +1711,8 @@ export class Kernel {
         this.feed = [];
         this.history = [];
         this.tokensUsed = 0;
+        this.usage = { turnIn: 0, turnOut: 0, sessionIn: 0, sessionOut: 0, contextTokens: 0, contextWindow: this.usage.contextWindow };
+        this.setTurn({ phase: "idle", busy: false, pending: 0, taskId: undefined, startedAt: undefined });
         this.createFreshSession = true;
         void this.resetAgentHost();
         try {

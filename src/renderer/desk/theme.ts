@@ -43,6 +43,9 @@ export function applyTheme(id: ThemeId, mode: ThemeMode): void {
   document.documentElement.dataset.mode = mode;
   localStorage.setItem(KEY_THEME, id);
   localStorage.setItem(KEY_MODE, mode);
+  // 把底色交给壳：下次冷启动首帧就用它，不闪白也不闪错色
+  const desk = THEMES.find((t) => t.id === id)?.[mode].desk;
+  if (desk) void window.lynn.rpc("app.appearance", { mode, desk }).catch(() => undefined);
 }
 
 /**

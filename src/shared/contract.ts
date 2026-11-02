@@ -273,6 +273,11 @@ export interface RpcContracts {
     params: void;
     result: { ok: boolean };
   };
+  /** 记住当前主题底色（首帧用，避免白闪/错色闪） */
+  "app.appearance": {
+    params: { mode: string; desk: string };
+    result: { ok: boolean };
+  };
   /** 打开一条证据（限定在该工单工作区内；越界拒绝） */
   "evidence.open": {
     params: { taskId: string; ref: string };
