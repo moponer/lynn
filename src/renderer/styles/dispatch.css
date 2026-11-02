@@ -1496,3 +1496,22 @@ button:disabled,
 .sf-card.wide { width: 780px; height: min(640px, 88vh); display: flex; flex-direction: column; }
 .sf-body { padding: 0; }
 
+
+/* 证据条：既是按钮也是条目（可点开文件）——清掉 UA 默认底色 */
+button.ev {
+  display: block;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  color: inherit;
+  cursor: pointer;
+  border-radius: var(--r-s);
+  transition: background-color var(--dur-fast) ease;
+}
+button.ev:disabled { cursor: default; }
+button.ev.openable:hover { background: var(--hover-bg); }
+button.ev:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+.ev .t { color: var(--ink); }
+.ev .d { color: var(--ink-3); }
