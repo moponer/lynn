@@ -414,6 +414,14 @@ export interface RpcContracts {
     params: { id: number };
     result: { ok: boolean };
   };
+  "calendar.scan": {
+    params: void;
+    result: { ok: boolean };
+  };
+  "schedule.tick": {
+    params: void;
+    result: { ok: boolean };
+  };
   /** 定时任务（M2-02）：调度器在核心里；单飞/补跑/陈旧清理，lastStatus 如实 */
   "schedule.add": {
     params: { name: string; prompt: string; kind: "once" | "daily" | "interval"; at?: string; time?: string; intervalMin?: number };

@@ -20,6 +20,8 @@ kernel.setEncryptors(
   () => safeStorage.isEncryptionAvailable(),
   (blob) => safeStorage.decryptString(blob),
 );
+// 系统通知通道（M2-03）：提醒/定时任务必达双通道之一；notifyOnce 自带"窗口可见就不打扰"
+kernel.setNotifier((title, body) => notifyOnce(title, body));
 
 let win: BrowserWindow | null = null;
 let pet: BrowserWindow | null = null;

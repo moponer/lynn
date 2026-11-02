@@ -309,6 +309,8 @@ export class Kernel {
   /** 定时任务（M2-02）：调度器在核心里；单飞 + 陈旧清理 + 休眠补跑 */
   private scheduler!: SchedulerStore;
   private scheduleTimer: NodeJS.Timeout | null = null;
+  /** 系统通知通道（M2-03）：壳层注入；不依赖云推送。通知失败不影响应用内卡片（双通道） */
+  private notifier: ((title: string, body: string) => void) | null = null;
   /** 下一次起 worker 时开新会话（session.new 置位；起过一次即清） */
   private createFreshSession = false;
   /** 用户点了停止：本轮结束时不追加"已完成"类文案 */
@@ -490,13 +492,10 @@ export class Kernel {
     const first: DueItem = due[0];
     if (!this.scheduler.acquire(first.task.id, new Date())) return;
     const { task, missed } = first;
-    this.card({
-      kind: "system",
-      badge: "工具",
-      title: `定时任务触发 · ${task.name}`,
-      meta: `${missed ? "补跑（错过原定时刻）" : "准点"} · ${task.kind}`,
-      body: task.prompt,
-    });
+    this.notifyUser(
+      `定时任务 · ${task.name}`,
+      `${missed ? "补跑（错过原定时刻）" : "准点"} · ${task.kind}`,
+    );
     // 交给风铃：作为一条消息进对话流，全程留痕
     try {
       this.submitTurn(`【定时任务·${task.name}${missed ? "·补跑" : ""}】${task.prompt}`);
@@ -507,18 +506,30 @@ export class Kernel {
     }
   }
 
-  /** 到期提醒 → 事件卡（M2-01）；系统通知在 M2-03 接入 */
+  /** 系统通知注入点（M2-03）：壳层把托盘通知接进来；提醒/定时任务双通道触达 */
+  setNotifier(fn: (title: string, body: string) => void): void {
+    this.notifier = fn;
+  }
+
+  /** 提醒必达：应用内卡片（必落）+ 系统通知（尽力）；通知失败只记日志不炸 */
+  private notifyUser(title: string, body: string): void {
+    this.card({ kind: "system", badge: "提醒", title, meta: body || undefined });
+    if (!this.notifier) return;
+    try {
+      this.notifier(title, body);
+      this.log("notified", { title });
+    } catch (err) {
+      this.log("notify_failed", { title, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+
+  /** 手动触发提醒扫描（测试与 UI 刷新用） */
   private scanReminders(): void {
     try {
       const due = dueReminders(this.calendar.listEvents({ includePast: false }));
       for (const e of due) {
         this.calendar.markNotified(e.id);
-        this.card({
-          kind: "system",
-          badge: "提醒",
-          title: e.title,
-          meta: `日程 · ${new Date(e.at).toLocaleString("zh-CN")}`,
-        });
+        this.notifyUser(e.title, `日程 · ${new Date(e.at).toLocaleString("zh-CN")}`);
         this.log("reminder_fired", { id: e.id, title: e.title });
       }
     } catch (err) {
@@ -1968,6 +1979,16 @@ export class Kernel {
       case "calendar.todo.finish": {
         const { id } = params as { id: number };
         this.calendar.finishTodo(Number(id));
+        return { ok: true } as RpcContracts[M]["result"];
+      }
+
+      case "calendar.scan": {
+        this.scanReminders();
+        return { ok: true } as RpcContracts[M]["result"];
+      }
+
+      case "schedule.tick": {
+        this.tickSchedules();
         return { ok: true } as RpcContracts[M]["result"];
       }
 
