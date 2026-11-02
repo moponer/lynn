@@ -170,10 +170,10 @@ export default function App() {
 
   /** 发送失败必须可见：之前用 void 吞掉了 rejection，界面一片空白 */
   const onSend = useCallback(
-    async (text: string, mode: "queue" | "steer" = "queue") => {
+    async (text: string, mode: "queue" | "steer" = "queue", attachments?: { files?: string[]; images?: { name: string; data: string }[] }) => {
       setNotice(null);
       try {
-        const r = await rpc("feed.send", { text, mode });
+        const r = await rpc("feed.send", { text, mode, ...(attachments ? { attachments } : {}) });
         if (r.queued) setNotice(`已排队（${text.slice(0, 20)}${text.length > 20 ? "…" : ""}）`);
         await refresh();
       } catch (err) {
@@ -321,7 +321,8 @@ export default function App() {
         ambient={ambient}
         ambientMode={ambientMode}
         onPermission={(m) => void onPermission(m)}
-        onSend={(t, mode) => void onSend(t, mode)}
+        onSend={(t, mode, att) => void onSend(t, mode, att)}
+        onFileSearch={(q) => rpc("files.search", { q }).then((r) => r.files)}
         onAbort={() => void onAbort()}
         onQueue={(a, id) => void onQueue(a, id)}
         onDecision={(id, a, reason) => void onDecision(id, a, reason)}

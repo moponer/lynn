@@ -23,6 +23,7 @@ import { McpRegistry, loadMcpConfig, loadMcpConfigAt, type McpServerConfig } fro
 import { CheckpointStore } from "./checkpoints";
 import { TrustStore } from "./trust";
 import { ThreadStore } from "./threads";
+import { buildTurnAttachments, searchProjectFiles, type TurnAttachments } from "./attachments";
 import { TeamStore } from "./team-store";
 import { TaskStore } from "./task-store";
 import { TaskCase } from "./task-case";
@@ -228,6 +229,7 @@ interface PendingPlan {
 /** 排队中的输入 */
 interface QueuedInput extends QueueItem {
   mode: "queue" | "steer";
+  attachments?: TurnAttachments;
 }
 
 /** 计划档位下也允许的只读工具 */
@@ -1306,10 +1308,25 @@ export class Kernel {
   }
 
   /** 提交一轮：卡片 + 落史 + 回合状态 + 结束后排水（排队输入） */
-  private submitTurn(text: string): void {
-    this.card({ kind: "user", text });
-    this.history.push({ role: "user", content: text });
-    this.persist("user", text);
+  private submitTurn(text: string, att?: TurnAttachments): void {
+    // 本轮随附（M1-16）：文件注入 + 图片落盘；带不上的如实出卡，不静默丢
+    let fullText = text;
+    if (att && (att.files?.length || att.images?.length)) {
+      const built = buildTurnAttachments(this.projectRoot, this.dataRoot, text, att);
+      if (built.errors.length) {
+        this.card({ kind: "system", text: `这些随附没带上：${built.errors.join("；")}。` });
+      }
+      fullText = built.fullText;
+      this.card({
+        kind: "user",
+        text,
+        meta: built.pieces.length ? `随附 ${built.pieces.map((p) => p.label).join("、")}` : undefined,
+      });
+    } else {
+      this.card({ kind: "user", text });
+    }
+    this.history.push({ role: "user", content: fullText });
+    this.persist("user", fullText);
     this.busy = true;
     this.l1.setBusy(true);
     this.abortRequested = false;
@@ -1317,7 +1334,7 @@ export class Kernel {
     this.threads.autoTitle(this.currentThreadId, text);
     this.checkpoints.begin(`turn-${Date.now()}`);
     this.setTurn({ phase: "accepted", busy: true, startedAt: new Date().toISOString(), canUndo: false, changedFiles: [] });
-    void this.runChat(text).finally(() => {
+    void this.runChat(fullText).finally(() => {
       this.busy = false;
       this.l1.setBusy(false);
       const phase: TurnPhase = this.turn.phase === "failed" ? "failed" : "idle";
@@ -1334,7 +1351,7 @@ export class Kernel {
       return;
     }
     this.setTurn({ pending: this.queue.length, phase: "accepted" });
-    this.submitTurn(next.text);
+    this.submitTurn(next.text, next.attachments);
   }
 
   /** 插话：只对当前回合生效，不另起回合 */
@@ -1669,24 +1686,50 @@ export class Kernel {
       }
 
       case "feed.send": {
-        const { text, mode = "queue" } = params as { text: string; mode?: "steer" | "queue" };
+        const { text, mode = "queue", attachments } = params as {
+          text: string;
+          mode?: "steer" | "queue";
+          attachments?: TurnAttachments;
+        };
         const trimmed = text.trim();
         if (!trimmed) return { ok: true, queued: false } as RpcContracts[M]["result"];
+        const hasAtt = Boolean(attachments && (attachments.files?.length || attachments.images?.length));
         if (this.busy) {
           if (mode === "steer") {
-            this.card({ kind: "user", text: trimmed, meta: "插话" });
-            this.history.push({ role: "user", content: trimmed });
-            this.persist("user", trimmed);
-            void this.steerTurn(trimmed);
+            let steerText = trimmed;
+            let meta = "插话";
+            if (hasAtt) {
+              const built = buildTurnAttachments(this.projectRoot, this.dataRoot, trimmed, attachments!);
+              if (built.errors.length) {
+                this.card({ kind: "system", text: `这些随附没带上：${built.errors.join("；")}。` });
+              }
+              steerText = built.fullText;
+              if (built.pieces.length) meta = `插话 · 随附 ${built.pieces.map((p) => p.label).join("、")}`;
+            }
+            this.card({ kind: "user", text: trimmed, meta });
+            this.history.push({ role: "user", content: steerText });
+            this.persist("user", steerText);
+            void this.steerTurn(steerText);
             return { ok: true, queued: false } as RpcContracts[M]["result"];
           }
-          const item: QueuedInput = { id: `q-${++this.queueSeq}`, text: trimmed, at: new Date().toISOString(), mode: "queue" };
+          const item: QueuedInput = {
+            id: `q-${++this.queueSeq}`,
+            text: trimmed,
+            at: new Date().toISOString(),
+            mode: "queue",
+            ...(hasAtt ? { attachments } : {}),
+          };
           this.queue.push(item);
           this.setTurn({});
           return { ok: true, queued: true, queueId: item.id } as RpcContracts[M]["result"];
         }
-        this.submitTurn(trimmed);
+        this.submitTurn(trimmed, attachments);
         return { ok: true, queued: false } as RpcContracts[M]["result"];
+      }
+
+      case "files.search": {
+        const { q = "", limit = 20 } = params as { q?: string; limit?: number };
+        return { files: searchProjectFiles(this.projectRoot, q, limit) } as RpcContracts[M]["result"];
       }
 
       case "session.abort": {

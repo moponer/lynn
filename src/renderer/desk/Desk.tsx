@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import type { FeedCard, PermissionMode, QueueItem } from "../../shared/contract";
 import { Icon, type IconName } from "../components/Icon";
 import type { Desk, DeskDiff, DeskJob, DeskMember } from "./model";
@@ -943,6 +943,7 @@ function ComposerZone({
   variant = "desk",
   onStandby,
   onSend,
+  onFileSearch,
   onAbort,
   onQueue,
 }: {
@@ -951,26 +952,91 @@ function ComposerZone({
   queue: QueueItem[];
   variant?: "desk" | "review";
   onStandby?: () => void;
-  onSend: (text: string, mode: "queue" | "steer") => void;
+  onSend: (text: string, mode: "queue" | "steer", attachments?: { files?: string[]; images?: { name: string; data: string }[] }) => void;
+  /** @ 提及的项目文件检索（M1-16） */
+  onFileSearch?: (q: string) => Promise<{ path: string; size: number }[]>;
   onAbort: () => void;
   onQueue: (action: "clear" | "remove", id?: string) => void;
 }) {
   const [draft, setDraft] = useState("");
   const [mode, setMode] = useState<"queue" | "steer">("queue");
   const busy = turn.busy;
-  const canSend = draft.trim().length > 0 && configured;
+  const taRef = useRef<HTMLTextAreaElement | null>(null);
+  // 本轮随附（M1-16）：发送前可见、逐片可裁剪
+  const [attFiles, setAttFiles] = useState<string[]>([]);
+  const [attImages, setAttImages] = useState<{ name: string; data: string }[]>([]);
+  // @ 文件提及补全
+  const [mention, setMention] = useState<{ start: number; q: string } | null>(null);
+  const [mentionItems, setMentionItems] = useState<{ path: string; size: number }[]>([]);
+  const [mentionIdx, setMentionIdx] = useState(0);
+  const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const imgSeq = useRef(0);
+  const hasAtt = attFiles.length > 0 || attImages.length > 0;
+  const canSend = (draft.trim().length > 0 || hasAtt) && configured;
+
+  const detectMention = (value: string, caret: number) => {
+    const before = value.slice(0, caret);
+    const m = /(^|\s)@([^\s@]{0,80})$/.exec(before);
+    if (m && onFileSearch) {
+      const q = m[2];
+      const start = caret - q.length - 1;
+      setMention({ start, q });
+      setMentionIdx(0);
+      if (searchTimer.current) clearTimeout(searchTimer.current);
+      searchTimer.current = setTimeout(() => {
+        void onFileSearch(q).then((files) => {
+          setMentionItems(files);
+        });
+      }, 200);
+    } else {
+      setMention(null);
+      setMentionItems([]);
+    }
+  };
+
+  const pickMention = (p: string) => {
+    if (!mention) return;
+    // 从草稿里摘掉 @token：文件进随附条，不留在正文里
+    setDraft((d) => d.slice(0, mention.start) + d.slice(mention.start + mention.q.length + 1));
+    setAttFiles((f) => (f.includes(p) ? f : [...f, p]));
+    setMention(null);
+    setMentionItems([]);
+    taRef.current?.focus();
+  };
+
+  const addImage = (file: File) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const data = String(reader.result ?? "");
+      if (data.startsWith("data:image/")) {
+        setAttImages((imgs) => [...imgs, { name: file.name || `图片${++imgSeq.current}`, data }]);
+      }
+    };
+    reader.readAsDataURL(file);
+  };
 
   const submit = () => {
+    if (mention) {
+      const pick = mentionItems[mentionIdx];
+      if (pick) pickMention(pick.path);
+      return;
+    }
     const text = draft.trim();
-    if (!text) return;
+    if (!text && !hasAtt) return;
     if (text === "/standby") {
       setDraft("");
       onStandby?.();
       return;
     }
-    onSend(text, busy ? mode : "queue");
+    const attachments = hasAtt ? { files: attFiles, images: attImages } : undefined;
+    onSend(text, busy ? mode : "queue", attachments);
     setDraft("");
+    setAttFiles([]);
+    setAttImages([]);
+    setMention(null);
   };
+
+  const fmtSize = (n: number): string => (n >= 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)}MB` : n >= 1024 ? `${Math.round(n / 1024)}KB` : `${n}B`);
 
   return (
     <div className="composer">
@@ -999,13 +1065,101 @@ function ComposerZone({
         </div>
       )}
 
-      <div className="composer-row">
+      {/* 本轮随附条（M1-16）：发送前看得见她将带走的东西，每片可裁剪 */}
+      {hasAtt && (
+        <div className="attach-strip" role="list" aria-label="本轮随附">
+          <span className="lbl">本轮随附</span>
+          {attFiles.map((f) => (
+            <span key={f} className="attach-chip" role="listitem" title={`将携带文件 ${f}`}>
+              @{f}
+              <button
+                type="button"
+                className="x"
+                aria-label={`移除 ${f}`}
+                onClick={() => setAttFiles((fs2) => fs2.filter((x) => x !== f))}
+              >
+                ×
+              </button>
+            </span>
+          ))}
+          {attImages.map((img, i) => (
+            <span key={`${img.name}-${i}`} className="attach-chip img" role="listitem" title={`将携带图片 ${img.name}`}>
+              <img src={img.data} alt={img.name} />
+              {img.name}
+              <button
+                type="button"
+                className="x"
+                aria-label={`移除 ${img.name}`}
+                onClick={() => setAttImages((imgs) => imgs.filter((_, j) => j !== i))}
+              >
+                ×
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+
+      <div className="composer-row" style={{ position: "relative" }}>
+        {mention && mentionItems.length > 0 && (
+          <div className="mention-pop" role="listbox" aria-label="文件补全">
+            {mentionItems.map((f, i) => (
+              <button
+                type="button"
+                key={f.path}
+                role="option"
+                aria-selected={i === mentionIdx}
+                className={`mention-item${i === mentionIdx ? " on" : ""}`}
+                onMouseEnter={() => setMentionIdx(i)}
+                onClick={() => pickMention(f.path)}
+              >
+                <span className="p">@{f.path}</span>
+                <span className="s">{fmtSize(f.size)}</span>
+              </button>
+            ))}
+          </div>
+        )}
         <textarea
+          ref={taRef}
           className="composer-in"
           rows={1}
           value={draft}
-          onChange={(e) => setDraft(e.target.value)}
+          onChange={(e) => {
+            setDraft(e.target.value);
+            detectMention(e.target.value, e.target.selectionStart ?? e.target.value.length);
+          }}
+          onPaste={(e) => {
+            const imgs = Array.from(e.clipboardData?.items ?? []).filter((it) => it.kind === "file" && it.type.startsWith("image/"));
+            if (imgs.length > 0) {
+              e.preventDefault();
+              for (const it of imgs) {
+                const f = it.getAsFile();
+                if (f) addImage(f);
+              }
+            }
+          }}
           onKeyDown={(e) => {
+            if (mention && mentionItems.length > 0) {
+              if (e.key === "ArrowDown") {
+                e.preventDefault();
+                setMentionIdx((i) => (i + 1) % mentionItems.length);
+                return;
+              }
+              if (e.key === "ArrowUp") {
+                e.preventDefault();
+                setMentionIdx((i) => (i - 1 + mentionItems.length) % mentionItems.length);
+                return;
+              }
+              if (e.key === "Escape") {
+                e.preventDefault();
+                setMention(null);
+                return;
+              }
+              if (e.key === "Enter" || e.key === "Tab") {
+                e.preventDefault();
+                pickMention(mentionItems[mentionIdx]?.path ?? "");
+                return;
+              }
+            }
             if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
               e.preventDefault();
               submit();
@@ -1019,7 +1173,7 @@ function ComposerZone({
                   : "排队：这一轮结束后执行…"
                 : variant === "review"
                   ? "告诉她怎么改，或直接回答她…"
-                  : "交给风铃去做，或直接问她…"
+                  : "交给风铃去做，或 @ 提及文件、粘贴图片…"
               : "先配置模型（我的风铃 → 模型）"
           }
         />
@@ -1053,7 +1207,7 @@ function ComposerZone({
       </div>
 
       <div className="composer-hint">
-        <span className="mono">Enter 发送 · Shift+Enter 换行</span>
+        <span className="mono">Enter 发送 · Shift+Enter 换行 · @ 提及文件 · 粘贴图片</span>
         {busy && (
           <>
             <span className="sep">·</span>
@@ -1426,6 +1580,7 @@ export function DeskView({
   onQueue,
   onDecision,
   onDecisionResolve,
+  onFileSearch,
   onFeedAction,
   onOpenSettings,
   onStandby,
@@ -1442,7 +1597,9 @@ export function DeskView({
   ambient: AmbientParams;
   ambientMode: AmbientMode;
   onPermission: (m: PermissionMode) => void;
-  onSend: (text: string, mode: "queue" | "steer") => void;
+  onSend: (text: string, mode: "queue" | "steer", attachments?: { files?: string[]; images?: { name: string; data: string }[] }) => void;
+  /** 项目工作区文件检索（@ 提及补全，M1-16） */
+  onFileSearch?: (q: string) => Promise<{ path: string; size: number }[]>;
   onAbort: () => void;
   onQueue: (action: "clear" | "remove", id?: string) => void;
   onDecision: (taskId: string, action: "approve" | "reject", reason?: { what: string; expect: string; deadline: string }) => void;
@@ -1516,6 +1673,7 @@ export function DeskView({
             queue={desk.queue}
             onStandby={onStandby}
             onSend={onSend}
+            onFileSearch={onFileSearch}
             onAbort={onAbort}
             onQueue={onQueue}
           />

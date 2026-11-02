@@ -1588,3 +1588,79 @@ button.ev:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 .thread-row:hover { background: var(--hover-bg); }
 .thread-row.on { background: var(--blue-wash); }
 .thread-row.on b { color: var(--blue); }
+
+/* ---- M1-16 本轮随附条 + @ 文件补全 ---- */
+.attach-strip {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px 2px 8px;
+}
+.attach-strip .lbl {
+  font-size: var(--fs-meta);
+  opacity: 0.6;
+  margin-right: 2px;
+}
+.attach-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 320px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: var(--surface-2, rgba(128, 128, 128, 0.12));
+  font-size: var(--fs-meta);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.attach-chip.img img {
+  width: 18px;
+  height: 18px;
+  object-fit: cover;
+  border-radius: 3px;
+}
+.attach-chip .x {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  opacity: 0.55;
+  cursor: pointer;
+  padding: 0 2px;
+  line-height: 1;
+}
+.attach-chip .x:hover { opacity: 1; }
+
+.mention-pop {
+  position: absolute;
+  bottom: calc(100% + 4px);
+  left: 0;
+  z-index: 30;
+  min-width: 260px;
+  max-width: 480px;
+  max-height: 240px;
+  overflow: auto;
+  border-radius: 8px;
+  background: var(--surface-1, #1b1e24);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  padding: 4px;
+}
+.mention-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  padding: 6px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: var(--fs-meta);
+}
+.mention-item.on { background: var(--surface-2, rgba(128, 128, 128, 0.14)); }
+.mention-item .p { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mention-item .s { opacity: 0.5; flex-shrink: 0; font-variant-numeric: tabular-nums; }

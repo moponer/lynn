@@ -279,8 +279,18 @@ export interface RpcContracts {
    * mode: steer=插话（改变当前方向）；queue=排队（本轮结束后执行，默认）
    */
   "feed.send": {
-    params: { text: string; mode?: "steer" | "queue" };
+    params: {
+      text: string;
+      mode?: "steer" | "queue";
+      /** 本轮随附（M1-16）：文件为项目工作区相对路径，图片为 data URL */
+      attachments?: { files?: string[]; images?: { name: string; data: string }[] };
+    };
     result: { ok: true; queued: boolean; queueId?: string };
+  };
+  /** 项目工作区文件检索（@ 提及补全，M1-16） */
+  "files.search": {
+    params: { q: string; limit?: number };
+    result: { files: { path: string; size: number }[] };
   };
   /** 停止当前这一轮（保留已产出文本） */
   "session.abort": {
