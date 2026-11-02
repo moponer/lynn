@@ -347,6 +347,27 @@ export interface RpcContracts {
     params: void;
     result: UpdateStatusView;
   };
+  /** 会话记忆两层（M2-05）：kind = user（永远保留）| memory（可 diff/回滚） */
+  "memory.get": {
+    params: { kind: "user" | "memory" };
+    result: { text: string };
+  };
+  "memory.save": {
+    params: { kind: "user" | "memory"; text: string };
+    result: { ok: boolean; versionId: string; hot: boolean };
+  };
+  "memory.versions": {
+    params: { kind: "user" | "memory" };
+    result: { versions: { id: string; savedAt: string; chars: number }[] };
+  };
+  "memory.diff": {
+    params: { kind: "user" | "memory"; versionId?: string };
+    result: { changes: { t: "same" | "add" | "del"; line: string }[] };
+  };
+  "memory.rollback": {
+    params: { kind: "user" | "memory"; versionId: string };
+    result: { ok: boolean; text: string; hot: boolean };
+  };
   /** 停止当前这一轮（保留已产出文本） */
   "session.abort": {
     params: void;

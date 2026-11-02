@@ -25,6 +25,7 @@ import { TrustStore } from "./trust";
 import { ThreadStore } from "./threads";
 import { buildTurnAttachments, searchProjectFiles, type TurnAttachments } from "./attachments";
 import { PersonaStore, composeSystemPrompt } from "./persona";
+import { MemoryStore, type MemoryKind } from "./memory";
 import { TeamStore } from "./team-store";
 import { TaskStore } from "./task-store";
 import { TaskCase } from "./task-case";
@@ -297,6 +298,8 @@ export class Kernel {
   private currentThreadId!: string;
   /** persona.md（M1-17）：语气人设可编辑 + 版本化 */
   private persona!: PersonaStore;
+  /** 会话记忆两层（M2-05）：USER.md 永远保留；MEMORY.md 可 diff/回滚 */
+  private memory!: MemoryStore;
   /** 下一次起 worker 时开新会话（session.new 置位；起过一次即清） */
   private createFreshSession = false;
   /** 用户点了停止：本轮结束时不追加"已完成"类文案 */
@@ -334,6 +337,7 @@ export class Kernel {
     // M1-14：线程状态优先于旧的 timeline/温层重建结果
     this.threads = new ThreadStore(dataRoot);
     this.persona = new PersonaStore(dataRoot);
+    this.memory = new MemoryStore(dataRoot);
     const list = this.threads.list();
     const current = list[0] ?? this.threads.create("新会话");
     this.currentThreadId = current.id;
@@ -453,9 +457,9 @@ export class Kernel {
 
   private threadSaveTimer: NodeJS.Timeout | null = null;
 
-  /** system prompt（M1-17）：固定头 + persona + 安全尾段；每轮现取，persona 保存后即生效 */
+  /** system prompt（M1-17/M2-05）：固定头 + persona + 记忆两层 + 安全尾段；每轮现取 */
   private systemPrompt(): string {
-    return composeSystemPrompt(this.persona.load());
+    return composeSystemPrompt(this.persona.load()) + this.memory.systemPromptSection();
   }
 
   /** 壳层读偏好（托盘/通知开关，M1-18）：壳不直接碰 SettingsStore */
@@ -464,7 +468,11 @@ export class Kernel {
     return { autoStart: p.autoStart, trayOnClose: p.trayOnClose, notify: p.notify };
   }
 
-  /** persona 变更后热同步到 Pi worker；失败如实落卡（下一轮 prompt 前仍会用启动时的旧词） */
+  private assertMemoryKind(kind: string): asserts kind is MemoryKind {
+    if (kind !== "user" && kind !== "memory") throw new Error(`未知记忆层：${kind}（user | memory）`);
+  }
+
+  /** persona/记忆变更后热同步到 Pi worker；失败如实落卡（下一轮 prompt 前仍会用启动时的旧词） */
   private hotSyncSystemPrompt(): boolean {
     if (!this.host?.isRunning()) return false;
     void this.host
@@ -1780,6 +1788,42 @@ export class Kernel {
       case "persona.rollback": {
         const { id } = params as { id: string };
         const text = this.persona.rollback(id);
+        const hot = this.hotSyncSystemPrompt();
+        return { ok: true, text, hot } as RpcContracts[M]["result"];
+      }
+
+      case "memory.get": {
+        const { kind } = params as { kind: MemoryKind };
+        this.assertMemoryKind(kind);
+        return { text: this.memory.load(kind) } as RpcContracts[M]["result"];
+      }
+
+      case "memory.save": {
+        const { kind, text } = params as { kind: MemoryKind; text: string };
+        this.assertMemoryKind(kind);
+        const versionId = this.memory.save(kind, text);
+        const hot = this.hotSyncSystemPrompt();
+        this.log("memory_save", { kind, chars: text.length, versionId, hot });
+        return { ok: true, versionId, hot } as RpcContracts[M]["result"];
+      }
+
+      case "memory.versions": {
+        const { kind } = params as { kind: MemoryKind };
+        this.assertMemoryKind(kind);
+        return { versions: this.memory.versions(kind) } as RpcContracts[M]["result"];
+      }
+
+      case "memory.diff": {
+        const { kind, versionId } = params as { kind: MemoryKind; versionId?: string };
+        this.assertMemoryKind(kind);
+        const { changes } = this.memory.diff(kind, versionId);
+        return { changes } as RpcContracts[M]["result"];
+      }
+
+      case "memory.rollback": {
+        const { kind, versionId } = params as { kind: MemoryKind; versionId: string };
+        this.assertMemoryKind(kind);
+        const text = this.memory.rollback(kind, versionId);
         const hot = this.hotSyncSystemPrompt();
         return { ok: true, text, hot } as RpcContracts[M]["result"];
       }
