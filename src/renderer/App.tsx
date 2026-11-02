@@ -331,6 +331,12 @@ export default function App() {
         onStandby={() => setStandby(true)}
         onNew={() => void onNew()}
         onUndo={() => void onUndo()}
+        onThread={(id) => {
+          setNotice(null);
+          void rpc("thread.switch", { id }).then(() => refresh());
+        }}
+        onThreadNew={() => void onNew()}
+        onThreadSearch={(q) => rpc("thread.search", { q }).then((r) => r.results)}
         notice={notice}
       />
       {settingsOpen && (

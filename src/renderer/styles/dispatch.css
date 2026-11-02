@@ -1558,3 +1558,33 @@ button.ev:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
   }
   .right:hover::after, .right:focus-within::after { color: var(--blue); }
 }
+
+/* ---------- 会话线程（M1-14） ---------- */
+.thread-bar { display: flex; align-items: center; gap: 4px; margin: 2px 8px 6px; }
+.thread-cur {
+  flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px;
+  border: 0; background: var(--sheet-2); color: var(--ink-2); font: inherit;
+  font-size: var(--fs-meta); padding: 6px 8px; border-radius: var(--r-m);
+  text-align: left; cursor: pointer;
+}
+.thread-cur .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.thread-cur:hover { background: var(--hover-bg); color: var(--ink); }
+.thread-panel {
+  margin: 0 8px 8px; padding: 6px; display: flex; flex-direction: column; gap: 4px;
+  background: var(--desk); border-radius: var(--r-m); max-height: 240px; overflow-y: auto;
+}
+.thread-q {
+  width: 100%; box-sizing: border-box; border: 0; border-radius: var(--r-s);
+  background: var(--sheet); color: var(--ink); font: inherit; font-size: var(--fs-meta);
+  padding: 6px 8px;
+}
+.thread-row {
+  display: flex; flex-direction: column; gap: 2px; border: 0; background: none;
+  color: var(--ink-2); font: inherit; font-size: var(--fs-meta); padding: 6px 8px;
+  border-radius: var(--r-s); text-align: left; cursor: pointer;
+}
+.thread-row b { font-weight: 500; color: var(--ink); font-size: var(--fs-body); }
+.thread-row small { color: var(--ink-3); font-size: var(--fs-label); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.thread-row:hover { background: var(--hover-bg); }
+.thread-row.on { background: var(--blue-wash); }
+.thread-row.on b { color: var(--blue); }

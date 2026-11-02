@@ -144,6 +144,9 @@ export interface Desk {
   queue: QueueItem[];
   /** 任务契约是否自动开始（设置页可改） */
   autoStart: boolean;
+  /** 当前会话线程与列表（M1-14） */
+  thread: { id: string; title: string };
+  threads: { id: string; title: string; updatedAt: string }[];
 }
 
 const MEMBER_STATUS_LABEL: Record<DeskMember["status"], string> = {
@@ -274,5 +277,7 @@ export function deskFromSnapshot(snap: SessionSnapshot): Desk {
     usage: snap.usage,
     queue: snap.queue,
     autoStart: snap.prefs.autoStart,
+    thread: snap.thread,
+    threads: snap.threads,
   };
 }

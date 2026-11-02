@@ -159,12 +159,21 @@ function Ledger({
   desk,
   activeId,
   onSelect,
+  onThread,
+  onThreadNew,
+  onThreadSearch,
 }: {
   desk: Desk;
   activeId?: string;
   onSelect: (id: string) => void;
+  onThread?: (id: string) => void;
+  onThreadNew?: () => void;
+  onThreadSearch?: (q: string) => Promise<{ id: string; title: string; hits: string[] }[]>;
 }) {
   const [q, setQ] = useState("");
+  const [threadsOpen, setThreadsOpen] = useState(false);
+  const [tq, setTq] = useState("");
+  const [hits, setHits] = useState<{ id: string; title: string; hits: string[] }[]>([]);
   const match = (j: DeskJob) => !q || `${j.id} ${j.title} ${j.member ?? ""}`.toLowerCase().includes(q.toLowerCase());
 
   const waiting = desk.jobs.filter((j) => (j.status === "in_review" || j.status === "blocked") && match(j));
@@ -180,6 +189,70 @@ function Ledger({
           {activeCount} 在办 · {desk.archived.length} 已归档
         </span>
       </div>
+      <div className="thread-bar">
+        <button
+          type="button"
+          className="thread-cur"
+          onClick={() => setThreadsOpen((v) => !v)}
+          title="切换会话 / 搜历史"
+        >
+          <Icon name="layers" size="sm" />
+          <span className="t">{desk.thread.title}</span>
+        </button>
+        <button type="button" className="icon-btn" onClick={onThreadNew} title="新会话">
+          <Icon name="plus" size="sm" />
+        </button>
+      </div>
+
+      {threadsOpen && (
+        <div className="thread-panel">
+          <input
+            className="thread-q"
+            value={tq}
+            placeholder="搜历史：关键词"
+            onChange={(e) => {
+              const v = e.target.value;
+              setTq(v);
+              if (!v.trim()) {
+                setHits([]);
+                return;
+              }
+              void (onThreadSearch?.(v) ?? Promise.resolve([])).then(setHits);
+            }}
+          />
+          {tq.trim()
+            ? hits.map((h) => (
+                <button
+                  type="button"
+                  key={h.id}
+                  className="thread-row"
+                  onClick={() => {
+                    onThread?.(h.id);
+                    setThreadsOpen(false);
+                  }}
+                >
+                  <b>{h.title}</b>
+                  <small>{h.hits[0]}</small>
+                </button>
+              ))
+            : desk.threads.map((t) => (
+                <button
+                  type="button"
+                  key={t.id}
+                  className={`thread-row${t.id === desk.thread.id ? " on" : ""}`}
+                  onClick={() => {
+                    onThread?.(t.id);
+                    setThreadsOpen(false);
+                  }}
+                >
+                  <b>{t.title}</b>
+                  <small className="mono">{t.updatedAt.slice(5, 16).replace("T", " ")}</small>
+                </button>
+              ))}
+          {tq.trim() && hits.length === 0 && <p className="sf-empty">没有匹配的历史。</p>}
+        </div>
+      )}
+
       <label className="search">
         <Icon name="search" size="sm" />
         <input
@@ -1358,6 +1431,9 @@ export function DeskView({
   onStandby,
   onNew,
   onUndo,
+  onThread,
+  onThreadNew,
+  onThreadSearch,
   notice,
 }: {
   desk: Desk;
@@ -1376,6 +1452,10 @@ export function DeskView({
   onStandby: () => void;
   onNew?: () => void;
   onUndo?: () => void;
+  /** 会话线程（M1-14） */
+  onThread?: (id: string) => void;
+  onThreadNew?: () => void;
+  onThreadSearch?: (q: string) => Promise<{ id: string; title: string; hits: string[] }[]>;
   /** 发送/新建失败时的可见提示（不允许静默失败） */
   notice?: string | null;
 }) {
@@ -1418,7 +1498,14 @@ export function DeskView({
         onUndo={onUndo}
       />
       <div className="body">
-        <Ledger desk={desk} activeId={current?.id} onSelect={setActiveId} />
+        <Ledger
+          desk={desk}
+          activeId={current?.id}
+          onSelect={setActiveId}
+          onThread={onThread}
+          onThreadNew={onThreadNew}
+          onThreadSearch={onThreadSearch}
+        />
         <main className="center">
           <div className="sheet-wrap">
             <Sheet job={current} feed={desk.feed} onFeedAction={onFeedAction} onExample={(t) => onSend(t, "queue")} />

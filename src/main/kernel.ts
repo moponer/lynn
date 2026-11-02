@@ -22,6 +22,7 @@ import { reapOrphanWorkers } from "./agent-orphans";
 import { McpRegistry, loadMcpConfig, loadMcpConfigAt, type McpServerConfig } from "./mcp";
 import { CheckpointStore } from "./checkpoints";
 import { TrustStore } from "./trust";
+import { ThreadStore } from "./threads";
 import { TeamStore } from "./team-store";
 import { TaskStore } from "./task-store";
 import { TaskCase } from "./task-case";
@@ -292,6 +293,9 @@ export class Kernel {
   /** 项目信任（M1-13）：决定项目级 mcp.json 能不能注入工具 */
   private trust!: TrustStore;
   private projectRoot!: string;
+  /** 多会话线程（M1-14）：列表/状态持久化 + 当前线程 id */
+  private threads!: ThreadStore;
+  private currentThreadId!: string;
   /** 下一次起 worker 时开新会话（session.new 置位；起过一次即清） */
   private createFreshSession = false;
   /** 用户点了停止：本轮结束时不追加"已完成"类文案 */
@@ -326,6 +330,22 @@ export class Kernel {
     // 早于 init() 里的 Pi 动态 import：把 Pi 的配置根与遥测开关钉在 ~/.lynn/kernel（§1.6 / §4.7）
     applyPiEnvironment(dataRoot);
     this.loadSession();
+    // M1-14：线程状态优先于旧的 timeline/温层重建结果
+    this.threads = new ThreadStore(dataRoot);
+    const list = this.threads.list();
+    const current = list[0] ?? this.threads.create("新会话");
+    this.currentThreadId = current.id;
+    const st = this.threads.loadState(current.id);
+    if (st.feed.length || st.history.length) {
+      this.feed = [];
+      this.cardSeq = 0;
+      for (const c of st.feed) {
+        this.feed.push(c);
+        const n = Number(/^c-(\d+)$/.exec(c.id)?.[1] ?? 0);
+        if (n > this.cardSeq) this.cardSeq = n;
+      }
+      this.history = st.history;
+    }
   }
 
   setEncryptors(
@@ -410,6 +430,7 @@ export class Kernel {
     };
     this.feed.push(full);
     this.notify({ type: "card", card: full });
+    this.persistThreadSoon();
     return full;
   }
 
@@ -417,12 +438,65 @@ export class Kernel {
   private patchCard(card: FeedCard, patch: Partial<FeedCard>): void {
     Object.assign(card, patch);
     this.notify({ type: "card", card, replaced: true });
+    this.persistThreadSoon();
   }
 
   /** 回合状态迁移：所有 UI 的"谁在干什么"都只读这一个字段 */
   private setTurn(patch: Partial<TurnState>): void {
     this.turn = { ...this.turn, ...patch, pending: this.queue.length };
     this.notify({ type: "turn", turn: this.turn });
+  }
+
+  // ---------- 线程落盘（M1-14） ----------
+
+  private threadSaveTimer: NodeJS.Timeout | null = null;
+
+  private persistThread(): void {
+    if (!this.currentThreadId) return;
+    try {
+      this.threads.saveState(this.currentThreadId, {
+        feed: this.feed.slice(-200),
+        history: this.history
+          .filter((m) => (m.role === "user" || m.role === "assistant") && typeof m.content === "string")
+          .map((m) => ({ role: m.role as "user" | "assistant", content: m.content as string }))
+          .slice(-200),
+      });
+    } catch {
+      /* 落盘失败不影响对话 */
+    }
+  }
+
+  /** 卡片/流式都会调：600ms 合并一次，崩溃最多丢最后一小段 */
+  private persistThreadSoon(): void {
+    if (this.threadSaveTimer) return;
+    this.threadSaveTimer = setTimeout(() => {
+      this.threadSaveTimer = null;
+      this.persistThread();
+    }, 600);
+  }
+
+  /** 切线程：先存当前，再装载目标；Pi 会话目录按线程隔离 */
+  private switchThread(id: string): void {
+    if (id === this.currentThreadId) return;
+    const meta = this.threads.get(id);
+    if (!meta) throw new Error(`会话不存在：${id}`);
+    this.persistThread();
+    this.currentThreadId = id;
+    const st = this.threads.loadState(id);
+    this.feed = [];
+    this.history = [];
+    this.cardSeq = 0;
+    for (const c of st.feed) {
+      this.feed.push(c);
+      const n = Number(/^c-(\d+)$/.exec(c.id)?.[1] ?? 0);
+      if (n > this.cardSeq) this.cardSeq = n;
+    }
+    this.history = st.history;
+    this.liveCard = null;
+    this.createFreshSession = true;
+    void this.resetAgentHost();
+    this.checkpoints.discard();
+    this.setTurn({ phase: "idle", busy: false, pending: 0, taskId: undefined, startedAt: undefined, canUndo: false, changedFiles: [] });
   }
 
   /** 本轮写过文件就把撤销入口亮出来（M1-12） */
@@ -1009,7 +1083,10 @@ export class Kernel {
       markerDir: path.join(this.dataRoot, "runtime", "workers"),
       // 只有「这次壳里已经有对话记录」才续上次会话：全新安装/新对话不翻出旧档，
       // 也避免测试环境里续到别的用例留下的会话。
-      resume: !this.createFreshSession && fs.existsSync(this.timelineFile),
+      resume:
+        !this.createFreshSession &&
+        (fs.existsSync(this.timelineFile) || this.threads.loadState(this.currentThreadId).history.length > 0),
+      sessionDir: this.threads.piDir(this.currentThreadId),
       onEvent: (ev) => this.onAgentEvent(ev),
       onError: (message) => {
         // 运行时错误必须进对话流：只发事件的话界面会一片空白（用户只看到自己那半句）
@@ -1026,6 +1103,11 @@ export class Kernel {
 
   /** 退出收尾：停 worker、停 MCP，别把子进程留在后台 */
   async dispose(): Promise<void> {
+    if (this.threadSaveTimer) {
+      clearTimeout(this.threadSaveTimer);
+      this.threadSaveTimer = null;
+    }
+    this.persistThread();
     await this.resetAgentHost().catch(() => undefined);
     await this.mcp.stopAll().catch(() => undefined);
     this.log("dispose");
@@ -1231,7 +1313,8 @@ export class Kernel {
     this.busy = true;
     this.l1.setBusy(true);
     this.abortRequested = false;
-    this.log("turn_start", { chars: text.length, model: this.settings.getModel()?.model ?? "" });
+    this.log("turn_start", { chars: text.length, model: this.settings.getModel()?.model ?? "", threadId: this.currentThreadId });
+    this.threads.autoTitle(this.currentThreadId, text);
     this.checkpoints.begin(`turn-${Date.now()}`);
     this.setTurn({ phase: "accepted", busy: true, startedAt: new Date().toISOString(), canUndo: false, changedFiles: [] });
     void this.runChat(text).finally(() => {
@@ -1545,6 +1628,11 @@ export class Kernel {
         const cfg = this.settings.getModel();
         const snap: RpcContracts["session.snapshot"]["result"] = {
           workspace: { project: path.basename(this.projectRoot), subdir: "指挥台" },
+          thread: {
+            id: this.currentThreadId,
+            title: this.threads.get(this.currentThreadId)?.title ?? "新会话",
+          },
+          threads: this.threads.list().map((t) => ({ id: t.id, title: t.title, updatedAt: t.updatedAt })),
           project: {
             root: this.projectRoot,
             trusted: this.trust.isTrusted(this.projectRoot),
@@ -1872,22 +1960,61 @@ export class Kernel {
         return { ok: true, restored: r.restored.length, removed: r.removed.length } as RpcContracts[M]["result"];
       }
 
+      case "thread.list": {
+        return (this.threads.list().map((t) => ({ id: t.id, title: t.title, updatedAt: t.updatedAt })) ??
+          []) as RpcContracts[M]["result"];
+      }
+
+      case "thread.new": {
+        const p = params as { title?: string };
+        this.persistThread();
+        const meta = this.threads.create(p?.title);
+        this.switchThread(meta.id);
+        return { ok: true, thread: { id: meta.id, title: meta.title } } as RpcContracts[M]["result"];
+      }
+
+      case "thread.switch": {
+        const p = params as { id: string };
+        this.switchThread(p.id);
+        return { ok: true, thread: { id: p.id, title: this.threads.get(p.id)?.title ?? "" } } as RpcContracts[M]["result"];
+      }
+
+      case "thread.rename": {
+        const p = params as { id: string; title: string };
+        const t = this.threads.rename(p.id, p.title);
+        return { ok: true, title: t.title } as RpcContracts[M]["result"];
+      }
+
+      case "thread.remove": {
+        const p = params as { id: string };
+        if (p.id === this.currentThreadId) {
+          const meta = this.threads.create("新会话");
+          this.switchThread(meta.id);
+        }
+        this.threads.remove(p.id);
+        return { ok: true } as RpcContracts[M]["result"];
+      }
+
+      case "thread.search": {
+        const p = params as { q: string };
+        return { results: this.threads.search(p.q) } as RpcContracts[M]["result"];
+      }
+
       case "session.new": {
-        this.feed = [];
-        this.history = [];
+        // 新对话 = 新线程：旧会话留在磁盘上可切回，不再清空历史
+        this.persistThread();
+        const meta = this.threads.create("新会话");
+        this.switchThread(meta.id);
         this.tokensUsed = 0;
         this.usage = { turnIn: 0, turnOut: 0, sessionIn: 0, sessionOut: 0, contextTokens: 0, contextWindow: this.usage.contextWindow };
-        this.setTurn({ phase: "idle", busy: false, pending: 0, taskId: undefined, startedAt: undefined });
-        this.createFreshSession = true;
-        void this.resetAgentHost();
         try {
           fs.rmSync(this.timelineFile, { force: true });
           this.contextStore.clear();
         } catch {
           // 忽略
         }
-        this.card({ kind: "system", text: "新会话已开始。历史卷宗仍在 ~/.lynn 里，随时可查。" });
-        return { ok: true } as RpcContracts[M]["result"];
+        this.card({ kind: "system", text: "新会话已开始。上一段对话留在「会话」列表里，随时能切回。" });
+        return { ok: true, threadId: meta.id } as RpcContracts[M]["result"];
       }
 
       default:

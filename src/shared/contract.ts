@@ -226,6 +226,9 @@ export interface SessionSnapshot {
   workspace: { project: string; subdir: string };
   /** 当前项目：项目级扩展只在 trusted 时加载（M1-13） */
   project: { root: string; trusted: boolean; hasMcp: boolean };
+  /** 当前会话线程与线程列表（M1-14） */
+  thread: { id: string; title: string };
+  threads: { id: string; title: string; updatedAt: string }[];
   permission: PermissionMode;
   model: ModelConfigView;
   feed: FeedCard[];
@@ -293,6 +296,31 @@ export interface RpcContracts {
   "trust.set": {
     params: { trusted: boolean };
     result: { ok: boolean; trusted: boolean; root: string; reloading: boolean };
+  };
+  /** 会话线程（M1-14） */
+  "thread.list": {
+    params: void;
+    result: { id: string; title: string; updatedAt: string }[];
+  };
+  "thread.new": {
+    params: { title?: string };
+    result: { ok: boolean; thread: { id: string; title: string } };
+  };
+  "thread.switch": {
+    params: { id: string };
+    result: { ok: boolean; thread: { id: string; title: string } };
+  };
+  "thread.rename": {
+    params: { id: string; title: string };
+    result: { ok: boolean; title: string };
+  };
+  "thread.remove": {
+    params: { id: string };
+    result: { ok: boolean };
+  };
+  "thread.search": {
+    params: { q: string };
+    result: { results: { id: string; title: string; hits: string[] }[] };
   };
   /** 撤销上一轮的文件改动（检查点回滚：改过的还原、新建的删掉） */
   "session.undo": {
