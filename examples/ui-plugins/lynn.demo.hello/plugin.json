@@ -1,0 +1,14 @@
+{
+  "id": "lynn.demo.hello",
+  "name": "磁盘上的问候",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "tier": "U",
+  "engines": { "kernel": "^1.4.0" },
+  "entry": "./ui.html",
+  "description": "示例 U 插件：装进 ~/.lynn/plugins/ 后出现在顶栏 status.bar 卡槽，跑在 iframe 沙箱里。",
+  "source": "marketplace",
+  "contributes": {
+    "slots": ["status.bar"]
+  }
+}

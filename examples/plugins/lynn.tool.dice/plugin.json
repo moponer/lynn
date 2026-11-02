@@ -1,0 +1,13 @@
+{
+  "id": "lynn.tool.dice",
+  "name": "骰子",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "tier": "L1",
+  "engines": { "kernel": "^0.0.1" },
+  "entry": "./index.ts",
+  "description": "示例 L1 进程内扩展：注册一个掷骰子工具（jiti 直跑 TS）",
+  "contributes": { "tools": ["roll"] },
+  "permissions": { "proc": false },
+  "source": "official"
+}

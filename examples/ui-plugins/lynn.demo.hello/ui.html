@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+<style>
+  html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; }
+  body {
+    display: flex; align-items: center;
+    font: 11px/1.2 "Segoe UI", "PingFang SC", sans-serif;
+    color: #9aabba;
+  }
+  .chip { display: inline-flex; align-items: center; gap: 4px; opacity: .9; }
+  .dot { width: 5px; height: 5px; border-radius: 50%; background: #5ea9c9; }
+</style>
+</head>
+<body>
+  <span class="chip"><span class="dot"></span>磁盘插件 · 已加载</span>
+  <script>
+    // 只接收颜色 Token；只回传 resize（不动宿主）
+    window.addEventListener('message', (e) => {
+      const d = e.data || {};
+      if (d.type !== 'init' || !d.theme) return;
+      if (typeof d.theme.ink === 'string') document.body.style.color = d.theme.ink;
+    });
+    parent.postMessage({ lynn: true, type: 'resize', height: 22 }, '*');
+  </script>
+</body>
+</html>

@@ -1,0 +1,11 @@
+{
+  "id": "lynn.theme.dusk",
+  "name": "暮色",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "tier": "L0",
+  "engines": { "kernel": "^1.4.0" },
+  "contributes": { "theme": "./theme.json" },
+  "description": "示例 L0 主题插件：只带 Token，不带脚本。装进 ~/.lynn/plugins/ 后可在「我的风铃」里一键应用。",
+  "source": "local"
+}

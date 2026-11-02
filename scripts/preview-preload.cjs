@@ -1,0 +1,143 @@
+// 预览截图用的假桥：让渲染层在没有内核进程时也能拿到一份快照。
+// 只在开发截图脚本里使用，不参与打包。这里的样例只服务截图，不是产品兜底数据。
+const { contextBridge } = require("electron");
+
+const now = "11-02 14:32";
+const feed = [
+  { id: "c1", kind: "user", createdAt: "14:30", text: "把 issues_0914.csv 整理成周报，少一条要说明。" },
+  {
+    id: "c2",
+    kind: "lynn",
+    createdAt: "14:31",
+    text: "明白了。我拆成两件：先核对源数据条数，再按编号去重生成第 3 节。验收标准：条数对得上、每条都有来源。",
+  },
+  {
+    id: "c3",
+    kind: "tool",
+    badge: "派单",
+    title: "顾明 · WO-2418",
+    meta: "截止 15:00",
+    body: "简报：读 issues_0914.csv，按 number 去重，输出 report_0914.md 第 3 节；附行数对账。",
+    jobId: "WO-2418",
+    createdAt: "14:31",
+  },
+  {
+    id: "c4",
+    kind: "tool",
+    badge: "回报",
+    title: "顾明 · WO-2418",
+    meta: "证据 2 项",
+    body: "已生成第 3 节；附 report_0914.md 与行数对账日志。",
+    jobId: "WO-2418",
+    createdAt: "14:32",
+  },
+];
+
+const snapshot = {
+  workspace: { project: "my-notes", subdir: "值台" },
+  permission: "ask",
+  model: {
+    configured: true,
+    provider: "DeepSeek",
+    baseUrl: "https://api.deepseek.com",
+    model: "deepseek-chat",
+    apiKeySet: true,
+  },
+  feed,
+  board: {
+    teams: [
+      {
+        id: "t1",
+        name: "月报突击队",
+        status: "active",
+        members: [
+          {
+            name: "顾明",
+            role: "数据整理",
+            goal: "把源数据整理成可核对的周报",
+            status: "delivered",
+            statusNote: "已交付，等你拍板",
+            progress: 100,
+            budgetUsed: 18,
+            budgetTotal: 300,
+            rejections: 0,
+            rejectionLimit: 3,
+            toolWhitelist: ["read_file", "write_file"],
+            color: "#5ea9c9",
+            model: "deepseek-chat",
+            turnLimit: 12,
+          },
+        ],
+      },
+    ],
+    track: [
+      {
+        id: "WO-2418",
+        teamId: "t1",
+        title: "把 issues_0914.csv 整理成周报第 3 节",
+        status: "in_review",
+        statusNote: "in_review · 顾明 · 证据 2",
+        member: "顾明",
+        at: now,
+        evidenceCount: 2,
+        version: 3,
+        rejectRounds: 0,
+        evidence: [
+          { label: "report_0914.md", ref: "artifacts/report_0914.md", verified: true, at: now },
+          { label: "rowcount.log", ref: "artifacts/rowcount.log", verified: true, at: now },
+        ],
+      },
+    ],
+    decisions: [],
+    tokensUsed: 21400,
+  },
+  turn: { phase: "review", busy: false, pending: 0, taskId: "WO-2418" },
+  usage: { turnIn: 3120, turnOut: 860, sessionIn: 18400, sessionOut: 3000, contextTokens: 42000, contextWindow: 128000 },
+  queue: [],
+  prefs: { autoStart: false },
+};
+
+contextBridge.exposeInMainWorld("lynn", {
+  rpc: async (method) => {
+    if (method === "session.snapshot") return snapshot;
+    if (method === "permission.set") return { ok: true, mode: "ask" };
+    if (method === "feed.send") return { ok: true, queued: false };
+    if (method === "session.abort") return { ok: true, aborted: true };
+    if (method === "session.queue") return { items: [] };
+    if (method === "session.reload") return { ok: true };
+    if (method === "app.openData") return { ok: true, path: "C:/Users/demo/.lynn" };
+    if (method === "decision.resolve") return { ok: true };
+    if (method === "config.get") return snapshot.model;
+    if (method === "config.prefs") return { ok: true, autoStart: false };
+    if (method === "config.clearKey") return { ok: true };
+    if (method === "ui.plugins") {
+      return { plugins: [], errors: [] };
+    }
+    if (method === "plugins.list") {
+      return {
+        plugins: [
+          {
+            id: "lynn.theme.dusk",
+            name: "暮色",
+            version: "1.0.0",
+            tier: "L0",
+            enabled: true,
+            loadable: true,
+            description: "示例 L0 主题插件（只带 Token）",
+            theme: {
+              name: "暮色",
+              dark: { "--blue": "#6fb3d1", "--brass": "#d0ab35" },
+              light: { "--blue": "#2c6c86", "--brass": "#8a6f1e" },
+            },
+          },
+        ],
+        errors: [],
+      };
+    }
+    if (method === "plugins.status") {
+      return { fingerprint: "3f9c1a2b4d5e6f70", count: 3, safeMode: false, snapshots: [] };
+    }
+    return { ok: true };
+  },
+  onEvent: () => () => {},
+});

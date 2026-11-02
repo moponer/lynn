@@ -1,0 +1,273 @@
+import * as fs from "node:fs";
+import * as path from "node:path";
+import type { TeamStore, MemberProfile } from "./team-store";
+
+/**
+ * 风铃的管理型工具 8 件套（§3.1 / §4.10.3）。
+ *
+ * 「她不会自己去做」的硬实现：这个文件里**只有管理动作**，
+ * 没有 bash / write / browser / office —— 执行类工具只发给成员。
+ * 约束不靠提示词自律，全部在代码里强制：
+ *  - 成员工具集 = min(岗位模板上限, 本次分配)，只能收窄（§4.10.3）
+ *  - 打回必须可执行：哪里不合格/期望是什么/时限（§4.10.5）
+ *  - 打回上限 3 轮，之后必须升级问你（§4.10.5）
+ *  - 编制默认 6 人上限，超过须写理由（§4.10.6）
+ *  - 每次动作写审计账本（§4.2.7：审计独立于被审计者）
+ */
+
+export interface AssignBrief {
+  taskId: string;
+  member: string;
+  /** 简报包：成员只拿这个，不继承全量会话（§4.10.1 上下文隔离） */
+  brief: string;
+  deadline: string;
+  /** 本次分配的工具集：必须是岗位白名单的子集（只能收窄） */
+  tools?: string[];
+  /** 超过 6 人编制时必须写理由 */
+  staffingJustification?: string;
+}
+
+export interface RejectReason {
+  what: string;
+  expect: string;
+  deadline: string;
+}
+
+export interface UserReport {
+  taskId: string;
+  conclusion: string;
+  evidence: string[];
+  unfinished: string[];
+  decisionsNeeded: string[];
+}
+
+export interface UserQuestion {
+  id: string;
+  question: string;
+  context: string;
+  askedAt: string;
+}
+
+const MEMBER_CAP = 6;
+const REJECT_LIMIT = 3;
+
+/**
+ * 只属于风铃的管理型工具。成员白名单里出现任何一个都算越权通道：
+ * 成员没有 ask_user、不能招募、不能验收（§4.10.3 单层指挥）。
+ */
+export const MANAGEMENT_ONLY_TOOLS = [
+  "create_member",
+  "assign_task",
+  "check_progress",
+  "review_result",
+  "accept_or_reject",
+  "report_to_user",
+  "ask_user",
+  "dissolve_team",
+] as const;
+
+export class ManagementTools {
+  private questions: UserQuestion[] = [];
+  private qCounter = 0;
+
+  constructor(
+    private readonly store: TeamStore,
+    private readonly dataRoot: string,
+  ) {}
+
+  /** 审计账本：独立文件，只追加（§4.2.7 内核红线） */
+  private audit(tool: string, detail: Record<string, unknown>): void {
+    const entry = { at: new Date().toISOString(), tool, ...detail };
+    fs.mkdirSync(this.dataRoot, { recursive: true });
+    fs.appendFileSync(path.join(this.dataRoot, "audit.jsonl"), JSON.stringify(entry) + "\n", "utf-8");
+  }
+
+  private assertTeamActive(teamId: string): void {
+    const file = path.join(this.store.teamDir(teamId), "team.json");
+    if (!fs.existsSync(file)) throw new Error(`团队不存在: ${teamId}`);
+    const rec = JSON.parse(fs.readFileSync(file, "utf-8")) as { status: string };
+    if (rec.status !== "active") throw new Error(`团队 ${teamId} 状态为 ${rec.status}，不能派活`);
+  }
+
+  /** 1. create_member —— 书面招募；>6 人必须给理由（§4.10.6 组织膨胀防线） */
+  createMember(teamId: string, profile: MemberProfile, staffingJustification?: string): string {
+    this.assertTeamActive(teamId);
+    const existing = this.store.listMembers(teamId).length;
+    if (existing >= MEMBER_CAP && !staffingJustification) {
+      throw new Error(
+        `编制已达 ${MEMBER_CAP} 人上限；如确需扩编，请在派单记录里写明理由（组织膨胀防线 §4.10.6）`,
+      );
+    }
+    if (!profile.tools.length) throw new Error("成员岗位必须有至少一个工具白名单项");
+    const managementTools = profile.tools.filter((t) =>
+      (MANAGEMENT_ONLY_TOOLS as readonly string[]).includes(t),
+    );
+    if (managementTools.length > 0) {
+      throw new Error(
+        `成员白名单不得包含管理型工具：${managementTools.join("、")}——成员没有 ask_user，也不能再招募或验收（§4.10.3）`,
+      );
+    }
+    const file = this.store.writeMember(teamId, profile);
+    this.audit("create_member", {
+      teamId,
+      member: profile.name,
+      tools: profile.tools.length,
+      justified: existing >= MEMBER_CAP,
+    });
+    return file;
+  }
+
+  /** 2. assign_task —— 派简报包；本次工具集只能比岗位白名单更窄 */
+  assignTask(teamId: string, brief: AssignBrief): void {
+    this.assertTeamActive(teamId);
+    const profile = this.store.readMember(teamId, brief.member);
+    if (brief.tools) {
+      const overreach = brief.tools.filter((t) => !profile.tools.includes(t));
+      if (overreach.length > 0) {
+        throw new Error(
+          `本次分配越权：${overreach.join(", ")} 不在 ${brief.member} 的岗位白名单内。成员工具集只能收窄不能扩张（§4.10.3）`,
+        );
+      }
+    }
+    this.store.appendAssignment(teamId, {
+      taskId: brief.taskId,
+      at: new Date().toISOString(),
+      kind: "assign",
+      member: brief.member,
+      text: JSON.stringify({
+        brief: brief.brief,
+        deadline: brief.deadline,
+        tools: brief.tools ?? profile.tools,
+      }),
+      evidence: brief.staffingJustification ? [brief.staffingJustification] : undefined,
+    });
+    this.audit("assign_task", { teamId, taskId: brief.taskId, member: brief.member });
+  }
+
+  /** 3. check_progress —— 她的上下文只保留状态与最新回报索引，不读成员全量日志（§4.10.6） */
+  checkProgress(teamId: string, taskId: string): {
+    assigns: number;
+    reports: number;
+    rejects: number;
+    latest: { at: string; kind: string; member?: string; text: string } | null;
+  } {
+    const recs = this.store.readAssignments(teamId, taskId);
+    const latest = recs.length ? recs[recs.length - 1] : null;
+    return {
+      assigns: recs.filter((r) => r.kind === "assign").length,
+      reports: recs.filter((r) => r.kind === "report").length,
+      rejects: recs.filter((r) => r.kind === "reject").length,
+      latest: latest ? { at: latest.at, kind: latest.kind, member: latest.member, text: latest.text } : null,
+    };
+  }
+
+  /** 4. review_result —— 审查回报；无证据不算完成（§4.10.5 证据原则） */
+  reviewResult(
+    teamId: string,
+    taskId: string,
+    opts: { member: string; text: string; evidence: string[] },
+  ): { verdict: "logged" } {
+    if (opts.evidence.length === 0) {
+      throw new Error(
+        `成员自述"已完成"但没有证据（文件路径/命令输出/测试结果/抓取快照）——按证据原则判未完成（§4.10.5）`,
+      );
+    }
+    this.store.appendAssignment(teamId, {
+      taskId,
+      at: new Date().toISOString(),
+      kind: "report",
+      member: opts.member,
+      text: opts.text,
+      evidence: opts.evidence,
+    });
+    this.audit("review_result", { teamId, taskId, member: opts.member, evidence: opts.evidence.length });
+    return { verdict: "logged" };
+  }
+
+  /** 5. accept_or_reject —— 打回/验收；第 4 次打回必须升级问你（§4.10.5） */
+  acceptOrReject(
+    teamId: string,
+    taskId: string,
+    verdict: "accept" | "reject",
+    opts: { member: string; rejectReason?: RejectReason; evidence?: string[] },
+  ): { escalated: boolean } {
+    if (verdict === "reject") {
+      const r = opts.rejectReason;
+      if (!r || !r.what || !r.expect || !r.deadline) {
+        throw new Error("打回必须可执行：写清哪里不合格(what)、期望是什么(expect)、多久内重交(deadline)——不带理由的打回视为风铃失职（§4.10.5）");
+      }
+      const rejects = this.store.rejectCount(teamId, taskId);
+      if (rejects >= REJECT_LIMIT) {
+        // 不再循环：升级问你（§4.10.5 防死循环最后一道闸）
+        const q = this.askUser(
+          `任务 ${taskId} 对 ${opts.member} 连续 ${REJECT_LIMIT} 轮打回未通过，继续打回还是换策略？`,
+          `最近一次不合格：${r.what}`,
+        );
+        this.store.appendAssignment(teamId, {
+          taskId,
+          at: new Date().toISOString(),
+          kind: "escalate",
+          member: opts.member,
+          text: `打回上限 ${REJECT_LIMIT} 轮已到，升级问你（问题 id: ${q.id}）`,
+        });
+        this.audit("accept_or_reject", { teamId, taskId, escalated: true });
+        return { escalated: true };
+      }
+    }
+    this.store.appendAssignment(teamId, {
+      taskId,
+      at: new Date().toISOString(),
+      kind: verdict === "accept" ? "accept" : "reject",
+      member: opts.member,
+      text:
+        verdict === "accept"
+          ? "验收通过：证据齐全且可复跑"
+          : JSON.stringify(opts.rejectReason),
+      evidence: opts.evidence,
+      rejectReason: verdict === "reject" ? opts.rejectReason : undefined,
+    });
+    this.audit("accept_or_reject", { teamId, taskId, verdict });
+    return { escalated: false };
+  }
+
+  /** 6. report_to_user —— 汇报四件套：结论+证据+未完成+待拍板（§4.10.4） */
+  reportToUser(teamId: string, report: UserReport): UserReport {
+    this.store.appendAssignment(teamId, {
+      taskId: report.taskId,
+      at: new Date().toISOString(),
+      kind: "report",
+      text: JSON.stringify({ report: true, ...report }),
+      evidence: report.evidence,
+    });
+    this.audit("report_to_user", { teamId, taskId: report.taskId });
+    return report;
+  }
+
+  /** 7. ask_user —— 成员没有问用户的通道，问题归集到她、由她转呈（§4.10.3） */
+  askUser(question: string, context: string): UserQuestion {
+    const q: UserQuestion = {
+      id: `q-${++this.qCounter}`,
+      question,
+      context,
+      askedAt: new Date().toISOString(),
+    };
+    this.questions.push(q);
+    this.audit("ask_user", { questionId: q.id, question });
+    return q;
+  }
+
+  pendingQuestions(): UserQuestion[] {
+    return [...this.questions];
+  }
+
+  /** 8. dissolve_team —— 解散或保留复用由她判断，但动作要审计 */
+  dissolveTeam(teamId: string, keep: boolean): "dissolved" | "kept" {
+    if (keep) {
+      this.audit("dissolve_team", { teamId, keep: true });
+      return "kept";
+    }
+    this.store.dissolveTeam(teamId);
+    this.audit("dissolve_team", { teamId, keep: false });
+    return "dissolved";
+  }
+}

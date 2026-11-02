@@ -1,0 +1,1427 @@
+import { useMemo, useState } from "react";
+import type { FeedCard, PermissionMode, QueueItem } from "../../shared/contract";
+import { Icon, type IconName } from "../components/Icon";
+import type { Desk, DeskDiff, DeskJob, DeskMember } from "./model";
+import { Slot, SandboxAction, SandboxHtml } from "./ui-host";
+import { AmbientLayer } from "./AmbientLayer";
+import type { AmbientMode, AmbientParams } from "../../shared/ambient";
+import { STAGES } from "./model";
+import { FeedView } from "./Feed";
+
+/**
+ * 值台（Dispatch Desk）—— 设计规范 §4 的三栏骨架：
+ * 台账 258 / 图纸 flex / 编制表 384，底部指令台。
+ * 三种声音：成员产出（等宽）/ 风铃（纸边批注）/ 你（朱砂印章）。
+ */
+
+const PERMISSIONS: { mode: PermissionMode; label: string; en: string }[] = [
+  { mode: "plan", label: "计划", en: "PLAN" },
+  { mode: "ask", label: "询问", en: "ASK" },
+  { mode: "auto", label: "自动", en: "AUTO" },
+  { mode: "full", label: "全权", en: "FULL" },
+];
+
+export function fmtTokens(n: number): string {
+  if (n <= 0) return "0";
+  return n >= 1000 ? `${(n / 1000).toFixed(1)}K` : String(n);
+}
+
+function statusChipClass(job: DeskJob): string {
+  if (job.status === "in_review" || job.status === "blocked") return "st-wait";
+  if (job.status === "in_progress") return "st-live";
+  if (job.status === "done") return "st-done";
+  return "st-idle";
+}
+
+// ============================ TOP RAIL ============================
+
+function TopRail({
+  desk,
+  current,
+  permission,
+  onPermission,
+  onOpenSettings,
+  onNew,
+  mode = "desk",
+}: {
+  desk: Desk;
+  current?: DeskJob;
+  permission: PermissionMode;
+  onPermission: (m: PermissionMode) => void;
+  onOpenSettings: () => void;
+  onNew?: () => void;
+  mode?: "desk" | "review";
+}) {
+  const ctx = desk.usage.contextWindow > 0 ? Math.min(1, desk.usage.contextTokens / desk.usage.contextWindow) : 0;
+  const contextPct = Math.round(ctx * 100);
+  const filled = Math.min(12, Math.max(0, Math.round(ctx * 12)));
+  return (
+    <header className="rail-top">
+      <div className="brand">
+        <div className="brand-mark">
+          <Icon name="bell" />
+        </div>
+        <div>
+          <div className="brand-name">风铃</div>
+          <div className="brand-sub">Lynn</div>
+        </div>
+      </div>
+      <div className="vr" />
+      <div className="crumbs">
+        <span className="crumb-chip">
+          <Icon name="folder" size="sm" /> {desk.project}
+        </span>
+        <Icon name="chev" size="sm" />
+        <span className="seg">{mode === "review" ? "验收包" : "工单"}</span>
+        <Icon name="chev" size="sm" />
+        <span className="cur mono">{current?.id ?? "—"}</span>
+      </div>
+      <div className="spacer" />
+
+      <div className="seg">
+        <span className="seg-label">权限</span>
+        {PERMISSIONS.map((p) => (
+          <button
+            type="button"
+            key={p.mode}
+            aria-pressed={permission === p.mode}
+            className={`seg-item${permission === p.mode ? " on" : ""}`}
+            onClick={() => onPermission(p.mode)}
+            title={`切到 ${p.label}`}
+          >
+            {p.label} <span className="en">{p.en}</span>
+          </button>
+        ))}
+      </div>
+
+      <div className="vr" />
+
+      {/* status.bar 卡槽：官方受限组件（用量读数） */}
+      <Slot
+        slot="status.bar"
+        render={(p) =>
+          p.html ? (
+            <SandboxHtml plugin={p} width={132} height={22} />
+          ) : p.sandbox ? null : (
+            <span className="st st-idle" title={p.description ?? p.name}>
+              {p.name} {fmtTokens(desk.tokensUsed)}
+            </span>
+          )
+        }
+      />
+
+      <div
+        className="gauge"
+        title={`上下文 ${desk.usage.contextTokens} / ${desk.usage.contextWindow} · 会话累计 ${fmtTokens(desk.tokensUsed)} tokens`}
+      >
+        <div className="gauge-read">
+          <div className="v">{contextPct}%</div>
+          <div className="k">上下文</div>
+        </div>
+        <div className="gauge-bar">
+          {Array.from({ length: 12 }, (_, i) => (
+            <i
+              key={i}
+              className={`${i < filled ? "on" : ""}${contextPct >= 90 && i < filled ? " hot" : ""}`}
+              style={{ height: `${8 + i}px` }}
+            />
+          ))}
+        </div>
+      </div>
+
+      <div className="vr" />
+      <button className="ghost-btn" onClick={onNew} title="新对话：清空当前会话，重新开始（工单与卷宗保留）">
+        <Icon name="plus" size="sm" /> 新对话
+      </button>
+      <button className="ghost-btn" onClick={onOpenSettings} title="设置 / 我的风铃（M3-06）">
+        <Icon name="user" size="sm" /> 我的风铃
+      </button>
+    </header>
+  );
+}
+
+// ============================ LEDGER ============================
+
+function Ledger({
+  desk,
+  activeId,
+  onSelect,
+}: {
+  desk: Desk;
+  activeId?: string;
+  onSelect: (id: string) => void;
+}) {
+  const [q, setQ] = useState("");
+  const match = (j: DeskJob) => !q || `${j.id} ${j.title} ${j.member ?? ""}`.toLowerCase().includes(q.toLowerCase());
+
+  const waiting = desk.jobs.filter((j) => (j.status === "in_review" || j.status === "blocked") && match(j));
+  const running = desk.jobs.filter((j) => !["in_review", "blocked", "done", "canceled"].includes(j.status) && match(j));
+  const archived = desk.archived.filter((a) => !q || `${a.id} ${a.title}`.toLowerCase().includes(q.toLowerCase()));
+  const activeCount = desk.jobs.filter((j) => j.status !== "done" && j.status !== "canceled").length;
+
+  return (
+    <aside className="ledger">
+      <div className="ledger-head">
+        <span className="h-cap">任务台账</span>
+        <span className="h-count">
+          {activeCount} 在办 · {desk.archived.length} 已归档
+        </span>
+      </div>
+      <label className="search">
+        <Icon name="search" size="sm" />
+        <input
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="搜工单、成员、产物"
+          style={{ background: "none", border: 0, outline: 0, color: "inherit", font: "inherit", flex: 1, minWidth: 0 }}
+        />
+      </label>
+
+      <div className="ledger-scroll">
+        <div className="grp-label">
+          <span className="dot" style={{ background: "var(--seal)" }} /> 等你拍板 · {waiting.length}
+        </div>
+        {waiting.length === 0 && <div className="ledger-empty">没有等你的工单 —— 她会在需要你裁决时才呈上来</div>}
+        {waiting.map((j) => (
+          <JobRow key={j.id} job={j} active={j.id === activeId} onClick={() => onSelect(j.id)} />
+        ))}
+
+        <div className="grp-label">
+          <span className="dot" style={{ background: "var(--blue)" }} /> 进行中 · {running.length}
+        </div>
+        {running.length === 0 && <div className="ledger-empty">派第一件需要动手的活，她会自己招人组队</div>}
+        {running.map((j) => (
+          <JobRow key={j.id} job={j} active={j.id === activeId} onClick={() => onSelect(j.id)} />
+        ))}
+
+        {archived.length > 0 && (
+          <div className="archive-band">
+            <div className="ab-h">
+              <Icon name="archive" size="sm" />
+              <span>归档带</span>
+              <span className="mono" style={{ marginLeft: "auto" }}>
+                {archived.length}
+              </span>
+            </div>
+            <ol>
+              {archived.slice(0, 20).map((a) => (
+                <li key={a.id} title={`~/.lynn/tasks/${a.id}/`}>
+                  {a.id} <span className="mono">{a.title}</span>
+                </li>
+              ))}
+            </ol>
+          </div>
+        )}
+
+        <div className="note" style={{ margin: "2px 8px 0", background: "rgba(146,174,194,.05)", boxShadow: "none" }}>
+          <Icon name="lock" size="sm" />
+          全部落在 <span className="mono" style={{ color: "var(--ink-2)" }}>~/.lynn/</span> · 无遥测
+        </div>
+      </div>
+    </aside>
+  );
+}
+
+function JobRow({ job, active, onClick }: { job: DeskJob; active: boolean; onClick: () => void }) {
+  return (
+    <button type="button" className={`job${active ? " on" : ""}`} onClick={onClick}>
+      <div className="job-top">
+        <span className="job-id">{job.id}</span>
+        <span className={`st ${statusChipClass(job)}`}>
+          {job.status === "in_progress" && <span className="pip" />}
+          {job.statusLabel}
+        </span>
+      </div>
+      <div className="job-title">{job.title}</div>
+      <div className="job-meta">
+        <Icon name="user" size="sm" /> {job.member ?? "风铃"}
+        <span style={{ color: "var(--ink-4)" }}>·</span>
+        <span className="mono">{job.at ?? "—"}</span>
+      </div>
+    </button>
+  );
+}
+
+// ============================ SHEET ============================
+
+const FEED_TAB = { k: "feed", label: "往来", icon: "bell" as IconName };
+
+function Sheet({
+  job,
+  feed,
+  onFeedAction,
+  onExample,
+}: {
+  job?: DeskJob;
+  feed: FeedCard[];
+  onFeedAction?: (c: FeedCard) => void;
+  onExample?: (text: string) => void;
+}) {
+  const [tab, setTab] = useState("feed");
+  const channel = useMemo(() => feed.filter((c) => !c.jobId), [feed]);
+
+  if (!job) {
+    return (
+      <div className="sheet">
+        <span className="crop tl" />
+        <span className="crop tr" />
+        <span className="crop bl" />
+        <span className="crop br" />
+        <div className="sheet-head">
+          <div className="sheet-eyebrow">
+            <span>频道</span>
+            <span style={{ opacity: 0.4 }}>/</span>
+            <span>还没有选中工单</span>
+          </div>
+          <h1 className="sheet-title">说吧，要办什么</h1>
+          <div className="sheet-sub">她先写清「要做什么、什么算完成」，再决定自己答还是组队。</div>
+        </div>
+        <div className="sheet-body">
+          <div className="work feed-work">
+            <FeedView
+              cards={channel}
+              onAction={onFeedAction}
+              empty={
+                <>
+                  还没有往来。可以在下面写一句要办的事，或者直接问。
+                  <span className="feed-examples">
+                    <button type="button" onClick={() => onExample?.("把 ~/Downloads 里的 CSV 整理成一份周报")}>
+                      整理 CSV 成周报
+                    </button>
+                    <button type="button" onClick={() => onExample?.("帮我看看这个仓库最该先修什么")}>
+                      看看仓库先修什么
+                    </button>
+                  </span>
+                </>
+              }
+            />
+          </div>
+        </div>
+        <div className="titleblock">
+          <div className="tb-cell">
+            <div className="k">工单</div>
+            <div className="v">—</div>
+          </div>
+          <div className="tb-cell">
+            <div className="k">版本</div>
+            <div className="v">—</div>
+          </div>
+          <div className="tb-cell hi">
+            <div className="k">阶段</div>
+            <div className="v">待受理</div>
+          </div>
+          <div className="tb-cell">
+            <div className="k">成员</div>
+            <div className="v">—</div>
+          </div>
+          <div className="tb-cell">
+            <div className="k">提交</div>
+            <div className="v">—</div>
+          </div>
+          <div className="tb-cell">
+            <div className="k">验收</div>
+            <div className="v">—</div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const evidence = job.evidence;
+  const jobFeed = useMemo(() => feed.filter((c) => c.jobId === job.id || !c.jobId), [feed, job.id]);
+
+  return (
+    <div className="sheet">
+      <span className="crop tl" />
+      <span className="crop tr" />
+      <span className="crop bl" />
+      <span className="crop br" />
+
+      <div className="sheet-head">
+        <div className="sheet-eyebrow">
+          <span>工单 {job.id}</span>
+          <span style={{ opacity: 0.4 }}>/</span>
+          <span>{job.teamName ?? job.teamId}</span>
+          <span style={{ opacity: 0.4 }}>/</span>
+          <span>
+            派给 {job.member ?? "风铃"} · {job.memberRole ?? "调度"}
+          </span>
+        </div>
+        <h1 className="sheet-title">{job.title}</h1>
+        <div className="sheet-sub">
+          {job.statusLabel} · 已附 <span className="mono">{job.evidenceCount}</span> 项证据 · 打回上限{" "}
+          <span className="mono">{job.rejectLimit}</span> 轮（已用 <span className="mono">{job.rejections}</span>）
+          {job.budget && (
+            <>
+              {" "}
+              · 本单预算{" "}
+              <span className="mono">
+                {job.budgetKind === "money"
+                  ? `¥${job.budget.used.toFixed(2)} / ¥${job.budget.total.toFixed(2)}`
+                  : `${job.budget.used}K / ${job.budget.total}K tokens`}
+              </span>
+            </>
+          )}
+        </div>
+
+        <div className="steps">
+          {STAGES.map((label, i) => {
+            const done = i < job.stage;
+            const now = i === job.stage;
+            return (
+              <span key={label} style={{ display: "flex", alignItems: "center" }}>
+                <span className={`step${done ? " done" : now ? " now" : ""}`}>
+                  <span className="n">{done ? "✓" : i + 1}</span>
+                  <span className="l">{label}</span>
+                </span>
+                {i < STAGES.length - 1 && <span className={`step-line${done ? " done" : ""}`} />}
+              </span>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="tabs">
+        {[
+          FEED_TAB,
+          ...(job.diff ? [{ k: "diff", label: "差异", icon: "diff" as IconName }] : []),
+          ...(job.artifact ? [{ k: "artifact", label: "产物", icon: "table" as IconName }] : []),
+        ].map((t) => {
+          const count = t.k === "feed" ? jobFeed.length : 0;
+          return (
+            <button
+              type="button"
+              key={t.k}
+              className={`tab${tab === t.k ? " on" : ""}`}
+              onClick={() => setTab(t.k)}
+            >
+              <Icon name={t.icon} size="sm" /> {t.label}
+              {count > 0 && <span className="tag">{count}</span>}
+            </button>
+          );
+        })}
+      </div>
+
+      <div className="sheet-body">
+        <div className="work feed-work">
+          {tab === "feed" && <FeedView cards={jobFeed} onAction={onFeedAction} empty="这个工单还没有往来。" />}
+          {tab === "diff" && job.diff && <DiffView diff={job.diff} />}
+          {tab === "artifact" && job.artifact && <ArtifactView job={job} />}
+        </div>
+
+        <div className="spine">
+          <div className="spine-h">
+            <span>证据链</span>
+            <span className="mono">
+              {evidence.filter((e) => e.level !== "pending").length} / {evidence.length}
+            </span>
+          </div>
+          {evidence.map((e, i) => (
+            <button
+              type="button"
+              key={i}
+              disabled={!e.ref}
+              title={e.ref ? `打开 ${e.ref}` : "没有可打开的证据"}
+              className={`ev${e.level === "ok" ? " ok" : e.level === "warn" ? " warn" : " pending"}${e.ref ? " openable" : ""}`}
+              onClick={() => {
+                if (!e.ref) return;
+                void window.lynn.rpc("evidence.open", { taskId: job.id, ref: e.ref });
+              }}
+            >
+              <div className="t">{e.title}</div>
+              <div className="d prewrap">{e.detail}</div>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="titleblock">
+        <div className="tb-cell">
+          <div className="k">工单</div>
+          <div className="v">{job.id}</div>
+        </div>
+        <div className="tb-cell">
+          <div className="k">版本</div>
+          <div className="v">v{job.version}</div>
+        </div>
+        <div className="tb-cell hi">
+          <div className="k">阶段</div>
+          <div className="v">{STAGES[job.stage]}</div>
+        </div>
+        <div className="tb-cell">
+          <div className="k">成员</div>
+          <div className="v">{job.member ?? "风铃"}</div>
+        </div>
+        <div className="tb-cell">
+          <div className="k">提交</div>
+          <div className="v">{job.at ?? "—"}</div>
+        </div>
+        <div className={`tb-cell${job.status === "in_review" || job.status === "blocked" ? " sealv" : ""}`}>
+          <div className="k">验收</div>
+          <div className="v">{job.status === "done" ? "已归档" : job.status === "in_review" ? "待你" : job.statusLabel}</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DiffView({ diff }: { diff: DeskDiff }) {
+  return (
+    <div className="diff">
+      <div className="f">
+        <span className="s">{diff.file}</span>
+        <span>{diff.hunk}</span>
+      </div>
+      {diff.lines.map((l, i) => (
+        <div key={i} className={`l${l.t === "add" ? " add" : l.t === "del" ? " del" : l.t === "hunk" ? " hunk" : ""}`}>
+          <span className="ln">{l.no}</span>
+          {l.t === "del" ? "-" : l.t === "add" ? "+" : " "}
+          {l.text}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+
+
+function ArtifactView({ job }: { job: DeskJob }) {
+  const a = job.artifact!;
+  return (
+    <div className="artifact">
+      <div className="artifact-h">
+        <Icon name="table" size="sm" />
+        <span>产物预览</span>
+        <span className="nm">
+          <b>{a.name}</b> · {a.section}
+        </span>
+      </div>
+      <div className="art-table">
+        <div className="art-row head">
+          {a.head.map((h) => (
+            <span key={h}>{h}</span>
+          ))}
+        </div>
+        {a.rows.map((r, i) => (
+          <div className="art-row" key={i}>
+            {r.map((c, j) => (
+              <span key={j} className={j === 0 ? "no" : j === 1 ? "ti" : "stt"}>
+                {c}
+              </span>
+            ))}
+          </div>
+        ))}
+        <div className="art-foot">
+          {a.foot.map((f, i) => (
+            <span key={i} className={f.warn ? "warn" : undefined} style={i === a.foot.length - 1 ? { marginLeft: "auto" } : undefined}>
+              {f.text}
+            </span>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================ ROSTER + SEAL ============================
+
+function Roster({
+  desk,
+  onAccept,
+  onReject,
+  onPlan,
+  onAnswer,
+}: {
+  desk: Desk;
+  onAccept: (taskId: string) => void;
+  onReject: (taskId: string) => void;
+  onPlan: (id: string, action: "start" | "revise" | "reject", text?: string) => void;
+  onAnswer: (id: string, text: string) => void;
+}) {
+  const active = desk.members.filter((m) => m.status !== "idle");
+  const idle = desk.members.filter((m) => m.status === "idle");
+  const decision = desk.decision;
+  const reviewJob = desk.jobs.find((j) => j.status === "in_review" || j.status === "blocked");
+
+  return (
+    <aside className="right">
+      <div className="right-scroll">
+        <div className="panel-h">
+          <div className="l">
+            <span className="t">我的团队</span>
+            <span className="n">编制 {desk.members.length} / 6</span>
+          </div>
+          <span className="cap">
+            在职 {active.length} · 空闲 {idle.length}
+          </span>
+        </div>
+
+        {desk.members.length === 0 && (
+          <div className="note" style={{ boxShadow: "none" }}>
+            <Icon name="users" size="sm" />
+            还没有编制。派一件需要动手的活，她会自己招人。
+          </div>
+        )}
+
+        {desk.members.map((m) => (
+          <MemberCard key={m.name} m={m} active={!!decision?.jobId && m.jobId === decision.jobId} />
+        ))}
+
+        {decision?.kind === "plan" && decision.plan ? (
+          <PlanSeal decision={decision} onPlan={onPlan} />
+        ) : decision?.kind === "approval" ? (
+          <ApprovalSeal decision={decision} onPlan={onPlan} />
+        ) : decision ? (
+          <QuestionSeal decision={decision} onAnswer={onAnswer} />
+        ) : reviewJob ? (
+          <AcceptSeal job={reviewJob} onAccept={() => onAccept(reviewJob.id)} onReject={() => onReject(reviewJob.id)} />
+        ) : (
+          <div className="sealcard-empty">
+            <Icon name="shield" size="sm" />
+            <div>
+              <b>暂无待你拍板</b>
+            </div>
+          </div>
+        )}
+      </div>
+    </aside>
+  );
+}
+
+function SealHead({ k, id }: { k: string; id?: string }) {
+  return (
+    <div className="sealcard-h">
+      <span className="k">{k}</span>
+      {id && <span className="mono seal-id">{id}</span>}
+    </div>
+  );
+}
+
+function SealChecks({ checks }: { checks: { ok: boolean; text: string }[] }) {
+  if (checks.length === 0) return null;
+  return (
+    <div className="accept">
+      <div className="k">验收标准</div>
+      <ul>
+        {checks.map((c, i) => (
+          <li key={i} className={c.ok ? "ok" : "bad"}>
+            <Icon name={c.ok ? "check" : "warn"} size="sm" />
+            <span>{c.text}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/** 任务契约：开始 / 改一版 / 先不做 */
+function PlanSeal({
+  decision,
+  onPlan,
+}: {
+  decision: NonNullable<Desk["decision"]>;
+  onPlan: (id: string, action: "start" | "revise" | "reject", text?: string) => void;
+}) {
+  const [revise, setRevise] = useState<string | null>(null);
+  const plan = decision.plan!;
+  return (
+    <div className="sealcard">
+      <SealHead k="任务契约" id={plan.taskId} />
+      <div className="sealcard-body">
+        <SealGlyph />
+        <div className="sealcard-text">
+          <div className="who">
+            <b>{plan.member ?? "待定"}</b>
+            {plan.deadline ? ` · 截止 ${plan.deadline}` : ""}
+            {plan.budgetTokens ? ` · 预算 ${Math.round(plan.budgetTokens / 1000)}K` : ""}
+          </div>
+          <div className="ask">{plan.title}</div>
+        </div>
+      </div>
+      <SealChecks checks={decision.checks} />
+      {revise === null ? (
+        <div className="seal-actions">
+          <button type="button" className="btn btn-accept" onClick={() => onPlan(decision.id, "start")}>
+            <Icon name="check" size="sm" /> 开始
+          </button>
+          <button type="button" className="btn" onClick={() => setRevise("")}>
+            <Icon name="undo" size="sm" /> 改一版
+          </button>
+          <button type="button" className="btn btn-reject" onClick={() => onPlan(decision.id, "reject")}>
+            先不做
+          </button>
+        </div>
+      ) : (
+        <div className="seal-revise">
+          <textarea
+            className="seal-input"
+            value={revise}
+            onChange={(e) => setRevise(e.target.value)}
+            placeholder="要改哪里？例如：验收标准加一条「必须提供 CSV 行数对账」"
+          />
+          <div className="seal-actions">
+            <button
+              type="button"
+              className="btn btn-accept"
+              disabled={!revise.trim()}
+              onClick={() => onPlan(decision.id, "revise", revise)}
+            >
+              交给她改
+            </button>
+            <button type="button" className="btn" onClick={() => setRevise(null)}>
+              取消
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** 工具审批：批准这一动作，或拒绝（拒绝不算错误轮） */
+function ApprovalSeal({
+  decision,
+  onPlan,
+}: {
+  decision: NonNullable<Desk["decision"]>;
+  onPlan: (id: string, action: "start" | "revise" | "reject", text?: string) => void;
+}) {
+  return (
+    <div className="sealcard">
+      <SealHead k="等你批准" id={decision.jobId} />
+      <div className="sealcard-body">
+        <SealGlyph />
+        <div className="sealcard-text">
+          <div className="who">权限档位：询问</div>
+          <div className="ask">{decision.question}</div>
+        </div>
+      </div>
+      <div className="seal-actions">
+        <button type="button" className="btn btn-accept" onClick={() => onPlan(decision.id, "start")}>
+          <Icon name="check" size="sm" /> 允许这次
+        </button>
+        <button type="button" className="btn btn-reject" onClick={() => onPlan(decision.id, "reject")}>
+          拒绝
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** 她的问题：回答会作为新一回合的输入回到模型 */
+function QuestionSeal({
+  decision,
+  onAnswer,
+}: {
+  decision: NonNullable<Desk["decision"]>;
+  onAnswer: (id: string, text: string) => void;
+}) {
+  const [text, setText] = useState("");
+  return (
+    <div className="sealcard">
+      <SealHead k="等你回答" id={decision.jobId} />
+      <div className="sealcard-body">
+        <SealGlyph />
+        <div className="sealcard-text">
+          <div className="who">{decision.who}</div>
+          <div className="ask">{decision.question}</div>
+        </div>
+      </div>
+      <textarea
+        className="seal-input"
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        placeholder="写清你的决定（她会照这个继续）"
+      />
+      <div className="seal-actions">
+        <button type="button" className="btn btn-accept" disabled={!text.trim()} onClick={() => onAnswer(decision.id, text)}>
+          提交回答
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** 工单交付：验收归档 / 打回（打回走审查台三要素） */
+function AcceptSeal({ job, onAccept, onReject }: { job: DeskJob; onAccept: () => void; onReject: () => void }) {
+  return (
+    <div className="sealcard">
+      <SealHead k="等你拍板" id={job.id} />
+      <div className="sealcard-body">
+        <SealGlyph />
+        <div className="sealcard-text">
+          <div className="who">
+            <b>{job.member ?? "成员"}</b> 提交{job.at ? ` · ${job.at}` : ""}
+          </div>
+          <div className="ask">{job.title}</div>
+        </div>
+      </div>
+      <SealChecks checks={job.evidence.filter((e) => e.verified).map((e) => ({ ok: true, text: e.title }))} />
+      <div className="seal-actions">
+        <button type="button" className="btn btn-accept" onClick={onAccept}>
+          <Icon name="check" size="sm" /> 验收归档
+        </button>
+        <button type="button" className="btn btn-reject" onClick={onReject}>
+          <Icon name="undo" size="sm" /> 打回重做
+        </button>
+      </div>
+      <div className="rounds">
+        <span>打回轮次</span>
+        {[0, 1, 2].map((i) => (
+          <span key={i} className={`sq${i < job.rejections ? " on" : ""}`} />
+        ))}
+        <span className="rounds-note">
+          {job.rejections >= job.rejectLimit ? "已满，需你决定" : `已用 ${job.rejections} / ${job.rejectLimit}`}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function MemberCard({ m, active }: { m: DeskMember; active: boolean }) {
+  const chip = m.status === "delivered" ? "st-wait" : m.status === "running" || m.status === "stuck" ? "st-live" : "st-idle";
+  return (
+    <div className={`mcard${active ? " active" : ""}`}>
+      <div className="mcard-top">
+        <div className={`mcard-avatar${m.status !== "idle" ? " on" : ""}`}>{m.name.slice(0, 1)}</div>
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <div className="mcard-name">{m.name}</div>
+          <div className="mcard-role">
+            {m.role} · {m.model}
+          </div>
+        </div>
+        <span className={`st ${chip}`}>
+          {m.status === "running" && <span className="pip" />}
+          {m.statusLabel}
+        </span>
+      </div>
+      <div className="mcard-job">
+        {m.jobId ? `${m.jobId} · ` : ""}
+        {m.jobTitle ?? "—"}
+      </div>
+      <div className="mcard-spec">
+        {m.tools.slice(0, 4).map((t) => (
+          <span key={t} className="chip b">
+            {t}
+          </span>
+        ))}
+        <span className="chip r">上限 {m.turnLimit ?? "—"} 轮</span>
+      </div>
+      <div className="mcard-foot">
+        <div className="pbar">
+          <i style={{ width: `${Math.max(0, Math.min(100, m.progress))}%` }} />
+        </div>
+        <span className="mono" style={{ fontSize: 9.5, color: "var(--ink-4)" }}>
+          {m.foot}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function SealGlyph({ big }: { big?: boolean }) {
+  const c = "var(--seal)";
+  return (
+    <div className="seal-glyph" style={big ? { width: 84, height: 84 } : undefined}>
+      <svg viewBox="0 0 100 100">
+        <g transform="rotate(-7 50 50)" opacity="0.92">
+          <rect x="6" y="6" width="88" height="88" rx="5" fill="none" stroke={c} strokeWidth="5.5" />
+          <rect x="13" y="13" width="74" height="74" rx="3" fill="none" stroke={c} strokeWidth="1.3" opacity="0.65" />
+          {[
+            ["等", 33, 43],
+            ["你", 67, 43],
+            ["拍", 33, 79],
+            ["板", 67, 79],
+          ].map(([t, x, y]) => (
+            <text
+              key={t as string}
+              x={x as number}
+              y={y as number}
+              textAnchor="middle"
+              fontFamily="Noto Sans SC, sans-serif"
+              fontSize="26"
+              fontWeight="700"
+              fill={c}
+            >
+              {t}
+            </text>
+          ))}
+        </g>
+      </svg>
+    </div>
+  );
+}
+
+// ============================ COMPOSER ============================
+
+function ComposerZone({
+  permission,
+  configured,
+  turn,
+  queue,
+  variant = "desk",
+  onStandby,
+  onSend,
+  onAbort,
+  onQueue,
+}: {
+  permission: PermissionMode;
+  configured: boolean;
+  turn: Desk["turn"];
+  queue: QueueItem[];
+  variant?: "desk" | "review";
+  onStandby?: () => void;
+  onSend: (text: string, mode: "queue" | "steer") => void;
+  onAbort: () => void;
+  onQueue: (action: "clear" | "remove", id?: string) => void;
+}) {
+  const [draft, setDraft] = useState("");
+  const [mode, setMode] = useState<"queue" | "steer">("queue");
+  const busy = turn.busy;
+  const canSend = draft.trim().length > 0 && configured;
+
+  const submit = () => {
+    const text = draft.trim();
+    if (!text) return;
+    if (text === "/standby") {
+      setDraft("");
+      onStandby?.();
+      return;
+    }
+    onSend(text, busy ? mode : "queue");
+    setDraft("");
+  };
+
+  return (
+    <div className="composer">
+      {busy && (
+        <div className="dispatch-strip">
+          <span className="lbl">进行中</span>
+          <span className="dchip b">
+            <span className="pip" /> {turn.phase === "review" ? "等你裁决" : "她在跑"}
+          </span>
+          {queue.length > 0 && (
+            <>
+              <span className="dchip">已排队 {queue.length} 条</span>
+              {queue.map((q) => (
+                <span key={q.id} className="dchip" title={q.text}>
+                  {q.text.slice(0, 12)}
+                  <button type="button" className="x" onClick={() => onQueue("remove", q.id)} title="撤回">
+                    ×
+                  </button>
+                </span>
+              ))}
+              <button type="button" className="strip-link" onClick={() => onQueue("clear")}>
+                清空
+              </button>
+            </>
+          )}
+        </div>
+      )}
+
+      <div className="composer-row">
+        <textarea
+          className="composer-in"
+          rows={1}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+              e.preventDefault();
+              submit();
+            }
+          }}
+          placeholder={
+            configured
+              ? busy
+                ? mode === "steer"
+                  ? "插话：会打断当前方向…"
+                  : "排队：这一轮结束后执行…"
+                : variant === "review"
+                  ? "告诉她怎么改，或直接回答她…"
+                  : "交给风铃去做，或直接问她…"
+              : "先配置模型（我的风铃 → 模型）"
+          }
+        />
+        {busy && (
+          <div className="mode-toggle">
+            <button type="button" className={`av-vbtn${mode === "queue" ? " on" : ""}`} onClick={() => setMode("queue")}>
+              排队
+            </button>
+            <button type="button" className={`av-vbtn${mode === "steer" ? " on" : ""}`} onClick={() => setMode("steer")}>
+              插话
+            </button>
+          </div>
+        )}
+        <Slot
+          slot="composer.action"
+          render={(p) =>
+            p.sandbox ? (
+              <SandboxAction plugin={p} onAction={(label) => setDraft((d) => `${d}!${label} `)} />
+            ) : null
+          }
+        />
+        {busy ? (
+          <button type="button" className="send stop" onClick={onAbort} title="停止本轮（已产出保留）">
+            <i />
+          </button>
+        ) : (
+          <button type="button" className="send" onClick={submit} disabled={!canSend} title="发送">
+            <Icon name="send" />
+          </button>
+        )}
+      </div>
+
+      <div className="composer-hint">
+        <span className="mono">Enter 发送 · Shift+Enter 换行</span>
+        <span className="sep">·</span>
+        <span className="mono">权限 {PERMISSIONS.find((p) => p.mode === permission)?.label ?? "询问"}</span>
+        {busy && (
+          <>
+            <span className="sep">·</span>
+            <span className="mono">生成中可排队或插话</span>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ============================ REVIEW DESK（场景 2） ============================
+
+/** 把真实工单装配成审查台需要的形状（没有的字段就留空，不编造内容） */
+function reviewOf(job: DeskJob) {
+  const ev = job.evidence.filter((e) => e.level !== "pending");
+  return {
+    product: {
+      title: `交付 · ${job.member ?? "成员"}`,
+      note: `结论　${job.report?.conclusion ?? job.statusNote}`,
+      lines: ev.map((e, i) => ({
+        no: String(i + 1),
+        text: `${e.verified ? "✓" : "?"} ${e.title} — ${e.ref ?? e.detail}`,
+      })),
+    },
+    source: {
+      title: "证据索引",
+      note: `${ev.length} 项　可点开验证`,
+      lines: job.evidence.map((e) => ({ no: e.verified ? "✓" : e.level === "warn" ? "!" : "—", text: e.detail })),
+    },
+    reject: job.rejectDraft ?? { what: "", expect: "", deadline: "15 分钟" },
+    report: job.report ?? { conclusion: "", evidence: "", unfinished: "", decision: "" },
+    ac: ev.map((e) => ({ ok: !!e.verified, text: e.title })),
+  };
+}
+
+function ReviewDesk({
+  desk,
+  job,
+  onBack,
+  onApprove,
+  onReject,
+}: {
+  desk: Desk;
+  job: DeskJob;
+  onBack: () => void;
+  onApprove: () => void;
+  onReject: (reason: { what: string; expect: string; deadline: string }) => void;
+}) {
+  const r = reviewOf(job);
+  const [what, setWhat] = useState(r.reject.what);
+  const [expect, setExpect] = useState(r.reject.expect);
+  const [deadline, setDeadline] = useState(r.reject.deadline);
+  const [sent, setSent] = useState(false);
+
+  const ac = r.ac;
+  const canReject = what.trim() !== "" && expect.trim() !== "" && deadline.trim() !== "";
+
+  return (
+    <div className="scene">
+      <TopRail
+        desk={desk}
+        current={job}
+        permission="ask"
+        onPermission={() => {}}
+        onOpenSettings={() => {}}
+        mode="review"
+      />
+      <div className="body">
+        <aside className="ledger" style={{ width: 230 }}>
+          <div className="ledger-head">
+            <span className="h-cap">验收包</span>
+            <span className="h-count">
+              {job.id} · v{job.version}
+            </span>
+          </div>
+          <div className="ledger-scroll" style={{ paddingTop: 4 }}>
+            <div className="grp-label" style={{ paddingTop: 8 }}>
+              成员
+            </div>
+            <div className="job on">
+              <div className="job-top">
+                <span className="job-id">交付人</span>
+                <span className="st st-wait">待你</span>
+              </div>
+              <div className="job-title">
+                {job.member ?? "风铃"} · {job.memberRole ?? "调度"}
+              </div>
+              <div className="job-meta">
+                <span className="mono">{job.at ?? "—"}</span>
+              </div>
+            </div>
+
+            <div className="grp-label">验收标准 · {ac.length}</div>
+            {ac.map((c, i) => (
+              <div className="job" key={i}>
+                <div className="job-top">
+                  <span className="job-id">AC-{i + 1}</span>
+                  <span className={`st ${c.ok ? "st-done" : "st-wait"}`}>{c.ok ? "满足" : "存疑"}</span>
+                </div>
+                <div className="job-title">{c.text}</div>
+              </div>
+            ))}
+
+            {job.artifact && (
+              <>
+                <div className="grp-label">产物 · 1</div>
+                <div className="job">
+                  <div className="job-top">
+                    <span className="job-id">FILE</span>
+                    <span className="st st-done">已入库</span>
+                  </div>
+                  <div className="job-title">{job.artifact.name}</div>
+                </div>
+              </>
+            )}
+
+            <div className="grp-label">简报包 · {job.member ?? "成员"}收到的</div>
+            <div className="job">
+              <div className="job-top">
+                <span className="job-id">BRIEF</span>
+                <span className="st st-done">已投递</span>
+              </div>
+              <div className="job-title">{job.statusNote}</div>
+            </div>
+
+            <div className="ledger-empty" style={{ marginTop: 8 }}>
+              <a onClick={onBack} style={{ color: "var(--blue)", cursor: "pointer" }}>
+                ← 返回值台
+              </a>
+            </div>
+          </div>
+        </aside>
+
+        <main className="center">
+          <div className="sheet-wrap">
+            <div className="sheet">
+              <span className="crop tl" />
+              <span className="crop tr" />
+              <span className="crop bl" />
+              <span className="crop br" />
+
+              <div className="sheet-head">
+                <div className="sheet-eyebrow">
+                  <span>验收包 · {job.id}</span>
+                  <span style={{ opacity: 0.4 }}>/</span>
+                  <span>提交于 {job.at ?? "—"}</span>
+                  <span style={{ opacity: 0.4 }}>/</span>
+                  <span>无证据不算完成</span>
+                </div>
+                <h1 className="sheet-title">{job.title}</h1>
+                <div className="sheet-sub">{job.statusNote}</div>
+              </div>
+
+              <div className="sheet-body">
+                <div className="work" style={{ paddingTop: 16 }}>
+                  <div className="rev-pair">
+                      <div>
+                        <div className="h-cap" style={{ marginBottom: 8 }}>
+                          {r.product.title}
+                        </div>
+                        <div className="diff" style={{ marginTop: 0 }}>
+                          <div className="f">
+                            <span className="s">{r.product.note.split("　")[0]}</span>
+                            <span>{r.product.note.split("　")[1] ?? ""}</span>
+                          </div>
+                          {r.product.lines.map((l, i) => (
+                            <div key={i} className="l">
+                              <span className="ln">{l.no}</span>
+                              {l.text}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="h-cap" style={{ marginBottom: 8 }}>
+                          {r.source.title}
+                        </div>
+                        <div className="diff" style={{ marginTop: 0 }}>
+                          <div className="f">
+                            <span className="s">{r.source.note.split("　")[0]}</span>
+                            <span>{r.source.note.split("　")[1] ?? ""}</span>
+                          </div>
+                          {r.source.lines.map((l, i) => (
+                            <div key={i} className="l">
+                              <span className="ln">{l.no}</span>
+                              {l.text}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                  </div>
+
+
+
+                  <div className="artifact" style={{ maxWidth: 660 }}>
+                    <div className="artifact-h">
+                      <Icon name="pen" size="sm" />
+                      <span>打回必须写清</span>
+                      <span className="nm">风铃已替你填好，改完直接发</span>
+                    </div>
+                    <div className="art-table">
+                      {[
+                        { k: "哪里不合格", v: what, set: setWhat, ph: "填：哪里不合格（不带理由的打回算她的失职）" },
+                        { k: "期望是什么", v: expect, set: setExpect, ph: "填：期望怎么改、补什么" },
+                        { k: "多久内重交", v: deadline, set: setDeadline, ph: "如 15 分钟" },
+                      ].map((f) => (
+                        <div className="art-row rev-row" key={f.k}>
+                          <span className="no rev-k">{f.k}</span>
+                          <textarea
+                            className="rev-field"
+                            value={f.v}
+                            onChange={(e) => f.set(e.target.value)}
+                            placeholder={f.ph}
+                            rows={f.k === "多久内重交" ? 1 : 2}
+                          />
+                        </div>
+                      ))}
+                      <div className="art-foot">
+                        <span>不带理由的打回，算她的失职</span>
+                        <span style={{ marginLeft: "auto" }}>这一轮是第 {job.rejections + 1} 次打回</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+              </div>
+
+              <div className="titleblock">
+                <div className="tb-cell">
+                  <div className="k">验收包</div>
+                  <div className="v">{job.id}</div>
+                </div>
+                <div className="tb-cell">
+                  <div className="k">版本</div>
+                  <div className="v">v{job.version}</div>
+                </div>
+                <div className="tb-cell">
+                  <div className="k">轮次</div>
+                  <div className="v">
+                    {Math.min(job.rejections + 1, job.rejectLimit)} / {job.rejectLimit}
+                  </div>
+                </div>
+                <div className="tb-cell">
+                  <div className="k">成员</div>
+                  <div className="v">{job.member ?? "—"}</div>
+                </div>
+                <div className="tb-cell">
+                  <div className="k">提交</div>
+                  <div className="v">{job.at ?? "—"}</div>
+                </div>
+                <div className="tb-cell sealv">
+                  <div className="k">验收</div>
+                  <div className="v">{sent ? "已打回" : "待你"}</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+        </main>
+
+        <aside className="right" style={{ width: 360 }}>
+          <div className="right-scroll">
+            <div className="panel-h">
+              <div className="l">
+                <span className="t">你的裁定</span>
+                <span className="n">{job.id}</span>
+              </div>
+              <span className="cap">
+                第 {job.rejections + 1} 轮 / 共 {job.rejectLimit} 轮
+              </span>
+            </div>
+
+            <div className="sealcard" style={{ marginTop: 2 }}>
+              <div className="sealcard-h">
+                <span className="k">等你拍板</span>
+                <span className="mono" style={{ fontSize: 9.5, color: "var(--ink-4)" }}>
+                  {job.at ?? ""}
+                </span>
+              </div>
+              <div className="sealcard-body">
+                <SealGlyph big />
+                <div className="sealcard-text">
+                  <div className="who">
+                    <b>{job.member ?? "风铃"}</b> 提交 · {job.memberRole ?? "调度"}
+                  </div>
+                  <div className="ask">这份交付能不能收？</div>
+                </div>
+              </div>
+
+              {ac.length > 0 && (
+                <div className="accept">
+                  <div className="k">她已核对 · {ac.length} 项验收标准</div>
+                  <ul>
+                    {ac.map((c, i) => (
+                      <li key={i} className={c.ok ? "ok" : "bad"}>
+                        <Icon name={c.ok ? "check" : "warn"} size="sm" />
+                        <span>{c.text}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              <div className="seal-actions" style={{ flexDirection: "column" }}>
+                <button type="button" className="btn btn-accept" onClick={onApprove}>
+                  <Icon name="check" size="sm" /> 验收归档
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-reject"
+                  disabled={!canReject}
+                  style={{ justifyContent: "space-between", padding: "8px 12px" }}
+                  onClick={() => {
+                    if (!canReject) return;
+                    setSent(true);
+                    onReject({ what: what.trim(), expect: expect.trim(), deadline: deadline.trim() });
+                  }}
+                >
+                  <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                    <Icon name="undo" size="sm" /> 打回重做
+                  </span>
+                  <span className="mono" style={{ fontSize: 10, color: "var(--ink-3)" }}>
+                    {canReject ? "理由已填好" : "三要素必填"}
+                  </span>
+                </button>
+              </div>
+
+              <div className="rounds">
+                <span>打回轮次</span>
+                {Array.from({ length: job.rejectLimit }, (_, i) => (
+                  <span key={i} className={`sq${i < job.rejections ? " on" : ""}`} />
+                ))}
+                <span style={{ marginLeft: "auto" }}>连打 {job.rejectLimit} 轮未过，她会来问你</span>
+              </div>
+            </div>
+
+            {sent && <div className="sf-result ok" style={{ margin: "0 0 12px" }}>已打回：理由已记入卷宗。</div>}
+          </div>
+        </aside>
+      </div>
+    </div>
+  );
+}
+
+// ============================ DESK ============================
+
+export function DeskView({
+  desk,
+  permission,
+  configured,
+  ambient,
+  ambientMode,
+  onPermission,
+  onSend,
+  onAbort,
+  onQueue,
+  onDecision,
+  onDecisionResolve,
+  onFeedAction,
+  onOpenSettings,
+  onStandby,
+  onNew,
+  notice,
+}: {
+  desk: Desk;
+  permission: PermissionMode;
+  configured: boolean;
+  ambient: AmbientParams;
+  ambientMode: AmbientMode;
+  onPermission: (m: PermissionMode) => void;
+  onSend: (text: string, mode: "queue" | "steer") => void;
+  onAbort: () => void;
+  onQueue: (action: "clear" | "remove", id?: string) => void;
+  onDecision: (taskId: string, action: "approve" | "reject", reason?: { what: string; expect: string; deadline: string }) => void;
+  onDecisionResolve: (id: string, action: "answer" | "start" | "revise" | "reject", text?: string) => void;
+  onFeedAction: (card: FeedCard) => void;
+  onOpenSettings: () => void;
+  onStandby: () => void;
+  onNew?: () => void;
+  /** 发送/新建失败时的可见提示（不允许静默失败） */
+  notice?: string | null;
+}) {
+  const waitingFirst = useMemo(() => {
+    const w = desk.jobs.find((j) => j.status === "in_review" || j.status === "blocked");
+    return w ?? desk.jobs[0];
+  }, [desk.jobs]);
+  const [activeId, setActiveId] = useState<string | undefined>(waitingFirst?.id);
+  const [reviewId, setReviewId] = useState<string | null>(null);
+  const current = desk.jobs.find((j) => j.id === activeId) ?? waitingFirst;
+  const reviewJob = desk.jobs.find((j) => j.id === reviewId);
+
+  if (reviewJob) {
+    return (
+      <ReviewDesk
+        desk={desk}
+        job={reviewJob}
+        onBack={() => setReviewId(null)}
+        onApprove={() => {
+          onDecision(reviewJob.id, "approve");
+          setReviewId(null);
+        }}
+        onReject={(reason) => {
+          onDecision(reviewJob.id, "reject", reason);
+        }}
+      />
+    );
+  }
+
+  return (
+    <div className="scene">
+      <AmbientLayer params={ambient} mode={ambientMode} standby={false} />
+      <TopRail
+        desk={desk}
+        current={current}
+        permission={permission}
+        onPermission={onPermission}
+        onOpenSettings={onOpenSettings}
+        onNew={onNew}
+      />
+      <div className="body">
+        <Ledger desk={desk} activeId={current?.id} onSelect={setActiveId} />
+        <main className="center">
+          <div className="sheet-wrap">
+            <Sheet job={current} feed={desk.feed} onFeedAction={onFeedAction} onExample={(t) => onSend(t, "queue")} />
+          </div>
+          <ComposerZone
+            permission={permission}
+            configured={configured}
+            turn={desk.turn}
+            queue={desk.queue}
+            onStandby={onStandby}
+            onSend={onSend}
+            onAbort={onAbort}
+            onQueue={onQueue}
+          />
+          {notice && <p className="composer-notice">{notice}</p>}
+        </main>
+        <Roster
+          desk={desk}
+          onAccept={(id) => onDecision(id, "approve")}
+          onReject={(id) => setReviewId(id)}
+          onPlan={(id, action, text) => onDecisionResolve(id, action, text)}
+          onAnswer={(id, text) => onDecisionResolve(id, "answer", text)}
+        />
+      </div>
+    </div>
+  );
+}

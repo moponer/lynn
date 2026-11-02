@@ -1,0 +1,19 @@
+{
+  "name": "暮色",
+  "dark": {
+    "--blue": "#6fb3d1",
+    "--blue-2": "#3c6b80",
+    "--blue-wash": "rgba(111,179,209,.14)",
+    "--blue-line": "rgba(111,179,209,.34)",
+    "--seal": "#c8443a",
+    "--brass": "#d0ab35"
+  },
+  "light": {
+    "--blue": "#2c6c86",
+    "--blue-2": "#8ab6c9",
+    "--blue-wash": "rgba(44,108,134,.10)",
+    "--blue-line": "rgba(44,108,134,.30)",
+    "--seal": "#a8402f",
+    "--brass": "#8a6f1e"
+  }
+}
