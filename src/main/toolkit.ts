@@ -23,6 +23,8 @@ export interface ToolkitOptions {
   outputCap?: number;
   /** 审计回调：命中/放行命令都留痕（M1-11，壳写 audit.jsonl） */
   onAudit?: (ev: { kind: "cmd_blocked" | "cmd_net" | "cmd_run"; command: string; why?: string; cwd: string }) => void;
+  /** 写之前通知壳（M1-12 检查点）：existed=false 表示这轮新建 */
+  onBeforeWrite?: (rel: string, full: string, existed: boolean) => void;
 }
 
 const READ_CAP = 200_000;
@@ -101,6 +103,7 @@ export class Toolkit {
   private readonly commandTimeoutMs: number;
   private readonly outputCap: number;
   private readonly onAudit?: ToolkitOptions["onAudit"];
+  private readonly onBeforeWrite?: ToolkitOptions["onBeforeWrite"];
 
   constructor(root: string, opts: ToolkitOptions = {}) {
     this.root = path.resolve(root);
@@ -108,6 +111,7 @@ export class Toolkit {
     this.commandTimeoutMs = opts.commandTimeoutMs ?? 120_000;
     this.outputCap = opts.outputCap ?? 8_000;
     this.onAudit = opts.onAudit;
+    this.onBeforeWrite = opts.onBeforeWrite;
   }
 
   getRoot(): string {
@@ -168,7 +172,9 @@ export class Toolkit {
     const content = String(args.content ?? "");
     const full = resolveWithin(this.root, rel);
     return this.serialize(full, () => {
-      const before = fs.existsSync(full) ? fs.readFileSync(full, "utf-8") : "";
+      const existed = fs.existsSync(full);
+      const before = existed ? fs.readFileSync(full, "utf-8") : "";
+      this.onBeforeWrite?.(rel, full, existed);
       fs.mkdirSync(path.dirname(full), { recursive: true });
       fs.writeFileSync(full, content, "utf-8");
       const c = this.record(rel, before, content);
@@ -187,6 +193,7 @@ export class Toolkit {
       if (!fs.existsSync(full)) throw new Error(`文件不存在：${rel}`);
       const before = fs.readFileSync(full, "utf-8");
       if (!before.includes(oldStr)) throw new Error(`没找到要替换的原文（${oldStr.slice(0, 40)}…）。先 read_file 再改。`);
+      this.onBeforeWrite?.(rel, full, true);
       const after = all ? before.split(oldStr).join(newStr) : before.replace(oldStr, newStr);
       fs.writeFileSync(full, after, "utf-8");
       const c = this.record(rel, before, after);

@@ -212,6 +212,18 @@ export default function App() {
     }
   }, [refresh]);
 
+  /** 撤销上一轮文件改动（M1-12）：改过的还原、新建的删掉，结果必须可见 */
+  const onUndo = useCallback(async () => {
+    setNotice(null);
+    try {
+      const r = await rpc("session.undo", {});
+      if (!r.ok) setNotice(r.error ?? "没有可撤销的改动");
+      await refresh();
+    } catch (err) {
+      setNotice(`撤销失败：${err instanceof Error ? err.message : String(err)}`);
+    }
+  }, [refresh]);
+
   const onDecision = useCallback(
     async (
       taskId: string,
@@ -318,6 +330,7 @@ export default function App() {
         onOpenSettings={() => setSettingsOpen(true)}
         onStandby={() => setStandby(true)}
         onNew={() => void onNew()}
+        onUndo={() => void onUndo()}
         notice={notice}
       />
       {settingsOpen && (

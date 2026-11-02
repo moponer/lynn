@@ -20,6 +20,7 @@ import { SettingsStore, loadApiKey, defaultDataRoot } from "./settings";
 import { applyPiEnvironment } from "./pi-home";
 import { reapOrphanWorkers } from "./agent-orphans";
 import { McpRegistry, loadMcpConfig } from "./mcp";
+import { CheckpointStore } from "./checkpoints";
 import { TeamStore } from "./team-store";
 import { TaskStore } from "./task-store";
 import { TaskCase } from "./task-case";
@@ -285,6 +286,8 @@ export class Kernel {
   private pendingApprovals = new Map<string, { resolve: (ok: boolean) => void }>();
   /** L2 MCP 工具（mcp__server__tool） */
   private mcp = new McpRegistry();
+  /** 逐轮文件检查点（M1-12） */
+  private checkpoints!: CheckpointStore;
   /** 下一次起 worker 时开新会话（session.new 置位；起过一次即清） */
   private createFreshSession = false;
   /** 用户点了停止：本轮结束时不追加"已完成"类文案 */
@@ -300,6 +303,8 @@ export class Kernel {
     this.taskStore = new TaskStore(dataRoot);
     this.taskCase = new TaskCase(dataRoot);
     this.contextStore = new ContextStore(dataRoot);
+    this.checkpoints = new CheckpointStore(path.join(dataRoot, "checkpoints"));
+    this.mcp = new McpRegistry();
     this.pluginHost = new PluginHost(dataRoot);
     this.pluginSet = new PluginSetStore(dataRoot);
     this.l1 = new L1Host({
@@ -410,6 +415,12 @@ export class Kernel {
   private setTurn(patch: Partial<TurnState>): void {
     this.turn = { ...this.turn, ...patch, pending: this.queue.length };
     this.notify({ type: "turn", turn: this.turn });
+  }
+
+  /** 本轮写过文件就把撤销入口亮出来（M1-12） */
+  private settleCheckpoint(): void {
+    const st = this.checkpoints.status();
+    if (st) this.setTurn({ canUndo: true, changedFiles: st.files });
   }
 
   private setUsage(patch: Partial<UsageView>): void {
@@ -662,6 +673,7 @@ export class Kernel {
       workdir,
       model: { baseUrl: cfg.baseUrl, apiKey, model: cfg.model },
       onAudit: (ev) => this.auditTool(teamId, taskId, member, ev),
+      onBeforeWrite: (rel, full, existed) => this.checkpoints.beforeWrite(rel, full, existed),
       onEvent: (ev) => {
         if (ev.kind === "tool") {
           this.emit({
@@ -1096,6 +1108,7 @@ export class Kernel {
           }
         }
       }
+      this.settleCheckpoint();
       this.emit({ type: "done", tokens: this.usage.turnOut });
     } finally {
       this.liveCard = null;
@@ -1158,6 +1171,7 @@ export class Kernel {
           continue;
         }
         this.settleAssistant(live, result.content);
+        this.settleCheckpoint();
         this.emit({ type: "done", tokens: result.promptTokens + result.completionTokens });
         return;
       }
@@ -1180,7 +1194,8 @@ export class Kernel {
     this.l1.setBusy(true);
     this.abortRequested = false;
     this.log("turn_start", { chars: text.length, model: this.settings.getModel()?.model ?? "" });
-    this.setTurn({ phase: "accepted", busy: true, startedAt: new Date().toISOString() });
+    this.checkpoints.begin(`turn-${Date.now()}`);
+    this.setTurn({ phase: "accepted", busy: true, startedAt: new Date().toISOString(), canUndo: false, changedFiles: [] });
     void this.runChat(text).finally(() => {
       this.busy = false;
       this.l1.setBusy(false);
@@ -1784,6 +1799,20 @@ export class Kernel {
 
       case "config.clearKey": {
         return { ok: this.settings.clearApiKey() } as RpcContracts[M]["result"];
+      }
+
+      case "session.undo": {
+        const r = this.checkpoints.undo();
+        if (!r.restored.length && !r.removed.length) {
+          return { ok: false, error: "没有可撤销的文件改动" } as RpcContracts[M]["result"];
+        }
+        this.setTurn({ canUndo: false, changedFiles: [] });
+        this.card({
+          kind: "system",
+          text: `已撤销上一轮文件改动：还原 ${r.restored.length} 个、删除新建 ${r.removed.length} 个。`,
+        });
+        this.log("undo", { restored: r.restored.length, removed: r.removed.length });
+        return { ok: true, restored: r.restored.length, removed: r.removed.length } as RpcContracts[M]["result"];
       }
 
       case "session.new": {

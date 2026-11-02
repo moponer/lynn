@@ -103,6 +103,9 @@ export interface TurnState {
   /** 正在跑的成员与进度（0–100），给编制表实时显示 */
   member?: string;
   progress?: number;
+  /** 本轮写过哪些文件；canUndo=true 表示可以整体撤销 */
+  canUndo?: boolean;
+  changedFiles?: string[];
 }
 
 /** 用量读数：轮/会话两层 + 上下文占比（都由后端算，前端不估） */
@@ -283,6 +286,11 @@ export interface RpcContracts {
   "session.reload": {
     params: void;
     result: { ok: boolean };
+  };
+  /** 撤销上一轮的文件改动（检查点回滚：改过的还原、新建的删掉） */
+  "session.undo": {
+    params: Record<string, never>;
+    result: { ok: boolean; restored?: number; removed?: number; error?: string };
   };
   /** 记住当前主题底色（首帧用，避免白闪/错色闪） */
   "app.appearance": {

@@ -131,3 +131,22 @@ test("命令审计落 audit.jsonl（拦截也留痕，能回查）", async () =>
   assert.equal(last.taskId, "WO-1");
   assert.match(last.command, /rm -rf/);
 });
+
+test("内核：写文件后 canUndo 亮起，撤销后文件回滚且状态复位（M1-12）", async () => {
+  const { root, kernel } = setup();
+  const file = path.join(root, "workspace", "a.md");
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, "原文");
+
+  kernel.checkpoints.begin("turn-x");
+  kernel.checkpoints.beforeWrite("a.md", file, true);
+  fs.writeFileSync(file, "改过");
+  kernel.settleCheckpoint();
+  assert.equal(kernel.handle("session.snapshot").turn.canUndo, true);
+
+  const r = kernel.handle("session.undo", {});
+  assert.equal(r.ok, true);
+  assert.equal(r.restored, 1);
+  assert.equal(fs.readFileSync(file, "utf-8"), "原文");
+  assert.equal(kernel.handle("session.snapshot").turn.canUndo, false);
+});

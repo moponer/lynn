@@ -42,6 +42,7 @@ function TopRail({
   onPermission,
   onOpenSettings,
   onNew,
+  onUndo,
   mode = "desk",
 }: {
   desk: Desk;
@@ -50,6 +51,7 @@ function TopRail({
   onPermission: (m: PermissionMode) => void;
   onOpenSettings: () => void;
   onNew?: () => void;
+  onUndo?: () => void;
   mode?: "desk" | "review";
 }) {
   const ctx = desk.usage.contextWindow > 0 ? Math.min(1, desk.usage.contextTokens / desk.usage.contextWindow) : 0;
@@ -132,6 +134,15 @@ function TopRail({
       </div>
 
       <div className="vr" />
+      {desk.turn.canUndo && onUndo && (
+        <button
+          className="ghost-btn"
+          onClick={onUndo}
+          title={`撤销上一轮文件改动：${(desk.turn.changedFiles ?? []).join("、")}`}
+        >
+          <Icon name="undo" size="sm" /> 撤销改动
+        </button>
+      )}
       <button className="ghost-btn" onClick={onNew} title="新对话：清空当前会话，重新开始（工单与卷宗保留）">
         <Icon name="plus" size="sm" /> 新对话
       </button>
@@ -1346,6 +1357,7 @@ export function DeskView({
   onOpenSettings,
   onStandby,
   onNew,
+  onUndo,
   notice,
 }: {
   desk: Desk;
@@ -1363,6 +1375,7 @@ export function DeskView({
   onOpenSettings: () => void;
   onStandby: () => void;
   onNew?: () => void;
+  onUndo?: () => void;
   /** 发送/新建失败时的可见提示（不允许静默失败） */
   notice?: string | null;
 }) {
@@ -1402,6 +1415,7 @@ export function DeskView({
         onPermission={onPermission}
         onOpenSettings={onOpenSettings}
         onNew={onNew}
+        onUndo={onUndo}
       />
       <div className="body">
         <Ledger desk={desk} activeId={current?.id} onSelect={setActiveId} />
