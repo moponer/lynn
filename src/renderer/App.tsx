@@ -349,6 +349,8 @@ export default function App() {
           ambientMode={ambientMode}
           members={desk.members.map((m) => ({ name: m.name, role: m.role }))}
           autoStart={snap.prefs.autoStart}
+          trayOnClose={snap.prefs.trayOnClose}
+          notify={snap.prefs.notify}
           project={snap.project}
           usage={snap.usage}
           onTheme={changeTheme}
@@ -361,6 +363,9 @@ export default function App() {
           }}
           onAutoStart={(v) => {
             void rpc("config.prefs", { autoStart: v }).then(() => refresh());
+          }}
+          onPrefs={(p) => {
+            void rpc("config.prefs", { autoStart: snap.prefs.autoStart, ...p }).then(() => refresh());
           }}
           onTrust={(trusted) => {
             void rpc("trust.set", { trusted }).then(() => {

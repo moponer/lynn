@@ -446,6 +446,12 @@ export class Kernel {
     return composeSystemPrompt(this.persona.load());
   }
 
+  /** 壳层读偏好（托盘/通知开关，M1-18）：壳不直接碰 SettingsStore */
+  getPrefs(): { autoStart: boolean; trayOnClose: boolean; notify: boolean } {
+    const p = this.settings.getPrefs();
+    return { autoStart: p.autoStart, trayOnClose: p.trayOnClose, notify: p.notify };
+  }
+
   /** persona 变更后热同步到 Pi worker；失败如实落卡（下一轮 prompt 前仍会用启动时的旧词） */
   private hotSyncSystemPrompt(): boolean {
     if (!this.host?.isRunning()) return false;
@@ -1997,9 +2003,18 @@ export class Kernel {
       }
 
       case "config.prefs": {
-        const p = params as { autoStart: boolean };
-        const saved = this.settings.savePrefs({ autoStart: Boolean(p.autoStart) });
-        return { ok: true, autoStart: saved.autoStart } as RpcContracts[M]["result"];
+        const p = params as { autoStart: boolean; trayOnClose?: boolean; notify?: boolean };
+        const saved = this.settings.savePrefs({
+          autoStart: Boolean(p.autoStart),
+          ...(p.trayOnClose !== undefined ? { trayOnClose: Boolean(p.trayOnClose) } : {}),
+          ...(p.notify !== undefined ? { notify: Boolean(p.notify) } : {}),
+        });
+        return {
+          ok: true,
+          autoStart: saved.autoStart,
+          trayOnClose: saved.trayOnClose,
+          notify: saved.notify,
+        } as RpcContracts[M]["result"];
       }
 
       case "config.clearKey": {

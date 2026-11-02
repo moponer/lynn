@@ -19,9 +19,13 @@ export interface StoredModelConfig {
 export interface Prefs {
   /** 任务契约默认自动开始（关闭时每次动手前都要用户点"开始"） */
   autoStart: boolean;
+  /** 关窗进托盘而不是退出（M1-18） */
+  trayOnClose: boolean;
+  /** 窗口隐藏时用系统通知触达（M1-18） */
+  notify: boolean;
 }
 
-const DEFAULT_PREFS: Prefs = { autoStart: false };
+const DEFAULT_PREFS: Prefs = { autoStart: false, trayOnClose: true, notify: true };
 
 interface SettingsFile {
   model?: StoredModelConfig;

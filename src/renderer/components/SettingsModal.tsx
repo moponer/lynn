@@ -50,8 +50,11 @@ export function SettingsModal({
   ambientMode,
   members,
   autoStart,
+  trayOnClose,
+  notify,
   project,
   usage,
+  onPrefs,
   onTheme,
   onAvatar,
   onPack,
@@ -69,8 +72,13 @@ export function SettingsModal({
   ambientMode: AmbientMode;
   members: { name: string; role: string }[];
   autoStart: boolean;
+  /** 关窗进托盘（M1-18） */
+  trayOnClose: boolean;
+  /** 窗口隐藏时系统通知（M1-18） */
+  notify: boolean;
   project?: { root: string; trusted: boolean; hasMcp: boolean };
   usage: UsageView;
+  onPrefs: (p: { trayOnClose: boolean; notify: boolean }) => void;
   onTheme: (id: ThemeId, mode: ThemeMode) => void;
   onAvatar: (on: boolean) => void;
   onPack: (p: LynnPack) => void;
@@ -624,6 +632,33 @@ export function SettingsModal({
             </button>
           </div>
           {avatar && <AvatarStage state={avState} onState={setAvState} bubble={BUBBLE[avState]} height={200} />}
+          <span className="sf-label">桌面驻留</span>
+          <div className="sf-row">
+            <div className="sf-row-main">
+              <b>关窗进托盘</b>
+              <small>点 × 最小化到托盘，会话不中断；托盘菜单「退出」才真退。全局快捷键 Alt+Shift+L 呼出。</small>
+            </div>
+            <button
+              type="button"
+              className={`sf-btn${trayOnClose ? " primary" : ""}`}
+              onClick={() => onPrefs({ trayOnClose: !trayOnClose, notify })}
+            >
+              {trayOnClose ? "已开启" : "已关闭"}
+            </button>
+          </div>
+          <div className="sf-row">
+            <div className="sf-row-main">
+              <b>窗口隐藏时通知</b>
+              <small>只在你看不见主窗口时弹系统通知（成员交活 / 需要拍板 / 出错），不做打扰源。</small>
+            </div>
+            <button
+              type="button"
+              className={`sf-btn${notify ? " primary" : ""}`}
+              onClick={() => onPrefs({ trayOnClose, notify: !notify })}
+            >
+              {notify ? "已开启" : "已关闭"}
+            </button>
+          </div>
         </div>
       );
     }
@@ -759,6 +794,8 @@ export function SettingsModal({
     avState,
     ambientMode,
     autoStart,
+    trayOnClose,
+    notify,
     usage,
     members,
     busy,
@@ -777,6 +814,7 @@ export function SettingsModal({
     onAmbient,
     onApplyThemeTokens,
     onAutoStart,
+    onPrefs,
     onAvatar,
     onTheme,
     toggleUi,

@@ -236,7 +236,7 @@ export interface SessionSnapshot {
   turn: TurnState;
   usage: UsageView;
   queue: QueueItem[];
-  prefs: { autoStart: boolean };
+  prefs: { autoStart: boolean; trayOnClose: boolean; notify: boolean };
 }
 
 // ---------- 事件流（主进程 → 渲染层） ----------
@@ -407,8 +407,8 @@ export interface RpcContracts {
   };
   /** 偏好设置（目前只有"任务契约自动开始"） */
   "config.prefs": {
-    params: { autoStart: boolean };
-    result: { ok: true; autoStart: boolean };
+    params: { autoStart: boolean; trayOnClose?: boolean; notify?: boolean };
+    result: { ok: true; autoStart: boolean; trayOnClose: boolean; notify: boolean };
   };
   /** 清除已保存的 API Key（保留端点与模型） */
   "config.clearKey": {

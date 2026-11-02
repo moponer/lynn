@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, safeStorage, screen, shell } from "electron";
+import { app, BrowserWindow, globalShortcut, ipcMain, Menu, nativeImage, Notification, safeStorage, screen, shell, Tray } from "electron";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { RpcMethod } from "../shared/contract";
@@ -20,6 +20,56 @@ kernel.setEncryptors(
 
 let win: BrowserWindow | null = null;
 let pet: BrowserWindow | null = null;
+let tray: Tray | null = null;
+
+/** 托盘图标（M1-18）：assets/tray.png（scripts/gen-tray-icon.mjs 生成） */
+function trayIcon() {
+  const p = path.join(__dirname, "..", "assets", "tray.png");
+  const img = nativeImage.createFromPath(p);
+  return img.isEmpty() ? nativeImage.createEmpty() : img;
+}
+
+function createTray(): void {
+  if (tray) return;
+  tray = new Tray(trayIcon());
+  tray.setToolTip("风铃 Lynn");
+  tray.setContextMenu(
+    Menu.buildFromTemplate([
+      { label: "打开指挥台", click: () => focusMain() },
+      { label: "桌宠", click: () => createPet() },
+      { type: "separator" },
+      {
+        label: "退出",
+        click: () => {
+          quitting = true;
+          app.quit();
+        },
+      },
+    ]),
+  );
+  tray.on("click", () => focusMain());
+}
+
+/** 全局快捷键：Alt+Shift+L 呼出指挥台（M1-18） */
+function registerHotkey(): void {
+  const combo = "Alt+Shift+L";
+  try {
+    const ok = globalShortcut.register(combo, () => focusMain());
+    if (!ok) console.warn(`[hotkey] ${combo} 注册失败（可能被占用），托盘仍可用`);
+  } catch (err) {
+    console.warn(`[hotkey] 注册异常：${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+/** 系统通知（M1-18）：只在主窗口不可见时发，不做打扰源 */
+function notifyOnce(title: string, body: string): void {
+  const visible = win !== null && win.isVisible() && win.isFocused();
+  if (visible || !kernel.getPrefs().notify) return;
+  if (!Notification.isSupported()) return;
+  const n = new Notification({ title, body, silent: false });
+  n.on("click", () => focusMain());
+  n.show();
+}
 
 const preload = () => path.join(__dirname, "preload.js");
 const indexHtml = () => path.join(__dirname, "../renderer/index.html");
@@ -66,6 +116,13 @@ function createWindow(): void {
   });
 
   void win.loadFile(indexHtml());
+  // M1-18：关窗进托盘（可关），不杀会话；托盘菜单「退出」才真退
+  win.on("close", (event) => {
+    if (!quitting && kernel.getPrefs().trayOnClose) {
+      event.preventDefault();
+      win?.hide();
+    }
+  });
   win.on("closed", () => {
     win = null;
   });
@@ -124,6 +181,8 @@ app.whenReady().then(async () => {
   const boot = kernel.noteKernelStart();
   console.log(`[plugins] fingerprint=${boot.fingerprint} safeMode=${boot.safeMode} starts=${boot.starts}`);
   createWindow();
+  createTray();
+  registerHotkey();
 
   // 唯一 RPC 通道
   ipcMain.handle("lynn:rpc", async (_event, method: string, params: unknown) => {
@@ -187,6 +246,16 @@ app.whenReady().then(async () => {
     for (const w of BrowserWindow.getAllWindows()) {
       w.webContents.send("lynn:event", ev);
     }
+    // M1-18：窗口不可见时用系统通知触达（成员交活 / 需要拍板 / 出错）
+    const evAny = ev as { type?: string; card?: { kind?: string; badge?: string; title?: string; text?: string; code?: string } };
+    if (evAny.type === "card" && evAny.card) {
+      const c = evAny.card;
+      if (c.kind === "tool" && (c.badge === "回报" || c.badge === "需要你拍板")) {
+        notifyOnce(c.title || "成员交活了", (c.text || "进审查台看看。").slice(0, 120));
+      } else if (c.kind === "system" && c.code) {
+        notifyOnce("风铃遇到了问题", (c.text || "").slice(0, 120));
+      }
+    }
   });
 
   app.on("activate", () => {
@@ -195,7 +264,9 @@ app.whenReady().then(async () => {
 });
 
 let quitting = false;
+
 app.on("before-quit", (event) => {
+  globalShortcut.unregisterAll();
   if (quitting) return;
   event.preventDefault();
   quitting = true;
