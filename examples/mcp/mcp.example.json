@@ -1,0 +1,10 @@
+{
+  "servers": [
+    {
+      "id": "echo",
+      "command": "node",
+      "args": ["examples/mcp/echo-server.mjs"],
+      "enabled": true
+    }
+  ]
+}

@@ -19,6 +19,7 @@ import { streamChat, probeEndpoint, type ChatMessage, type ToolSchema } from "./
 import { SettingsStore, loadApiKey, defaultDataRoot } from "./settings";
 import { applyPiEnvironment } from "./pi-home";
 import { reapOrphanWorkers } from "./agent-orphans";
+import { McpRegistry, loadMcpConfig } from "./mcp";
 import { TeamStore } from "./team-store";
 import { TaskStore } from "./task-store";
 import { TaskCase } from "./task-case";
@@ -98,6 +99,11 @@ const TOOL_JSON: ToolSchema[] = [
           brief: { type: "string" },
           deadline: { type: "string" },
           tools: { type: "array", items: { type: "string" }, description: "本次分配工具集，必须 ⊆ 岗位白名单" },
+          acceptance: { type: "array", items: { type: "string" }, description: "验收标准（写进任务契约，用户点开始后生效）" },
+          template: {
+            type: "string",
+            description: "复用哪套编制模板（省略则按任务标题自动匹配；没有模板会如实报错，不会凭空造团队）",
+          },
         },
       },
     },
@@ -277,6 +283,8 @@ export class Kernel {
   private pendingPlans = new Map<string, PendingPlan>();
   /** 等你批准的工具调用（decisionId → 决议器） */
   private pendingApprovals = new Map<string, { resolve: (ok: boolean) => void }>();
+  /** L2 MCP 工具（mcp__server__tool） */
+  private mcp = new McpRegistry();
   /** 下一次起 worker 时开新会话（session.new 置位；起过一次即清） */
   private createFreshSession = false;
   /** 用户点了停止：本轮结束时不追加"已完成"类文案 */
@@ -406,6 +414,21 @@ export class Kernel {
     // L1 插件启动加载（§4.2.1）：单个失败不影响其余，诊断留在 l1.lastErrors
     await this.l1.loadAll();
     for (const e of this.l1.lastErrors) console.warn("[kernel] L1 加载失败：", e);
+
+    // L2 MCP（M0-07）：按 mcp.json 连 server，工具并入工具面；单个失败如实报错，不静默
+    const mcp = loadMcpConfig(this.dataRoot);
+    if (mcp.error) {
+      this.log("mcp_config_error", { error: mcp.error });
+      this.card({ kind: "system", text: mcp.error });
+    }
+    if (mcp.servers.length) {
+      await this.mcp.startAll(mcp.servers);
+      for (const e of this.mcp.lastErrors()) {
+        this.log("mcp_server_error", e);
+        this.card({ kind: "system", text: `MCP 服务器「${e.id}」没连上：${e.message}` });
+      }
+      this.log("mcp_ready", { tools: this.mcp.size(), fingerprint: this.mcp.fingerprint() });
+    }
   }
 
   // ---------- 工具执行（Pi execute 与直连 tool_calls 共用） ----------
@@ -718,6 +741,14 @@ export class Kernel {
           deadline,
         };
         const ctx: PendingPlan = { teamId, taskId, member, brief, deadline, tools };
+        // M1-08：团队不在时按编制模板起一支（显式指定优先，否则按标题匹配）
+        const reused = this.tools.ensureTeamFromTemplate(teamId, title, args.template as string | undefined);
+        if (!this.storeTeamExists(teamId)) {
+          return `团队 ${teamId} 不存在，也没有匹配「${title}」的编制模板。先 create_member 招募，或在上一单解散时选「保留编制」。`;
+        }
+        if (reused) {
+          this.card({ kind: "system", text: `复用编制「${reused.name}」（${reused.members} 人），没有重新招人。` });
+        }
         // 还没开工：工单只落 todo，不能谎报"执行中"（七态见 §4.10.4）
         if (!this.taskStore.get(taskId)) {
           this.taskStore.create({ id: taskId, title, teamId, member });
@@ -876,13 +907,14 @@ export class Kernel {
       ? loadApiKey(this.settings, (b) => (this.decryptor ? this.decryptor(b) : b.toString("utf-8")))
       : null;
     if (!cfg || !apiKey) throw new Error("no-model-config");
-    const stamp = `${cfg.baseUrl}@${cfg.model}@${cfg.updatedAt}@${this.l1.fingerprint()}`;
+    const stamp = `${cfg.baseUrl}@${cfg.model}@${cfg.updatedAt}@${this.l1.fingerprint()}@${this.mcp.fingerprint()}`;
     if (this.host && this.hostStamp === stamp) return this.host;
     await this.resetAgentHost();
-    const tools: RpcToolSpec[] = [
-      ...TOOL_JSON.map((t) => ({ name: t.function.name, description: t.function.description, parameters: t.function.parameters })),
-      ...this.l1.toolSchemas().map((t) => ({ name: t.function.name, description: t.function.description, parameters: t.function.parameters })),
-    ];
+    const tools: RpcToolSpec[] = this.allTools().map((t) => ({
+      name: t.function.name,
+      description: t.function.description,
+      parameters: t.function.parameters,
+    }));
     const host = new AgentHost({
       entryPath: this.rpcEntryPath,
       model: { baseUrl: cfg.baseUrl, apiKey, model: cfg.model, provider: cfg.provider },
@@ -915,6 +947,13 @@ export class Kernel {
     this.host = host;
     this.hostStamp = stamp;
     return host;
+  }
+
+  /** 退出收尾：停 worker、停 MCP，别把子进程留在后台 */
+  async dispose(): Promise<void> {
+    await this.resetAgentHost().catch(() => undefined);
+    await this.mcp.stopAll().catch(() => undefined);
+    this.log("dispose");
   }
 
   private async resetAgentHost(): Promise<void> {
@@ -959,10 +998,25 @@ export class Kernel {
    * 工具执行唯一入口（RPC 回壳与直连降级共用）：
    * 权限门禁 → L1 → 管理型 8 件套；失败转成可读文本，不把异常抛回模型循环。
    */
+  /** 完整工具面：管理型 8 件 + L1 插件 + L2 MCP（同一道门禁，只是来源不同） */
+  private allTools(): ToolSchema[] {
+    return [...TOOL_JSON, ...this.l1.toolSchemas(), ...this.mcp.schemas()];
+  }
+
+  /** 工具面里实际有哪些名字（诊断/测试用） */
+  toolNames(): string[] {
+    return this.allTools().map((t) => t.function.name);
+  }
+
+  private storeTeamExists(teamId: string): boolean {
+    return this.teamStore.teamExists(teamId);
+  }
+
   private async executeToolCall(name: string, args: Record<string, unknown>): Promise<string> {
     try {
       const denial = await this.gateTool(name, args);
       if (denial) return denial;
+      if (this.mcp.has(name)) return await this.mcp.execute(name, args);
       return this.l1.has(name) ? await this.l1.execute(name, args) : this.runTool(name, args);
     } catch (err) {
       const text = `工具执行失败：${err instanceof Error ? err.message : String(err)}。请调整后重试或如实告知用户。`;

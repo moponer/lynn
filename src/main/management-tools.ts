@@ -260,14 +260,39 @@ export class ManagementTools {
     return [...this.questions];
   }
 
-  /** 8. dissolve_team —— 解散或保留复用由她判断，但动作要审计 */
+  /**
+   * 8. dissolve_team —— 解散或保留复用由她判断，但动作要审计。
+   * keep=true 时把当前编制存进 `team/_templates/`（M1-08）：下一单同类任务直接复用，
+   * 不用重新招人；存模板失败就如实抛错，不假装保留。
+   */
   dissolveTeam(teamId: string, keep: boolean): "dissolved" | "kept" {
     if (keep) {
-      this.audit("dissolve_team", { teamId, keep: true });
+      const saved = this.store.saveTemplate(teamId);
+      this.store.dissolveTeam(teamId);
+      this.audit("dissolve_team", { teamId, keep: true, template: saved.name, members: saved.members });
       return "kept";
     }
     this.store.dissolveTeam(teamId);
     this.audit("dissolve_team", { teamId, keep: false });
     return "dissolved";
+  }
+
+  /** 编制模板：列出来给风铃/界面看 */
+  listTemplates(): { name: string; members: number; createdAt: string }[] {
+    return this.store.listTemplates().map((t) => ({ name: t.name, members: t.members.length, createdAt: t.createdAt }));
+  }
+
+  /**
+   * 团队不存在时按模板起一支（M1-08）：显式指定优先，否则按任务标题匹配。
+   * 返回用了哪套模板；没有可用模板返回 null（调用方据此如实报错，不硬造团队）。
+   */
+  ensureTeamFromTemplate(teamId: string, taskTitle: string, template?: string): { name: string; members: number } | null {
+    if (this.store.teamExists(teamId)) return null;
+    const picked = template?.trim()
+      ? this.store.findTemplate(template.trim())
+      : this.store.matchTemplate(taskTitle);
+    if (!picked) return null;
+    const res = this.store.instantiateTemplate(picked.name, teamId);
+    return { name: res.template, members: res.members };
   }
 }

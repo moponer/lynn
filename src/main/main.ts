@@ -194,6 +194,15 @@ app.whenReady().then(async () => {
   });
 });
 
+let quitting = false;
+app.on("before-quit", (event) => {
+  if (quitting) return;
+  event.preventDefault();
+  quitting = true;
+  // 收尾：Pi 子进程与 MCP server 都要停掉，不靠进程退出时被顺带回收
+  void kernel.dispose().finally(() => app.quit());
+});
+
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
 });

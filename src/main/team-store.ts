@@ -176,6 +176,13 @@ export interface TeamRecord {
   budgetTokens: number;
 }
 
+export interface TeamTemplate {
+  name: string;
+  sourceTeam: string;
+  createdAt: string;
+  members: MemberProfile[];
+}
+
 export interface AssignmentRecord {
   taskId: string;
   at: string;
@@ -210,6 +217,10 @@ export class TeamStore {
     fs.mkdirSync(path.join(dir, "reviews"), { recursive: true });
     fs.writeFileSync(path.join(dir, "team.json"), JSON.stringify(rec, null, 2));
     return rec;
+  }
+
+  teamExists(teamId: string): boolean {
+    return fs.existsSync(path.join(this.teamDir(teamId), "team.json"));
   }
 
   writeMember(teamId: string, p: MemberProfile): string {
@@ -253,6 +264,85 @@ export class TeamStore {
   /** 打回上限检查：同一 taskId 内第几次打回（§4.10.5 上限 3 轮） */
   rejectCount(teamId: string, taskId: string): number {
     return this.readAssignments(teamId, taskId).filter((r) => r.kind === "reject").length;
+  }
+
+  // ---------- 编制模板（M1-08）：解散时保留，下一次同类任务直接复用 ----------
+
+  templatesDir(): string {
+    return path.join(this.dataRoot, "team", "_templates");
+  }
+
+  /** 把一支队伍的成员档案存成模板（不含战绩/进度，只留可复用的编制） */
+  saveTemplate(teamId: string, name?: string): { name: string; file: string; members: number } {
+    const teamFile = path.join(this.teamDir(teamId), "team.json");
+    if (!fs.existsSync(teamFile)) throw new Error(`团队不存在: ${teamId}`);
+    const rec = JSON.parse(fs.readFileSync(teamFile, "utf-8")) as TeamRecord;
+    const members = this.listMembers(teamId);
+    if (!members.length) throw new Error(`团队 ${teamId} 没有成员，存成模板也没用`);
+    const template: TeamTemplate = {
+      name: (name?.trim() || rec.name || teamId).slice(0, 40),
+      sourceTeam: teamId,
+      createdAt: new Date().toISOString(),
+      members,
+    };
+    const file = path.join(this.templatesDir(), `${memberFileName(template.name).replace(/\.md$/, "")}.json`);
+    fs.mkdirSync(this.templatesDir(), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(template, null, 2), "utf-8");
+    return { name: template.name, file, members: members.length };
+  }
+
+  listTemplates(): TeamTemplate[] {
+    const dir = this.templatesDir();
+    if (!fs.existsSync(dir)) return [];
+    return fs
+      .readdirSync(dir)
+      .filter((f) => f.endsWith(".json"))
+      .map((f) => {
+        try {
+          return JSON.parse(fs.readFileSync(path.join(dir, f), "utf-8")) as TeamTemplate;
+        } catch {
+          return null;
+        }
+      })
+      .filter((t): t is TeamTemplate => Boolean(t?.members?.length))
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  findTemplate(nameOrId: string): TeamTemplate | null {
+    const q = nameOrId.trim();
+    if (!q) return null;
+    return this.listTemplates().find((t) => t.name === q || t.sourceTeam === q) ?? null;
+  }
+
+  /**
+   * 按任务标题猜模板：模板名/成员角色/岗位目标里的二字词与标题求交，
+   * 取命中最多的一套；命中为 0 就不猜（宁可不复用，也不乱套编制）。
+   */
+  matchTemplate(text: string): TeamTemplate | null {
+    if (!text.trim()) return null;
+    let best: { t: TeamTemplate; score: number } | null = null;
+    for (const t of this.listTemplates()) {
+      const bag = [t.name, ...t.members.map((m) => `${m.name}${m.role}${m.goal}`)].join("");
+      let score = 0;
+      for (let i = 0; i + 2 <= text.length; i += 1) {
+        const pair = text.slice(i, i + 2);
+        if (bag.includes(pair)) score += 1;
+      }
+      if (score > 0 && (!best || score > best.score)) best = { t, score };
+    }
+    return best && best.score >= 2 ? best.t : null;
+  }
+
+  /** 用模板起一支队（成员档案原样写入，不带上一单的进度/战绩） */
+  instantiateTemplate(nameOrId: string, teamId: string, teamName?: string): { template: string; members: number } {
+    const t = this.findTemplate(nameOrId);
+    if (!t) throw new Error(`没有这套编制模板：${nameOrId}（先用 dissolve_team keep=true 存一套）`);
+    if (fs.existsSync(path.join(this.teamDir(teamId), "team.json"))) {
+      throw new Error(`团队 ${teamId} 已存在，不能再用模板覆盖`);
+    }
+    this.createTeam(teamId, teamName?.trim() || t.name);
+    for (const m of t.members) this.writeMember(teamId, m);
+    return { template: t.name, members: t.members.length };
   }
 
   dissolveTeam(teamId: string): void {
