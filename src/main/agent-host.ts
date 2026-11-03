@@ -79,11 +79,18 @@ export class AgentHost {
   private busyWatchdog?: NodeJS.Timeout;
   private idleProbeStreak = 0;
   private probing = false;
+  /** 最近一次已知的 Pi session（M0-13 追溯）：worker 任何消息带 sessionId 都缓存 */
+  private lastSessionId?: string;
 
   constructor(private readonly options: AgentHostOptions) {}
 
   isRunning(): boolean {
     return Boolean(this.child && this.child.exitCode === null);
+  }
+
+  /** 当前 Pi session id（未拿到过时 undefined——如实缺省，不编造） */
+  get sessionId(): string | undefined {
+    return this.lastSessionId;
   }
 
   isBusy(): boolean {
@@ -274,6 +281,7 @@ export class AgentHost {
       return;
     }
     const type = typeof data.type === "string" ? data.type : "";
+    if (typeof data.sessionId === "string") this.lastSessionId = data.sessionId;
     if (type === "response" && typeof data.id === "string") {
       const pending = this.pending.get(data.id);
       if (!pending) return;

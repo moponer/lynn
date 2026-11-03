@@ -814,8 +814,8 @@ export class Kernel {
    * 成员回报登记（风铃 review_result 与成员后台回报共用；§4.10.5 证据原则的执行点）。
    * 证据可点开验证：真实文件收进卷宗 artifacts/，验不了的只登记 verified:false，不冒充。
    */
-  private registerReport(teamId: string, taskId: string, member: string, text: string, evidence: string[]): string {
-    this.tools.reviewResult(teamId, taskId, { member, text, evidence });
+  private registerReport(teamId: string, taskId: string, member: string, text: string, evidence: string[], sessionId?: string): string {
+    this.tools.reviewResult(teamId, taskId, { member, text, evidence, sessionId: sessionId ?? this.host?.sessionId });
     this.taskCase.append(taskId, { kind: "report", member, text, meta: { evidence } });
     this.taskCase.appendSummary(taskId, `${member} 回报：${text.slice(0, 60)}`);
 
@@ -947,6 +947,7 @@ export class Kernel {
       brief: p.brief,
       deadline: p.deadline,
       tools: p.tools,
+      sessionId: this.host?.sessionId, // M0-13：派单记录可回溯到当轮 Pi session
     });
     try {
       this.taskStore.ensureInProgress({
@@ -1371,8 +1372,8 @@ export class Kernel {
             this.log("skill_tool_denied", { tool: name, allowed: this.activeSkills.flatMap((s) => s.allowedTools) });
             return `工具 ${name} 不在当前激活技能的 allowed-tools 声明里（本次允许：${this.activeSkills.flatMap((s) => s.allowedTools).join("、") || "无"}）。按技能边界收窄行动，或在回复里说明为什么需要越界（用户可放宽技能声明）。`;
           }
-          // 工具面真值在壳：L1 先查，再落到管理型 8 件套（停用残留由执行层拒绝）
-          return this.l1.has(name) ? await this.l1.execute(name, args) : this.runTool(name, args);
+          // 工具面真值在壳：MCP → L1 → 管理工具，与直连 executeToolCall 同一顺序（M1-10 三来源同管线）
+          return await this.dispatchShellTool(name, args);
         } catch (err) {
           return `工具执行失败：${err instanceof Error ? err.message : String(err)}`;
         }
@@ -1476,6 +1477,15 @@ export class Kernel {
     return this.teamStore.teamExists(teamId);
   }
 
+  /**
+   * 壳内工具分发（M1-10 三来源同管线）：MCP → L1 → 管理工具。
+   * Pi onToolCall 与直连 executeToolCall 都走这里——顺序一致，新增来源改一处。
+   */
+  private async dispatchShellTool(name: string, args: Record<string, unknown>): Promise<string> {
+    if (this.mcp.has(name)) return await this.mcp.execute(name, args);
+    return this.l1.has(name) ? await this.l1.execute(name, args) : this.runTool(name, args);
+  }
+
   private async executeToolCall(name: string, args: Record<string, unknown>): Promise<string> {
     try {
       const denial = await this.gateTool(name, args);
@@ -1485,8 +1495,7 @@ export class Kernel {
         this.log("skill_tool_denied", { tool: name, allowed: this.activeSkills.flatMap((s) => s.allowedTools) });
         return `工具 ${name} 不在当前激活技能的 allowed-tools 声明里（本次允许：${this.activeSkills.flatMap((s) => s.allowedTools).join("、") || "无"}）。按技能边界收窄行动，或在回复里说明为什么需要越界（用户可放宽技能声明）。`;
       }
-      if (this.mcp.has(name)) return await this.mcp.execute(name, args);
-      return this.l1.has(name) ? await this.l1.execute(name, args) : this.runTool(name, args);
+      return await this.dispatchShellTool(name, args);
     } catch (err) {
       const text = `工具执行失败：${err instanceof Error ? err.message : String(err)}。请调整后重试或如实告知用户。`;
       this.emit({ type: "tool", badge: "工具", title: `${name} 失败`, body: text });

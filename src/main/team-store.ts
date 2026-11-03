@@ -189,6 +189,8 @@ export interface AssignmentRecord {
   kind: "assign" | "report" | "reject" | "accept" | "escalate";
   member?: string;
   text: string;
+  /** Pi session 追溯（M0-13 §4.10.7）：这条记录发生时主会话跑在哪个 Pi session 上 */
+  sessionId?: string;
   /** 证据索引（指向任务卷宗 artifacts/） */
   evidence?: string[];
   /** 打回必须可执行（§4.10.5）：哪里不合格/期望是什么/时限 */

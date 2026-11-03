@@ -23,6 +23,8 @@ export interface AssignBrief {
   deadline: string;
   /** 本次分配的工具集：必须是岗位白名单的子集（只能收窄） */
   tools?: string[];
+  /** Pi session 追溯（M0-13）：派单时主会话所在的 Pi session */
+  sessionId?: string;
   /** 超过 6 人编制时必须写理由 */
   staffingJustification?: string;
 }
@@ -136,6 +138,7 @@ export class ManagementTools {
       at: new Date().toISOString(),
       kind: "assign",
       member: brief.member,
+      sessionId: brief.sessionId,
       text: JSON.stringify({
         brief: brief.brief,
         deadline: brief.deadline,
@@ -188,7 +191,7 @@ export class ManagementTools {
   reviewResult(
     teamId: string,
     taskId: string,
-    opts: { member: string; text: string; evidence: string[] },
+    opts: { member: string; text: string; evidence: string[]; sessionId?: string },
   ): { verdict: "logged" } {
     if (opts.evidence.length === 0) {
       throw new Error(
@@ -200,6 +203,7 @@ export class ManagementTools {
       at: new Date().toISOString(),
       kind: "report",
       member: opts.member,
+      sessionId: opts.sessionId,
       text: opts.text,
       evidence: opts.evidence,
     });

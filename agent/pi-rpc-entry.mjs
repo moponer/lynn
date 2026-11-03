@@ -295,7 +295,14 @@ async function handle(message) {
     case "get_stats":
       return handleStats();
     case "get_state":
-      return { isStreaming: busy, pendingMessageCount: pendingCount(), sessionReady: Boolean(session) };
+      return {
+        isStreaming: busy,
+        pendingMessageCount: pendingCount(),
+        sessionReady: Boolean(session),
+        // M0-13 追溯：壳缓存 sessionId 供派单/回报记录回写
+        sessionId: session?.sessionId,
+        sessionFile: session?.sessionFile,
+      };
     case "tool_response": {
       const resolve = pendingTool.get(message.id);
       if (resolve) {
