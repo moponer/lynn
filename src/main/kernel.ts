@@ -30,6 +30,7 @@ import { PRESETS, loadProviders, saveProviders, type ProviderEntry } from "./pro
 import { CalendarStore, dueReminders, parseNaturalDate } from "./calendar";
 import { SchedulerStore, recover as recoverScheduler, type DueItem } from "./scheduler";
 import { KnowledgeStore, watchKnowledge } from "./knowledge";
+import { appendUsage, evaluateBudget, pickModel } from "./budget";
 import {
   buildInjection,
   discoverSkills,
@@ -326,6 +327,8 @@ export class Kernel {
   private officeHealth!: EngineHealth;
   /** 知识库目录 watch（M2-09）：变更去抖后增量索引 */
   private kbWatch: { close: () => void } | null = null;
+  /** 软上限已提醒标记（M2-11）：每会话一次，不刷屏 */
+  private budgetWarned = false;
   /** 技能（M2-10）：三级路径发现；命中后 allowed-tools 强制到工具门禁 */
   private skillEntries: SkillEntry[] = [];
   private activeSkills: SkillEntry[] = [];
@@ -583,6 +586,17 @@ export class Kernel {
       });
       this.log("skills_activated", { skills: this.activeSkills.map((s) => s.name), degraded: inj.degraded });
     }
+  }
+
+  /** 软上限检查（M2-11）：达限落一张提示卡（每次会话只提醒一次，不刷屏）；不静默停机 */
+  private checkBudget(): void {
+    const { mode, ratio } = evaluateBudget(this.usage.sessionIn + this.usage.sessionOut, this.settings.getPrefs().softBudgetTokens);
+    if (mode !== "soft" || this.budgetWarned) return;
+    this.budgetWarned = true;
+    this.notifyUser(
+      "预算提示",
+      `本轮 token 用量已达软上限（${Math.round(ratio * 100)}%）。未配置备用模型时继续用当前模型；不会自动停机。`,
+    );
   }
 
   /** 手动触发提醒扫描（测试与 UI 刷新用） */
@@ -1447,6 +1461,11 @@ export class Kernel {
 
   /** 直连降级路径：Pi 不可用时仍可用（原实现保留） */
   private async runChatDirect(cfg: NonNullable<ReturnType<SettingsStore["getModel"]>>, apiKey: string): Promise<void> {
+    // 软上限降级（M2-11）：达软限且有备用模型就换；没有就如实提示继续用（不静默停机）
+    const budget = evaluateBudget(this.usage.sessionIn + this.usage.sessionOut, this.settings.getPrefs().softBudgetTokens);
+    const picked = pickModel(cfg, this.settings.getPrefs().fallbackModel, budget.mode);
+    if (picked.note) this.card({ kind: "system", badge: "工具", title: "预算提示", body: picked.note });
+    const usedModel = picked.model;
     const live = this.card({ kind: "lynn", text: "", streaming: true });
     const patchLive = (text: string, streaming: boolean) => {
       live.text = text;
@@ -1464,7 +1483,7 @@ export class Kernel {
         const result = await streamChat({
           baseUrl: cfg.baseUrl,
           apiKey,
-          model: cfg.model,
+          model: usedModel,
           messages,
           tools: [...TOOL_JSON, ...this.l1.toolSchemas(), ...this.mcp.schemas()],
           onDelta: (t) => {
@@ -1480,6 +1499,9 @@ export class Kernel {
           sessionOut: this.usage.sessionOut + result.completionTokens,
           contextTokens: this.usage.contextTokens + result.promptTokens + result.completionTokens,
         });
+        // 按次记账（M2-11）+ 软上限检查（达限提示/可切备用模型；不静默停机）
+        appendUsage(this.dataRoot, { at: new Date().toISOString(), kind: "turn", in: result.promptTokens, out: result.completionTokens, model: usedModel });
+        this.checkBudget();
         if (result.toolCalls.length > 0) {
           messages.push({
             role: "assistant",
@@ -2386,17 +2408,21 @@ export class Kernel {
       }
 
       case "config.prefs": {
-        const p = params as { autoStart: boolean; trayOnClose?: boolean; notify?: boolean };
+        const p = params as { autoStart: boolean; trayOnClose?: boolean; notify?: boolean; softBudgetTokens?: number; fallbackModel?: string };
         const saved = this.settings.savePrefs({
           autoStart: Boolean(p.autoStart),
           ...(p.trayOnClose !== undefined ? { trayOnClose: Boolean(p.trayOnClose) } : {}),
           ...(p.notify !== undefined ? { notify: Boolean(p.notify) } : {}),
+          ...(p.softBudgetTokens !== undefined ? { softBudgetTokens: Math.max(0, Number(p.softBudgetTokens) || 0) } : {}),
+          ...(p.fallbackModel !== undefined ? { fallbackModel: String(p.fallbackModel).trim() } : {}),
         });
         return {
           ok: true,
           autoStart: saved.autoStart,
           trayOnClose: saved.trayOnClose,
           notify: saved.notify,
+          softBudgetTokens: saved.softBudgetTokens,
+          fallbackModel: saved.fallbackModel,
         } as RpcContracts[M]["result"];
       }
 

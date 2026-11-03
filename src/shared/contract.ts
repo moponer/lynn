@@ -557,10 +557,10 @@ export interface RpcContracts {
     params: { baseUrl: string; apiKey: string; model: string };
     result: { ok: true; latencyMs: number } | { ok: false; error: string };
   };
-  /** 偏好设置（目前只有"任务契约自动开始"） */
+  /** 偏好设置（M2-11 加软预算与备用模型） */
   "config.prefs": {
-    params: { autoStart: boolean; trayOnClose?: boolean; notify?: boolean };
-    result: { ok: true; autoStart: boolean; trayOnClose: boolean; notify: boolean };
+    params: { autoStart: boolean; trayOnClose?: boolean; notify?: boolean; softBudgetTokens?: number; fallbackModel?: string };
+    result: { ok: true; autoStart: boolean; trayOnClose: boolean; notify: boolean; softBudgetTokens: number; fallbackModel: string };
   };
   /** 清除已保存的 API Key（保留端点与模型） */
   "config.clearKey": {

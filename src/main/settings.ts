@@ -23,9 +23,13 @@ export interface Prefs {
   trayOnClose: boolean;
   /** 窗口隐藏时用系统通知触达（M1-18） */
   notify: boolean;
+  /** 会话软预算（token）：达到后提示并可切备用模型；0 = 未设预算（M2-11） */
+  softBudgetTokens: number;
+  /** 软上限触达后的备用模型（留空 = 只提示不切换，不静默停机） */
+  fallbackModel: string;
 }
 
-const DEFAULT_PREFS: Prefs = { autoStart: false, trayOnClose: true, notify: true };
+const DEFAULT_PREFS: Prefs = { autoStart: false, trayOnClose: true, notify: true, softBudgetTokens: 0, fallbackModel: "" };
 
 interface SettingsFile {
   model?: StoredModelConfig;
