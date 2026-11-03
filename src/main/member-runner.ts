@@ -58,10 +58,12 @@ export interface MemberRunInput {
   browser?: ToolkitOptions["browser"];
   /** 知识库写入桥接（M2-08） */
   kb?: ToolkitOptions["kb"];
+  /** 中止信号（用户点「停」/解散队伍）：模型流与工具轮都尽快收尾 */
+  signal?: AbortSignal;
 }
 
 export interface MemberRunResult {
-  status: "reported" | "turn_limit" | "error";
+  status: "reported" | "turn_limit" | "aborted" | "error";
   report: string;
   evidence: string[];
   turns: number;
@@ -112,7 +114,7 @@ export function memberSystemPrompt(input: MemberRunInput): string {
     "",
     "【你的工具】",
     `- 执行工具：${input.tools.filter((t) => (MEMBER_EXEC_TOOLS as readonly string[]).includes(t)).join("、") || "（本次未分配执行工具，只能靠推理完成）"}`,
-    "- submit_report：回报通道（终局）。",
+    "- submit_report：回报通道（终局）。**剩最后 2 轮时必须停手交回**，哪怕没做完也要交：写清做到哪一步、卡在哪、需要什么。不交 = 这张单白跑。",
     "- 你没有 ask_user，不能问用户；口径拿不准就选一种并写明理由。需要升级时在回报正文里标 ESCALATE: 并说明。",
     "",
     "【工作区】",
@@ -188,7 +190,12 @@ export async function runMemberTask(input: MemberRunInput): Promise<MemberRunRes
           text: (name === "write_file" ? "写入 " : "修改 ") + String(args.path) + (ch ? "（+" + ch.added + "/-" + ch.removed + "）" : ""),
         });
       } else if (name === "run_command") {
-        input.onEvent?.({ kind: "tool", text: "执行：" + String(args.command).slice(0, 120) });
+        // 写全命令（截 500）：只给 120 字时界面上全是"执行：powershell -NoProfile -Command "try {…"，
+        // 用户根本看不出它在干什么
+        input.onEvent?.({ kind: "tool", text: "执行：" + String(args.command).slice(0, 500) });
+      } else {
+        const head = name.startsWith("browser_") ? String(args.url ?? args.target ?? args.selector ?? "") : String(args.path ?? args.name ?? "");
+        input.onEvent?.({ kind: "tool", text: `${name}${head ? "：" + head.slice(0, 200) : ""}` });
       }
       return out;
 } catch (err) {
@@ -197,13 +204,22 @@ export async function runMemberTask(input: MemberRunInput): Promise<MemberRunRes
   };
 
   try {
-    while (finalReport === null && turns < maxTurns) {
+    while (finalReport === null && turns < maxTurns && !input.signal?.aborted) {
       input.onEvent?.({
         kind: "turn",
         text: `第 ${turns + 1} / ${maxTurns} 轮`,
         progress: Math.min(95, Math.round((turns / maxTurns) * 100)),
       });
       turns += 1;
+      // 逼近上限就强制收口：不给"再探一轮"的机会，否则 40 轮烧完一张回报都没有
+      if (finalReport === null && maxTurns - turns <= 2) {
+        messages.push({
+          role: "user",
+          content:
+            "只剩 2 轮了：立刻用 submit_report 交回当前结论。未完成也要交——写清做到哪一步、拿到的证据、卡在哪、需要什么。" +
+            "不要再调用其它工具，不要再探索。",
+        });
+      }
       const result = await chat({
         baseUrl: input.model.baseUrl,
         apiKey: input.model.apiKey,
@@ -211,6 +227,7 @@ export async function runMemberTask(input: MemberRunInput): Promise<MemberRunRes
         messages,
         tools,
         onDelta: () => {},
+        signal: input.signal,
       });
       promptTokens += result.promptTokens;
       completionTokens += result.completionTokens;
@@ -233,6 +250,7 @@ export async function runMemberTask(input: MemberRunInput): Promise<MemberRunRes
         })),
       });
       for (const tc of result.toolCalls) {
+        if (input.signal?.aborted) break;
         const outcome = await execTool(tc.name, tc.arguments);
         if (finalReport !== null) {
           return {
@@ -246,6 +264,16 @@ export async function runMemberTask(input: MemberRunInput): Promise<MemberRunRes
         }
         messages.push({ role: "tool", tool_call_id: tc.id, name: tc.name, content: outcome });
       }
+    }
+    if (input.signal?.aborted) {
+      return {
+        status: "aborted",
+        report: "已被停止（用户中止）。已写出的文件留在工作区，未提交汇报。",
+        evidence: [],
+        turns,
+        promptTokens,
+        completionTokens,
+      };
     }
     return {
       status: "turn_limit",

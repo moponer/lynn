@@ -41,7 +41,7 @@ import {
 import { probeSoffice, readTable, writeTable, type EngineHealth } from "./office";
 import { BrowserController, sensitiveUrl } from "./browser";
 import { COMPLIANCE_NOTE, loadMessaging, type ChannelConfig } from "./messaging";
-import { TeamStore } from "./team-store";
+import { TeamStore, generateTeamId } from "./team-store";
 import {
   createDraft,
   listDrafts,
@@ -76,23 +76,53 @@ import { AgentHost, type RpcToolSpec } from "./agent-host";
 
 // ---------- 我方工具定义（与 RPC worker / 直连共用一份语义） ----------
 
+const TEAM_HINT = "团队 ID。**省略即可**：系统会绑定当前团队，没有就自动新建一个（ID 由系统生成，不要问用户要）";
+
+/** 流式 delta 的发送去抖：一帧一次。渲染层再按 rAF 合帧，两处都不许降到"肉眼看得出卡"的档位 */
+const DELTA_FRAME_MS = 16;
+
+/** 同时最多几个成员在跑：再多就互相堵，而且用户根本看不出来谁在干什么 */
+const MAX_CONCURRENT_MEMBERS = 2;
+/** 成员多久没有任何动作就标"可能卡住"（蓝本 tether-ai 是 120s） */
+const MEMBER_STALL_MS = 120_000;
+
 const TOOL_JSON: ToolSchema[] = [
+  {
+    type: "function",
+    function: {
+      name: "create_team",
+      description:
+        "建一个团队（不需要先有团队）。只需给一个人类可读的名字，团队 ID 由系统生成并返回给你——绝不要向用户索要 ID。",
+      parameters: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "团队名（人类可读，例如「超星学霸」）；省略则用系统默认名" },
+        },
+      },
+    },
+  },
   {
     type: "function",
     function: {
       name: "create_member",
       description:
-        "招募团队成员（书面岗位）：名字、岗位、单一目标、边界（不许做什么）、工具白名单、产出契约与验收标准。超过 6 人编制需要 justification。",
+        "招募团队成员（书面岗位）：名字、岗位、单一目标、边界（不许做什么）、工具白名单、产出契约与验收标准。超过 6 人编制需要 justification。团队不存在会自动新建。",
       parameters: {
         type: "object",
-        required: ["teamId", "name", "role", "goal", "tools"],
+        required: ["name", "role", "goal", "tools"],
         properties: {
-          teamId: { type: "string" },
+          teamId: { type: "string", description: TEAM_HINT },
+          teamName: { type: "string", description: "需要自动建队时用的团队名（可选）" },
           name: { type: "string" },
           role: { type: "string" },
           goal: { type: "string", description: "单一目标，行为收敛的关键" },
           boundaries: { type: "array", items: { type: "string" } },
-          tools: { type: "array", items: { type: "string" }, description: "执行类工具白名单，如 read/write/edit/bash/glob/grep/browser/office" },
+          tools: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "执行类工具白名单，只能填这些真实工具名：read_file / write_file / list_dir / run_command / browser_navigate / browser_snapshot / browser_click / browser_fill / browser_extract / browser_close / office_read_table / office_write_table / kb_add",
+          },
           deliverable: { type: "string" },
           acceptance: { type: "array", items: { type: "string" } },
           justification: { type: "string", description: "超过 6 人编制时必填" },
@@ -104,12 +134,13 @@ const TOOL_JSON: ToolSchema[] = [
     type: "function",
     function: {
       name: "assign_task",
-      description: "向成员派单。成员只拿到简报包（任务+完成标准+时限），看不到你们的对话。",
+      description: "向成员派单。成员只拿到简报包（任务+完成标准+时限），看不到你们的对话。团队不存在会自动新建。",
       parameters: {
         type: "object",
-        required: ["teamId", "taskId", "member", "brief", "deadline"],
+        required: ["taskId", "member", "brief", "deadline"],
         properties: {
-          teamId: { type: "string" },
+          teamId: { type: "string", description: TEAM_HINT },
+          teamName: { type: "string", description: "需要自动建队时用的团队名（可选）" },
           taskId: { type: "string" },
           member: { type: "string" },
           brief: { type: "string" },
@@ -118,7 +149,7 @@ const TOOL_JSON: ToolSchema[] = [
           acceptance: { type: "array", items: { type: "string" }, description: "验收标准（写进任务契约，用户点开始后生效）" },
           template: {
             type: "string",
-            description: "复用哪套编制模板（省略则按任务标题自动匹配；没有模板会如实报错，不会凭空造团队）",
+            description: "复用哪套编制模板（省略则按任务标题自动匹配；没有再自动新建一支空队，不会失败）",
           },
         },
       },
@@ -131,8 +162,8 @@ const TOOL_JSON: ToolSchema[] = [
       description: "查看某任务进度（派单数/回报数/打回数/最新回报摘要）。",
       parameters: {
         type: "object",
-        required: ["teamId", "taskId"],
-        properties: { teamId: { type: "string" }, taskId: { type: "string" } },
+        required: ["taskId"],
+        properties: { teamId: { type: "string", description: TEAM_HINT }, taskId: { type: "string" } },
       },
     },
   },
@@ -155,9 +186,9 @@ const TOOL_JSON: ToolSchema[] = [
       description: "登记成员节点回报。必须附证据；无证据会被拒绝登记。",
       parameters: {
         type: "object",
-        required: ["teamId", "taskId", "member", "text", "evidence"],
+        required: ["taskId", "member", "text", "evidence"],
         properties: {
-          teamId: { type: "string" },
+          teamId: { type: "string", description: TEAM_HINT },
           taskId: { type: "string" },
           member: { type: "string" },
           text: { type: "string" },
@@ -173,9 +204,9 @@ const TOOL_JSON: ToolSchema[] = [
       description: "验收或打回。打回必须写 what/expect/deadline；连续 3 轮打回将强制升级问用户。",
       parameters: {
         type: "object",
-        required: ["teamId", "taskId", "member", "verdict"],
+        required: ["taskId", "member", "verdict"],
         properties: {
-          teamId: { type: "string" },
+          teamId: { type: "string", description: TEAM_HINT },
           taskId: { type: "string" },
           member: { type: "string" },
           verdict: { type: "string", enum: ["accept", "reject"] },
@@ -193,9 +224,9 @@ const TOOL_JSON: ToolSchema[] = [
       description: "向用户汇报。四件套：结论/证据/未完成项/需要用户拍板的事。",
       parameters: {
         type: "object",
-        required: ["teamId", "taskId", "conclusion"],
+        required: ["taskId", "conclusion"],
         properties: {
-          teamId: { type: "string" },
+          teamId: { type: "string", description: TEAM_HINT },
           taskId: { type: "string" },
           conclusion: { type: "string" },
           evidence: { type: "array", items: { type: "string" } },
@@ -297,6 +328,10 @@ export class Kernel {
   private memberRuns = new Map<string, Promise<MemberRunResult>>();
   /** 成员进度（姓名 → 0–100）：只在内存里，用来画实时进度 */
   private memberProgress = new Map<string, number>();
+  /** 每张单的中止器（用户点「停」）：没有它就只能解散全队来止损 */
+  private memberAborts = new Map<string, AbortController>();
+  /** 成员占用：`teamId::成员` → 正在跑的 taskId（同一成员不许并发跟两张单） */
+  private memberActive = new Map<string, string>();
   private listeners = new Set<(ev: KernelEvent) => void>();
 
   /** Pi RPC worker 可用（M0-03：壳与运行时分进程） */
@@ -306,7 +341,10 @@ export class Kernel {
   private hostStamp = "";
   /** 流式中的她：runChat 里增量 patch */
   private liveCard: FeedCard | null = null;
-  /** 上一次推 delta 事件的时间（节流到 ~80ms 一次） */
+  /**
+   * 上一次推 delta 事件的时间。按帧节流（~16ms）而不是按"人能看清"的 80ms：
+   * 合并交给渲染层 rAF（蓝本 tether-ai 的做法），主进程只做去抖，不做降帧。
+   */
   private lastDeltaEmit = 0;
 
   /** 回合状态（唯一真相源，渲染层只读） */
@@ -325,6 +363,8 @@ export class Kernel {
   private queueSeq = 0;
   /** 待确认的任务契约（decisionId → 派单上下文） */
   private pendingPlans = new Map<string, PendingPlan>();
+  /** 最近一次「任务契约已呈给用户」的时间：用来挡"派完单又问一遍是否开工" */
+  private lastPlanAt = 0;
   /** 等你批准的工具调用（decisionId → 决议器） */
   private pendingApprovals = new Map<string, { resolve: (ok: boolean) => void }>();
   /** L2 MCP 工具（mcp__server__tool） */
@@ -722,7 +762,32 @@ export class Kernel {
     return path.join(__dirname, "..", "..", "agent", "pi-rpc-entry.mjs");
   }
 
+  /**
+   * 启动对账：上次进程被杀/退出时留在 in_progress 的单，成员已经不在跑了。
+   * 不收拾的话台账上永远挂着"进行中"，点「停」还会回"没有在跑的"。
+   */
+  private reconcileOrphanTasks(): void {
+    let n = 0;
+    for (const t of this.taskStore.list()) {
+      if (t.status !== "in_progress" || this.memberRuns.has(t.id)) continue;
+      try {
+        this.taskStore.transition(t.id, "blocked");
+        n += 1;
+      } catch {
+        /* 迁移规则不允许就不强改 */
+      }
+    }
+    if (n > 0) {
+      this.card({
+        kind: "system",
+        text: `${n} 张单在上次运行时中断、没有收尾（成员已不在跑），已标成「卡住」。要重做就重新派单。`,
+      });
+    }
+  }
+
   async init(): Promise<void> {
+    // 上次没收尾的单先对账（放在最前：界面一打开就该是真实状态）
+    this.reconcileOrphanTasks();
     // office 引擎健康（M2-06）：探测一次；失败不影响 CSV
     this.officeHealth = await probeSoffice().catch(
       (): EngineHealth => ({ found: false, kind: "none", detail: "引擎探测失败（不影响 CSV）" }),
@@ -1001,6 +1066,15 @@ export class Kernel {
     if (this.memberRuns.has(taskId)) {
       return `${taskId} 已有成员在执行中，不重复开工。`;
     }
+    if (this.memberRuns.size >= MAX_CONCURRENT_MEMBERS) {
+      return `同时最多 ${MAX_CONCURRENT_MEMBERS} 个成员在跑，现在已经有 ${this.memberRuns.size} 个（${[...this.memberRuns.keys()].join("、")}）。等其中一个回报或点「停」之后再派。`;
+    }
+    // 同一个成员同时跟两张单 = 工具层互相堵死（真实事故：13:24 与 13:26 各派一张，然后两边都不动了）
+    const memberKey = `${teamId}::${member}`;
+    const busyTask = this.memberActive.get(memberKey);
+    if (busyTask && busyTask !== taskId) {
+      return `成员「${member}」正在跑 ${busyTask}，同一成员同时只能跟一张单。等它回报后再派，或换一个成员。`;
+    }
     // 执行工具 = 本次分配 ∩ 内置执行工具；submit_report 是回报通道，不占白名单
     const allowed = (toolsArg ?? profile.tools).filter((t) =>
       (MEMBER_EXEC_TOOLS as readonly string[]).includes(t),
@@ -1015,11 +1089,38 @@ export class Kernel {
       "utf-8",
     );
 
+    // 进度卡：一张单一张卡，跑的过程中就地更新——不再一次工具调用刷一张卡
+    const controller = new AbortController();
+    const steps: string[] = [];
+    const startedAt = Date.now();
+    const live = this.card({ kind: "tool", badge: "进度", title: `${member} 在干 · ${taskId}`, meta: "刚开工", body: "（等他第一步）" });
+    let lastStepAt = Date.now();
+    const pushStep = (text: string) => {
+      steps.push(text);
+      lastStepAt = Date.now();
+      const tail = steps.slice(-6).join("\n");
+      this.patchCard(live, {
+        meta: `${steps.length} 步 · ${Math.round((Date.now() - startedAt) / 1000)}s`,
+        body: tail.length > 1500 ? `…\n${tail.slice(-1500)}` : tail,
+      });
+    };
+    // 卡死可见：长时间没有任何动作就在卡上标出来（不自动杀，让人决定）
+    const stallTimer = setInterval(() => {
+      const quiet = Date.now() - lastStepAt;
+      if (quiet < MEMBER_STALL_MS) return;
+      this.patchCard(live, {
+        meta: `${steps.length} 步 · 已 ${Math.round((Date.now() - startedAt) / 1000)}s · 可能卡住`,
+        body: `已经 ${Math.round(quiet / 1000)}s 没有任何动作。可以点台账上的「停」止损。\n\n最后动作：\n${steps.slice(-3).join("\n") || "（一步都没做）"}`,
+      });
+    }, 15_000);
+    stallTimer.unref?.();
+
     const run: Promise<MemberRunResult> = runMemberTask({
       profile,
       brief,
       deadline,
       tools: allowed,
+      signal: controller.signal,
       workdir,
       model: { baseUrl: cfg.baseUrl, apiKey, model: cfg.model },
       onAudit: (ev) => this.auditTool(teamId, taskId, member, ev),
@@ -1040,15 +1141,7 @@ export class Kernel {
         add: (name, markdown) => this.knowledge.addDoc(name, markdown),
       },
       onEvent: (ev) => {
-        if (ev.kind === "tool") {
-          this.emit({
-            type: "tool",
-            badge: "工具",
-            title: `${member} · ${taskId}`,
-            meta: "成员工作区",
-            body: ev.text,
-          });
-        }
+        if (ev.kind === "tool") pushStep(ev.text);
         if (ev.kind === "turn") {
           const progress = ev.progress ?? 0;
           this.memberProgress.set(member, progress);
@@ -1060,28 +1153,52 @@ export class Kernel {
     void run
       .then((result) => {
         this.memberProgress.set(member, 100);
-        this.registerReport(teamId, taskId, member, result.report, result.evidence);
-        if (result.status !== "reported") {
-          this.emit({
-            type: "tool",
+        const used = Math.round((Date.now() - startedAt) / 1000);
+        if (result.status === "reported" && result.evidence.length > 0) {
+          // 只有真交了证据才登记；空回报进登记通道会抛错，原来那条路直接变成"崩溃"卡
+          this.registerReport(teamId, taskId, member, result.report, result.evidence);
+          this.patchCard(live, {
             badge: "回报",
-            title: `${member} 未能完成 · ${taskId}`,
-            body: result.error === "turn_limit" ? `轮次上限（${profile.limits?.maxTurns ?? 12}）内未回报。` : result.report,
+            title: `${member} 回报 · ${taskId}`,
+            meta: `${result.turns} 轮 · ${used}s`,
+            body: result.report.slice(0, 1500),
           });
+          return;
+        }
+        if (result.status === "aborted") {
+          this.patchCard(live, { badge: "已停止", title: `${member} 已停止 · ${taskId}`, meta: `${used}s`, body: "用户中止。已写出的文件留在工作区。" });
+          return;
+        }
+        // 没回报：如实说清、把单子标成"卡住"让它在待你区里显形，别静默消失
+        this.patchCard(live, {
+          badge: "未完成",
+          title: `${member} 没交出回报 · ${taskId}`,
+          meta: `${result.turns} 轮 · ${used}s`,
+          body: `${result.report}\n\n最后 ${Math.min(steps.length, 3)} 步：\n${steps.slice(-3).join("\n") || "（一步都没做）"}`,
+        });
+        try {
+          this.taskStore.transition(taskId, "blocked");
+        } catch {
+          /* 状态已经不在可迁移范围内就不强改 */
         }
       })
       .catch((err: unknown) => {
-        this.emit({
-          type: "tool",
-          badge: "回报",
-          title: `成员执行崩溃 · ${member} · ${taskId}`,
+        this.patchCard(live, {
+          badge: "崩溃",
+          title: `${member} 执行崩溃 · ${taskId}`,
+          meta: `${steps.length} 步`,
           body: err instanceof Error ? err.message : String(err),
         });
       })
       .finally(() => {
+        clearInterval(stallTimer);
         this.memberRuns.delete(taskId);
+        this.memberAborts.delete(taskId);
+        if (this.memberActive.get(memberKey) === taskId) this.memberActive.delete(memberKey);
       });
     this.memberRuns.set(taskId, run);
+    this.memberAborts.set(taskId, controller);
+    this.memberActive.set(memberKey, taskId);
     this.emit({
       type: "tool",
       badge: "派单",
@@ -1092,11 +1209,52 @@ export class Kernel {
     return "成员已开工（后台执行），回报后会自动进待审查。";
   }
 
+  /**
+   * 停掉一张正在跑的成员单（§4.10.4 缺的那一半）。
+   * 之前想止损只有"解散整队"一条路，会连带停掉同队其他成员。
+   */
+  cancelMemberTask(taskId: string): { ok: boolean; error?: string } {
+    const controller = this.memberAborts.get(taskId);
+    if (!controller) return { ok: false, error: `没有在跑的 ${taskId}（可能已经结束或从未开工）` };
+    controller.abort();
+    this.card({ kind: "system", text: `已停 ${taskId}：成员在本轮模型调用结束后收手，已写出的文件留在工作区。` });
+    return { ok: true };
+  }
+
+  /** 在跑的成员单（taskId 列表）：界面据此显示「停」按钮，而不是让用户去猜 */
+  runningTaskIds(): string[] {
+    return [...this.memberRuns.keys()];
+  }
+
   runTool(name: string, args: Record<string, unknown>): string {
     switch (name) {
+      // 0. create_team（§4.10.3 修正）：ID 由系统生成，模型只需给名字
+      case "create_team": {
+        const team = this.autoCreateTeam({
+          teamName: args.name ? String(args.name) : undefined,
+          title: args.name ? String(args.name) : undefined,
+        });
+        this.card({
+          kind: "system",
+          text: team.reused
+            ? `已建团队「${team.name}」（复用编制「${team.reused.name}」，${team.reused.members} 人）——ID ${team.id} 由系统生成。`
+            : `已建团队「${team.name}」——ID ${team.id} 由系统生成，接下来直接 create_member 招募即可。`,
+        });
+        return JSON.stringify({ teamId: team.id, teamName: team.name, members: team.reused?.members ?? 0 });
+      }
       case "create_member": {
+        // 没有团队就自动建一支：不再让模型回头向用户要 teamId
+        let teamId = this.resolveTeamId(args.teamId ? String(args.teamId) : undefined);
+        if (!teamId) {
+          const team = this.autoCreateTeam({
+            teamId: args.teamId ? String(args.teamId) : undefined,
+            teamName: args.teamName ? String(args.teamName) : undefined,
+          });
+          teamId = team.id;
+          this.card({ kind: "system", text: `还没有可用团队，已自建「${team.name}」（ID ${team.id}）。` });
+        }
         this.tools.createMember(
-          String(args.teamId),
+          teamId,
           {
             name: String(args.name),
             role: String(args.role),
@@ -1104,7 +1262,8 @@ export class Kernel {
             boundaries: (args.boundaries as string[]) ?? [],
             tools: (args.tools as string[]) ?? [],
             model: "deepseek-chat",
-            limits: { maxTurns: 40, budgetTokens: 300000, wallClockMin: 30 },
+            // 15 轮封顶：一轮一次模型调用，40 轮能烧很久且大多数时候后 20 轮都在原地打转
+            limits: { maxTurns: 15, budgetTokens: 300000, wallClockMin: 30 },
             outputContract: {
               deliverable: String(args.deliverable ?? "按验收标准交付"),
               evidence: ["改动文件清单/命令输出", "测试或核对结果"],
@@ -1122,10 +1281,9 @@ export class Kernel {
           body: `目标：${args.goal}\n边界：${((args.boundaries as string[]) ?? []).join("；") || "（未写）"}`,
           members: [{ name: String(args.name), role: String(args.role), color: this.teamColor(0) }],
         });
-        return `已招募 ${args.name}（岗位档案已落盘，用户可读可改）。`;
+        return `已招募 ${args.name}（岗位档案已落盘，用户可读可改）。团队 ID：${teamId}（后续派单可省略 teamId，缺省就绑它）。`;
       }
       case "assign_task": {
-        const teamId = String(args.teamId);
         const taskId = String(args.taskId);
         const member = String(args.member);
         const brief = String(args.brief);
@@ -1139,6 +1297,33 @@ export class Kernel {
         // 标题取简报第一个非空行（首行为空时别把裸 taskId 当标题摆到台账上）
         const titleLine = brief.split("\n").map((l) => l.trim()).find((l) => l.length > 0) ?? "";
         const title = (titleLine || taskId).slice(0, 40);
+        // M1-08 + §4.10.3 修正：显式 → 当前唯一在职队 → 模板复用 → 自动新建空队。
+        // 绝不因为"团队不存在"把活退回去让用户给 ID（这正是此前卡死的根因）。
+        let teamId = this.resolveTeamId(args.teamId ? String(args.teamId) : undefined);
+        if (!teamId) {
+          const team = this.autoCreateTeam(
+            {
+              teamId: args.teamId ? String(args.teamId) : undefined,
+              teamName: args.teamName ? String(args.teamName) : undefined,
+              title,
+            },
+            args.template as string | undefined,
+          );
+          teamId = team.id;
+          this.card({
+            kind: "system",
+            text: team.reused
+              ? `本机还没有这个团队，已建「${team.name}」并复用编制「${team.reused.name}」（${team.reused.members} 人），ID ${team.id}。`
+              : `本机还没有这个团队，已自建「${team.name}」（ID ${team.id}）。派单照常进行，不需要你提供团队 ID。`,
+          });
+        }
+        // 成员档案不存在时如实说明该先招人——这是真缺人，不是缺团队
+        if (!this.teamStore.teamExists(teamId)) {
+          return `团队 ${teamId} 仍不可用（建队失败），请如实告知用户并附上错误。`;
+        }
+        if (!this.teamStore.listMembers(teamId).some((p) => p.name === member)) {
+          return `团队 ${teamId} 里还没有成员「${member}」，先 create_member 招募（团队已经在了，不用再建队，也不用问用户要 ID）。`;
+        }
         const plan: TaskPlan = {
           taskId,
           title,
@@ -1150,14 +1335,6 @@ export class Kernel {
           deadline,
         };
         const ctx: PendingPlan = { teamId, taskId, member, brief, deadline, tools, draftId };
-        // M1-08：团队不在时按编制模板起一支（显式指定优先，否则按标题匹配）
-        const reused = this.tools.ensureTeamFromTemplate(teamId, title, args.template as string | undefined);
-        if (!this.storeTeamExists(teamId)) {
-          return `团队 ${teamId} 不存在，也没有匹配「${title}」的编制模板。先 create_member 招募，或在上一单解散时选「保留编制」。`;
-        }
-        if (reused) {
-          this.card({ kind: "system", text: `复用编制「${reused.name}」（${reused.members} 人），没有重新招人。` });
-        }
         // 还没开工：工单只落 todo，不能谎报"执行中"（七态见 §4.10.4）
         if (!this.taskStore.get(taskId)) {
           this.taskStore.create({ id: taskId, title, teamId, member });
@@ -1179,6 +1356,7 @@ export class Kernel {
           plan,
           checks: plan.acceptance.map((a) => ({ ok: true, text: a })),
         });
+        this.lastPlanAt = Date.now();
         this.setTurn({ phase: "awaiting_plan", taskId });
         this.emit({
           type: "tool",
@@ -1191,8 +1369,10 @@ export class Kernel {
       }
       case "check_progress": {
         const taskId = String(args.taskId);
+        const teamId = this.resolveTeamId(args.teamId ? String(args.teamId) : undefined);
+        if (!teamId) return "本机还没有任何团队：先 create_team（ID 由系统生成），再招募派单。";
         const p = {
-          ...this.tools.checkProgress(String(args.teamId), taskId),
+          ...this.tools.checkProgress(teamId, taskId),
           running: this.memberRuns.has(taskId),
         };
         return JSON.stringify(p, null, 2);
@@ -1233,8 +1413,10 @@ export class Kernel {
         return `已启用 L0 技能插件 ${enabled.id}。记得在汇报里告知用户（自启用须告知）。`;
       }
       case "review_result": {
+        const teamId = this.resolveTeamId(args.teamId ? String(args.teamId) : undefined);
+        if (!teamId) return "本机还没有任何团队，无从登记回报。先 create_team（ID 由系统生成）。";
         return this.registerReport(
-          String(args.teamId),
+          teamId,
           String(args.taskId),
           String(args.member),
           String(args.text),
@@ -1242,7 +1424,9 @@ export class Kernel {
         );
       }
       case "accept_or_reject": {
-        const r = this.tools.acceptOrReject(String(args.teamId), String(args.taskId), args.verdict as "accept" | "reject", {
+        const teamId = this.resolveTeamId(args.teamId ? String(args.teamId) : undefined);
+        if (!teamId) return "本机还没有任何团队，无从验收。先 create_team（ID 由系统生成）。";
+        const r = this.tools.acceptOrReject(teamId, String(args.taskId), args.verdict as "accept" | "reject", {
           member: String(args.member),
           rejectReason:
             args.verdict === "reject"
@@ -1279,13 +1463,17 @@ export class Kernel {
             : "已打回，并写清了改什么、期望什么、时限。";
       }
       case "report_to_user": {
-        this.tools.reportToUser(String(args.teamId), {
-          taskId: String(args.taskId),
-          conclusion: String(args.conclusion),
-          evidence: (args.evidence as string[]) ?? [],
-          unfinished: (args.unfinished as string[]) ?? [],
-          decisionsNeeded: (args.decisionsNeeded as string[]) ?? [],
-        });
+        const teamId = this.resolveTeamId(args.teamId ? String(args.teamId) : undefined);
+        // 没有团队就不落账（没队可落），但汇报本身必须照常呈给用户
+        if (teamId) {
+          this.tools.reportToUser(teamId, {
+            taskId: String(args.taskId),
+            conclusion: String(args.conclusion),
+            evidence: (args.evidence as string[]) ?? [],
+            unfinished: (args.unfinished as string[]) ?? [],
+            decisionsNeeded: (args.decisionsNeeded as string[]) ?? [],
+          });
+        }
         this.emit({
           type: "tool",
           badge: "汇报",
@@ -1311,6 +1499,11 @@ export class Kernel {
         return "汇报已呈给用户。";
       }
       case "ask_user": {
+        // 刚呈上任务契约又问"是否确认开工"= 重复确认：契约卡自己带「开始/修改/驳回」，
+        // 再来一问只会把用户的回答变成一轮新对话（真实事故：一次派单问了两遍）
+        if (this.pendingPlans.size > 0 && Date.now() - this.lastPlanAt < 120_000) {
+          return "任务契约已经在等用户确认（卡片上有「开始 / 修改 / 驳回」三个按钮），不要再用 ask_user 重复问是否开工。把需要补充的说明写进下一次回复即可。";
+        }
         const q = this.tools.askUser(String(args.question), String(args.context ?? ""));
         this.decisions.push({
           id: q.id,
@@ -1387,6 +1580,9 @@ export class Kernel {
         !this.createFreshSession &&
         (fs.existsSync(this.timelineFile) || this.threads.loadState(this.currentThreadId).history.length > 0),
       sessionDir: this.threads.piDir(this.currentThreadId),
+      // 把用户的项目根交给 worker 当 Pi 的 cwd（此前是 worker 脚本所在目录，
+      // 导致 Pi 顺祖先目录捡到 F:\spiker\AGENTS.md 那个别的项目的开发指南）
+      projectRoot: this.projectRoot,
       onEvent: (ev) => this.onAgentEvent(ev),
       onError: (message) => {
         // 运行时错误必须进对话流：只发事件的话界面会一片空白（用户只看到自己那半句）
@@ -1475,8 +1671,34 @@ export class Kernel {
     return this.allTools().map((t) => t.function.name);
   }
 
-  private storeTeamExists(teamId: string): boolean {
-    return this.teamStore.teamExists(teamId);
+  /**
+   * 团队主键解析（§4.10.3 修正：主键由系统管，不是用户输入项）。
+   * 显式给了且存在 → 用它；否则只有一支在职队 → 隐式绑它；都没有 → undefined（交给自动建队）。
+   */
+  private resolveTeamId(explicit?: string): string | undefined {
+    const wanted = (explicit ?? "").trim();
+    if (wanted && this.teamStore.teamExists(wanted)) return wanted;
+    const active = this.teamStore.activeTeams();
+    return active.length === 1 ? active[0].id : undefined;
+  }
+
+  /**
+   * 缺团队就地建（对齐蓝本 tether-ai 的兜底姿态：不问用户要主键）。
+   * 先看编制模板能不能复用，没有就起一支空队；ID 由系统生成，名字用人类可读的 hint。
+   */
+  private autoCreateTeam(
+    hint: { teamId?: string; teamName?: string; title?: string },
+    template?: string,
+  ): { id: string; name: string; reused: { name: string; members: number } | null } {
+    const requested = (hint.teamId ?? "").trim();
+    const prettyName = (hint.teamName ?? "").trim() || requested || (hint.title ?? "").trim() || "默认团队";
+    // 机器可读的 ID（纯 ASCII）可以沿用；中文一类当名字，ID 重新生成
+    const machine = requested && /^[A-Za-z0-9._-]+$/.test(requested) ? requested : undefined;
+    const id = machine ?? generateTeamId(prettyName, (c) => this.teamStore.teamExists(c));
+    const reused = this.tools.ensureTeamFromTemplate(id, hint.title ?? prettyName, template);
+    if (reused) return { id, name: reused.name, reused };
+    const created = this.tools.createTeam(prettyName, id, !machine);
+    return { id: created.id, name: created.name, reused: null };
   }
 
   /**
@@ -1489,6 +1711,9 @@ export class Kernel {
   }
 
   private async executeToolCall(name: string, args: Record<string, unknown>): Promise<string> {
+    // 状态行（对齐蓝本 liveStatus）：工具执行期间界面必须显示"正在做什么 + 已用时"，
+    // 否则串行工具轮看起来就是卡死
+    this.setTurn({ activity: "tool", activityName: name, activityAt: Date.now() });
     try {
       const denial = await this.gateTool(name, args);
       if (denial) return denial;
@@ -1502,6 +1727,9 @@ export class Kernel {
       const text = `工具执行失败：${err instanceof Error ? err.message : String(err)}。请调整后重试或如实告知用户。`;
       this.emit({ type: "tool", badge: "工具", title: `${name} 失败`, body: text });
       return text;
+    } finally {
+      // 工具交回后模型接着生成：状态行切回"生成中"，不清空（否则中途一片空白）
+      this.setTurn({ activity: "model", activityName: undefined, activityAt: Date.now() });
     }
   }
 
@@ -1520,6 +1748,8 @@ export class Kernel {
     this.liveCard = live;
     const beforeIn = this.usage.sessionIn;
     const beforeOut = this.usage.sessionOut;
+    // 从收到指令那一刻就开始计时：避免冷启动/首 token 期间界面完全静默
+    this.setTurn({ activity: "model", activityName: undefined, activityAt: Date.now() });
     try {
       const host = await this.ensureHost();
       this.setTurn({ phase: "accepted", busy: true });
@@ -1556,6 +1786,8 @@ export class Kernel {
     } finally {
       this.liveCard = null;
       if (live.streaming) this.patchCard(live, { streaming: false });
+      // 本轮结束：状态行必须收掉，不能留一个永远在走的计时器
+      this.setTurn({ activity: undefined, activityName: undefined, activityAt: undefined });
     }
   }
 
@@ -1567,13 +1799,15 @@ export class Kernel {
     if (picked.note) this.card({ kind: "system", badge: "工具", title: "预算提示", body: picked.note });
     const usedModel = picked.model;
     const live = this.card({ kind: "lynn", text: "", streaming: true });
+    this.setTurn({ activity: "model", activityName: undefined, activityAt: Date.now() });
     const patchLive = (text: string, streaming: boolean) => {
       live.text = text;
       live.streaming = streaming;
       const now = Date.now();
-      if (streaming && now - this.lastDeltaEmit >= 80) {
+      if (streaming && now - this.lastDeltaEmit >= DELTA_FRAME_MS) {
         this.lastDeltaEmit = now;
-        this.emit({ type: "delta", text });
+        // cardId 必须带：渲染层只认带 cardId 的 delta，否则降级路径等于没有流式
+        this.notify({ type: "delta", text, cardId: live.id });
       }
     };
     const messages: ChatMessage[] = [{ role: "system", content: this.systemPrompt() }, ...this.history];
@@ -1633,6 +1867,8 @@ export class Kernel {
       if (!live.text) live.text = fail.message;
       this.patchCard(live, { streaming: false, code: fail.code });
       this.failTurn(fail.code, fail.message, fail.action);
+    } finally {
+      this.setTurn({ activity: undefined, activityName: undefined, activityAt: undefined });
     }
   }
 
@@ -2272,6 +2508,23 @@ export class Kernel {
 
       case "office.health": {
         return { ...this.officeHealth, csv: true, xlsx: this.officeHealth.found } as RpcContracts[M]["result"];
+      }
+
+      case "task.cancel": {
+        const { taskId } = params as { taskId: string };
+        return this.cancelMemberTask(String(taskId)) as RpcContracts[M]["result"];
+      }
+
+      // 建团队（§4.10.3 修正）：界面上给名字就够，ID 由系统生成
+      case "team.create": {
+        const { name } = params as { name?: string };
+        try {
+          const created = this.tools.createTeam(name ? String(name) : undefined);
+          this.card({ kind: "system", text: `已建团队「${created.name}」（ID ${created.id}）。` });
+          return { ok: true, id: created.id, name: created.name } as RpcContracts[M]["result"];
+        } catch (err) {
+          return { ok: false, error: err instanceof Error ? err.message : String(err) } as RpcContracts[M]["result"];
+        }
       }
 
       // 模板导出/导入（M2-15）：第三方岗位说明白名单只收窄

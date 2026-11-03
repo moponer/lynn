@@ -114,6 +114,49 @@ const DANGEROUS: { re: RegExp; why: string }[] = [
 /** 出站动作（只审计不拦）：真正的拦截要靠域名白名单，那是后续的事 */
 const OUTBOUND = /\b(curl|wget|ssh|scp|sftp|ftp|telnet|nc|ncat|Invoke-WebRequest|iwr|git\s+clone|npm\s+(i|install|publish))\b|https?:\/\//i;
 
+// ---------- 命令里的路径逃逸 ----------
+//
+// 文件工具被钉在工作区，命令却能随手读全盘——真实事故：成员的 powershell 去
+// `Get-ChildItem 'D:\qcc\Hermix Desktop'`、`C:\Users\...\.hermix` 翻用户别的项目。
+// 这里做字面量绝对路径识别（拼出来的路径拦不住，OS 级隔离是 M1-11 的活，不谎报沙箱）。
+const PATH_BOUNDARY = "[\\s\"'=()`;,|&]";
+const ABS_WIN = new RegExp(`(?:^|${PATH_BOUNDARY})([A-Za-z]:[\\\\/][^\\s"'\`;|&)]*)`, "g");
+const ABS_UNC = new RegExp(`(?:^|${PATH_BOUNDARY})(\\\\\\\\[^\\s"'\`;|&)]+)`, "g");
+const ABS_POSIX = new RegExp(`(?:^|${PATH_BOUNDARY})(/[A-Za-z0-9._-][^\\s"'\`;|&)]*)`, "g");
+const HOME_VARS = /(%USERPROFILE%|\$env:USERPROFILE|\$HOME|(^|[\s"'=])~[\\/])/i;
+
+/**
+ * 找出命令里第一处越出 root 的路径。返回人话原因；没有越界返回 null。
+ * 纯函数（不碰文件系统），可单测。
+ */
+export function findPathEscape(command: string, root: string): string | null {
+  const rootAbs = path.resolve(root);
+  if (HOME_VARS.test(command)) return "引用了用户主目录（%USERPROFILE% / $HOME / ~）";
+  const targets: string[] = [];
+  for (const re of [ABS_WIN, ABS_UNC, ABS_POSIX]) {
+    re.lastIndex = 0;
+    let m: RegExpExecArray | null = re.exec(command);
+    while (m) {
+      targets.push(m[1]);
+      m = re.exec(command);
+    }
+  }
+  for (const raw of targets) {
+    const clean = raw.replace(/[.,;:]+$/, "");
+    let abs: string;
+    try {
+      abs = path.resolve(rootAbs, clean);
+    } catch {
+      continue;
+    }
+    const rel = path.relative(rootAbs, abs);
+    if (rel.startsWith("..") || path.isAbsolute(rel)) return `越出工作区的路径：${clean}`;
+  }
+  // `..` 段：相对路径也能上跳
+  if (/(^|[\s"'=()`;,|&])\.\.[\\/]/.test(command)) return "包含 .. 上跳路径";
+  return null;
+}
+
 export class Toolkit {
   private queues = new Map<string, Promise<unknown>>();
   private changeLog: FileChange[] = [];
@@ -326,6 +369,15 @@ export class Toolkit {
         this.onAudit?.({ kind: "cmd_blocked", command, why: d.why, cwd: this.root });
         return Promise.resolve(`已拒绝执行：${d.why}。这类命令不会自动执行（纵深防御规则，不是 OS 沙箱）。`);
       }
+    }
+    // 路径逃逸：文件工具钉在工作区，命令却能随手读全盘——这是"探针摸进你别的仓库"的直接原因
+    const escape = findPathEscape(command, this.root);
+    if (escape) {
+      this.onAudit?.({ kind: "cmd_blocked", command, why: escape, cwd: this.root });
+      return Promise.resolve(
+        `已拒绝执行：${escape}。命令只能用任务工作区内的路径（工作区：${this.root}）。` +
+          `需要工作区外的数据时，在回报里写 ESCALATE 说明，由人决定。`,
+      );
     }
     if (OUTBOUND.test(command)) this.onAudit?.({ kind: "cmd_net", command, cwd: this.root });
     this.onAudit?.({ kind: "cmd_run", command, cwd: this.root });

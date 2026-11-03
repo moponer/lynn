@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { FeedCard, PermissionMode, QueueItem } from "../../shared/contract";
 import { Icon, type IconName } from "../components/Icon";
 import { WindowControls } from "../components/WindowControls";
@@ -26,6 +26,21 @@ const PERMISSIONS: { mode: PermissionMode; labelKey: string; en: string }[] = [
 export function fmtTokens(n: number): string {
   if (n <= 0) return "0";
   return n >= 1000 ? `${(n / 1000).toFixed(1)}K` : String(n);
+}
+
+/**
+ * 状态行计时（对齐蓝本 tether-ai 的 Elapsed：500ms 一跳）。
+ * 只在这一轮真的在跑时才开定时器，结束后停掉——不留空转 interval。
+ */
+function useTick(active: boolean): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!active) return;
+    setNow(Date.now());
+    const id = window.setInterval(() => setNow(Date.now()), 500);
+    return () => window.clearInterval(id);
+  }, [active]);
+  return now;
 }
 
 function statusChipClass(job: DeskJob): string {
@@ -179,6 +194,7 @@ function Ledger({
   onThread,
   onThreadNew,
   onThreadSearch,
+  onCancelTask,
 }: {
   desk: Desk;
   activeId?: string;
@@ -186,6 +202,8 @@ function Ledger({
   onThread?: (id: string) => void;
   onThreadNew?: () => void;
   onThreadSearch?: (q: string) => Promise<{ id: string; title: string; hits: string[] }[]>;
+  /** 停一张在跑的单（此前只能解散全队止损） */
+  onCancelTask?: (taskId: string) => void;
 }) {
   const [q, setQ] = useState("");
   const [threadsOpen, setThreadsOpen] = useState(false);
@@ -293,7 +311,7 @@ function Ledger({
         </div>
         {running.length === 0 && <div className="ledger-empty">派第一件需要动手的活，她会自己招人组队</div>}
         {running.map((j) => (
-          <JobRow key={j.id} job={j} active={j.id === activeId} onClick={() => onSelect(j.id)} />
+          <JobRow key={j.id} job={j} active={j.id === activeId} onClick={() => onSelect(j.id)} onCancel={onCancelTask} />
         ))}
 
         {archived.length > 0 && (
@@ -320,14 +338,37 @@ function Ledger({
   );
 }
 
-function JobRow({ job, active, onClick }: { job: DeskJob; active: boolean; onClick: () => void }) {
+function JobRow({
+  job,
+  active,
+  onClick,
+  onCancel,
+}: {
+  job: DeskJob;
+  active: boolean;
+  onClick: () => void;
+  onCancel?: (taskId: string) => void;
+}) {
   const t = useT();
+  const running = job.status === "in_progress";
   return (
-    <button type="button" className={`job${active ? " on" : ""}`} onClick={onClick}>
+    // 外层用 div：里面要放「停」按钮，button 套 button 是非法结构
+    <div
+      className={`job${active ? " on" : ""}`}
+      role="button"
+      tabIndex={0}
+      onClick={onClick}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onClick();
+        }
+      }}
+    >
       <div className="job-top">
         <span className="job-id">{job.id}</span>
         <span className={`st ${statusChipClass(job)}`}>
-          {job.status === "in_progress" && <span className="pip" />}
+          {running && <span className="pip" />}
           {t(STATUS_KEY[job.status] ?? "status.todo")}
         </span>
       </div>
@@ -336,8 +377,22 @@ function JobRow({ job, active, onClick }: { job: DeskJob; active: boolean; onCli
         <Icon name="user" size="sm" /> {job.member ?? t("sheet.lynn")}
         <span style={{ color: "var(--ink-4)" }}>·</span>
         <span className="mono">{job.at ?? "—"}</span>
+        {running && onCancel && (
+          <button
+            type="button"
+            className="ghost-btn"
+            title={t("ledger.stopTitle")}
+            style={{ marginLeft: "auto" }}
+            onClick={(e) => {
+              e.stopPropagation();
+              onCancel(job.id);
+            }}
+          >
+            {t("ledger.stop")}
+          </button>
+        )}
       </div>
-    </button>
+    </div>
   );
 }
 
@@ -632,18 +687,30 @@ function Roster({
   onReject,
   onPlan,
   onAnswer,
+  onCreateTeam,
 }: {
   desk: Desk;
   onAccept: (taskId: string) => void;
   onReject: (taskId: string) => void;
   onPlan: (id: string, action: "start" | "revise" | "reject", text?: string) => void;
   onAnswer: (id: string, text: string) => void;
+  /** 建团队：这里只要名字，ID 由系统生成（§4.10.3 修正） */
+  onCreateTeam?: (name: string) => void;
 }) {
   const t = useT();
   const active = desk.members.filter((m) => m.status !== "idle");
   const idle = desk.members.filter((m) => m.status === "idle");
   const decision = desk.decision;
   const reviewJob = desk.jobs.find((j) => j.status === "in_review" || j.status === "blocked");
+  const [naming, setNaming] = useState(false);
+  const [teamName, setTeamName] = useState("");
+  const submitTeam = () => {
+    const name = teamName.trim();
+    if (!name) return;
+    onCreateTeam?.(name);
+    setNaming(false);
+    setTeamName("");
+  };
 
   return (
     <aside className="right">
@@ -655,6 +722,38 @@ function Roster({
           </div>
           <span className="cap">{t("roster.split", { a: active.length, b: idle.length })}</span>
         </div>
+
+        {/* 建团队：给名字就行，ID 由系统生成——不让用户在面板里找 ID */}
+        {onCreateTeam && (
+          <div style={{ display: "flex", gap: 8, marginBottom: 10, alignItems: "center" }}>
+            {naming ? (
+              <>
+                <input
+                  className="seal-input"
+                  style={{ flex: 1 }}
+                  autoFocus
+                  value={teamName}
+                  placeholder={t("roster.newPlaceholder")}
+                  onChange={(e) => setTeamName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") submitTeam();
+                    if (e.key === "Escape") {
+                      setNaming(false);
+                      setTeamName("");
+                    }
+                  }}
+                />
+                <button type="button" className="ghost-btn" onClick={submitTeam}>
+                  {t("common.create")}
+                </button>
+              </>
+            ) : (
+              <button type="button" className="ghost-btn" onClick={() => setNaming(true)}>
+                <Icon name="users" size="sm" /> {t("roster.new")}
+              </button>
+            )}
+          </div>
+        )}
 
         {desk.members.length === 0 && (
           <div className="note" style={{ boxShadow: "none" }}>
@@ -987,6 +1086,8 @@ function ComposerZone({
   const [draft, setDraft] = useState("");
   const [mode, setMode] = useState<"queue" | "steer">("queue");
   const busy = turn.busy;
+  const now = useTick(busy && Boolean(turn.activity));
+  const elapsed = turn.activityAt ? Math.max(0, Math.floor((now - turn.activityAt) / 1000)) : 0;
   const taRef = useRef<HTMLTextAreaElement | null>(null);
   const t = useT();
   // 本轮随附（M1-16）：发送前可见、逐片可裁剪
@@ -1073,6 +1174,15 @@ function ComposerZone({
           <span className="dchip b">
             <span className="pip" /> {turn.phase === "review" ? t("composer.awaiting") : t("composer.running")}
           </span>
+          {/* 状态行：串行工具轮期间必须看得见"在做什么 + 已用时"，否则像卡死 */}
+          {turn.activity && (
+            <span className="dchip">
+              {turn.activity === "tool"
+                ? t("composer.actTool", { name: turn.activityName ?? "" })
+                : t("composer.actModel")}
+              {elapsed > 0 ? ` · ${t("composer.elapsed", { s: elapsed })}` : ""}
+            </span>
+          )}
           {queue.length > 0 && (
             <>
               <span className="dchip">{t("composer.queued", { n: queue.length })}</span>
@@ -1616,6 +1726,8 @@ export function DeskView({
   onThread,
   onThreadNew,
   onThreadSearch,
+  onCreateTeam,
+  onCancelTask,
   notice,
 }: {
   desk: Desk;
@@ -1640,6 +1752,10 @@ export function DeskView({
   onThread?: (id: string) => void;
   onThreadNew?: () => void;
   onThreadSearch?: (q: string) => Promise<{ id: string; title: string; hits: string[] }[]>;
+  /** 建团队（§4.10.3 修正）：用户只给名字，ID 由系统生成 */
+  onCreateTeam?: (name: string) => void;
+  /** 停一张在跑的单 */
+  onCancelTask?: (taskId: string) => void;
   /** 发送/新建失败时的可见提示（不允许静默失败） */
   notice?: string | null;
 }) {
@@ -1689,6 +1805,7 @@ export function DeskView({
           onThread={onThread}
           onThreadNew={onThreadNew}
           onThreadSearch={onThreadSearch}
+          onCancelTask={onCancelTask}
         />
         <main className="center">
           <div className="sheet-wrap">
@@ -1712,6 +1829,7 @@ export function DeskView({
           onReject={(id) => setReviewId(id)}
           onPlan={(id, action, text) => onDecisionResolve(id, action, text)}
           onAnswer={(id, text) => onDecisionResolve(id, "answer", text)}
+          onCreateTeam={onCreateTeam}
         />
       </div>
     </div>

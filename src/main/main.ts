@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { autoUpdater } from "electron-updater";
 import type { RpcMethod } from "../shared/contract";
 import { Kernel } from "./kernel";
+import { defaultDataRoot } from "./settings";
 import { resolveFeedUrl, transition, type UpdateState } from "./updater";
 import { discoverModels } from "./providers";
 import {
@@ -260,6 +261,50 @@ function createWindow(): void {
     },
   });
 
+  /**
+   * 渲染层异常落盘（白屏可见化）：白屏时没有任何现场，之前只能靠猜。
+   * console 的 error/warning、渲染进程崩溃、加载失败、preload 报错、显式上报全进 logs/renderer.log。
+   */
+  const logRenderer = (entry: Record<string, unknown>) => {
+    try {
+      const dir = path.join(defaultDataRoot(), "logs");
+      fs.mkdirSync(dir, { recursive: true });
+      fs.appendFileSync(path.join(dir, "renderer.log"), JSON.stringify({ at: new Date().toISOString(), ...entry }) + "\n", "utf-8");
+    } catch {
+      /* 日志写不进去不能拖垮界面 */
+    }
+  };
+  // Electron 29+ 改成 (event, details) 对象；旧签名是 (event, level:number, message, line, sourceId)。
+  // 两种都兜住，免得升级/降级后日志静默失效。
+  type ConsoleArgs = [unknown, unknown, unknown?, unknown?, unknown?];
+  (win.webContents as unknown as { on(ev: string, cb: (...a: ConsoleArgs) => void): void }).on("console-message", (...args) => {
+    const maybe = args[1];
+    const obj = typeof maybe === "object" && maybe !== null ? (maybe as { level?: string; message?: string; lineNumber?: number; sourceId?: string }) : null;
+    const level =
+      obj?.level ??
+      (typeof maybe === "number" ? (maybe >= 3 ? "error" : maybe === 2 ? "warning" : "info") : "info");
+    if (level !== "error" && level !== "warning") return;
+    const message = obj?.message ?? (typeof args[2] === "string" ? args[2] : "");
+    logRenderer({
+      kind: "console",
+      level,
+      message: message.slice(0, 4000),
+      source: obj?.sourceId ?? (typeof args[4] === "string" ? args[4] : undefined),
+      line: obj?.lineNumber ?? (typeof args[3] === "number" ? args[3] : undefined),
+    });
+  });
+  win.webContents.on("render-process-gone", (_event, details) => {
+    logRenderer({ kind: "render-process-gone", reason: details.reason, exitCode: details.exitCode });
+    // 渲染进程没了就是白屏：直接重载一次，别让用户对着空白窗口
+    if (!win?.isDestroyed() && details.reason !== "clean-exit") setTimeout(() => win?.reload(), 300);
+  });
+  win.webContents.on("did-fail-load", (_event, code, desc, url) => {
+    logRenderer({ kind: "did-fail-load", code, desc, url });
+  });
+  win.webContents.on("preload-error", (_event, preloadPath, error) => {
+    logRenderer({ kind: "preload-error", preloadPath, message: error?.message, stack: error?.stack });
+  });
+
   win.once("ready-to-show", () => win?.show());
   // 最大化状态同步给渲染层（自绘按钮要显示"最大化/还原"两个态）
   const sendMaximized = () => {
@@ -345,6 +390,17 @@ app.whenReady().then(async () => {
   createTray();
   registerHotkey();
   bindUpdater();
+
+  // 渲染层显式上报（window.onerror / unhandledrejection / React 边界）：只写日志
+  ipcMain.on("lynn:log-error", (_event, payload: { kind: string; message: string; stack?: string; source?: string }) => {
+    try {
+      const dir = path.join(defaultDataRoot(), "logs");
+      fs.mkdirSync(dir, { recursive: true });
+      fs.appendFileSync(path.join(dir, "renderer.log"), JSON.stringify({ at: new Date().toISOString(), ...payload }) + "\n", "utf-8");
+    } catch {
+      /* 同上：写不进去不炸 */
+    }
+  });
 
   // 唯一 RPC 通道
   ipcMain.handle("lynn:rpc", async (_event, method: string, params: unknown) => {

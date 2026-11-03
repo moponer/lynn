@@ -20,4 +20,8 @@ contextBridge.exposeInMainWorld("lynn", {
     ipcRenderer.on("lynn:event", listener);
     return () => ipcRenderer.removeListener("lynn:event", listener);
   },
+  // 渲染层异常上报：只写日志，不暴露任何能力
+  logError: (payload: { kind: string; message: string; stack?: string; source?: string }) => {
+    ipcRenderer.send("lynn:log-error", payload);
+  },
 });

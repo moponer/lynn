@@ -15,7 +15,7 @@ const member = (over = {}) => ({
   role: "后端工程师",
   goal: "清洗对账",
   boundaries: ["只改数据目录"],
-  tools: ["read", "write", "edit", "bash"],
+  tools: ["read_file", "write_file", "run_command"],
   model: "deepseek-chat",
   limits: { maxTurns: 40, budgetTokens: 300000, wallClockMin: 30 },
   outputContract: { deliverable: "diff", evidence: ["测试输出"], acceptance: ["test 全绿"] },
@@ -46,14 +46,14 @@ test("create_member：6 人上限，超编必须写理由", () => {
 test("assign_task：本次分配越权（超出岗位白名单）直接拒绝", () => {
   tools.createMember("t1", member());
   assert.throws(
-    () => tools.assignTask("t1", { taskId: "x", member: "林工", brief: "b", deadline: "d", tools: ["browser"] }),
+    () => tools.assignTask("t1", { taskId: "x", member: "林工", brief: "b", deadline: "d", tools: ["browser_navigate"] }),
     /只能收窄不能扩张/,
   );
   // 收窄合法
-  tools.assignTask("t1", { taskId: "x", member: "林工", brief: "b", deadline: "d", tools: ["read"] });
+  tools.assignTask("t1", { taskId: "x", member: "林工", brief: "b", deadline: "d", tools: ["read_file"] });
   const recs = store.readAssignments("t1", "x");
   assert.equal(recs.length, 1);
-  assert.equal(JSON.parse(recs[0].text).tools.join(","), "read");
+  assert.equal(JSON.parse(recs[0].text).tools.join(","), "read_file");
 });
 
 test("check_progress：她只看状态计数与最新回报，不读全量日志", () => {

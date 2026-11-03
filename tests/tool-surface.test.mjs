@@ -23,6 +23,7 @@ const LYNN_TOOLS = [
   "check_progress",
   "check_roster",
   "create_member",
+  "create_team",
   "dissolve_team",
   "report_to_user",
   "review_result",
@@ -51,7 +52,7 @@ const member = (over = {}) => ({
   role: "后端工程师",
   goal: "清洗对账",
   boundaries: ["只改数据目录"],
-  tools: ["read"],
+  tools: ["read_file"],
   model: "deepseek-chat",
   limits: { maxTurns: 40, budgetTokens: 300000, wallClockMin: 30 },
   outputContract: { deliverable: "diff", evidence: ["测试输出"], acceptance: ["test 全绿"] },
@@ -60,7 +61,7 @@ const member = (over = {}) => ({
   ...over,
 });
 
-test("风铃的工具面恰好是 10 件管理工具", () => {
+test("风铃的工具面恰好是 11 件管理工具", () => {
   assert.deepEqual([...AGENT_TOOL_NAMES].sort(), LYNN_TOOLS);
 });
 
@@ -102,8 +103,26 @@ test("成员白名单不得包含管理型工具（没有 ask_user、不能再�
     "成员不得自己验收（§4.10.5 审查归风铃）",
   );
 
-  const file = tools.createMember("t1", member({ name: "正牌", tools: ["read", "write"] }));
+  const file = tools.createMember("t1", member({ name: "正牌", tools: ["read_file", "write_file"] }));
   assert.ok(fs.existsSync(file), "纯执行类工具白名单应当放行");
+});
+
+test("白名单写了不存在的工具名 → 当场拒绝，不静默过滤（否则成员带空工具集空跑）", () => {
+  const root = tmpRoot();
+  const store = new TeamStore(root);
+  const tools = new ManagementTools(store, root);
+  store.createTeam("t1", "测评组");
+
+  // 旧 schema 的示例名（read/write/edit/bash/browser）全都不存在，必须报错并给真实清单
+  assert.throws(
+    () => tools.createMember("t1", member({ tools: ["read", "write", "browser"] })),
+    /未知工具.*read、write、browser/,
+  );
+  // 报错里要给出可直接照抄的真实名字
+  assert.throws(
+    () => tools.createMember("t1", member({ name: "网页操作员", tools: ["browser"] })),
+    /browser_navigate/,
+  );
 });
 
 test("管理型工具名单 = 风铃工具面（成员禁入名单与她的工具面同源）", () => {

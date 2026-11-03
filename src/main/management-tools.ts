@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { TeamStore, MemberProfile } from "./team-store";
+import { generateTeamId, type TeamStore, type MemberProfile } from "./team-store";
+import { MEMBER_EXEC_TOOLS } from "./member-runner";
 
 /**
  * 风铃的管理型工具 8 件套（§3.1 / §4.10.3）。
@@ -58,6 +59,7 @@ const REJECT_LIMIT = 3;
  * 成员没有 ask_user、不能招募、不能验收（§4.10.3 单层指挥）。
  */
 export const MANAGEMENT_ONLY_TOOLS = [
+  "create_team",
   "create_member",
   "assign_task",
   "check_progress",
@@ -93,6 +95,31 @@ export class ManagementTools {
     if (rec.status !== "active") throw new Error(`团队 ${teamId} 状态为 ${rec.status}，不能派活`);
   }
 
+  /**
+   * 0. create_team —— 建团队。**ID 由系统生成，不要问用户要**（§4.10.3 修正）。
+   * 缺团队时 assign_task / create_member 也会走这条路自动起队，不需要人先建。
+   */
+  createTeam(name?: string, teamId?: string, idWasGenerated = false): { id: string; name: string } {
+    // 同名在职队直接复用：模型重复调 create_team 不该造出一堆同名团队
+    const display0 = (name ?? "").trim();
+    if (display0 && !teamId) {
+      const same = this.store.activeTeams().find((t) => t.name === display0);
+      if (same) return { id: same.id, name: same.name };
+    }
+    const id = teamId?.trim()
+      ? teamId.trim()
+      : generateTeamId(name, (candidate) => this.store.teamExists(candidate));
+    if (this.store.teamExists(id)) {
+      const rec = this.store.readTeam(id);
+      // 已存在就当顺带把 ID 告诉模型，不重复覆盖（覆盖会抹掉成员与战绩）
+      return { id: rec.id, name: rec.name };
+    }
+    const display = (name ?? "").trim() || id;
+    this.store.createTeam(id, display);
+    this.audit("create_team", { teamId: id, name: display, generated: idWasGenerated || !teamId });
+    return { id, name: display };
+  }
+
   /** 1. create_member —— 书面招募；>6 人必须给理由（§4.10.6 组织膨胀防线） */
   createMember(teamId: string, profile: MemberProfile, staffingJustification?: string): string {
     this.assertTeamActive(teamId);
@@ -109,6 +136,13 @@ export class ManagementTools {
     if (managementTools.length > 0) {
       throw new Error(
         `成员白名单不得包含管理型工具：${managementTools.join("、")}——成员没有 ask_user，也不能再招募或验收（§4.10.3）`,
+      );
+    }
+    // 工具名写错会在派单时被静默过滤掉，成员带着空工具集开工——必须当场拒
+    const unknown = profile.tools.filter((t) => !(MEMBER_EXEC_TOOLS as readonly string[]).includes(t));
+    if (unknown.length > 0) {
+      throw new Error(
+        `未知工具：${unknown.join("、")}。成员可用执行工具只有：${MEMBER_EXEC_TOOLS.join("、")}（请按这些名字重写白名单）`,
       );
     }
     const file = this.store.writeMember(teamId, profile);

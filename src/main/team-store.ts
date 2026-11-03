@@ -165,6 +165,37 @@ export function memberFileName(name: string): string {
   return `${safe}.md`;
 }
 
+/**
+ * teamId 会直接当目录名用，必须净化——否则 ``../..`` 能把 mkdir 写到数据根之外。
+ * 中文/Unicode 放行（用户说的名字可以直接当显示名），但要挡住分隔符与上跳。
+ */
+export function assertValidTeamId(teamId: string): string {
+  const id = teamId.trim();
+  if (!id) throw new Error("团队 ID 不能为空");
+  if (id === "." || id === ".." || id.includes("..")) throw new Error(`团队 ID 不合法：${teamId}`);
+  if (/[\\/:*?"<>|\x00-\x1f]/.test(id)) throw new Error(`团队 ID 不能包含路径分隔符或控制字符：${teamId}`);
+  if (id.length > 64) throw new Error(`团队 ID 不能超过 64 个字符：${teamId}`);
+  return id;
+}
+
+/**
+ * 系统生成团队 ID（§4.10.3 修正）：ID 是内部主键，不该由人给。
+ * 名字里全是 ASCII 就退化成可读 slug，否则 `team-<时间36>-<随机>`。
+ */
+export function generateTeamId(name?: string, taken?: (id: string) => boolean): string {
+  const slug = (name ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 24);
+  for (let i = 0; i < 50; i += 1) {
+    const tail = `${Date.now().toString(36).slice(-4)}${Math.random().toString(36).slice(2, 5)}`;
+    const id = slug ? `${slug}-${tail}` : `team-${tail}`;
+    if (!taken || !taken(id)) return id;
+  }
+  throw new Error("生成团队 ID 失败（重名过多），请重试");
+}
+
 // ---------- TeamStore ----------
 
 export interface TeamRecord {
@@ -220,18 +251,20 @@ export class TeamStore {
   constructor(readonly dataRoot: string) {}
 
   teamDir(teamId: string): string {
-    return path.join(this.dataRoot, "team", teamId);
+    // 目录名就是主键：不做净化等于把数据根暴露给 `../..`
+    return path.join(this.dataRoot, "team", assertValidTeamId(teamId));
   }
 
   createTeam(id: string, name: string, budgetTokens = 1_000_000): TeamRecord {
+    const safeId = assertValidTeamId(id);
     const rec: TeamRecord = {
-      id,
+      id: safeId,
       name,
       createdAt: new Date().toISOString(),
       status: "active",
       budgetTokens,
     };
-    const dir = this.teamDir(id);
+    const dir = this.teamDir(safeId);
     fs.mkdirSync(path.join(dir, "members"), { recursive: true });
     fs.mkdirSync(path.join(dir, "assignments"), { recursive: true });
     fs.mkdirSync(path.join(dir, "artifacts"), { recursive: true });
@@ -241,7 +274,23 @@ export class TeamStore {
   }
 
   teamExists(teamId: string): boolean {
-    return fs.existsSync(path.join(this.teamDir(teamId), "team.json"));
+    // 非法 ID 一律当"不存在"，让调用方走自动建队/如实报错，而不是抛异常打断工具轮
+    try {
+      return fs.existsSync(path.join(this.teamDir(teamId), "team.json"));
+    } catch {
+      return false;
+    }
+  }
+
+  readTeam(teamId: string): TeamRecord {
+    const file = path.join(this.teamDir(teamId), "team.json");
+    if (!fs.existsSync(file)) throw new Error(`团队不存在: ${teamId}`);
+    return JSON.parse(fs.readFileSync(file, "utf-8")) as TeamRecord;
+  }
+
+  /** 在职团队（自动建队/隐式绑定只看这些；解散的队留着当资产，不能派活） */
+  activeTeams(): TeamRecord[] {
+    return this.listTeams().filter((t) => t.status === "active");
   }
 
   writeMember(teamId: string, p: MemberProfile): string {

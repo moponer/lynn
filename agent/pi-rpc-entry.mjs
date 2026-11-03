@@ -139,22 +139,40 @@ async function init(message) {
   if (!model) throw new Error(`Pi getModel 为空：${modelId}`);
 
   // 系统提示词（人设）由壳下发：Pi 的 system prompt 挂在 resource loader 上
-  const cwd = process.cwd();
+  //
+  // cwd 必须是**用户的项目根**（壳通过 LYNN_PROJECT_ROOT 下发），不能用 worker 脚本所在目录：
+  // Pi 会顺着 cwd 的祖先目录找 AGENTS.md / CLAUDE.md 并塞进 system prompt，
+  // 用脚本目录时它捡到了 F:\spiker\AGENTS.md（另一个 Rust 项目的开发指南），
+  // 结果风铃以为自己是那个项目的 agent，满口 "hermes / browser.rs"。
+  const cwd = process.env.LYNN_PROJECT_ROOT || process.cwd();
   // 内核会给 PI_CODING_AGENT_DIR（重定向到 ~/.lynn/kernel）；独立跑/测试时兜底到临时目录，
   // 不能把 undefined 传给 Pi（内部会对路径做 startsWith，直接崩）
   const agentDir = process.env.PI_CODING_AGENT_DIR ?? path.join(os.tmpdir(), "lynn-pi-agent");
   fs.mkdirSync(agentDir, { recursive: true });
+  try {
+    fs.mkdirSync(cwd, { recursive: true });
+  } catch {
+    /* 项目根建不出来就让 Pi 自己报 */
+  }
   const settingsManager = SettingsManager.create(cwd, agentDir);
   const resourceLoader = new DefaultResourceLoader({
     cwd,
     ...(agentDir ? { agentDir } : {}),
     settingsManager,
+    // 默认**不加载**项目上下文文件（AGENTS.md / CLAUDE.md 那类）：
+    // 风铃的"项目"是指挥台，不继承任何仓库的开发指南；需要时用 LYNN_CONTEXT_FILES=1 显式打开。
+    noContextFiles: process.env.LYNN_CONTEXT_FILES !== "1",
     ...(typeof message.systemPrompt === "string" && message.systemPrompt.trim()
       ? { systemPrompt: message.systemPrompt }
       : {}),
     systemPromptOverride: (base) => (currentSystemPrompt && currentSystemPrompt.trim() ? currentSystemPrompt : base),
   });
   await resourceLoader.reload();
+  // 加载到项目上下文文件时如实播报（默认不会发生；开了开关就得让人看见注入了什么）
+  {
+    const loaded = resourceLoader.getAgentsFiles?.()?.agentsFiles ?? [];
+    if (loaded.length) write({ type: "context_files", files: loaded.map((f) => f.path) });
+  }
 
   const tools = buildTools(toolSpecs);
   // 会话落盘（§4.1「崩溃后会话可续」）：worker 独占写，主进程只读索引。

@@ -103,6 +103,12 @@ export interface TurnState {
   /** 正在跑的成员与进度（0–100），给编制表实时显示 */
   member?: string;
   progress?: number;
+  /** 当前在做什么：模型在生成 / 某个工具在执行（渲染层据此显示状态行，避免长时间静默） */
+  activity?: "model" | "tool";
+  /** activity 的具体名字（工具名）；模型生成时为空 */
+  activityName?: string;
+  /** activity 的起始毫秒时间戳，渲染层用来算已用时 */
+  activityAt?: number;
   /** 本轮写过哪些文件；canUndo=true 表示可以整体撤销 */
   canUndo?: boolean;
   changedFiles?: string[];
@@ -149,7 +155,15 @@ export type ToolCardBadge =
   /** 出站命令（已审计） */
   | "出站"
   /** 日程到点提醒（M2-01） */
-  | "提醒";
+  | "提醒"
+  /** 成员执行中的聚合进度卡（一张单一张卡，就地更新） */
+  | "进度"
+  /** 成员被用户停掉 */
+  | "已停止"
+  /** 成员跑完但没有交出回报 */
+  | "未完成"
+  /** 成员执行崩溃 */
+  | "崩溃";
 
 export interface FeedCard {
   id: string;
@@ -459,6 +473,16 @@ export interface RpcContracts {
     params: void;
     result: { ok: boolean };
   };
+  /** 停一张正在跑的成员单（不能只靠"解散全队"止损） */
+  "task.cancel": {
+    params: { taskId: string };
+    result: { ok: boolean; error?: string };
+  };
+  /** 建团队（§4.10.3 修正）：用户只给名字，ID 由系统生成 */
+  "team.create": {
+    params: { name?: string };
+    result: { ok: boolean; id?: string; name?: string; error?: string };
+  };
   /** 模板导出/导入（M2-15）：导入白名单只收窄（越权工具剥掉并告警） */
   "team.exportTemplate": {
     params: { name: string; outFile: string };
@@ -761,6 +785,11 @@ export interface LynnBridge {
   rpc: RpcClient;
   /** 订阅内核事件；返回取消订阅函数 */
   onEvent: (cb: (ev: KernelEvent) => void) => () => void;
+  /**
+   * 渲染层异常上报（可选）：白屏时代没有现场，报错只能靠猜。
+   * 上报内容落 `<数据根>/logs/renderer.log`，一行一个 JSON。
+   */
+  logError?: (payload: { kind: "error" | "rejection" | "react"; message: string; stack?: string; source?: string }) => void;
 }
 
 declare global {

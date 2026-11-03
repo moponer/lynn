@@ -55,6 +55,11 @@ export interface AgentHostOptions {
   resume?: boolean;
   /** 本线程的 Pi 会话目录（M1-14：线程之间不串档） */
   sessionDir?: string;
+  /**
+   * 用户的项目根（= 指挥台工作区）。worker 拿它当 Pi 的 cwd，
+   * 而不是"被启动时所在目录"——否则 Pi 会顺着祖先目录捡别人的 AGENTS.md。
+   */
+  projectRoot?: string;
 }
 
 interface PendingRequest {
@@ -118,6 +123,7 @@ export class AgentHost {
         // 默认不续档：只有壳明确说"这次要续"才读旧会话，避免测试/新装翻出无关历史
         LYNN_RESUME: this.options.resume === true ? "1" : "0",
         ...(this.options.sessionDir ? { PI_CODING_AGENT_SESSION_DIR: this.options.sessionDir } : {}),
+        ...(this.options.projectRoot ? { LYNN_PROJECT_ROOT: this.options.projectRoot } : {}),
         LYNN_MODEL_BASE_URL: this.options.model.baseUrl,
         LYNN_MODEL_API_KEY: this.options.model.apiKey,
         LYNN_MODEL: this.options.model.model,

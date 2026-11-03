@@ -23,7 +23,7 @@ function setup() {
     name: "林工",
     role: "后端工程师",
     goal: "整理周报",
-    tools: ["read", "write"],
+    tools: ["read_file", "write_file"],
     deliverable: "周报",
     acceptance: ["数据对得上"],
   });

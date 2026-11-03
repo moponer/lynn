@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   FeedCard,
   KernelEvent,
@@ -150,6 +150,11 @@ export default function App() {
     }
   }, [snap?.model.configured, wizardOpen]);
 
+  // 流式补字合帧（对齐蓝本 tether-ai 的 rAF 合并）：一帧最多一次 setState，
+  // 否则每个 delta 都重建整棵 feed，长回复会一顿一顿
+  const pendingDelta = useRef<{ id: string; text: string } | null>(null);
+  const deltaFrame = useRef<number | null>(null);
+
   useEffect(() => {
     // 增量事件：卡片 upsert / 流式补字 / 回合状态；只有完成与错误才拉权威快照
     const off = window.lynn.onEvent((ev: KernelEvent) => {
@@ -158,14 +163,16 @@ export default function App() {
         return;
       }
       if (ev.type === "delta" && ev.cardId) {
-        setSnap((s) =>
-          s
-            ? {
-                ...s,
-                feed: s.feed.map((c) => (c.id === ev.cardId ? { ...c, text: ev.text } : c)),
-              }
-            : s,
-        );
+        pendingDelta.current = { id: ev.cardId, text: ev.text };
+        if (deltaFrame.current === null) {
+          deltaFrame.current = window.requestAnimationFrame(() => {
+            deltaFrame.current = null;
+            const d = pendingDelta.current;
+            pendingDelta.current = null;
+            if (!d) return;
+            setSnap((s) => (s ? { ...s, feed: s.feed.map((c) => (c.id === d.id ? { ...c, text: d.text } : c)) } : s));
+          });
+        }
         return;
       }
       if (ev.type === "turn") {
@@ -176,7 +183,13 @@ export default function App() {
       if (ev.type === "window") return;
       void refresh();
     });
-    return off;
+    return () => {
+      off();
+      if (deltaFrame.current !== null) {
+        window.cancelAnimationFrame(deltaFrame.current);
+        deltaFrame.current = null;
+      }
+    };
   }, [refresh]);
 
   const desk: Desk | null = useMemo(() => (snap ? deskFromSnapshot(snap) : null), [snap]);
@@ -359,6 +372,18 @@ export default function App() {
         }}
         onThreadNew={() => void onNew()}
         onThreadSearch={(q) => rpc("thread.search", { q }).then((r) => r.results)}
+        onCancelTask={(taskId) => {
+          void rpc("task.cancel", { taskId }).then(async (r) => {
+            if (!r.ok) setNotice(r.error ?? "停不下来");
+            await refresh();
+          });
+        }}
+        onCreateTeam={(name) => {
+          void rpc("team.create", { name }).then(async (r) => {
+            if (!r.ok) setNotice(`建团队失败：${r.error ?? "未知原因"}`);
+            await refresh();
+          });
+        }}
         notice={notice}
       />
       {settingsOpen && (
