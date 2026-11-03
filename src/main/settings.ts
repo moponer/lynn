@@ -27,9 +27,18 @@ export interface Prefs {
   softBudgetTokens: number;
   /** 软上限触达后的备用模型（留空 = 只提示不切换，不静默停机） */
   fallbackModel: string;
+  /** 界面语言（M3-08）：zh 是源语言；en 缺词条回退中文 */
+  lang: "zh" | "en";
 }
 
-const DEFAULT_PREFS: Prefs = { autoStart: false, trayOnClose: true, notify: true, softBudgetTokens: 0, fallbackModel: "" };
+const DEFAULT_PREFS: Prefs = {
+  autoStart: false,
+  trayOnClose: true,
+  notify: true,
+  softBudgetTokens: 0,
+  fallbackModel: "",
+  lang: "zh",
+};
 
 interface SettingsFile {
   model?: StoredModelConfig;

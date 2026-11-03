@@ -7,6 +7,7 @@ import { AmbientLayer } from "./AmbientLayer";
 import type { AmbientMode, AmbientParams } from "../../shared/ambient";
 import { STAGES } from "./model";
 import { FeedView } from "./Feed";
+import { useT } from "../i18n";
 
 /**
  * 值台（Dispatch Desk）—— 设计规范 §4 的三栏骨架：
@@ -57,6 +58,7 @@ function TopRail({
   const ctx = desk.usage.contextWindow > 0 ? Math.min(1, desk.usage.contextTokens / desk.usage.contextWindow) : 0;
   const contextPct = Math.round(ctx * 100);
   const filled = Math.min(12, Math.max(0, Math.round(ctx * 12)));
+  const t = useT();
   return (
     <header className="rail-top">
       <div className="brand">
@@ -138,13 +140,13 @@ function TopRail({
         <button
           className="ghost-btn"
           onClick={onUndo}
-          title={`撤销上一轮文件改动：${(desk.turn.changedFiles ?? []).join("、")}`}
+          title={t("top.undoTitle", { files: (desk.turn.changedFiles ?? []).join("、") })}
         >
-          <Icon name="undo" size="sm" /> 撤销改动
+          <Icon name="undo" size="sm" /> {t("top.undo")}
         </button>
       )}
-      <button className="ghost-btn" onClick={onNew} title="新对话：清空当前会话，重新开始（工单与卷宗保留）">
-        <Icon name="plus" size="sm" /> 新对话
+      <button className="ghost-btn" onClick={onNew} title={t("top.newThread")}>
+        <Icon name="plus" size="sm" /> {t("top.newThread")}
       </button>
       <button className="ghost-btn" onClick={onOpenSettings} title="设置 / 我的风铃（M3-06）">
         <Icon name="user" size="sm" /> 我的风铃
@@ -174,6 +176,7 @@ function Ledger({
   const [threadsOpen, setThreadsOpen] = useState(false);
   const [tq, setTq] = useState("");
   const [hits, setHits] = useState<{ id: string; title: string; hits: string[] }[]>([]);
+  const t = useT();
   const match = (j: DeskJob) => !q || `${j.id} ${j.title} ${j.member ?? ""}`.toLowerCase().includes(q.toLowerCase());
 
   const waiting = desk.jobs.filter((j) => (j.status === "in_review" || j.status === "blocked") && match(j));
@@ -199,7 +202,7 @@ function Ledger({
           <Icon name="layers" size="sm" />
           <span className="t">{desk.thread.title}</span>
         </button>
-        <button type="button" className="icon-btn" onClick={onThreadNew} title="新会话">
+        <button type="button" className="icon-btn" onClick={onThreadNew} title={t("top.newThread")}>
           <Icon name="plus" size="sm" />
         </button>
       </div>
@@ -209,7 +212,7 @@ function Ledger({
           <input
             className="thread-q"
             value={tq}
-            placeholder="搜历史：关键词"
+            placeholder={t("top.searchHistory")}
             onChange={(e) => {
               const v = e.target.value;
               setTq(v);
@@ -962,6 +965,7 @@ function ComposerZone({
   const [mode, setMode] = useState<"queue" | "steer">("queue");
   const busy = turn.busy;
   const taRef = useRef<HTMLTextAreaElement | null>(null);
+  const t = useT();
   // 本轮随附（M1-16）：发送前可见、逐片可裁剪
   const [attFiles, setAttFiles] = useState<string[]>([]);
   const [attImages, setAttImages] = useState<{ name: string; data: string }[]>([]);
@@ -1196,18 +1200,18 @@ function ComposerZone({
           }
         />
         {busy ? (
-          <button type="button" className="send stop" onClick={onAbort} title="停止本轮（已产出保留）">
+          <button type="button" className="send stop" onClick={onAbort} title={t("composer.stop")}>
             <i />
           </button>
         ) : (
-          <button type="button" className="send" onClick={submit} disabled={!canSend} title="发送">
+          <button type="button" className="send" onClick={submit} disabled={!canSend} title={t("composer.send")}>
             <Icon name="send" />
           </button>
         )}
       </div>
 
       <div className="composer-hint">
-        <span className="mono">Enter 发送 · Shift+Enter 换行 · @ 提及文件 · 粘贴图片</span>
+        <span className="mono">{t("composer.keys")}</span>
         {busy && (
           <>
             <span className="sep">·</span>

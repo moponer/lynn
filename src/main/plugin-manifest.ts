@@ -53,6 +53,8 @@ export interface PluginManifest {
     commands?: { name: string; description: string }[];
     tools?: string[];
     slots?: UiSlot[];
+    /** M3-08：语言包文件（相对路径，JSON 结构见 shared/i18n.ts）——L0 声明式，无代码 */
+    langs?: string[];
   };
   permissions?: PluginPermissions;
   mcp?: { recipe: string };
@@ -172,6 +174,16 @@ export function checkManifest(raw: unknown): ManifestCheck {
     }
     if (contributes.theme !== undefined && tier === "L0" && typeof contributes.theme !== "string") {
       fail("contributes.theme", "L0 主题必须指向 theme.json");
+    }
+    if (contributes.langs !== undefined) {
+      if (!Array.isArray(contributes.langs)) {
+        fail("contributes.langs", "必须是相对路径数组");
+      } else {
+        for (const p of contributes.langs) {
+          if (typeof p !== "string" || !p.trim()) fail("contributes.langs", "语言包路径必须是非空字符串");
+          else if (!p.endsWith(".json")) fail("contributes.langs", `语言包必须是 .json 文件：${String(p)}`);
+        }
+      }
     }
   }
 

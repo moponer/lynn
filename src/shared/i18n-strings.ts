@@ -1,0 +1,91 @@
+// M3-08 内置字典：zh 是源语言（key 全覆盖），en 渐进补全（缺 key 回退中文）。
+//  key 命名：<区域>.<语义>；文案保持"三种声音"语汇（风铃=纸边批注口吻，控件=短直白）。
+//  英文措辞取短词，避免按钮/页签溢出（版式在英文下不重排：控件全是自适应宽度）。
+import type { Lang } from "./i18n";
+
+export const ZH_STRINGS: Record<string, string> = {
+  // 通用
+  "common.on": "已开启",
+  "common.off": "已关闭",
+  "common.enable": "启用",
+  "common.disable": "关闭",
+  "common.save": "保存",
+  "common.close": "关闭",
+  // 设置导航
+  "nav.overview": "概览",
+  "nav.model": "模型",
+  "nav.persona": "人设与语气",
+  "nav.plugins": "能力与插件",
+  "nav.safety": "权限与安全",
+  "nav.look": "外观",
+  "nav.data": "数据与日志",
+  // 外观页
+  "look.title": "外观",
+  "look.theme": "主题",
+  "look.modeDark": "暗色",
+  "look.modeLight": "亮色",
+  "look.ambient": "动效",
+  "look.avatar": "形象（只在设置与桌宠里出现）",
+  "look.petOpen": "唤出桌宠",
+  "look.presence": "桌面驻留",
+  "look.trayTitle": "关窗进托盘",
+  "look.trayHint": "点 × 最小化到托盘，会话不中断；托盘菜单「退出」才真退。全局快捷键 Alt+Shift+L 呼出。",
+  "look.notifyTitle": "窗口隐藏时通知",
+  "look.notifyHint": "只在你看不见主窗口时弹系统通知（成员交活 / 需要拍板 / 出错），不做打扰源。",
+  "look.language": "界面语言",
+  "look.languageHint": "中文为源语言；英文缺词条处回退中文。语言包也可作为 L0 插件扩展。",
+  "lang.zh": "中文",
+  "lang.en": "English",
+  // 指令台（Composer）
+  "composer.send": "发送",
+  "composer.stop": "停止本轮（已产出保留）",
+  "composer.keys": "Enter 发送 · Shift+Enter 换行 · @ 提及文件 · 粘贴图片",
+  // 顶栏
+  "top.undo": "撤销改动",
+  "top.undoTitle": "撤销上一轮文件改动：{files}",
+  "top.newThread": "新对话",
+  "top.searchHistory": "搜历史：关键词",
+  "top.searchBoard": "搜工单、成员、产物",
+};
+
+export const EN_STRINGS: Record<string, string> = {
+  "common.on": "On",
+  "common.off": "Off",
+  "common.enable": "Enable",
+  "common.disable": "Disable",
+  "common.save": "Save",
+  "common.close": "Close",
+  "nav.overview": "Overview",
+  "nav.model": "Model",
+  "nav.persona": "Persona",
+  "nav.plugins": "Plugins",
+  "nav.safety": "Safety",
+  "nav.look": "Appearance",
+  "nav.data": "Data & Logs",
+  "look.title": "Appearance",
+  "look.theme": "Theme",
+  "look.modeDark": "Dark",
+  "look.modeLight": "Light",
+  "look.ambient": "Motion",
+  "look.avatar": "Avatar (settings & pet only)",
+  "look.petOpen": "Open Pet",
+  "look.presence": "Desktop Presence",
+  "look.trayTitle": "Close to Tray",
+  "look.trayHint": "× minimizes to tray; sessions keep running. Quit from the tray menu. Hotkey: Alt+Shift+L.",
+  "look.notifyTitle": "Notify when hidden",
+  "look.notifyHint": "System notifications only while the main window is hidden (deliveries / decisions / errors).",
+  "look.language": "Interface language",
+  "look.languageHint": "Chinese is the source language; missing English entries fall back to Chinese. Language packs are L0 plugins.",
+  "lang.zh": "中文",
+  "lang.en": "English",
+  "composer.send": "Send",
+  "composer.stop": "Stop this turn (keep output)",
+  "composer.keys": "Enter to send · Shift+Enter newline · @ files · paste images",
+  "top.undo": "Undo changes",
+  "top.undoTitle": "Undo last-turn file changes: {files}",
+  "top.newThread": "New chat",
+  "top.searchHistory": "Search history",
+  "top.searchBoard": "Search tasks, members, artifacts",
+};
+
+export const BUILTIN_STRINGS: Record<Lang, Record<string, string>> = { zh: ZH_STRINGS, en: EN_STRINGS };

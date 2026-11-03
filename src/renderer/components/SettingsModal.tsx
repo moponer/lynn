@@ -6,6 +6,7 @@ import { useUiPlugins } from "../desk/ui-host";
 import { AvatarStage } from "../desk/AvatarStage";
 import type { AvatarState } from "../../shared/avatar";
 import { AMBIENT_MODE_LABEL, type AmbientMode } from "../../shared/ambient";
+import { useT } from "../i18n";
 import { Icon, type IconName } from "./Icon";
 
 const BUBBLE: Record<AvatarState, string> = {
@@ -28,14 +29,14 @@ const PRESETS = [
 
 type Tab = "overview" | "model" | "persona" | "plugins" | "safety" | "look" | "data";
 
-const NAV: { k: Tab; label: string; icon: IconName }[] = [
-  { k: "overview", label: "概览", icon: "home" },
-  { k: "model", label: "模型", icon: "cpu" },
-  { k: "persona", label: "人设与语气", icon: "user" },
-  { k: "plugins", label: "能力与插件", icon: "layers" },
-  { k: "safety", label: "权限与安全", icon: "shield" },
-  { k: "look", label: "外观", icon: "pen" },
-  { k: "data", label: "数据与日志", icon: "folder" },
+const NAV: { k: Tab; labelKey: string; icon: IconName }[] = [
+  { k: "overview", labelKey: "nav.overview", icon: "home" },
+  { k: "model", labelKey: "nav.model", icon: "cpu" },
+  { k: "persona", labelKey: "nav.persona", icon: "user" },
+  { k: "plugins", labelKey: "nav.plugins", icon: "layers" },
+  { k: "safety", labelKey: "nav.safety", icon: "shield" },
+  { k: "look", labelKey: "nav.look", icon: "pen" },
+  { k: "data", labelKey: "nav.data", icon: "folder" },
 ];
 
 /**
@@ -52,6 +53,7 @@ export function SettingsModal({
   autoStart,
   trayOnClose,
   notify,
+  lang,
   project,
   usage,
   onPrefs,
@@ -76,9 +78,11 @@ export function SettingsModal({
   trayOnClose: boolean;
   /** 窗口隐藏时系统通知（M1-18） */
   notify: boolean;
+  /** 界面语言（M3-08） */
+  lang: "zh" | "en";
   project?: { root: string; trusted: boolean; hasMcp: boolean };
   usage: UsageView;
-  onPrefs: (p: { trayOnClose: boolean; notify: boolean }) => void;
+  onPrefs: (p: { trayOnClose: boolean; notify: boolean; lang?: "zh" | "en" }) => void;
   onTheme: (id: ThemeId, mode: ThemeMode) => void;
   onAvatar: (on: boolean) => void;
   onPack: (p: LynnPack) => void;
@@ -100,6 +104,7 @@ export function SettingsModal({
   const [packMsg, setPackMsg] = useState<string>("");
   const [preview, setPreview] = useState<{ pack: LynnPack; lines: string[] } | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const t = useT();
   const { all: uiPlugins, disabled: uiDisabled, errors: uiErrors, toggle: toggleUi } = useUiPlugins();
 
   // persona.md（M1-17）：编辑 + 版本化回滚
@@ -590,18 +595,28 @@ export function SettingsModal({
     if (tab === "look") {
       return (
         <div className="sf-pane">
-          <h3>外观</h3>
-          <span className="sf-label">主题</span>
+          <h3>{t("look.title")}</h3>
+          <span className="sf-label">{t("look.language")}</span>
+          <div className="sf-inline">
+            <button type="button" className={`sf-btn${lang === "zh" ? " primary" : ""}`} onClick={() => onPrefs({ trayOnClose, notify, lang: "zh" })}>
+              {t("lang.zh")}
+            </button>
+            <button type="button" className={`sf-btn${lang === "en" ? " primary" : ""}`} onClick={() => onPrefs({ trayOnClose, notify, lang: "en" })}>
+              {t("lang.en")}
+            </button>
+          </div>
+          <small className="sf-hint">{t("look.languageHint")}</small>
+          <span className="sf-label">{t("look.theme")}</span>
           <div className="theme-row">
-            {THEMES.map((t) => {
-              const c = t[mode];
+            {THEMES.map((th) => {
+              const c = th[mode];
               return (
                 <button
                   type="button"
-                  key={t.id}
-                  className={`theme${theme === t.id ? " on" : ""}`}
-                  onClick={() => onTheme(t.id, mode)}
-                  title={`${t.name} · ${t.hint}`}
+                  key={th.id}
+                  className={`theme${theme === th.id ? " on" : ""}`}
+                  onClick={() => onTheme(th.id, mode)}
+                  title={`${th.name} · ${th.hint}`}
                 >
                   <div className="swatches">
                     <i style={{ background: c.desk }} />
@@ -610,22 +625,22 @@ export function SettingsModal({
                     <i style={{ background: c.brass }} />
                   </div>
                   <div className="theme-name">
-                    <span className="t">{t.name}</span>
+                    <span className="t">{th.name}</span>
                   </div>
-                  <div className="theme-desc">{t.hint}</div>
+                  <div className="theme-desc">{th.hint}</div>
                 </button>
               );
             })}
           </div>
           <div className="sf-inline">
             <button type="button" className={`sf-btn${mode === "dark" ? " primary" : ""}`} onClick={() => onTheme(theme, "dark")}>
-              暗色
+              {t("look.modeDark")}
             </button>
             <button type="button" className={`sf-btn${mode === "light" ? " primary" : ""}`} onClick={() => onTheme(theme, "light")}>
-              亮色
+              {t("look.modeLight")}
             </button>
           </div>
-          <span className="sf-label">动效</span>
+          <span className="sf-label">{t("look.ambient")}</span>
           <div className="sf-inline">
             {(["full", "low", "off"] as AmbientMode[]).map((m) => (
               <button type="button" key={m} className={`sf-btn${ambientMode === m ? " primary" : ""}`} onClick={() => onAmbient(m)}>
@@ -633,44 +648,44 @@ export function SettingsModal({
               </button>
             ))}
           </div>
-          <span className="sf-label">形象（只在设置与桌宠里出现）</span>
+          <span className="sf-label">{t("look.avatar")}</span>
           <div className="sf-inline">
             <button type="button" className={`sf-btn${avatar ? " primary" : ""}`} onClick={() => onAvatar(true)}>
-              启用
+              {t("common.enable")}
             </button>
             <button type="button" className={`sf-btn${!avatar ? " primary" : ""}`} onClick={() => onAvatar(false)}>
-              关闭
+              {t("common.disable")}
             </button>
             <button type="button" className="sf-btn" onClick={() => void window.lynn.rpc("pet.open")}>
-              唤出桌宠
+              {t("look.petOpen")}
             </button>
           </div>
           {avatar && <AvatarStage state={avState} onState={setAvState} bubble={BUBBLE[avState]} height={200} />}
-          <span className="sf-label">桌面驻留</span>
+          <span className="sf-label">{t("look.presence")}</span>
           <div className="sf-row">
             <div className="sf-row-main">
-              <b>关窗进托盘</b>
-              <small>点 × 最小化到托盘，会话不中断；托盘菜单「退出」才真退。全局快捷键 Alt+Shift+L 呼出。</small>
+              <b>{t("look.trayTitle")}</b>
+              <small>{t("look.trayHint")}</small>
             </div>
             <button
               type="button"
               className={`sf-btn${trayOnClose ? " primary" : ""}`}
-              onClick={() => onPrefs({ trayOnClose: !trayOnClose, notify })}
+              onClick={() => onPrefs({ trayOnClose: !trayOnClose, notify, lang })}
             >
-              {trayOnClose ? "已开启" : "已关闭"}
+              {trayOnClose ? t("common.on") : t("common.off")}
             </button>
           </div>
           <div className="sf-row">
             <div className="sf-row-main">
-              <b>窗口隐藏时通知</b>
-              <small>只在你看不见主窗口时弹系统通知（成员交活 / 需要拍板 / 出错），不做打扰源。</small>
+              <b>{t("look.notifyTitle")}</b>
+              <small>{t("look.notifyHint")}</small>
             </div>
             <button
               type="button"
               className={`sf-btn${notify ? " primary" : ""}`}
-              onClick={() => onPrefs({ trayOnClose, notify: !notify })}
+              onClick={() => onPrefs({ trayOnClose, notify: !notify, lang })}
             >
-              {notify ? "已开启" : "已关闭"}
+              {notify ? t("common.on") : t("common.off")}
             </button>
           </div>
         </div>
@@ -892,7 +907,7 @@ export function SettingsModal({
             {NAV.map((n) => (
               <button type="button" key={n.k} className={`sf-nav-item${tab === n.k ? " on" : ""}`} onClick={() => setTab(n.k)}>
                 <Icon name={n.icon} size="sm" />
-                {n.label}
+                {t(n.labelKey)}
               </button>
             ))}
           </nav>

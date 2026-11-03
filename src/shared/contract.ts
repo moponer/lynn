@@ -250,7 +250,7 @@ export interface SessionSnapshot {
   turn: TurnState;
   usage: UsageView;
   queue: QueueItem[];
-  prefs: { autoStart: boolean; trayOnClose: boolean; notify: boolean };
+  prefs: { autoStart: boolean; trayOnClose: boolean; notify: boolean; lang: "zh" | "en" };
 }
 
 // ---------- 事件流（主进程 → 渲染层） ----------
@@ -603,10 +603,20 @@ export interface RpcContracts {
     params: { baseUrl: string; apiKey: string; model: string };
     result: { ok: true; latencyMs: number } | { ok: false; error: string };
   };
-  /** 偏好设置（M2-11 加软预算与备用模型） */
+  /** 偏好设置（M2-11 加软预算与备用模型；M3-08 加界面语言） */
   "config.prefs": {
-    params: { autoStart: boolean; trayOnClose?: boolean; notify?: boolean; softBudgetTokens?: number; fallbackModel?: string };
-    result: { ok: true; autoStart: boolean; trayOnClose: boolean; notify: boolean; softBudgetTokens: number; fallbackModel: string };
+    params: { autoStart: boolean; trayOnClose?: boolean; notify?: boolean; softBudgetTokens?: number; fallbackModel?: string; lang?: "zh" | "en" };
+    result: { ok: true; autoStart: boolean; trayOnClose: boolean; notify: boolean; softBudgetTokens: number; fallbackModel: string; lang: "zh" | "en" };
+  };
+  /** M3-08：当前界面语言的合并字典（内置 + 启用的语言包插件覆盖），渲染层按 lang 变化拉取 */
+  "i18n.get": {
+    params: void;
+    result: {
+      lang: "zh" | "en";
+      strings: Record<string, string>;
+      /** 参与合并的语言包插件 id（如实说明文案来源） */
+      sources: string[];
+    };
   };
   /** 清除已保存的 API Key（保留端点与模型） */
   "config.clearKey": {
@@ -634,6 +644,8 @@ export interface RpcContracts {
         loadable: boolean;
         description?: string;
         theme?: { name?: string; dark?: Record<string, string>; light?: Record<string, string> };
+        /** M3-08：L0 语言包插件才有 */
+        langs?: { lang: "zh" | "en"; strings: Record<string, string> }[];
       }[];
       errors: string[];
     };

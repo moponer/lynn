@@ -16,6 +16,8 @@ import { Wizard, type WizardResult } from "./desk/Wizard";
 import { Standby } from "./desk/Standby";
 import { Pet } from "./desk/Pet";
 import { ambientForTheme, type AmbientMode } from "../shared/ambient";
+import { ZH_STRINGS } from "../shared/i18n-strings";
+import { I18nProvider } from "./i18n";
 
 /** 渲染层只认 contract.ts 里的类型化 RPC；不感知内核实现是直连还是 Pi。 */
 async function rpc<M extends RpcMethod>(
@@ -48,6 +50,22 @@ export default function App() {
   const ambient = useMemo(() => ambientForTheme(theme.id), [theme.id]);
   const [avatar, setAvatar] = useState(() => localStorage.getItem("lynn.avatar") !== "0");
   const [notice, setNotice] = useState<string | null>(null);
+  /** M3-08：界面语言字典（内置 ⊕ 语言包插件），lang 变化即重拉 */
+  const [i18nStrings, setI18nStrings] = useState<Record<string, string>>(ZH_STRINGS);
+  const lang = snap?.prefs.lang ?? "zh";
+  useEffect(() => {
+    let dead = false;
+    rpc("i18n.get")
+      .then((r) => {
+        if (!dead) setI18nStrings(r.strings);
+      })
+      .catch(() => {
+        /* 拉不到就用内置 zh，不阻塞界面 */
+      });
+    return () => {
+      dead = true;
+    };
+  }, [lang]);
 
   useEffect(() => {
     applyTheme(theme.id, theme.mode);
@@ -313,7 +331,7 @@ export default function App() {
   }
 
   return (
-    <>
+    <I18nProvider strings={i18nStrings}>
       <DeskView
         desk={desk}
         permission={snap.permission}
@@ -351,6 +369,7 @@ export default function App() {
           autoStart={snap.prefs.autoStart}
           trayOnClose={snap.prefs.trayOnClose}
           notify={snap.prefs.notify}
+          lang={snap.prefs.lang}
           project={snap.project}
           usage={snap.usage}
           onTheme={changeTheme}
@@ -377,6 +396,6 @@ export default function App() {
           onSaved={() => void refresh()}
         />
       )}
-    </>
+    </I18nProvider>
   );
 }

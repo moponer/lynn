@@ -51,6 +51,8 @@ import {
   draftsDir,
   type WorkshopKind,
 } from "./workshop";
+import { isLang, mergeStrings } from "../shared/i18n";
+import { BUILTIN_STRINGS } from "../shared/i18n-strings";
 import { TaskStore } from "./task-store";
 import { TaskCase } from "./task-case";
 import { ContextStore } from "./context-store";
@@ -2572,13 +2574,17 @@ export class Kernel {
       }
 
       case "config.prefs": {
-        const p = params as { autoStart: boolean; trayOnClose?: boolean; notify?: boolean; softBudgetTokens?: number; fallbackModel?: string };
+        const p = params as { autoStart: boolean; trayOnClose?: boolean; notify?: boolean; softBudgetTokens?: number; fallbackModel?: string; lang?: "zh" | "en" };
+        if (p.lang !== undefined && !isLang(p.lang)) {
+          return { ok: false, error: `未知语言：${String(p.lang)}（只支持 zh / en）` } as unknown as RpcContracts[M]["result"];
+        }
         const saved = this.settings.savePrefs({
           autoStart: Boolean(p.autoStart),
           ...(p.trayOnClose !== undefined ? { trayOnClose: Boolean(p.trayOnClose) } : {}),
           ...(p.notify !== undefined ? { notify: Boolean(p.notify) } : {}),
           ...(p.softBudgetTokens !== undefined ? { softBudgetTokens: Math.max(0, Number(p.softBudgetTokens) || 0) } : {}),
           ...(p.fallbackModel !== undefined ? { fallbackModel: String(p.fallbackModel).trim() } : {}),
+          ...(p.lang !== undefined ? { lang: p.lang } : {}),
         });
         return {
           ok: true,
@@ -2587,7 +2593,25 @@ export class Kernel {
           notify: saved.notify,
           softBudgetTokens: saved.softBudgetTokens,
           fallbackModel: saved.fallbackModel,
+          lang: saved.lang,
         } as RpcContracts[M]["result"];
+      }
+
+      // M3-08：界面语言字典——内置（zh 源语言 / en 渐进）⊕ 启用的语言包插件覆盖
+      case "i18n.get": {
+        const lang = this.settings.getPrefs().lang;
+        let strings: Record<string, string> = { ...BUILTIN_STRINGS.zh };
+        if (lang === "en") strings = mergeStrings(strings, BUILTIN_STRINGS.en);
+        const sources: string[] = [];
+        for (const p of this.pluginHost.scan().plugins) {
+          if (!p.enabled || !p.langs) continue;
+          for (const pack of p.langs) {
+            if (pack.lang !== lang) continue;
+            strings = mergeStrings(strings, pack.strings);
+            if (!sources.includes(p.id)) sources.push(p.id);
+          }
+        }
+        return { lang, strings, sources } as RpcContracts[M]["result"];
       }
 
       case "config.clearKey": {

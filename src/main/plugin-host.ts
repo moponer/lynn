@@ -4,6 +4,7 @@ import { checkManifest, type PluginManifest } from "./plugin-manifest";
 import { probeMcpServer } from "./plugin-probe";
 import { PluginSetStore } from "./plugin-set";
 import { SKIN_TOKEN_KEYS } from "../shared/skin";
+import { checkLangPack, type LangPack } from "../shared/i18n";
 import type { L1Host } from "./plugin-l1";
 
 /**
@@ -27,6 +28,8 @@ export interface PluginView {
   enabled: boolean;
   /** L0 主题插件才有 */
   theme?: ThemeFile;
+  /** M3-08：L0 语言包插件才有（可能同时带 zh/en 多个包） */
+  langs?: LangPack[];
   /** false = 该档加载器还没接（L1/L2） */
   loadable: boolean;
   description?: string;
@@ -151,26 +154,54 @@ export class PluginHost {
 
       if (m.tier === "L0") {
         const themeRel = m.contributes?.theme;
-        if (!themeRel) {
-          errors.push(`${entry.name}: L0 插件至少要有 contributes.theme（技能/命令加载器后续接入）`);
+        const langRels = m.contributes?.langs ?? [];
+        if (!themeRel && !langRels.length) {
+          errors.push(`${entry.name}: L0 插件至少要有 contributes.theme 或 contributes.langs（技能/命令加载器后续接入）`);
           continue;
         }
-        const themePath = path.resolve(dir, themeRel);
-        if (!themePath.startsWith(path.resolve(dir)) || !fs.existsSync(themePath)) {
-          errors.push(`${entry.name}: theme 文件不存在或跳出插件目录`);
-          continue;
-        }
-        try {
-          const themeCheck = checkThemeFile(JSON.parse(fs.readFileSync(themePath, "utf-8")));
-          if (!themeCheck.ok) {
-            errors.push(`${entry.name}: ${themeCheck.issues.join("；")}`);
+        if (themeRel) {
+          const themePath = path.resolve(dir, themeRel);
+          if (!themePath.startsWith(path.resolve(dir)) || !fs.existsSync(themePath)) {
+            errors.push(`${entry.name}: theme 文件不存在或跳出插件目录`);
             continue;
           }
-          view.theme = themeCheck.theme;
-        } catch {
-          errors.push(`${entry.name}: theme.json 不是合法 JSON`);
-          continue;
+          try {
+            const themeCheck = checkThemeFile(JSON.parse(fs.readFileSync(themePath, "utf-8")));
+            if (!themeCheck.ok) {
+              errors.push(`${entry.name}: ${themeCheck.issues.join("；")}`);
+              continue;
+            }
+            view.theme = themeCheck.theme;
+          } catch {
+            errors.push(`${entry.name}: theme.json 不是合法 JSON`);
+            continue;
+          }
         }
+        // M3-08：语言包——同一沙箱纪律（路径不出插件目录 + 结构校验），坏包跳过不拖垮其它
+        const packs: LangPack[] = [];
+        let langBad = false;
+        for (const rel of langRels) {
+          const p = path.resolve(dir, rel);
+          if (!p.startsWith(path.resolve(dir)) || !fs.existsSync(p)) {
+            errors.push(`${entry.name}: 语言包不存在或跳出插件目录：${rel}`);
+            langBad = true;
+            continue;
+          }
+          try {
+            const check = checkLangPack(JSON.parse(fs.readFileSync(p, "utf-8")));
+            if (!check.ok || !check.pack) {
+              errors.push(`${entry.name}: 语言包 ${rel} — ${check.issues.join("；")}`);
+              langBad = true;
+              continue;
+            }
+            packs.push(check.pack);
+          } catch {
+            errors.push(`${entry.name}: 语言包 ${rel} 不是合法 JSON`);
+            langBad = true;
+          }
+        }
+        if (langBad) continue;
+        if (packs.length) view.langs = packs;
       }
 
       plugins.push(view);
