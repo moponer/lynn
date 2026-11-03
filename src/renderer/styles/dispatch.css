@@ -49,6 +49,28 @@
   --r-s: 3px;
   --r-m: 5px;
   --r-l: 8px;
+
+  /* --- 字号阶梯（规范 §3.3）：六档，最小 10px。
+         这里必须真的定义——此前只有引用没有声明，
+         所有 font-size: var(--fs-*) 在计算值阶段整条失效、全站塌成 16px。 --- */
+  --fs-label: 10px;    /* 等宽标签 / 计数 / 芯片 */
+  --fs-meta: 11px;     /* 时间 / 来源 / 提示行 */
+  --fs-body: 12.5px;   /* 正文主力 */
+  --fs-body-lg: 13px;  /* 指令台输入 / 小节标题 */
+  --fs-brand: 17px;    /* 品牌名 */
+  --fs-title: 21px;    /* 页面标题 */
+  --fs-head: 21px;     /* 图纸主标题 */
+  --fs-display: 26px;  /* 造铃大标题 */
+  --fs-clock: 56px;    /* 待机页时钟（唯一的超大字号） */
+
+  /* --- 交互时长与缓动：只表达状态，不循环 --- */
+  --dur-fast: 120ms;
+  --dur: 180ms;
+  --ease-out: cubic-bezier(.16, 1, .3, 1);
+
+  /* --- 弹层/芯片表面：跟随主题的 sheet 层，禁止再写死深色回退 --- */
+  --surface-1: var(--sheet-2);
+  --surface-2: var(--sheet-3);
 }
 
 * { box-sizing: border-box; }
@@ -147,7 +169,7 @@ svg.ic.lg { width: 20px; height: 20px; }
 .win-btn {
   width: 32px; height: 26px; display: grid; place-items: center;
   border: 0; background: none; border-radius: var(--r-s);
-  color: var(--ink-3); cursor: default;
+  color: var(--ink-3);
 }
 .win-btn:hover { background: var(--hover-bg); color: var(--ink); }
 .win-btn.close:hover { background: var(--red-wash); color: var(--red); }
@@ -183,7 +205,7 @@ svg.ic.lg { width: 20px; height: 20px; }
   display: flex; align-items: center; gap: 5px;
   padding: 4px 9px; border-radius: var(--r-s);
   font-size: var(--fs-meta); color: var(--ink-3);
-  cursor: default;
+  cursor: pointer;
 }
 .seg-item .en { font-family: var(--f-mono); font-size: var(--fs-label); color: var(--ink-4); letter-spacing: .06em; }
 .seg-item.on { background: var(--blue-wash); color: var(--blue); }
@@ -206,7 +228,7 @@ svg.ic.lg { width: 20px; height: 20px; }
 .icon-btn {
   width: 30px; height: 30px; border-radius: var(--r-m);
   display: grid; place-items: center; color: var(--ink-3);
-  background: var(--desk-3); cursor: default;
+  background: var(--desk-3); cursor: pointer;
   box-shadow: 0 1px 2px rgba(0,0,0,.35);
 }
 .icon-btn:hover { background: #202b37; color: var(--ink-2); }
@@ -215,7 +237,7 @@ svg.ic.lg { width: 20px; height: 20px; }
   display: inline-flex; align-items: center; gap: 6px;
   padding: 6px 11px; border-radius: var(--r-m);
   background: var(--desk-3); color: var(--ink-2);
-  font-size: var(--fs-body); cursor: default;
+  font-size: var(--fs-body); cursor: pointer;
   font-family: var(--f-cjk);
   box-shadow: 0 1px 2px rgba(0,0,0,.35);
 }
@@ -263,9 +285,11 @@ svg.ic.lg { width: 20px; height: 20px; }
 
 .job {
   display: block; padding: 8px 9px; border-radius: var(--r-m);
-  margin-bottom: 2px; cursor: default; position: relative;
+  margin-bottom: 2px; position: relative;
   background: transparent;
 }
+/* 只有真能点的工单行给手型：审查台左栏有同名的静态 .job（无 role），不能误给 */
+.job[role="button"] { cursor: pointer; }
 .job:hover { background: #18212c; }
 .job.on { background: var(--sheet); box-shadow: 0 1px 3px rgba(0,0,0,.45); }
 .job.on::before {
@@ -576,7 +600,7 @@ svg.ic.lg { width: 20px; height: 20px; }
 .btn {
   flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 6px;
   padding: 8px 10px; border-radius: var(--r-m); font-size: var(--fs-body);
-  cursor: default; font-family: var(--f-cjk);
+  cursor: pointer; font-family: var(--f-cjk);
 }
 .btn-accept { background: var(--blue); color: var(--on-accent); font-weight: 600; box-shadow: 0 4px 12px -6px rgba(94,169,201,.6); }
 .btn-accept:hover { background: #6fbada; }
@@ -811,7 +835,9 @@ textarea.composer-in::placeholder { color: var(--ink-4); }
 /* 运行态基础（原聊天壳已移除，这里的重置只服务值台） */
 html, body { height: 100%; overflow: hidden; background: var(--desk); }
 #root { height: 100vh; }
-button { font: inherit; cursor: pointer; }
+/* 所有按钮先归零 UA 边框：零描边规则是从这里兜底的，
+   不是逐个类名补（.ghost-btn / .icon-btn / .btn / .send 曾漏掉，实测 2px outset 黑框） */
+button { font: inherit; cursor: pointer; border: 0; background: none; }
 input, textarea { font: inherit; }
 
 /* 指令台：窄窗口下允许换行，别把提示挤成竖排 */
@@ -1371,7 +1397,8 @@ button.seg-item,
 button.av-vbtn,
 button.av-sbtn {
   border: 0;
-  font: inherit;
+  /* 只继承字族：写 font: inherit 会把上面各类自己的 font-size 一起打回 16px */
+  font-family: var(--f-cjk);
   text-align: left;
   color: inherit;
   background: none;

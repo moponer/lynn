@@ -183,9 +183,28 @@ const ratio = (a, b) => {
   }
 }
 
+// ---------- 8) CSS 变量契约：每个 var(--x) 必须真的被定义 ----------
+// 背景：字体阶梯一度只有引用没有声明（--fs-* 全缺），font-size 计算值整条失效、
+// 全站塌成 16px，但没有任何静态检查拦得住。这条规则把"引用-定义"的差集变成红灯。
+{
+  // 注释里举例的 var(--fs-*) 不算引用：先按行把 /* */ 抹掉，保留行数便于报行号
+  const code = css.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " "));
+  const defined = new Set();
+  for (const m of code.matchAll(/(?:^|[\s;{,])(--[\w-]+)\s*:/g)) defined.add(m[1]);
+  const missing = new Map();
+  for (const m of code.matchAll(/var\(\s*(--[\w-]+)/g)) {
+    if (!defined.has(m[1]) && !missing.has(m[1])) {
+      missing.set(m[1], code.slice(0, m.index).split("\n").length);
+    }
+  }
+  for (const [name, line] of missing) {
+    fail(cssFile, line, `未定义的 CSS 变量 ${name}：var() 会让整条声明在计算值阶段失效`);
+  }
+}
+
 if (violations.length > 0) {
   console.error(`设计约束检查失败（${violations.length} 处）：`);
   for (const v of violations) console.error("  " + v);
   process.exit(1);
 }
-console.log("设计约束检查通过：零描边（仅 crop 角标）、四功能色齐全、无装饰色。");
+console.log("设计约束检查通过：零描边（仅 crop 角标）、四功能色齐全、无装饰色、CSS 变量引用全部有定义。");

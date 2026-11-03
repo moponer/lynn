@@ -37,7 +37,8 @@ const snapshot = {
   workspace: { project: "my-notes", subdir: "值台" },
   permission: "ask",
   model: {
-    configured: true,
+    // LYNN_PREVIEW_WIZARD=1：模型未配 → 首启向导不被 App 的"已配就跳过"逻辑关掉
+    configured: process.env.LYNN_PREVIEW_WIZARD !== "1",
     provider: "DeepSeek",
     baseUrl: "https://api.deepseek.com",
     model: "deepseek-chat",
