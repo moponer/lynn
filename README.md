@@ -4,9 +4,9 @@
 
 本地优先、插件化的桌面 AI 个人助理——**她是指挥者，不是执行者**：她组队、派单、盯进度、审查证据、向你汇报。基于 [earendil-works/pi](https://github.com/earendil-works/pi) 生态，薄壳 + 三档插件 + MCP 能力外挂。
 
-> 当前状态：**M0 进行中**。已有：类型化 IPC 单一契约、Electron 薄壳、管理型 8 件套（真实执行、落盘、审计、硬约束）、成员档案 v1、插件 manifest v1 校验器 + 版本闸门、Pi 配置根重定向与无遥测开关、**权威工单实体（七态 / version / parent / evidence）+ 任务卷宗 + 三层存储（压缩与归档）**、**UI 插件卡槽 + 从磁盘加载 U 插件（iframe 沙箱）**、**形象舞台（三视图 / 状态机 / 心声）**、**动效层与待机模式（GPU 红线已实测）**、**设计约束 CI（零描边 / 四功能色）**、91 条 `node --test` 用例、CI（typecheck + lint:design + test）。
-> 尚未完成：Pi 运行时的 RPC 独立进程接入（当前为进程内 SDK 过渡路径）、插件三档加载器、权限门禁、七态任务实体。
-> 完整任务与验收口径见 [`../docs/开发任务清单.md`](../docs/开发任务清单.md)。
+> 当前状态：**M4 发布准备**（M0–M3 主体完成）。已有：Pi RPC 独立进程 + 薄壳、管理工具 10 件套（真实执行、落盘、审计、硬约束）、七态工单实体 + 卷宗 + 证据链、三档插件加载器（L0/L1/L2）+ U 档 iframe 沙箱 + 准入流水线 + 安全模式/回滚/指纹、**插件工坊（规格→草稿区→准入→分档启用）**、六大执行域（日历/cron/知识库/office/浏览器/消息平台合规路径）、技能体系（allowed-tools 强制）、成本软上限、多会话/撤销/托盘/更新器、**中英 i18n（语言包即 L0 插件）**、265 条 `node --test` 用例、CI（typecheck + lint:design + test）。
+> 尚未完成：Windows 代码签名（无证书，如实注明，见[发布说明](./docs/site/zh/release.md)）、消息平台收消息（长连接）、VRM 驱动（暂缓）。
+> 完整任务与验收口径见 [`../docs/开发任务清单.md`](../docs/开发任务清单.md)。**用户文档**：[快速开始](./docs/site/zh/quickstart.md) · [插件开发指南](./docs/site/zh/plugin-guide.md) · [插件索引](./docs/site/zh/plugin-index.md) · [隐私说明](./docs/site/zh/privacy.md) · English docs in `docs/site/en/`。
 
 ## 运行
 
@@ -96,17 +96,20 @@ L0 是纯数据：`plugin.json` 的 `contributes.theme` 指向一个 `theme.json
 
 | 文档 | 管什么 |
 |---|---|
+| `docs/site/zh/` · `docs/site/en/` | **用户与插件开发者文档站**：快速开始 / 插件指南 / 插件索引 / 隐私 / 发布签名 |
+| [`PLUGIN-CONTRACT.md`](./PLUGIN-CONTRACT.md) | UI 插件契约 v1（冻结承诺 + 卡槽语义 + 沙箱） |
+| [`THIRD_PARTY_NOTICES.md`](./THIRD_PARTY_NOTICES.md) | 第三方声明（许可证 + 依赖清单，`node scripts/gen-notices.mjs` 再生） |
+| [`LICENSE`](./LICENSE) | MIT |
 | [`../docs/立项计划书-全方位个人助理.md`](../docs/立项计划书-全方位个人助理.md) v0.5.0 | 产品形态、架构、插件体系、指挥与团队运行时、里程碑、风险 |
 | [`../docs/风铃-界面设计规范.md`](../docs/风铃-界面设计规范.md) v1.0 | 界面结构、视觉语言、数据契约、实现路线 |
-| [`../docs/开发任务清单.md`](../docs/开发任务清单.md) v1 | 未完成任务（按 M0–M4 + 横切编排）、决策、文档缺口 |
+| [`../docs/开发任务清单.md`](../docs/开发任务清单.md) v1 | 任务与验收口径（按 M0–M4 + 横切编排） |
 
-## 下一步（M0 剩余）
+## 下一步（M4 剩余）
 
-1. **实验 6：纯提示词版指挥环**（计划书 §7，最优先）——量 token 成本、假验收率、打回轮数。
-2. Pi 接入改为 RPC + 扩展宿主、独立进程（计划书 §4.1）。
-3. L1（进程内 TS）/ L2（MCP）加载器 + `/reload` 排队语义（L0 已落）。
-4. VRM 驱动（需 `three-vrm` 依赖 + 授权明确的开源模型）。
-5. 温层 SQLite/FTS（随 M2-04 知识库）。
+1. **Windows 代码签名**（OV/EV 证书接入后更新发布说明与更新器校验说明）。
+2. 消息平台收消息（官方 WS 长连接，接官方 SDK）。
+3. i18n 文案补全（机制已落，Feed 卡 / 审批印章 / 向导等剩余界面文案 key 化）。
+4. 社区插件投稿与索引审核流程。
 
 ## 界面走查
 
