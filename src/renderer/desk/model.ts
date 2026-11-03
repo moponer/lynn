@@ -121,7 +121,7 @@ export interface Desk {
   project: string;
   subdir: string;
   jobs: DeskJob[];
-  archived: { id: string; title: string }[];
+  archived: { id: string; title: string; status?: TaskStatus }[];
   members: DeskMember[];
   /** 未解散的团队数：>1 时成员卡要标出归属，否则同名成员分不清 */
   teamCount: number;
@@ -264,7 +264,7 @@ export function deskFromSnapshot(snap: SessionSnapshot): Desk {
     jobs,
     archived: jobs
       .filter((j) => j.status === "done" || j.status === "canceled")
-      .map((j) => ({ id: j.id, title: j.title })),
+      .map((j) => ({ id: j.id, title: j.title, status: j.status })),
     members,
     teamCount: board.teams.filter((t) => t.status !== "dissolved").length,
     decision: first ? toDecision(first) : undefined,

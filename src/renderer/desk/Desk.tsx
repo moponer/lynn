@@ -235,6 +235,7 @@ function Ledger({
   onCancelTask?: (taskId: string) => void;
 }) {
   const [q, setQ] = useState("");
+  const [showAllArchive, setShowAllArchive] = useState(false);
   const [threadsOpen, setThreadsOpen] = useState(false);
   const [tq, setTq] = useState("");
   const [hits, setHits] = useState<{ id: string; title: string; hits: string[] }[]>([]);
@@ -363,12 +364,29 @@ function Ledger({
               </span>
             </div>
             <ol>
-              {archived.slice(0, 20).map((a) => (
-                <li key={a.id} title={`~/.lynn/tasks/${a.id}/`}>
-                  {a.id} <span className="mono">{a.title}</span>
+              {(showAllArchive ? archived : archived.slice(0, 20)).map((a) => (
+                <li key={a.id}>
+                  {/* 归档不是坟场：点得开才叫可追溯 */}
+                  <button
+                    type="button"
+                    className={`arch-item${a.id === activeId ? " on" : ""}`}
+                    title={`打开 ${a.id}（~/.lynn/tasks/${a.id}/）`}
+                    onClick={() => onSelect(a.id)}
+                  >
+                    <span className="arch-id mono">{a.id}</span>
+                    <span className="arch-title">{a.title}</span>
+                    <span className={`st ${a.status === "canceled" ? "st-idle" : "st-done"}`}>
+                      {t(STATUS_KEY[a.status ?? "done"], {})}
+                    </span>
+                  </button>
                 </li>
               ))}
             </ol>
+            {archived.length > 20 && (
+              <button type="button" className="strip-link" onClick={() => setShowAllArchive((v) => !v)}>
+                {showAllArchive ? t("ledger.archiveLess") : t("ledger.archiveAll", { n: archived.length })}
+              </button>
+            )}
           </div>
         )}
 

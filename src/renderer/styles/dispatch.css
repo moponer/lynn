@@ -328,8 +328,20 @@ svg.ic.lg { width: 20px; height: 20px; }
   background: repeating-linear-gradient(135deg, rgba(146,174,194,.035) 0 6px, rgba(146,174,194,.015) 6px 12px);
 }
 .archive-band .ab-h { display: flex; align-items: center; gap: 6px; font-size: var(--fs-meta); color: var(--ink-3); }
-.archive-band ol { margin: 7px 0 0; padding-left: 14px; color: var(--ink-4); font-size: var(--fs-meta); line-height: 1.75; }
+.archive-band ol { margin: 7px 0 0; padding-left: 0; list-style: none; }
 .archive-band .mono { font-size: var(--fs-label); }
+/* 归档项：一条一行，点得开（原来只是不可交互的 <li> 文本） */
+.arch-item {
+  width: 100%; display: flex; align-items: center; gap: 6px;
+  padding: 3px 5px; border-radius: var(--r-s);
+  background: none; color: var(--ink-4); text-align: left;
+  font-size: var(--fs-meta); cursor: pointer;
+}
+.arch-item:hover { background: var(--hover-bg); color: var(--ink-2); }
+.arch-item.on { background: var(--sheet); color: var(--ink); }
+.arch-item .arch-id { flex: none; opacity: .75; }
+.arch-item .arch-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.arch-item .st { flex: none; }
 
 /* ---------- CENTER SHEET ---------- */
 .center { flex: 1; min-width: 0; display: flex; flex-direction: column; background: var(--desk); }
