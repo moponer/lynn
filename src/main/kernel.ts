@@ -29,7 +29,7 @@ import { MemoryStore, type MemoryKind } from "./memory";
 import { PRESETS, loadProviders, saveProviders, type ProviderEntry } from "./providers";
 import { CalendarStore, dueReminders, parseNaturalDate } from "./calendar";
 import { SchedulerStore, recover as recoverScheduler, type DueItem } from "./scheduler";
-import { KnowledgeStore } from "./knowledge";
+import { KnowledgeStore, watchKnowledge } from "./knowledge";
 import { probeSoffice, readTable, writeTable, type EngineHealth } from "./office";
 import { TeamStore } from "./team-store";
 import { TaskStore } from "./task-store";
@@ -317,6 +317,8 @@ export class Kernel {
   private knowledge!: KnowledgeStore;
   /** office 引擎健康（M2-06）：init 时探测一次，工具调用时如实降级 */
   private officeHealth!: EngineHealth;
+  /** 知识库目录 watch（M2-09）：变更去抖后增量索引 */
+  private kbWatch: { close: () => void } | null = null;
   /** 下一次起 worker 时开新会话（session.new 置位；起过一次即清） */
   private createFreshSession = false;
   /** 用户点了停止：本轮结束时不追加"已完成"类文案 */
@@ -650,6 +652,12 @@ export class Kernel {
     if (released.length) this.log("scheduler_recovered", { released });
     this.scheduleTimer = setInterval(() => this.tickSchedules(), 30_000);
     this.scheduleTimer.unref?.();
+    // 知识库增量索引（M2-09）：文件变更去抖 800ms 后增量重索引
+    this.kbWatch = watchKnowledge(this.knowledge.dir, () => this.knowledge.reindex(), {
+      onChange: (r) => {
+        if (r.indexed || r.removed) this.log("kb_indexed", r);
+      },
+    });
 
     // L1 插件启动加载（§4.2.1）：单个失败不影响其余，诊断留在 l1.lastErrors
     await this.l1.loadAll();
@@ -1245,6 +1253,8 @@ export class Kernel {
       clearInterval(this.scheduleTimer);
       this.scheduleTimer = null;
     }
+    this.kbWatch?.close();
+    this.kbWatch = null;
     this.persistThread();
     await this.resetAgentHost().catch(() => undefined);
     await this.mcp.stopAll().catch(() => undefined);

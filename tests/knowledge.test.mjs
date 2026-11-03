@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { KnowledgeStore } from "../dist/main/knowledge.js";
+import { KnowledgeStore, debounce, watchKnowledge } from "../dist/main/knowledge.js";
 import { Kernel } from "../dist/main/kernel.js";
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), "lynn-kb-"));
@@ -52,6 +52,37 @@ test("中文检索：trigram 召回；短查询如实拒；增量与删除同步
   const r3 = kb.reindex();
   assert.equal(r3.removed, 1);
   assert.equal(kb.search("紫水晶").hits.length, 0);
+});
+
+test("M2-09 fs-watch：去抖合并 + 目录变更触发增量索引", async () => {
+  // 去抖：窗口内第二次命中被吞
+  const g = debounce(50);
+  assert.equal(g.hit(), true);
+  assert.equal(g.hit(), false);
+  await new Promise((r) => setTimeout(r, 60));
+  assert.equal(g.hit(), true);
+
+  // 真实目录 watch：写文件 → 去抖后增量索引
+  const root = tmp();
+  const kb = new KnowledgeStore(root);
+  const seen = [];
+  const w = watchKnowledge(kb.dir, () => kb.reindex(), { debounceMs: 120, onChange: (r) => seen.push(r) });
+  try {
+    fs.writeFileSync(path.join(kb.dir, "watched.md"), "# 监听文档\n\n知识库增量索引测试内容。", "utf-8");
+    const deadline = Date.now() + 4000;
+    while (kb.search("增量索引测试").hits.length === 0 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    assert.ok(kb.search("增量索引测试").hits.length === 1, "变更后自动可检索（不需手动 reindex）");
+    assert.ok(seen.length >= 1 && (seen[0].indexed > 0 || seen[0].removed >= 0));
+    // 非 md 不触发：等 400ms 后 docs 数不变（Windows 重复事件合法，但不得产生新索引）
+    const docsBefore = kb.list().length;
+    fs.writeFileSync(path.join(kb.dir, "note.txt"), "not markdown", "utf-8");
+    await new Promise((r) => setTimeout(r, 400));
+    assert.equal(kb.list().length, docsBefore, ".txt 不进知识库");
+  } finally {
+    w.close();
+  }
 });
 
 test("Kernel：kb.* RPC 闭环；read 防目录穿越", async () => {

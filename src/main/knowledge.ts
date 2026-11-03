@@ -49,6 +49,47 @@ function snippetOf(body: string, q: string): string {
   return `${start > 0 ? "…" : ""}${body.slice(start, end).trim()}${end < body.length ? "…" : ""}`;
 }
 
+/** 变更去抖：busy 窗口内合并多次事件只索引一次 */
+export function debounce(ms: number): { hit: () => boolean; cancel: () => void } {
+  let last = 0;
+  return {
+    hit: () => {
+      const now = Date.now();
+      if (now - last < ms) return false;
+      last = now;
+      return true;
+    },
+    cancel: () => {
+      last = 0;
+    },
+  };
+}
+
+/** 订阅知识库目录变更（M2-09）：去抖后增量索引；recursive 在 Windows 可用 */
+export function watchKnowledge(
+  dir: string,
+  reindex: () => { indexed: number; removed: number },
+  opts: { debounceMs?: number; onChange?: (r: { indexed: number; removed: number }) => void } = {},
+): { close: () => void } {
+  const gate = debounce(opts.debounceMs ?? 800);
+  let watcher: fs.FSWatcher;
+  try {
+    watcher = fs.watch(dir, { recursive: true }, (_event, filename) => {
+      if (!filename?.endsWith(".md")) return;
+      if (!gate.hit()) return;
+      try {
+        opts.onChange?.(reindex());
+      } catch {
+        /* 索引失败不炸 watch；下次变更会再试 */
+      }
+    });
+  } catch {
+    // 目录 watch 不可用（罕见）：如实由调用方降级——返回空 watch
+    return { close: () => undefined };
+  }
+  return { close: () => watcher.close() };
+}
+
 export class KnowledgeStore {
   readonly dir: string;
   private db: unknown;
