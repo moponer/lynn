@@ -38,16 +38,25 @@ export function loadMcpConfig(dataRoot: string): { servers: McpServerConfig[]; e
   return loadMcpConfigAt(path.join(dataRoot, "mcp.json"));
 }
 
-/** 读任意路径的 mcp.json（项目级配置也走同一套校验） */
+/** 读任意路径的 mcp.json（项目级配置也走同一套校验）；重复 server id 按 §4.11.5 报明冲突并去重（保首个） */
 export function loadMcpConfigAt(file: string): { servers: McpServerConfig[]; error?: string } {
   if (!fs.existsSync(file)) return { servers: [] };
   try {
     const raw = JSON.parse(fs.readFileSync(file, "utf-8")) as { servers?: unknown };
     const list = Array.isArray(raw.servers) ? raw.servers : [];
     const servers: McpServerConfig[] = [];
+    const errors: string[] = [];
+    const seen = new Set<string>();
     for (const item of list) {
       const s = item as McpServerConfig;
       if (!s || typeof s.id !== "string" || typeof s.command !== "string") continue;
+      if (seen.has(s.id)) {
+        const first = servers.find((x) => x.id === s.id);
+        const cmdOf = (c: McpServerConfig) => [c.command, ...(c.args ?? [])].join(" ");
+        errors.push(`server id 冲突：「${s.id}」出现多次，保留首个（${first ? cmdOf(first) : "?"}），忽略后续（${cmdOf(s)}）——重名拒绝，请改配置`);
+        continue;
+      }
+      seen.add(s.id);
       servers.push({
         id: s.id,
         command: s.command,
@@ -58,7 +67,7 @@ export function loadMcpConfigAt(file: string): { servers: McpServerConfig[]; err
         lazy: s.lazy === true,
       });
     }
-    return { servers };
+    return { servers, error: errors.length ? errors.join("；") : undefined };
   } catch (err) {
     return { servers: [], error: `mcp.json 解析失败：${err instanceof Error ? err.message : String(err)}` };
   }
@@ -128,7 +137,18 @@ export class McpClient {
     });
     this.notify("notifications/initialized", {});
     const listed = (await this.request("tools/list", {})) as { tools?: McpToolDef[] };
-    this.toolDefs = Array.isArray(listed?.tools) ? listed.tools.filter((t) => t && typeof t.name === "string") : [];
+    // 同 server 内工具重名：保留首个并记 stderr（工具名冲突会让模型分不清调用目标）
+    const all = Array.isArray(listed?.tools) ? listed.tools.filter((t) => t && typeof t.name === "string") : [];
+    const seen = new Set<string>();
+    this.toolDefs = [];
+    for (const t of all) {
+      if (seen.has(t.name)) {
+        this.stderr += `\n[mcp ${this.cfg.id}] 工具重名：${t.name} 出现多次，保留首个，忽略后续`;
+        continue;
+      }
+      seen.add(t.name);
+      this.toolDefs.push(t);
+    }
     return this.toolDefs;
   }
 

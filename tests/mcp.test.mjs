@@ -33,6 +33,21 @@ test("配置读取：没有文件=空，坏 JSON 报错，缺字段的条目被�
   assert.equal(cfg[0].enabled, true);
 });
 
+test("冲突检测（M1-20 §4.11.5）：重复 server id 报明双方并保首个，不静默覆盖", () => {
+  const root = tmp();
+  fs.writeFileSync(
+    path.join(root, "mcp.json"),
+    JSON.stringify({ servers: [{ id: "dup", command: "node", args: ["first.mjs"] }, { id: "dup", command: "node", args: ["second.mjs"] }, { id: "ok", command: "node" }] }),
+    "utf-8",
+  );
+  const r = loadMcpConfig(root);
+  assert.equal(r.servers.length, 2, "dup 只留一个 + ok");
+  assert.deepEqual(r.servers.map((s) => s.id).sort(), ["dup", "ok"]);
+  assert.equal(r.servers.find((s) => s.id === "dup").args[0], "first.mjs", "保首个");
+  assert.match(r.error, /server id 冲突/);
+  assert.match(r.error, /first\.mjs.*second\.mjs|second\.mjs/s, "报明双方");
+});
+
 test("连上 server：列工具、调用、错误如实回文本", async () => {
   const client = new McpClient(server());
   try {
