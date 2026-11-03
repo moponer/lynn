@@ -187,22 +187,23 @@ export const MEMBER_STATUS_KEY: Record<DeskMember["status"], string> = {
 };
 
 function evidenceOf(job: TaskTrackItem): DeskEvidence[] {
-  const list = job.evidence ?? [];
-  if (list.length > 0) {
-    return list.map((e) => ({
-      level: e.verified ? "ok" : "warn",
-      title: e.label || e.ref,
-      detail: e.verified ? `已验证 · ${e.ref}` : `未验证 · ${e.ref}`,
-      ref: e.ref,
-      verified: e.verified,
-    }));
-  }
-  // 空态就说"未附"（这不是编造，是事实：证据链还没建立）
-  return [
-    { level: "pending", title: "命令输出 / 测试结果", detail: "未附" },
-    { level: "pending", title: "改动文件清单", detail: "未附" },
-    { level: "pending", title: "未覆盖风险", detail: "未附" },
-  ];
+  // 只列真实证据；没有就是空链（渲染层显示空态，绝不编造"未附"三件套）
+  return (job.evidence ?? []).map((e) => ({
+    level: e.verified ? "ok" : "warn",
+    title: e.label || e.ref,
+    detail: e.verified ? `已验证 · ${e.ref}` : `未验证 · ${e.ref}`,
+    ref: e.ref,
+    verified: e.verified,
+  }));
+}
+
+/** ISO 时间 → 本地短时间（界面不裸露 2026-11-03T10:33:13.816Z 这种原始值） */
+export function fmtTime(iso?: string): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
 function reportOf(feed: FeedCard[], taskId: string): DeskJob["report"] {

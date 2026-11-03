@@ -952,7 +952,7 @@ export class Kernel {
     try {
       this.taskStore.ensureInProgress({
         id: p.taskId,
-        title: p.brief.split("\n")[0].slice(0, 40) || p.taskId,
+        title: (p.brief.split("\n").map((l) => l.trim()).find((l) => l.length > 0) ?? "").slice(0, 40) || p.taskId,
         teamId: p.teamId,
         member: p.member,
       });
@@ -1136,7 +1136,9 @@ export class Kernel {
         if (draftId && !listDrafts(this.dataRoot).some((d) => d.draftId === draftId)) {
           return `草稿 ${draftId} 不存在。先用 workshop.create 开草稿，再派单给插件工程师。`;
         }
-        const title = brief.split("\n")[0].slice(0, 40) || taskId;
+        // 标题取简报第一个非空行（首行为空时别把裸 taskId 当标题摆到台账上）
+        const titleLine = brief.split("\n").map((l) => l.trim()).find((l) => l.length > 0) ?? "";
+        const title = (titleLine || taskId).slice(0, 40);
         const plan: TaskPlan = {
           taskId,
           title,

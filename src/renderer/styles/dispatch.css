@@ -154,7 +154,7 @@ svg.ic.lg { width: 20px; height: 20px; }
 .gauge-read { text-align: right; line-height: 1.25; }
 .gauge-read .v { font-family: var(--f-mono); font-size: var(--fs-body); color: var(--ink); font-variant-numeric: tabular-nums; }
 .gauge-read .v em { font-style: normal; color: var(--ink-4); }
-.gauge-read .k { font-family: var(--f-mono); font-size: var(--fs-label); letter-spacing: .14em; color: var(--ink-4); text-transform: uppercase; }
+.gauge-read .k { font-family: var(--f-mono); font-size: var(--fs-label); letter-spacing: .14em; color: var(--ink-4); text-transform: uppercase; white-space: nowrap; }
 .gauge-bar { display: flex; gap: 2px; align-items: flex-end; height: 20px; }
 .gauge-bar i {
   width: 5px; border-radius: 1px; background: rgba(201,162,39,.20);
@@ -432,7 +432,8 @@ svg.ic.lg { width: 20px; height: 20px; }
 
 /* ---------- title block (drawing convention) ---------- */
 .titleblock {
-  position: absolute; right: 22px; bottom: 12px; z-index: 3;
+  /* 图纸标题栏：作为底部信息条参与流式布局，不再绝对定位遮挡正文 */
+  align-self: flex-end; margin: 4px 22px 12px; z-index: auto;
   display: grid;
   grid-template-columns: repeat(3, minmax(0,1fr));
   box-shadow: 0 0 0 1px var(--rule);
@@ -709,7 +710,17 @@ textarea.composer-in::placeholder { color: var(--ink-4); }
 .ledger-empty {
   padding: 7px 9px 10px; font-size: var(--fs-meta); line-height: 1.6; color: var(--ink-4);
   font-style: italic;
+  /* 满宽正常换行：之前被压成窄列逐字换行 */
+  display: block; width: 100%; min-width: 0; white-space: normal; word-break: normal;
 }
+
+/* 证据链空态 */
+.spine-empty { font-size: var(--fs-meta); line-height: 1.6; color: var(--ink-4); font-style: italic; }
+
+/* 右栏说明条：图标 + 文本，文本满宽（裸文本节点在 flex 里会被压成竖排） */
+.note { display: flex; align-items: flex-start; gap: 8px; }
+.note > svg { flex: none; margin-top: 2px; }
+.note > span { flex: 1; min-width: 0; }
 .sheet-empty {
   margin: auto; text-align: center; max-width: 420px; padding: 40px 20px;
 }

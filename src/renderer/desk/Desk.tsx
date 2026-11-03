@@ -5,7 +5,7 @@ import type { Desk, DeskDiff, DeskJob, DeskMember } from "./model";
 import { Slot, SandboxAction, SandboxHtml } from "./ui-host";
 import { AmbientLayer } from "./AmbientLayer";
 import type { AmbientMode, AmbientParams } from "../../shared/ambient";
-import { STAGES, STAGE_KEYS, STATUS_KEY, MEMBER_STATUS_KEY } from "./model";
+import { STAGES, STAGE_KEYS, STATUS_KEY, MEMBER_STATUS_KEY, fmtTime } from "./model";
 import { FeedView } from "./Feed";
 import { useT } from "../i18n";
 
@@ -93,7 +93,7 @@ function TopRail({
             onClick={() => onPermission(p.mode)}
             title={t("top.switchTo", { label: t(p.labelKey) })}
           >
-            {t(p.labelKey)} <span className="en">{p.en}</span>
+            {t(p.labelKey)}
           </button>
         ))}
       </div>
@@ -503,6 +503,7 @@ function Sheet({
               {evidence.filter((e) => e.level !== "pending").length} / {evidence.length}
             </span>
           </div>
+          {evidence.length === 0 && <div className="spine-empty">{t("sheet.evidenceEmpty")}</div>}
           {evidence.map((e, i) => (
             <button
               type="button"
@@ -541,7 +542,7 @@ function Sheet({
         </div>
         <div className="tb-cell">
           <div className="k">提交</div>
-          <div className="v">{job.at ?? "—"}</div>
+          <div className="v">{fmtTime(job.at)}</div>
         </div>
         <div className={`tb-cell${job.status === "in_review" || job.status === "blocked" ? " sealv" : ""}`}>
           <div className="k">验收</div>
@@ -645,7 +646,7 @@ function Roster({
         {desk.members.length === 0 && (
           <div className="note" style={{ boxShadow: "none" }}>
             <Icon name="users" size="sm" />
-            {t("roster.empty")}
+            <span>{t("roster.empty")}</span>
           </div>
         )}
 
@@ -842,7 +843,7 @@ function AcceptSeal({ job, onAccept, onReject }: { job: DeskJob; onAccept: () =>
         <div className="sealcard-text">
           <div className="who">
             <b>{job.member ?? t("seal.member")}</b> {t("seal.submitted")}
-            {job.at ? ` · ${job.at}` : ""}
+            {job.at ? ` · ${fmtTime(job.at)}` : ""}
           </div>
           <div className="ask">{job.title}</div>
         </div>
@@ -1310,7 +1311,7 @@ function ReviewDesk({
                 {job.member ?? "风铃"} · {job.memberRole ?? "调度"}
               </div>
               <div className="job-meta">
-                <span className="mono">{job.at ?? "—"}</span>
+                <span className="mono">{fmtTime(job.at)}</span>
               </div>
             </div>
 
@@ -1367,7 +1368,7 @@ function ReviewDesk({
                 <div className="sheet-eyebrow">
                   <span>验收包 · {job.id}</span>
                   <span style={{ opacity: 0.4 }}>/</span>
-                  <span>提交于 {job.at ?? "—"}</span>
+                  <span>提交于 {fmtTime(job.at)}</span>
                   <span style={{ opacity: 0.4 }}>/</span>
                   <span>无证据不算完成</span>
                 </div>
@@ -1470,7 +1471,7 @@ function ReviewDesk({
                 </div>
                 <div className="tb-cell">
                   <div className="k">提交</div>
-                  <div className="v">{job.at ?? "—"}</div>
+                  <div className="v">{fmtTime(job.at)}</div>
                 </div>
                 <div className="tb-cell sealv">
                   <div className="k">验收</div>

@@ -249,6 +249,7 @@ export const ZH_STRINGS: Record<string, string> = {
   "perm.ask": "询问",
   "perm.auto": "自动",
   "perm.full": "全权",
+  "sheet.evidenceEmpty": "还没有证据。成员交付时会附上文件 / 命令输出 / 测试结果。",
 };
 
 export const EN_STRINGS: Record<string, string> = {
@@ -482,6 +483,7 @@ export const EN_STRINGS: Record<string, string> = {
   "perm.ask": "Ask",
   "perm.auto": "Auto",
   "perm.full": "Full",
+  "sheet.evidenceEmpty": "No evidence yet. Members attach files / command output / test results when they deliver.",
 };
 
 export const BUILTIN_STRINGS: Record<Lang, Record<string, string>> = { zh: ZH_STRINGS, en: EN_STRINGS };
