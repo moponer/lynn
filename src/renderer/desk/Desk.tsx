@@ -3,6 +3,7 @@ import type { FeedCard, PermissionMode, QueueItem } from "../../shared/contract"
 import { Icon, type IconName } from "../components/Icon";
 import { WindowControls } from "../components/WindowControls";
 import type { Desk, DeskDiff, DeskJob, DeskMember } from "./model";
+import type { JobGroup } from "../../shared/task-groups";
 import { Slot, SandboxAction, SandboxHtml } from "./ui-host";
 import { AmbientLayer } from "./AmbientLayer";
 import type { AmbientMode, AmbientParams } from "../../shared/ambient";
@@ -21,6 +22,14 @@ const PERMISSIONS: { mode: PermissionMode; labelKey: string; en: string }[] = [
   { mode: "ask", labelKey: "perm.ask", en: "ASK" },
   { mode: "auto", labelKey: "perm.auto", en: "AUTO" },
   { mode: "full", labelKey: "perm.full", en: "FULL" },
+];
+
+/** 台账分组（数组顺序即渲染顺序）；空组直接不渲染，不留占位假条目 */
+const GROUP_META: { k: Exclude<JobGroup, "archived">; labelKey: string; color: string; stoppable: boolean }[] = [
+  { k: "waiting", labelKey: "ledger.awaiting", color: "var(--seal)", stoppable: false },
+  { k: "stuck", labelKey: "ledger.stuck", color: "var(--brass)", stoppable: true },
+  { k: "running", labelKey: "ledger.running", color: "var(--blue)", stoppable: true },
+  { k: "queued", labelKey: "ledger.queued", color: "var(--ink-4)", stoppable: false },
 ];
 
 export function fmtTokens(n: number): string {
@@ -212,10 +221,12 @@ function Ledger({
   const t = useT();
   const match = (j: DeskJob) => !q || `${j.id} ${j.title} ${j.member ?? ""}`.toLowerCase().includes(q.toLowerCase());
 
-  const waiting = desk.jobs.filter((j) => (j.status === "in_review" || j.status === "blocked") && match(j));
-  const running = desk.jobs.filter((j) => !["in_review", "blocked", "done", "canceled"].includes(j.status) && match(j));
+  // 分组只认 desk.jobs[].group（shared/task-groups）：等你的只有 in_review，
+  // 卡住是单独一组，未开工的 backlog/todo 不再混进"进行中"。
+  const visible = desk.jobs.filter(match);
+  const byGroup = (g: JobGroup) => visible.filter((j) => j.group === g);
   const archived = desk.archived.filter((a) => !q || `${a.id} ${a.title}`.toLowerCase().includes(q.toLowerCase()));
-  const activeCount = desk.jobs.filter((j) => j.status !== "done" && j.status !== "canceled").length;
+  const activeCount = desk.jobs.filter((j) => j.group !== "archived").length;
 
   return (
     <aside className="ledger">
@@ -280,7 +291,7 @@ function Ledger({
                   }}
                 >
                   <b>{t.title}</b>
-                  <small className="mono">{t.updatedAt.slice(5, 16).replace("T", " ")}</small>
+                  <small className="mono">{fmtTime(t.updatedAt)}</small>
                 </button>
               ))}
           {tq.trim() && hits.length === 0 && <p className="sf-empty">没有匹配的历史。</p>}
@@ -298,21 +309,29 @@ function Ledger({
       </label>
 
       <div className="ledger-scroll">
-        <div className="grp-label">
-          <span className="dot" style={{ background: "var(--seal)" }} /> {t("ledger.awaiting", { n: waiting.length })}
-        </div>
-        {waiting.length === 0 && <div className="ledger-empty">{t("ledger.awaitingEmpty")}</div>}
-        {waiting.map((j) => (
-          <JobRow key={j.id} job={j} active={j.id === activeId} onClick={() => onSelect(j.id)} />
-        ))}
-
-        <div className="grp-label">
-          <span className="dot" style={{ background: "var(--blue)" }} /> 进行中 · {running.length}
-        </div>
-        {running.length === 0 && <div className="ledger-empty">派第一件需要动手的活，她会自己招人组队</div>}
-        {running.map((j) => (
-          <JobRow key={j.id} job={j} active={j.id === activeId} onClick={() => onSelect(j.id)} onCancel={onCancelTask} />
-        ))}
+        {/* 空组不占位（原来每组一句斜体提示，读起来像一条工单） */}
+        {desk.jobs.length === 0 && <div className="ledger-empty">{t("ledger.runningEmpty")}</div>}
+        {desk.jobs.length > 0 && visible.length === 0 && <div className="ledger-empty">{t("ledger.noMatch")}</div>}
+        {GROUP_META.map((g) => {
+          const items = byGroup(g.k);
+          if (items.length === 0) return null;
+          return (
+            <div key={g.k}>
+              <div className="grp-label">
+                <span className="dot" style={{ background: g.color }} /> {t(g.labelKey, { n: items.length })}
+              </div>
+              {items.map((j) => (
+                <JobRow
+                  key={j.id}
+                  job={j}
+                  active={j.id === activeId}
+                  onClick={() => onSelect(j.id)}
+                  onCancel={g.stoppable ? onCancelTask : undefined}
+                />
+              ))}
+            </div>
+          );
+        })}
 
         {archived.length > 0 && (
           <div className="archive-band">
@@ -683,17 +702,23 @@ function ArtifactView({ job }: { job: DeskJob }) {
 
 function Roster({
   desk,
+  current,
   onAccept,
   onReject,
   onPlan,
   onAnswer,
+  onCancel,
   onCreateTeam,
 }: {
   desk: Desk;
+  /** 当前在图纸上打开的那张单：印章优先对它，不再"取全局第一条" */
+  current?: DeskJob;
   onAccept: (taskId: string) => void;
   onReject: (taskId: string) => void;
   onPlan: (id: string, action: "start" | "revise" | "reject", text?: string) => void;
   onAnswer: (id: string, text: string) => void;
+  /** 停掉一张卡住/在跑的单 */
+  onCancel?: (taskId: string) => void;
   /** 建团队：这里只要名字，ID 由系统生成（§4.10.3 修正） */
   onCreateTeam?: (name: string) => void;
 }) {
@@ -701,7 +726,8 @@ function Roster({
   const active = desk.members.filter((m) => m.status !== "idle");
   const idle = desk.members.filter((m) => m.status === "idle");
   const decision = desk.decision;
-  const reviewJob = desk.jobs.find((j) => j.status === "in_review" || j.status === "blocked");
+  // 只有 in_review 可验收；blocked 只给"停掉/继续"，绝不出现"验收归档"
+  const sealJob = current && current.action !== "none" ? current : desk.jobs.find((j) => j.action !== "none");
   const [naming, setNaming] = useState(false);
   const [teamName, setTeamName] = useState("");
   const submitTeam = () => {
@@ -772,8 +798,10 @@ function Roster({
           <ApprovalSeal decision={decision} onPlan={onPlan} />
         ) : decision ? (
           <QuestionSeal decision={decision} onAnswer={onAnswer} />
-        ) : reviewJob ? (
-          <AcceptSeal job={reviewJob} onAccept={() => onAccept(reviewJob.id)} onReject={() => onReject(reviewJob.id)} />
+        ) : sealJob?.action === "accept" ? (
+          <AcceptSeal job={sealJob} onAccept={() => onAccept(sealJob.id)} onReject={() => onReject(sealJob.id)} />
+        ) : sealJob?.action === "unblock" ? (
+          <BlockedSeal job={sealJob} onStop={onCancel} />
         ) : (
           <div className="sealcard-empty">
             <Icon name="shield" size="sm" />
@@ -979,6 +1007,37 @@ function AcceptSeal({ job, onAccept, onReject }: { job: DeskJob; onAccept: () =>
             ? t("seal.roundsFull")
             : t("seal.roundsUsed", { a: job.rejections, b: job.rejectLimit })}
         </span>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * 卡住（blocked）：她连续两个节点没交新证据。
+ * 这里不能出现"验收归档"——没有交付物，收下就是在没有证据的情况下把单推成 done。
+ */
+function BlockedSeal({ job, onStop }: { job: DeskJob; onStop?: (taskId: string) => void }) {
+  const t = useT();
+  return (
+    <div className="sealcard">
+      <SealHead k={t("seal.blockedHead")} id={job.id} />
+      <div className="sealcard-body">
+        <SealGlyph />
+        <div className="sealcard-text">
+          <div className="who">
+            <b>{job.member ?? t("seal.member")}</b>
+            {job.at ? ` · ${fmtTime(job.at)}` : ""}
+          </div>
+          <div className="ask">{t("seal.blockedBody")}</div>
+        </div>
+      </div>
+      <div className="seal-actions">
+        <button type="button" className="btn btn-reject" onClick={() => onStop?.(job.id)}>
+          {t("seal.blockedStop")}
+        </button>
+      </div>
+      <div className="rounds">
+        <span className="rounds-note">{t("seal.blockedNote")}</span>
       </div>
     </div>
   );
@@ -1825,10 +1884,12 @@ export function DeskView({
         </main>
         <Roster
           desk={desk}
+          current={current}
           onAccept={(id) => onDecision(id, "approve")}
           onReject={(id) => setReviewId(id)}
           onPlan={(id, action, text) => onDecisionResolve(id, action, text)}
           onAnswer={(id, text) => onDecisionResolve(id, "answer", text)}
+          onCancel={onCancelTask}
           onCreateTeam={onCreateTeam}
         />
       </div>

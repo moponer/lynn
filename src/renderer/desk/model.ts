@@ -9,6 +9,7 @@ import type {
   TurnState,
   UsageView,
 } from "../../shared/contract";
+import { actionOf, groupOf, type JobAction, type JobGroup } from "../../shared/task-groups";
 
 /** 值台数据模型：把内核的指挥板转成"图纸审查室"需要的形状（只做转译，不编造事实） */
 
@@ -104,6 +105,10 @@ export interface DeskJob {
   title: string;
   status: TaskStatus;
   statusLabel: string;
+  /** 台账分组（唯一来源：shared/task-groups） */
+  group: JobGroup;
+  /** 这张单需要你做什么：accept / unblock / none */
+  action: JobAction;
   stage: number;
   member?: string;
   memberRole?: string;
@@ -223,6 +228,8 @@ function toJob(job: TaskTrackItem, teamName?: string, member?: Member, feed: Fee
     title: job.title,
     status: job.status,
     statusLabel: STATUS_LABEL[job.status] ?? job.status,
+    group: groupOf(job.status),
+    action: actionOf(job.status),
     stage: onThisTask ?? STAGE_OF[job.status] ?? 0,
     member: job.member,
     memberRole: member?.role,

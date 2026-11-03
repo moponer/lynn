@@ -71,7 +71,14 @@
   /* --- 弹层/芯片表面：跟随主题的 sheet 层，禁止再写死深色回退 --- */
   --surface-1: var(--sheet-2);
   --surface-2: var(--sheet-3);
+
+  /* --- 凹陷面（输入框 / 分段控件）的边线：1px 代替原来的 3px 内阴影 --- */
+  --edge: rgba(146, 174, 194, .20);
+  --edge-focus: var(--blue-line);
 }
+
+/* 亮色下 3px 黑影会变成"粗灰框"：凹陷面统一换成纸感边线（一处覆盖，不再逐条列举） */
+html[data-mode="light"] { --edge: rgba(90, 72, 40, .22); }
 
 * { box-sizing: border-box; }
 
@@ -195,7 +202,7 @@ svg.ic.lg { width: 20px; height: 20px; }
 .seg {
   display: flex; align-items: center; gap: 2px; padding: 3px;
   background: var(--desk); border-radius: var(--r-m);
-  box-shadow: inset 0 1px 2px rgba(0,0,0,.5);
+  box-shadow: inset 0 0 0 1px var(--edge);
 }
 .seg-label {
   font-family: var(--f-mono); font-size: var(--fs-label); letter-spacing: .16em;
@@ -269,7 +276,7 @@ svg.ic.lg { width: 20px; height: 20px; }
   background: var(--desk); border-radius: var(--r-m);
   display: flex; align-items: center; gap: 7px;
   color: var(--ink-4);
-  box-shadow: inset 0 1px 2px rgba(0,0,0,.4);
+  box-shadow: inset 0 0 0 1px var(--edge);
 }
 .search span { font-size: var(--fs-meta); }
 
@@ -317,8 +324,8 @@ svg.ic.lg { width: 20px; height: 20px; }
 .archive-band {
   margin: 8px 8px 10px; padding: 9px 10px;
   border-radius: var(--r-m);
+  /* "收起来"只靠斜纹底表达，不再加一圈描边（零描边规则里边界只留给选区） */
   background: repeating-linear-gradient(135deg, rgba(146,174,194,.035) 0 6px, rgba(146,174,194,.015) 6px 12px);
-  box-shadow: inset 0 0 0 1px var(--rule-soft);
 }
 .archive-band .ab-h { display: flex; align-items: center; gap: 6px; font-size: var(--fs-meta); color: var(--ink-3); }
 .archive-band ol { margin: 7px 0 0; padding-left: 14px; color: var(--ink-4); font-size: var(--fs-meta); line-height: 1.75; }
@@ -648,7 +655,7 @@ svg.ic.lg { width: 20px; height: 20px; }
   padding: 10px 13px; min-height: 44px;
   display: flex; align-items: center;
   color: var(--ink-4); font-size: var(--fs-body-lg);
-  box-shadow: inset 0 1px 3px rgba(0,0,0,.45);
+  box-shadow: inset 0 0 0 1px var(--edge);
 }
 .composer-in .caret { width: 1px; height: 15px; background: var(--blue); margin-right: 8px; }
 .send {
@@ -1054,9 +1061,9 @@ html[data-pet="1"] #root { background: transparent !important; }
 .sf-input {
   background: var(--desk); color: var(--ink);
   border: 0; outline: 0; border-radius: 5px; padding: 8px 10px; font-size: var(--fs-body);
-  box-shadow: inset 0 1px 3px rgba(0, 0, 0, .45);
+  box-shadow: inset 0 0 0 1px var(--edge);
 }
-.sf-input:focus { box-shadow: inset 0 1px 3px rgba(0, 0, 0, .45), 0 0 0 1px var(--blue-line); }
+.sf-input:focus { box-shadow: inset 0 0 0 1px var(--edge-focus), 0 0 0 3px var(--blue-wash); }
 .sf-hint { font-size: var(--fs-meta); color: var(--ink-4); }
 .sf-result { margin: 0 16px 4px; padding: 8px 10px; border-radius: 5px; font-size: var(--fs-meta); }
 .sf-result.ok { background: var(--blue-wash); color: var(--blue); }
@@ -1237,12 +1244,9 @@ html[data-mode="light"] .composer,
 html[data-mode="light"] .search {
   box-shadow: 0 1px 2px rgba(90, 70, 40, .12), 0 10px 26px -20px rgba(90, 70, 40, .32);
 }
+/* 凹陷面统一走 --edge（亮色值在 :root 后面按 data-mode 覆盖），只剩纯展示面单独调 */
 html[data-mode="light"] .diff,
-html[data-mode="light"] .art-table,
-html[data-mode="light"] .seg,
-html[data-mode="light"] .tool-key,
-html[data-mode="light"] textarea.composer-in,
-html[data-mode="light"] .search { box-shadow: inset 0 1px 2px rgba(90, 70, 40, .10); }
+html[data-mode="light"] .art-table { box-shadow: inset 0 0 0 1px var(--edge); }
 html[data-mode="light"] .job.on .job-title,
 html[data-mode="light"] .sheet-title,
 html[data-mode="light"] .wiz-h1,
@@ -1451,11 +1455,21 @@ button.av-sbtn {
 .send:focus-visible,
 .tool-key:focus-visible,
 .feed-action:focus-visible,
-.strip-link:focus-visible,
-textarea:focus-visible,
-input:focus-visible {
-  outline: 2px solid var(--blue);
-  outline-offset: 2px;
+.strip-link:focus-visible {
+  /* 焦点环从 2px/2px 收到 1.5px/1px：40px 的发送键上原来那道环占掉 10% 边长 */
+  outline: 1.5px solid var(--blue);
+  outline-offset: 1px;
+}
+/* 输入类不用 outline，改用边线 + 柔光；搜索框外壳代为提示 */
+.search:focus-within { box-shadow: inset 0 0 0 1px var(--edge-focus), 0 0 0 3px var(--blue-wash); }
+.composer-in:focus,
+.seal-input:focus,
+.sf-input:focus,
+.thread-q:focus,
+.rev-field:focus,
+.sf-persona:focus {
+  outline: none;
+  box-shadow: inset 0 0 0 1px var(--edge-focus), 0 0 0 3px var(--blue-wash);
 }
 button:disabled,
 .btn:disabled,
@@ -1467,7 +1481,7 @@ button:disabled,
 .send.stop i { width: 10px; height: 10px; border-radius: 2px; background: var(--on-accent); display: block; }
 
 /* 排队/插话切换 */
-.mode-toggle { display: flex; gap: 2px; padding: 2px; border-radius: var(--r-s); background: var(--desk); }
+.mode-toggle { display: flex; gap: 2px; padding: 2px; border-radius: var(--r-s); background: var(--desk); box-shadow: inset 0 0 0 1px var(--edge); }
 .mode-toggle button { border: 0; }
 .strip-link { border: 0; background: none; color: var(--blue); font: inherit; font-size: var(--fs-meta); padding: 2px 4px; border-radius: 3px; }
 .strip-link:hover { background: var(--hover-bg); }
@@ -1512,8 +1526,9 @@ button:disabled,
   width: 100%; box-sizing: border-box; margin-top: 10px; min-height: 54px; resize: vertical;
   background: var(--desk); color: var(--ink); border: 0; border-radius: var(--r-s);
   padding: 8px 10px; font: inherit; font-size: var(--fs-meta); line-height: 1.55;
-  box-shadow: inset 0 1px 3px rgba(0,0,0,.35);
+  box-shadow: inset 0 0 0 1px var(--edge);
 }
+.seal-input:focus { box-shadow: inset 0 0 0 1px var(--edge-focus), 0 0 0 3px var(--blue-wash); }
 .seal-input::placeholder { color: var(--ink-3); }
 .seal-revise { margin-top: 10px; }
 .rounds-note { margin-left: auto; }
@@ -1655,7 +1670,9 @@ button.ev:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
   width: 100%; box-sizing: border-box; border: 0; border-radius: var(--r-s);
   background: var(--sheet); color: var(--ink); font: inherit; font-size: var(--fs-meta);
   padding: 6px 8px;
+  box-shadow: inset 0 0 0 1px var(--edge);
 }
+.thread-q:focus { box-shadow: inset 0 0 0 1px var(--edge-focus), 0 0 0 3px var(--blue-wash); }
 .thread-row {
   display: flex; flex-direction: column; gap: 2px; border: 0; background: none;
   color: var(--ink-2); font: inherit; font-size: var(--fs-meta); padding: 6px 8px;
