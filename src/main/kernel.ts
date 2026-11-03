@@ -5,6 +5,7 @@ import type {
   Decision,
   FeedCard,
   KernelEvent,
+  MemberStatus,
   PermissionMode,
   QueueItem,
   RpcContracts,
@@ -328,6 +329,8 @@ export class Kernel {
   private memberRuns = new Map<string, Promise<MemberRunResult>>();
   /** 成员进度（姓名 → 0–100）：只在内存里，用来画实时进度 */
   private memberProgress = new Map<string, number>();
+  /** 成员本轮累计 token（`teamId::成员` → tokens）：编制表的预算读数不再是硬编码 0 */
+  private memberUsage = new Map<string, number>();
   /** 每张单的中止器（用户点「停」）：没有它就只能解散全队来止损 */
   private memberAborts = new Map<string, AbortController>();
   /** 成员占用：`teamId::成员` → 正在跑的 taskId（同一成员不许并发跟两张单） */
@@ -1153,6 +1156,8 @@ export class Kernel {
     void run
       .then((result) => {
         this.memberProgress.set(member, 100);
+        // 预算读数：按真实 token 累计（此前编制表恒显示 0）
+        this.memberUsage.set(memberKey, (this.memberUsage.get(memberKey) ?? 0) + result.promptTokens + result.completionTokens);
         const used = Math.round((Date.now() - startedAt) / 1000);
         if (result.status === "reported" && result.evidence.length > 0) {
           // 只有真交了证据才登记；空回报进登记通道会抛错，原来那条路直接变成"崩溃"卡
@@ -2070,24 +2075,43 @@ export class Kernel {
       const tf = path.join(dir, entry.name, "team.json");
       if (!fs.existsSync(tf)) continue;
       const rec = JSON.parse(fs.readFileSync(tf, "utf-8")) as { id: string; name: string; status: string };
+      // 成员卡必须是"现场"而不是"档案"：状态/预算/打回都从真实指派推导，
+      // 原先这里写死 status:"idle"、budgetUsed:0、rejections:0，右栏永远显示空闲
+      const allTasks = this.taskStore.list();
       const members = this.teamStore
         .listMembers(entry.name)
-        .map((p, i) => ({
-          name: p.name,
-          role: p.role,
-          goal: p.goal,
-          status: "idle" as const,
-          statusNote: p.goal,
-          progress: this.memberProgress.get(p.name) ?? 0,
-          budgetUsed: 0,
-          budgetTotal: Math.round(p.limits.budgetTokens / 1000),
-          rejections: 0,
-          rejectionLimit: 3,
-          toolWhitelist: p.tools,
-          color: this.teamColor(i),
-          model: p.model,
-          turnLimit: p.limits.maxTurns,
-        }));
+        .map((p, i) => {
+          const key = `${entry.name}::${p.name}`;
+          const runningTask = this.memberActive.get(key);
+          const mine = allTasks
+            .filter((t) => t.teamId === entry.name && t.member === p.name)
+            .sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
+          const activeTask = mine.find((t) => t.status !== "done" && t.status !== "canceled") ?? mine[0];
+          const status: MemberStatus = runningTask
+            ? "running"
+            : activeTask?.status === "in_review"
+              ? "delivered"
+              : activeTask?.status === "blocked" || activeTask?.status === "in_progress"
+                ? "stuck"
+                : "idle";
+          return {
+            name: p.name,
+            role: p.role,
+            goal: p.goal,
+            status,
+            statusNote: p.goal,
+            // 只有真在跑才给进度；空闲时归零，别留着上次的 100%
+            progress: runningTask ? this.memberProgress.get(p.name) ?? 0 : 0,
+            budgetUsed: Math.round((this.memberUsage.get(key) ?? 0) / 1000),
+            budgetTotal: Math.round(p.limits.budgetTokens / 1000),
+            rejections: activeTask?.rejectRounds ?? 0,
+            rejectionLimit: activeTask?.rejectLimit ?? 3,
+            toolWhitelist: p.tools,
+            color: this.teamColor(i),
+            model: p.model,
+            turnLimit: p.limits.maxTurns,
+          };
+        });
       teams.push({
         id: rec.id,
         name: rec.name,

@@ -174,6 +174,8 @@ export const ZH_STRINGS: Record<string, string> = {
   "seal.blockedStop": "停掉这张单",
   "seal.blockedNote": "卡住不是交付，不能验收归档",
   "member.turnLimit": "上限 {n} 轮",
+  "member.openJob": "打开他手上的工单 {id}",
+  "member.progress": "本轮进度 {n}%",
   // 工单状态与阶段（七态 + 七阶段）
   "status.backlog": "待受理",
   "status.todo": "待派单",
@@ -431,6 +433,8 @@ export const EN_STRINGS: Record<string, string> = {
   "seal.blockedNote": "Stuck is not delivered — cannot be accepted",
   "seal.roundsUsed": "{a} of {b} used",
   "member.turnLimit": "max {n} turns",
+  "member.openJob": "Open job {id}",
+  "member.progress": "This run: {n}%",
   "status.backlog": "Queued",
   "status.todo": "To dispatch",
   "status.in_progress": "Running",

@@ -278,7 +278,9 @@ export function deskFromSnapshot(snap: SessionSnapshot): Desk {
     .filter((t) => t.status !== "dissolved")
     .flatMap((t) =>
       t.members.map((m) => {
-        const job = jobs.find((j) => j.member === m.name && j.status !== "done");
+        // 一张成员卡优先挂"需要你的/在跑的"那张单，其次才是最近归档前的那张
+        const mine = jobs.filter((j) => j.member === m.name && j.group !== "archived");
+        const job = mine.find((j) => j.action !== "none") ?? mine.find((j) => j.group === "running") ?? mine[0];
         return {
           name: m.name,
           role: m.role,
@@ -291,7 +293,13 @@ export function deskFromSnapshot(snap: SessionSnapshot): Desk {
           turnLimit: m.turnLimit,
           progress:
             snap.turn.member === m.name && typeof snap.turn.progress === "number" ? snap.turn.progress : m.progress,
-          foot: m.budgetTotal > 0 ? `预算 ${m.budgetUsed}/${m.budgetTotal}K` : "保留编制",
+          // 没用过预算就说"上限"，别用 0/300K 冒充"已经花了 0"
+          foot:
+            m.budgetTotal > 0
+              ? m.budgetUsed > 0
+                ? `预算 ${m.budgetUsed}/${m.budgetTotal}K`
+                : `预算上限 ${m.budgetTotal}K`
+              : "保留编制",
           rejections: m.rejections,
           rejectLimit: m.rejectionLimit,
         };

@@ -708,11 +708,14 @@ function Roster({
   onPlan,
   onAnswer,
   onCancel,
+  onSelectJob,
   onCreateTeam,
 }: {
   desk: Desk;
   /** 当前在图纸上打开的那张单：印章优先对它，不再"取全局第一条" */
   current?: DeskJob;
+  /** 成员卡 → 打开他手上的那张单 */
+  onSelectJob?: (taskId: string) => void;
   onAccept: (taskId: string) => void;
   onReject: (taskId: string) => void;
   onPlan: (id: string, action: "start" | "revise" | "reject", text?: string) => void;
@@ -788,28 +791,36 @@ function Roster({
           </div>
         )}
 
-        {desk.members.map((m) => (
-          <MemberCard key={m.name} m={m} active={!!decision?.jobId && m.jobId === decision.jobId} />
-        ))}
-
-        {decision?.kind === "plan" && decision.plan ? (
-          <PlanSeal decision={decision} onPlan={onPlan} />
-        ) : decision?.kind === "approval" ? (
-          <ApprovalSeal decision={decision} onPlan={onPlan} />
-        ) : decision ? (
-          <QuestionSeal decision={decision} onAnswer={onAnswer} />
-        ) : sealJob?.action === "accept" ? (
-          <AcceptSeal job={sealJob} onAccept={() => onAccept(sealJob.id)} onReject={() => onReject(sealJob.id)} />
-        ) : sealJob?.action === "unblock" ? (
-          <BlockedSeal job={sealJob} onStop={onCancel} />
-        ) : (
-          <div className="sealcard-empty">
-            <Icon name="shield" size="sm" />
-            <div>
-              <b>{t("roster.noDecision")}</b>
+        {/* 印章排在最前：它是"该你拍板"的唯一落点，不能藏在成员卡下面要滚动才看见 */}
+        <div className="seal-slot">
+          {decision?.kind === "plan" && decision.plan ? (
+            <PlanSeal decision={decision} onPlan={onPlan} />
+          ) : decision?.kind === "approval" ? (
+            <ApprovalSeal decision={decision} onPlan={onPlan} />
+          ) : decision ? (
+            <QuestionSeal decision={decision} onAnswer={onAnswer} />
+          ) : sealJob?.action === "accept" ? (
+            <AcceptSeal job={sealJob} onAccept={() => onAccept(sealJob.id)} onReject={() => onReject(sealJob.id)} />
+          ) : sealJob?.action === "unblock" ? (
+            <BlockedSeal job={sealJob} onStop={onCancel} />
+          ) : (
+            <div className="sealcard-empty">
+              <Icon name="shield" size="sm" />
+              <div>
+                <b>{t("roster.noDecision")}</b>
+              </div>
             </div>
-          </div>
-        )}
+          )}
+        </div>
+
+        {desk.members.map((m) => (
+          <MemberCard
+            key={m.name}
+            m={m}
+            active={!!decision?.jobId && m.jobId === decision.jobId}
+            onSelect={onSelectJob}
+          />
+        ))}
       </div>
     </aside>
   );
@@ -1043,11 +1054,28 @@ function BlockedSeal({ job, onStop }: { job: DeskJob; onStop?: (taskId: string) 
   );
 }
 
-function MemberCard({ m, active }: { m: DeskMember; active: boolean }) {
+function MemberCard({ m, active, onSelect }: { m: DeskMember; active: boolean; onSelect?: (jobId: string) => void }) {
   const t = useT();
   const chip = m.status === "delivered" ? "st-wait" : m.status === "running" || m.status === "stuck" ? "st-live" : "st-idle";
+  const open = () => {
+    if (m.jobId) onSelect?.(m.jobId);
+  };
+  const hiddenTools = Math.max(0, m.tools.length - 4);
   return (
-    <div className={`mcard${active ? " active" : ""}`}>
+    <div
+      className={`mcard${active ? " active" : ""}${m.jobId ? " linkable" : ""}`}
+      role={m.jobId ? "button" : undefined}
+      tabIndex={m.jobId ? 0 : undefined}
+      title={m.jobId ? t("member.openJob", { id: m.jobId }) : undefined}
+      onClick={open}
+      onKeyDown={(e) => {
+        if (!m.jobId) return;
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          open();
+        }
+      }}
+    >
       <div className="mcard-top">
         <div className={`mcard-avatar${m.status !== "idle" ? " on" : ""}`}>{m.name.slice(0, 1)}</div>
         <div style={{ minWidth: 0, flex: 1 }}>
@@ -1071,13 +1099,19 @@ function MemberCard({ m, active }: { m: DeskMember; active: boolean }) {
             {tool}
           </span>
         ))}
+        {/* 不再静默截断：多出来的工具给 +N，别让人以为成员只有 4 件工具 */}
+        {hiddenTools > 0 && <span className="chip">+{hiddenTools}</span>}
         <span className="chip r">{t("member.turnLimit", { n: m.turnLimit ?? "—" })}</span>
       </div>
       <div className="mcard-foot">
-        <div className="pbar">
-          <i style={{ width: `${Math.max(0, Math.min(100, m.progress))}%` }} />
-        </div>
-        <span className="mono" style={{ fontSize: 9.5, color: "var(--ink-4)" }}>
+        {m.status === "running" ? (
+          <div className="pbar" title={t("member.progress", { n: Math.round(m.progress) })}>
+            <i style={{ width: `${Math.max(0, Math.min(100, m.progress))}%` }} />
+          </div>
+        ) : (
+          <span style={{ flex: 1 }} />
+        )}
+        <span className="mono" style={{ fontSize: "var(--fs-label)", color: "var(--ink-4)" }}>
           {m.foot}
         </span>
       </div>
@@ -1890,6 +1924,7 @@ export function DeskView({
           onPlan={(id, action, text) => onDecisionResolve(id, action, text)}
           onAnswer={(id, text) => onDecisionResolve(id, "answer", text)}
           onCancel={onCancelTask}
+          onSelectJob={setActiveId}
           onCreateTeam={onCreateTeam}
         />
       </div>
