@@ -284,13 +284,13 @@ export function SettingsModal({
 
   const ctxPct = usage.contextWindow > 0 ? Math.round((usage.contextTokens / usage.contextWindow) * 100) : 0;
   const statusBadge = current.configured && current.apiKeySet ? "ok" : current.configured ? "warn" : "bad";
-  const statusText = statusBadge === "ok" ? "已配置" : statusBadge === "warn" ? "缺 Key" : "未配置";
+  const statusText = statusBadge === "ok" ? t("model.statusOk") : statusBadge === "warn" ? t("model.statusWarn") : t("model.statusBad");
 
   const page = useMemo(() => {
     if (tab === "model") {
       return (
         <div className="sf-pane">
-          <h3>模型</h3>
+          <h3>{t("model.title")}</h3>
           <div className="sf-inline">
             {PRESETS.map((p) => (
               <button
@@ -310,11 +310,11 @@ export function SettingsModal({
           </div>
           <div className="sf-grid2">
             <label className="sf-field">
-              <span className="sf-label">服务商</span>
+              <span className="sf-label">{t("model.provider")}</span>
               <input className="sf-input" value={provider} onChange={(e) => setProvider(e.target.value)} />
             </label>
             <label className="sf-field">
-              <span className="sf-label">模型</span>
+              <span className="sf-label">{t("model.model")}</span>
               <input className="sf-input" value={model} onChange={(e) => setModel(e.target.value)} />
             </label>
           </div>
@@ -329,20 +329,20 @@ export function SettingsModal({
               type="password"
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
-              placeholder={current.apiKeySet ? "已加密保存 · 留空沿用" : "sk-…"}
+              placeholder={current.apiKeySet ? t("model.keySaved") : "sk-…"}
             />
-            <small className="sf-hint">safeStorage 加密，只存本机；不会下发给渲染层</small>
+            <small className="sf-hint">{t("model.keyHint")}</small>
           </label>
           {result && <div className={`sf-result ${result.ok ? "ok" : "bad"}`}>{result.text}</div>}
           <div className="sf-actions">
             <button type="button" className="sf-btn" onClick={() => void testConn()} disabled={busy !== "" || (!apiKey.trim() && !current.apiKeySet)}>
-              {busy === "test" ? "测试中…" : "测试连接"}
+              {busy === "test" ? t("model.testing") : t("model.test")}
             </button>
             <button type="button" className="sf-btn primary" onClick={() => void save()} disabled={busy !== ""}>
-              {busy === "save" ? "保存中…" : "保存"}
+              {busy === "save" ? t("model.saving") : t("common.save")}
             </button>
             <button type="button" className="sf-btn" onClick={() => void clearKey()} disabled={busy !== "" || !current.apiKeySet}>
-              {busy === "clear" ? "清除中…" : "清除 Key"}
+              {busy === "clear" ? t("model.clearing") : t("model.clearKey")}
             </button>
           </div>
         </div>
@@ -352,12 +352,10 @@ export function SettingsModal({
     if (tab === "persona") {
       return (
         <div className="sf-pane">
-          <h3>人设与语气</h3>
-          <div className="sf-hint">
-            编辑风铃的表达方式（persona.md）。保存立即生效，不用重开会话；每次保存自动留版本，可回滚。安全边界与工具规则不在此文件，改不动。
-          </div>
+          <h3>{t("persona.title")}</h3>
+          <div className="sf-hint">{t("persona.hint")}</div>
           {personaText === null ? (
-            <p className="sf-empty">{personaMsg || "加载中…"}</p>
+            <p className="sf-empty">{personaMsg || t("persona.loading")}</p>
           ) : (
             <>
               <textarea
@@ -373,12 +371,12 @@ export function SettingsModal({
                   className="sf-btn primary"
                   onClick={() => {
                     void window.lynn.rpc("persona.save", { text: personaText }).then((r) => {
-                      setPersonaMsg(r.hot ? "已保存并热更新到当前会话。" : "已保存（下轮对话生效）。");
+                      setPersonaMsg(r.hot ? t("persona.savedHot") : t("persona.savedNext"));
                       void window.lynn.rpc("persona.versions").then((v) => setPersonaVersions(v.versions));
                     });
                   }}
                 >
-                  保存并生效
+                  {t("persona.save")}
                 </button>
                 <button
                   type="button"
@@ -388,19 +386,19 @@ export function SettingsModal({
                     setPersonaMsg("");
                   }}
                 >
-                  放弃改动
+                  {t("persona.discard")}
                 </button>
               </div>
               {personaMsg && <div className="sf-hint">{personaMsg}</div>}
               {personaVersions.length > 0 && (
                 <>
-                  <span className="sf-label">版本（最近 20 份）</span>
+                  <span className="sf-label">{t("persona.versions")}</span>
                   <div className="sf-list">
                     {personaVersions.map((v) => (
                       <div className="sf-row" key={v.id}>
                         <div className="sf-row-main">
                           <span className="mono">{new Date(v.savedAt).toLocaleString()}</span>
-                          <span className="sf-row-sub">{v.chars} 字符</span>
+                          <span className="sf-row-sub">{t("persona.chars", { n: v.chars })}</span>
                         </div>
                         <button
                           type="button"
@@ -408,11 +406,11 @@ export function SettingsModal({
                           onClick={() => {
                             void window.lynn.rpc("persona.rollback", { id: v.id }).then((r) => {
                               setPersonaText(r.text);
-                              setPersonaMsg(r.hot ? "已回滚并热更新到当前会话。" : "已回滚（下轮对话生效）。");
+                              setPersonaMsg(r.hot ? t("persona.rollbackHot") : t("persona.rollbackNext"));
                             });
                           }}
                         >
-                          回滚到此版
+                          {t("persona.rollback")}
                         </button>
                       </div>
                     ))}
@@ -428,13 +426,15 @@ export function SettingsModal({
     if (tab === "plugins") {
       return (
         <div className="sf-pane">
-          <h3>能力与插件</h3>
+          <h3>{t("plugins.title")}</h3>
           <div className="sf-hint">
-            插件集指纹 <span className="mono">{setStatus?.fingerprint.slice(0, 12) ?? "—"}</span> · {setStatus?.count ?? 0} 个
-            {setStatus?.safeMode && <span className="sf-badge bad">安全模式：{setStatus.safeModeReason ?? "多次启动失败"}</span>}
+            {t("plugins.fingerprint")} <span className="mono">{setStatus?.fingerprint.slice(0, 12) ?? "—"}</span> · {t("plugins.count", { n: setStatus?.count ?? 0 })}
+            {setStatus?.safeMode && (
+              <span className="sf-badge bad">{t("plugins.safeMode", { reason: setStatus.safeModeReason ?? "…" })}</span>
+            )}
           </div>
           {plugins.length === 0 ? (
-            <p className="sf-empty">还没有装插件。把插件目录放进 ~/.lynn/plugins/ 后重开这里。</p>
+            <p className="sf-empty">{t("plugins.empty")}</p>
           ) : (
             <div className="sf-list">
               {plugins.map((p) => (
@@ -452,18 +452,18 @@ export function SettingsModal({
                       void window.lynn.rpc("plugins.toggle", { id: p.id, enabled: !p.enabled }).then(() => refreshPlugins())
                     }
                   >
-                    {p.enabled ? "停用" : "启用"}
+                    {p.enabled ? t("plugins.disable") : t("common.enable")}
                   </button>
                   <button
                     type="button"
                     className="sf-btn"
                     onClick={() =>
                       void window.lynn.rpc("plugins.probe", { id: p.id }).then((r) =>
-                        setResult({ ok: r.ok, text: `试装 ${p.id}：${r.detail}` }),
+                        setResult({ ok: r.ok, text: t("plugins.probeResult", { id: p.id, detail: r.detail }) }),
                       )
                     }
                   >
-                    试装
+                    {t("plugins.probe")}
                   </button>
                 </div>
               ))}
@@ -475,17 +475,17 @@ export function SettingsModal({
               className="sf-btn"
               onClick={() =>
                 void window.lynn.rpc("plugins.rollback", {}).then((r) => {
-                  setResult({ ok: r.ok, text: r.ok ? "已回滚到上一次插件集（不动用户数据）。" : r.detail });
+                  setResult({ ok: r.ok, text: r.ok ? t("plugins.rollbackOk") : r.detail });
                   if (r.ok) void refreshPlugins();
                 })
               }
             >
-              回滚上次变更
+              {t("plugins.rollback")}
             </button>
           </div>
           {themePlugins.length > 0 && (
             <div className="sf-sub">
-              <span className="sf-label">主题插件</span>
+              <span className="sf-label">{t("plugins.themePlugins")}</span>
               <div className="sf-inline">
                 {themePlugins.map((p) => (
                   <button
@@ -498,15 +498,15 @@ export function SettingsModal({
                   </button>
                 ))}
                 <button type="button" className="sf-btn" onClick={() => onApplyThemeTokens(undefined)}>
-                  恢复主题
+                  {t("plugins.restoreTheme")}
                 </button>
               </div>
             </div>
           )}
           <div className="sf-sub">
-            <span className="sf-label">界面卡槽 · U 档（{uiPlugins.length}）</span>
+            <span className="sf-label">{t("plugins.uiSlots", { n: uiPlugins.length })}</span>
             {uiPlugins.length === 0 ? (
-              <p className="sf-empty">没有 U 档插件。第三方一律 iframe 沙箱，只回传一条动作。</p>
+              <p className="sf-empty">{t("plugins.uiEmpty")}</p>
             ) : (
               <div className="sf-list">
                 {uiPlugins.map((p) => (
@@ -518,7 +518,7 @@ export function SettingsModal({
                       </small>
                     </div>
                     <button type="button" className={`sf-btn${uiDisabled.includes(p.id) ? "" : " primary"}`} onClick={() => toggleUi(p.id)}>
-                      {uiDisabled.includes(p.id) ? "启用" : "停用"}
+                      {uiDisabled.includes(p.id) ? t("common.enable") : t("plugins.disable")}
                     </button>
                   </div>
                 ))}
@@ -534,59 +534,50 @@ export function SettingsModal({
     if (tab === "safety") {
       return (
         <div className="sf-pane">
-          <h3>权限与安全</h3>
+          <h3>{t("safety.title")}</h3>
           <div className="sf-row">
             <div className="sf-row-main">
-              <b>任务契约每次确认</b>
-              <small>动手前先给你看「目标 / 验收标准 / 谁来做 / 预算」，你点开始才开工。</small>
+              <b>{t("safety.contractTitle")}</b>
+              <small>{t("safety.contractHint")}</small>
             </div>
             <button
               type="button"
               className={`sf-btn${autoStart ? "" : " primary"}`}
               onClick={() => onAutoStart(false)}
             >
-              每次确认
+              {t("safety.alwaysAsk")}
             </button>
             <button type="button" className={`sf-btn${autoStart ? " primary" : ""}`} onClick={() => onAutoStart(true)}>
-              自动开始
+              {t("safety.autoStart")}
             </button>
           </div>
           <div className="sf-sub">
-            <span className="sf-label">顶栏四档权限</span>
-            <p className="sf-hint">计划 / 询问 / 自动 / 全权：决定她能不能直接调工具、哪些必须问你。设置里看当前档位，改档在顶栏。</p>
+            <span className="sf-label">{t("safety.permLabel")}</span>
+            <p className="sf-hint">{t("safety.permHint")}</p>
           </div>
           <div className="sf-row">
             <div className="sf-row-main">
               <b>
-                当前项目
+                {t("safety.project")}
                 <span className={`sf-badge ${project?.trusted ? "ok" : "warn"}`}>
-                  {project?.trusted ? "已信任" : "未信任"}
+                  {project?.trusted ? t("safety.trusted") : t("safety.untrusted")}
                 </span>
               </b>
               <small className="mono">{project?.root ?? "—"}</small>
-              <small>
-                {project?.hasMcp
-                  ? "这个项目带 .lynn/mcp.json：未信任时不会加载，信任后重连。"
-                  : "项目里没有 .lynn/mcp.json。"}
-              </small>
+              <small>{project?.hasMcp ? t("safety.hasMcp") : t("safety.noMcp")}</small>
             </div>
             <button type="button" className="sf-btn" onClick={() => onTrust?.(!project?.trusted)}>
-              {project?.trusted ? "取消信任" : "信任此项目"}
+              {project?.trusted ? t("safety.untrust") : t("safety.trust")}
             </button>
           </div>
 
           <div className="sf-sub">
-            <span className="sf-label">成员的执行边界（纵深防御，不是沙箱）</span>
-            <p className="sf-hint">
-              文件只能动本单工作区；明显破坏/提权/远程直执行的命令会被拦下；出站命令逐条写
-              <span className="mono"> audit.jsonl</span>。**不是 OS 级隔离**——不承诺挡住恶意二进制，只保证越界可查。
-            </p>
+            <span className="sf-label">{t("safety.isolationLabel")}</span>
+            <p className="sf-hint">{t("safety.isolationHint")}</p>
           </div>
           <div className="sf-sub">
-            <span className="sf-label">数据与遥测</span>
-            <p className="sf-hint">
-              全部落在 <span className="mono">~/.lynn/</span>；不引入遥测（Pi 的 PI_TELEMETRY=0），出站只有你配置的模型端点。
-            </p>
+            <span className="sf-label">{t("safety.dataLabel")}</span>
+            <p className="sf-hint">{t("safety.dataHint")}</p>
           </div>
         </div>
       );
@@ -694,19 +685,19 @@ export function SettingsModal({
 
     if (tab === "data") {
       const upd = updateInfo;
-      const updMsg = upd?.error ? `更新出错：${upd.error}` : upd?.reason ?? "";
+      const updMsg = upd?.error ? t("data.updateErr", { msg: upd.error }) : upd?.reason ?? "";
       return (
         <div className="sf-pane">
-          <h3>数据与日志</h3>
+          <h3>{t("data.title")}</h3>
           <div className="sf-row">
             <div className="sf-row-main">
               <b>
-                当前版本 <span className="mono">{upd?.version ?? "…"}</span>
+                {t("data.version")} <span className="mono">{upd?.version ?? "…"}</span>
                 {upd?.latest && upd.latest !== upd.version && (
-                  <small> · 可更新到 <span className="mono">{upd.latest}</span></small>
+                  <small> · {t("data.updatable")} <span className="mono">{upd.latest}</span></small>
                 )}
-                {upd?.phase === "downloading" && <small> · 下载中 {Math.round(upd.percent ?? 0)}%</small>}
-                {upd?.phase === "downloaded" && <small> · 已下载就绪，重启即装</small>}
+                {upd?.phase === "downloading" && <small> · {t("data.downloading", { pct: Math.round(upd.percent ?? 0) })}</small>}
+                {upd?.phase === "downloaded" && <small> · {t("data.downloaded")}</small>}
               </b>
               {updMsg && <small>{updMsg}</small>}
               {!updMsg && upd?.supported === false && upd.phase === "idle" && (
@@ -724,7 +715,7 @@ export function SettingsModal({
                   })
                 }
               >
-                检查更新
+                {t("data.check")}
               </button>
               {upd?.phase === "downloaded" && (
                 <button
@@ -732,39 +723,39 @@ export function SettingsModal({
                   className="sf-btn primary"
                   onClick={() => void window.lynn.rpc("update.install").then(() => undefined)}
                 >
-                  重启安装
+                  {t("data.install")}
                 </button>
               )}
             </div>
           </div>
           <div className="sf-actions">
             <button type="button" className="sf-btn" onClick={() => void window.lynn.rpc("app.openData", { kind: "data" })}>
-              打开数据目录
+              {t("data.openData")}
             </button>
             <button type="button" className="sf-btn" onClick={() => void window.lynn.rpc("app.openData", { kind: "logs" })}>
-              打开日志目录
+              {t("data.openLogs")}
             </button>
             <button
               type="button"
               className="sf-btn"
               onClick={() => {
-                if (!window.confirm("清空当前会话？工单与卷宗会保留。")) return;
+                if (!window.confirm(t("data.clearConfirm"))) return;
                 void window.lynn.rpc("session.new").then(() => {
-                  setPackMsg("当前会话已清空（卷宗仍在）。");
+                  setPackMsg(t("data.cleared"));
                   onSaved();
                 });
               }}
             >
-              清空当前会话
+              {t("data.clearSession")}
             </button>
           </div>
-          <span className="sf-label">配置包</span>
+          <span className="sf-label">{t("data.pack")}</span>
           <div className="sf-actions">
             <button type="button" className="sf-btn" onClick={exportPack}>
-              导出 .lynnpack
+              {t("data.export")}
             </button>
             <button type="button" className="sf-btn" onClick={() => fileRef.current?.click()}>
-              导入 .lynnpack
+              {t("data.import")}
             </button>
             <input
               ref={fileRef}
@@ -792,13 +783,13 @@ export function SettingsModal({
                   onClick={() => {
                     onPack(preview.pack);
                     setPreview(null);
-                    setPackMsg("配置包已应用（只含主题 / 形象 / 模型）。");
+                    setPackMsg(t("data.applied"));
                   }}
                 >
-                  应用
+                  {t("data.apply")}
                 </button>
                 <button type="button" className="sf-btn" onClick={() => setPreview(null)}>
-                  取消
+                  {t("common.cancel")}
                 </button>
               </div>
             </div>
@@ -809,44 +800,44 @@ export function SettingsModal({
 
     return (
       <div className="sf-pane">
-        <h3>概览</h3>
+        <h3>{t("overview.title")}</h3>
         <div className="sf-grid2">
           <div className="sf-tile">
-            <span className="sf-label">模型</span>
+            <span className="sf-label">{t("model.title")}</span>
             <b>
-              {current.model || "未配置"} <span className={`sf-badge ${statusBadge}`}>{statusText}</span>
+              {current.model || t("model.statusBad")} <span className={`sf-badge ${statusBadge}`}>{statusText}</span>
             </b>
             <small className="mono">{current.baseUrl || "—"}</small>
           </div>
           <div className="sf-tile">
-            <span className="sf-label">上下文</span>
+            <span className="sf-label">{t("overview.context")}</span>
             <b>{ctxPct}%</b>
             <small className="mono">
               {usage.contextTokens} / {usage.contextWindow}
             </small>
           </div>
           <div className="sf-tile">
-            <span className="sf-label">会话用量</span>
+            <span className="sf-label">{t("overview.sessionUsage")}</span>
             <b>{usage.sessionIn + usage.sessionOut} tokens</b>
             <small className="mono">
-              入 {usage.sessionIn} · 出 {usage.sessionOut}
+              {t("overview.in", { n: usage.sessionIn })} · {t("overview.out", { n: usage.sessionOut })}
             </small>
           </div>
           <div className="sf-tile">
-            <span className="sf-label">任务契约</span>
-            <b>{autoStart ? "自动开始" : "每次确认"}</b>
-            <small>改动在「权限与安全」</small>
+            <span className="sf-label">{t("overview.contract")}</span>
+            <b>{autoStart ? t("safety.autoStart") : t("safety.alwaysAsk")}</b>
+            <small>{t("overview.contractHint")}</small>
           </div>
         </div>
         <div className="sf-row">
           <div className="sf-row-main">
-            <b>她的班底 · {members.length} 人</b>
-            <small>{members.length === 0 ? "还没有编制。派一件需要动手的活，她会自己招人。" : members.map((m) => m.name).join("、")}</small>
+            <b>{t("overview.crew", { n: members.length })}</b>
+            <small>{members.length === 0 ? t("overview.crewEmpty") : members.map((m) => m.name).join("、")}</small>
           </div>
         </div>
         <div className="sf-actions">
           <button type="button" className="sf-btn primary" onClick={() => setTab("model")}>
-            {current.configured ? "调整模型" : "去配置模型"}
+            {current.configured ? t("overview.adjustModel") : t("overview.configModel")}
           </button>
         </div>
       </div>
@@ -892,13 +883,13 @@ export function SettingsModal({
 
   return (
     <div className="sf-overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="sf-card wide" ref={cardRef} role="dialog" aria-modal="true" aria-label="我的风铃">
+      <div className="sf-card wide" ref={cardRef} role="dialog" aria-modal="true" aria-label={t("settings.title")}>
         <header className="sf-head">
           <div>
-            <b>我的风铃</b>
-            <span className="sf-sub">皮 · 形 · 脑 · 班底 · 数据</span>
+            <b>{t("settings.title")}</b>
+            <span className="sf-sub">{t("settings.subtitle")}</span>
           </div>
-          <button type="button" className="sf-x" onClick={onClose} title="关闭（Esc）">
+          <button type="button" className="sf-x" onClick={onClose} title={t("settings.close")}>
             ✕
           </button>
         </header>

@@ -32,6 +32,9 @@ test("translate：占位替换；缺 key 返回 undefined 由调用方回退", (
   for (const k of Object.keys(EN_STRINGS)) {
     assert.ok(k in ZH_STRINGS, `en 多出 zh 没有的 key：${k}`);
   }
+  // M3-08 补齐后升级纪律：设置页词条已全量双语，新增 key 必须同时给英文（防只写中文漂移）
+  const zhOnly = Object.keys(ZH_STRINGS).filter((k) => !(k in EN_STRINGS));
+  assert.deepEqual(zhOnly, [], `这些 key 缺英文翻译：${zhOnly.join("、")}`);
 });
 
 test("manifest：contributes.langs 形状校验（数组、.json 结尾）", () => {
