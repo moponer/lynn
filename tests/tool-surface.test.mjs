@@ -26,6 +26,7 @@ const LYNN_TOOLS = [
   "dissolve_team",
   "report_to_user",
   "review_result",
+  "ship_plugin",
 ];
 
 /** 执行类工具：这些只发给成员，永远不该出现在她的工具面里 */
@@ -59,7 +60,7 @@ const member = (over = {}) => ({
   ...over,
 });
 
-test("风铃的工具面恰好是 9 件管理工具", () => {
+test("风铃的工具面恰好是 10 件管理工具", () => {
   assert.deepEqual([...AGENT_TOOL_NAMES].sort(), LYNN_TOOLS);
 });
 

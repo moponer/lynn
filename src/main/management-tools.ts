@@ -65,6 +65,7 @@ export const MANAGEMENT_ONLY_TOOLS = [
   "report_to_user",
   "ask_user",
   "dissolve_team",
+  "ship_plugin",
 ] as const;
 
 export class ManagementTools {

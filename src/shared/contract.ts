@@ -663,6 +663,53 @@ export interface RpcContracts {
     params: { file?: string };
     result: { ok: boolean; detail: string };
   };
+  /** ---------- M3-07 插件工坊：规格 → 草稿区 → 准入 → 启用（§4.11） ---------- */
+  "workshop.create": {
+    params: { title: string; kind: "L0" | "L1" | "L2"; spec: string; taskId?: string };
+    result: {
+      draftId: string;
+      title: string;
+      kind: "L0" | "L1" | "L2";
+      taskId?: string;
+      spec: string;
+      createdAt: string;
+      status: "draft" | "reviewed" | "enabled";
+    };
+  };
+  "workshop.list": {
+    params: void;
+    result: {
+      drafts: {
+        draftId: string;
+        title: string;
+        kind: "L0" | "L1" | "L2";
+        taskId?: string;
+        createdAt: string;
+        status: "draft" | "reviewed" | "enabled";
+      }[];
+    };
+  };
+  /** 准入审查（静态流水线）：manifest / 禁项 / 冲突 / 自研追溯，分档强度 */
+  "workshop.review": {
+    params: { draftId: string };
+    result: {
+      ok: boolean;
+      verdict: "approved" | "rejected";
+      tier: "L0" | "L1" | "L2";
+      findings: { ok: boolean; text: string }[];
+      /** Q6 定稿 C：只有 L0 允许她自启用 */
+      selfEnable: boolean;
+    };
+  };
+  /** 迁入插件库：L1/L2 必须 byUser=true（用户点启用）；L0 可由风铃自启用（记审计） */
+  "workshop.promote": {
+    params: { draftId: string; byUser: boolean };
+    result: { ok: true; id: string; tier: "L0" | "L1" | "L2"; byUser: boolean };
+  };
+  "workshop.discard": {
+    params: { draftId: string };
+    result: { ok: true };
+  };
   /** 磁盘上的 U 档插件（渲染层只拿 manifest + iframe 文档，不碰文件系统） */
   "ui.plugins": {
     params: void;

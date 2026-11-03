@@ -42,6 +42,15 @@ import { probeSoffice, readTable, writeTable, type EngineHealth } from "./office
 import { BrowserController, sensitiveUrl } from "./browser";
 import { COMPLIANCE_NOTE, loadMessaging, type ChannelConfig } from "./messaging";
 import { TeamStore } from "./team-store";
+import {
+  createDraft,
+  listDrafts,
+  reviewDraft,
+  promoteDraft,
+  discardDraft,
+  draftsDir,
+  type WorkshopKind,
+} from "./workshop";
 import { TaskStore } from "./task-store";
 import { TaskCase } from "./task-case";
 import { ContextStore } from "./context-store";
@@ -218,6 +227,19 @@ const TOOL_JSON: ToolSchema[] = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "ship_plugin",
+      description:
+        "把通过准入审查的工坊草稿启用（M3-07 插件工坊）。只允许 L0 技能插件自启用——每次启用记审计并在汇报里告知用户；L1/L2 一律拒绝：必须由用户在插件面板点启用（她不得给自己的产物提权，Q6 定稿 C）。",
+      parameters: {
+        type: "object",
+        required: ["draftId"],
+        properties: { draftId: { type: "string", description: "工坊草稿 id（workshop.list 可查）" } },
+      },
+    },
+  },
 ];
 
 /**
@@ -237,6 +259,8 @@ interface PendingPlan {
   brief: string;
   deadline: string;
   tools?: string[];
+  /** M3-07：插件工坊草稿 id——成员工作区即草稿区（产物只能写进草稿） */
+  draftId?: string;
 }
 
 /** 排队中的输入 */
@@ -939,7 +963,7 @@ export class Kernel {
       meta: { deadline: p.deadline, tools: p.tools },
     });
     this.taskCase.appendSummary(p.taskId, `派给 ${p.member}（截止 ${p.deadline}）`);
-    const kickoff = this.dispatchMember(p.teamId, p.taskId, p.member, p.brief, p.deadline, p.tools);
+    const kickoff = this.dispatchMember(p.teamId, p.taskId, p.member, p.brief, p.deadline, p.tools, p.draftId);
     this.setTurn({ phase: "working", taskId: p.taskId, busy: this.busy });
     return kickoff;
   }
@@ -956,6 +980,7 @@ export class Kernel {
     brief: string,
     deadline: string,
     toolsArg?: string[],
+    draftId?: string,
   ): string {
     const cfg = this.settings.getModel();
     const apiKey = cfg
@@ -977,7 +1002,9 @@ export class Kernel {
     const allowed = (toolsArg ?? profile.tools).filter((t) =>
       (MEMBER_EXEC_TOOLS as readonly string[]).includes(t),
     );
-    const workdir = path.join(this.dataRoot, "tasks", taskId, "workspace");
+    // M3-07：带 draftId 的派单（插件工程师），工作区即草稿区——产物只能写进草稿，
+    // 不可能落进生效目录（plugin-host 扫描跳过 `_` 前缀目录，草稿永不自动生效）
+    const workdir = draftId ? path.join(draftsDir(this.dataRoot), draftId) : path.join(this.dataRoot, "tasks", taskId, "workspace");
     fs.mkdirSync(workdir, { recursive: true });
     fs.writeFileSync(
       path.join(workdir, "_brief.md"),
@@ -1101,6 +1128,11 @@ export class Kernel {
         const brief = String(args.brief);
         const deadline = String(args.deadline);
         const tools = (args.tools as string[] | undefined) ?? undefined;
+        // M3-07：插件工坊派单——工作区即草稿区（成员产物只能写进草稿，永不自动生效）
+        const draftId = args.draftId ? String(args.draftId) : undefined;
+        if (draftId && !listDrafts(this.dataRoot).some((d) => d.draftId === draftId)) {
+          return `草稿 ${draftId} 不存在。先用 workshop.create 开草稿，再派单给插件工程师。`;
+        }
         const title = brief.split("\n")[0].slice(0, 40) || taskId;
         const plan: TaskPlan = {
           taskId,
@@ -1112,7 +1144,7 @@ export class Kernel {
           budgetTokens: 300_000,
           deadline,
         };
-        const ctx: PendingPlan = { teamId, taskId, member, brief, deadline, tools };
+        const ctx: PendingPlan = { teamId, taskId, member, brief, deadline, tools, draftId };
         // M1-08：团队不在时按编制模板起一支（显式指定优先，否则按标题匹配）
         const reused = this.tools.ensureTeamFromTemplate(teamId, title, args.template as string | undefined);
         if (!this.storeTeamExists(teamId)) {
@@ -1162,6 +1194,38 @@ export class Kernel {
       }
       case "check_roster": {
         return JSON.stringify(this.tools.roster(args.teamId ? String(args.teamId) : undefined), null, 2);
+      }
+      case "ship_plugin": {
+        // M3-07（Q6 定稿 C）：只有 L0 技能插件允许她自启用，每次启用记审计并落卡告知用户
+        const draftId = String(args.draftId);
+        const review = reviewDraft(this.dataRoot, draftId, {
+          pluginIds: this.pluginHost.scan().plugins.map((p) => p.id),
+          skillNames: this.skillEntries.map((s) => s.name),
+        });
+        if (!review.ok) {
+          return JSON.stringify({ ok: false, verdict: review.verdict, findings: review.findings }, null, 2);
+        }
+        if (review.tier !== "L0") {
+          return `${review.tier} 档插件不能由你启用（她不得给自己的产物提权，Q6 定稿 C）。审查已通过，请如实告知用户：在插件面板点「启用」即可生效。`;
+        }
+        let enabled;
+        try {
+          enabled = promoteDraft(this.dataRoot, draftId, false);
+        } catch (err) {
+          return `启用失败：${err instanceof Error ? err.message : String(err)}`;
+        }
+        this.reloadSkills();
+        try {
+          fs.appendFileSync(
+            path.join(this.dataRoot, "audit.jsonl"),
+            JSON.stringify({ at: new Date().toISOString(), tool: "ship_plugin", draftId, id: enabled.id, tier: enabled.tier, by: "风铃自启用（L0）" }) + "\n",
+            "utf-8",
+          );
+        } catch {
+          /* 审计写失败不阻断，但失败即异常路径——插件面板仍有记录 */
+        }
+        this.card({ kind: "system", text: `L0 技能插件「${enabled.id}」已由风铃自启用（Q6 定稿 C），此动作已记审计。技能即刻可被检索激活。` });
+        return `已启用 L0 技能插件 ${enabled.id}。记得在汇报里告知用户（自启用须告知）。`;
       }
       case "review_result": {
         return this.registerReport(
@@ -2399,6 +2463,65 @@ export class Kernel {
       case "plugins.rollback": {
         const p = params as { file?: string };
         return this.pluginSet.rollback(p.file) as RpcContracts[M]["result"];
+      }
+
+      // ---------- M3-07 插件工坊（§4.11）：草稿 → 准入 → 启用 ----------
+      case "workshop.create": {
+        const p = params as { title: string; kind: WorkshopKind; spec: string; taskId?: string };
+        try {
+          return createDraft(this.dataRoot, p) as RpcContracts[M]["result"];
+        } catch (err) {
+          return { ok: false, error: err instanceof Error ? err.message : String(err) } as RpcContracts[M]["result"];
+        }
+      }
+      case "workshop.list": {
+        return {
+          drafts: listDrafts(this.dataRoot).map((d) => ({
+            draftId: d.draftId,
+            title: d.title,
+            kind: d.kind,
+            taskId: d.taskId,
+            createdAt: d.createdAt,
+            status: d.status,
+          })),
+        } as RpcContracts[M]["result"];
+      }
+      case "workshop.review": {
+        const p = params as { draftId: string };
+        try {
+          return reviewDraft(this.dataRoot, p.draftId, {
+            pluginIds: this.pluginHost.scan().plugins.map((x) => x.id),
+            skillNames: this.skillEntries.map((s) => s.name),
+          }) as RpcContracts[M]["result"];
+        } catch (err) {
+          return { ok: false, error: err instanceof Error ? err.message : String(err) } as RpcContracts[M]["result"];
+        }
+      }
+      case "workshop.promote": {
+        const p = params as { draftId: string; byUser: boolean };
+        try {
+          const r = promoteDraft(this.dataRoot, p.draftId, p.byUser);
+          if (r.tier === "L0") this.reloadSkills();
+          this.card({
+            kind: "system",
+            text:
+              r.tier === "L0"
+                ? `L0 技能插件「${r.id}」已启用（${r.byUser ? "用户确认" : "风铃自启用，已记审计"}）。`
+                : `「${r.id}」已入库（${r.tier}）。默认影子态：在插件面板点「启用」才进全局工具面。`,
+          });
+          return { ok: true, ...r } as RpcContracts[M]["result"];
+        } catch (err) {
+          return { ok: false, error: err instanceof Error ? err.message : String(err) } as RpcContracts[M]["result"];
+        }
+      }
+      case "workshop.discard": {
+        const p = params as { draftId: string };
+        try {
+          discardDraft(this.dataRoot, p.draftId);
+          return { ok: true } as RpcContracts[M]["result"];
+        } catch (err) {
+          return { ok: false, error: err instanceof Error ? err.message : String(err) } as RpcContracts[M]["result"];
+        }
       }
 
       case "ui.plugins": {
