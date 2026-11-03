@@ -25,6 +25,11 @@ export interface ToolkitOptions {
   onAudit?: (ev: { kind: "cmd_blocked" | "cmd_net" | "cmd_run"; command: string; why?: string; cwd: string }) => void;
   /** 写之前通知壳（M1-12 检查点）：existed=false 表示这轮新建 */
   onBeforeWrite?: (rel: string, full: string, existed: boolean) => void;
+  /** office 能力注入（M2-06）：csv 永远可用；xlsx 由壳按引擎健康决定（缺引擎如实报） */
+  office?: {
+    read: (file: string) => { table?: { headers: string[]; rows: string[][] }; error?: string };
+    write: (file: string, table: { headers: string[]; rows: string[][] }) => { ok: boolean; error?: string };
+  };
 }
 
 const READ_CAP = 200_000;
@@ -104,6 +109,7 @@ export class Toolkit {
   private readonly outputCap: number;
   private readonly onAudit?: ToolkitOptions["onAudit"];
   private readonly onBeforeWrite?: ToolkitOptions["onBeforeWrite"];
+  private readonly office?: ToolkitOptions["office"];
 
   constructor(root: string, opts: ToolkitOptions = {}) {
     this.root = path.resolve(root);
@@ -112,6 +118,7 @@ export class Toolkit {
     this.outputCap = opts.outputCap ?? 8_000;
     this.onAudit = opts.onAudit;
     this.onBeforeWrite = opts.onBeforeWrite;
+    this.office = opts.office;
   }
 
   getRoot(): string {
@@ -347,14 +354,60 @@ export class Toolkit {
         return this.grep(args);
       case "run_command":
         return this.runCommand(args);
+      case "office_read_table":
+      case "office_write_table":
+        return this.officeTool(name, args);
       default:
         throw new Error(`工作区里没有这个工具：${name}`);
     }
+  }
+
+  /** office 工具（M2-06）：路径钉在工作区；能力未注入（壳没装配）就如实说 */
+  private officeTool(name: string, args: Record<string, unknown>): string {
+    if (!this.office) {
+      return "office 能力未装配（当前进程没有 office 引擎桥接）——请回报此限制，改用 CSV 或在简报里说明。";
+    }
+    const rel = String(args.path ?? "");
+    const full = resolveWithin(this.root, rel);
+    if (name === "office_read_table") {
+      const r = this.office.read(full);
+      return JSON.stringify(r, null, 2);
+    }
+    const w = this.office.write(full, {
+      headers: (args.headers as string[]) ?? [],
+      rows: (args.rows as string[][]) ?? [],
+    });
+    return JSON.stringify(w, null, 2);
   }
 }
 
 /** 官方执行工具的 schema（成员白名单按名字过滤后使用） */
 export const TOOLKIT_SCHEMAS = [
+  {
+    type: "function" as const,
+    function: {
+      name: "office_read_table",
+      description:
+        "读表格为 {headers, rows}：csv/txt 直读；xlsx 需要本机 LibreOffice（缺引擎会如实报错，不要假装有数据）。",
+      parameters: { type: "object", properties: { path: { type: "string", description: "工作区内相对路径" } }, required: ["path"] },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "office_write_table",
+      description: "把表格写为 CSV 文件（headers + rows）。xlsx 写入不支持时会如实拒绝。",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "工作区内相对路径（.csv）" },
+          headers: { type: "array", items: { type: "string" } },
+          rows: { type: "array", items: { type: "array", items: { type: "string" } } },
+        },
+        required: ["path", "headers", "rows"],
+      },
+    },
+  },
   {
     type: "function" as const,
     function: {

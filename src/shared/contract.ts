@@ -439,6 +439,11 @@ export interface RpcContracts {
     params: void;
     result: { indexed: number; removed: number; docs: number; dbBytes: number };
   };
+  /** office 引擎健康（M2-06）：csv 永远可用；xlsx 看引擎 */
+  "office.health": {
+    params: void;
+    result: { found: boolean; kind: string; version?: string; sofficePath?: string; detail: string; csv: boolean; xlsx: boolean };
+  };
   /** 定时任务（M2-02）：调度器在核心里；单飞/补跑/陈旧清理，lastStatus 如实 */
   "schedule.add": {
     params: { name: string; prompt: string; kind: "once" | "daily" | "interval"; at?: string; time?: string; intervalMin?: number };

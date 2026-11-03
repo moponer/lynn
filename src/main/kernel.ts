@@ -30,6 +30,7 @@ import { PRESETS, loadProviders, saveProviders, type ProviderEntry } from "./pro
 import { CalendarStore, dueReminders, parseNaturalDate } from "./calendar";
 import { SchedulerStore, recover as recoverScheduler, type DueItem } from "./scheduler";
 import { KnowledgeStore } from "./knowledge";
+import { probeSoffice, readTable, writeTable, type EngineHealth } from "./office";
 import { TeamStore } from "./team-store";
 import { TaskStore } from "./task-store";
 import { TaskCase } from "./task-case";
@@ -314,6 +315,8 @@ export class Kernel {
   private notifier: ((title: string, body: string) => void) | null = null;
   /** 本地知识库（M2-04）：权威是 markdown 文件，FTS5 trigram 只做检索 */
   private knowledge!: KnowledgeStore;
+  /** office 引擎健康（M2-06）：init 时探测一次，工具调用时如实降级 */
+  private officeHealth!: EngineHealth;
   /** 下一次起 worker 时开新会话（session.new 置位；起过一次即清） */
   private createFreshSession = false;
   /** 用户点了停止：本轮结束时不追加"已完成"类文案 */
@@ -356,6 +359,7 @@ export class Kernel {
     this.scheduler = new SchedulerStore(dataRoot);
     this.knowledge = new KnowledgeStore(dataRoot);
     this.knowledge.reindex();
+    this.officeHealth = { found: false, kind: "none", detail: "尚未探测" };
     const list = this.threads.list();
     const current = list[0] ?? this.threads.create("新会话");
     this.currentThreadId = current.id;
@@ -622,6 +626,10 @@ export class Kernel {
   }
 
   async init(): Promise<void> {
+    // office 引擎健康（M2-06）：探测一次；失败不影响 CSV
+    this.officeHealth = await probeSoffice().catch(
+      (): EngineHealth => ({ found: false, kind: "none", detail: "引擎探测失败（不影响 CSV）" }),
+    );
     // 只做「能不能用」的静态判定；真正的子进程在首轮对话时懒启动（启动失败会自动降级直连）
     const entry = this.rpcEntryPath;
     const piPkg = path.join(__dirname, "..", "..", "node_modules", "@earendil-works", "pi-coding-agent");
@@ -901,6 +909,10 @@ export class Kernel {
       model: { baseUrl: cfg.baseUrl, apiKey, model: cfg.model },
       onAudit: (ev) => this.auditTool(teamId, taskId, member, ev),
       onBeforeWrite: (rel, full, existed) => this.checkpoints.beforeWrite(rel, full, existed),
+      office: {
+        read: (file) => readTable(file, this.officeHealth),
+        write: (file, table) => writeTable(file, table),
+      },
       onEvent: (ev) => {
         if (ev.kind === "tool") {
           this.emit({
@@ -2061,6 +2073,10 @@ export class Kernel {
         const { indexed, removed } = this.knowledge.reindex();
         const st = this.knowledge.stats();
         return { indexed, removed, docs: st.docs, dbBytes: st.dbBytes } as RpcContracts[M]["result"];
+      }
+
+      case "office.health": {
+        return { ...this.officeHealth, csv: true, xlsx: this.officeHealth.found } as RpcContracts[M]["result"];
       }
 
       case "session.abort": {

@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import { streamChat, type ChatMessage, type ToolSchema } from "./llm";
 import type { MemberProfile } from "./team-store";
-import { Toolkit, TOOLKIT_SCHEMAS, resolveWithin } from "./toolkit";
+import { Toolkit, TOOLKIT_SCHEMAS, resolveWithin, type ToolkitOptions } from "./toolkit";
 
 /**
  * 成员运行时（M0-09：单层派单真实执行）。
@@ -17,7 +17,14 @@ import { Toolkit, TOOLKIT_SCHEMAS, resolveWithin } from "./toolkit";
  * （纵深防御，不承诺沙箱）的活，这里不做谎报。
  */
 
-export const MEMBER_EXEC_TOOLS = ["read_file", "write_file", "list_dir", "run_command"] as const;
+export const MEMBER_EXEC_TOOLS = [
+  "read_file",
+  "write_file",
+  "list_dir",
+  "run_command",
+  "office_read_table",
+  "office_write_table",
+] as const;
 
 export type MemberChatFn = typeof streamChat;
 
@@ -38,6 +45,8 @@ export interface MemberRunInput {
   onAudit?: (ev: { kind: "cmd_blocked" | "cmd_net" | "cmd_run"; command: string; why?: string; cwd: string }) => void;
   /** 写前通知（M1-12 检查点） */
   onBeforeWrite?: (rel: string, full: string, existed: boolean) => void;
+  /** office 能力桥接（M2-06）：壳按引擎健康注入；不注入时成员调 office 工具会得到如实提示 */
+  office?: ToolkitOptions["office"];
 }
 
 export interface MemberRunResult {
@@ -116,7 +125,7 @@ export function memberSystemPrompt(input: MemberRunInput): string {
 
 export async function runMemberTask(input: MemberRunInput): Promise<MemberRunResult> {
   const chat = input.chatFn ?? streamChat;
-  const toolkit = new Toolkit(input.workdir, { onAudit: input.onAudit, onBeforeWrite: input.onBeforeWrite });
+  const toolkit = new Toolkit(input.workdir, { onAudit: input.onAudit, onBeforeWrite: input.onBeforeWrite, office: input.office });
   const maxTurns = Math.max(1, Math.min(input.profile.limits?.maxTurns ?? 12, 40));
   const tools = memberToolSchemas(input.tools);
   const messages: ChatMessage[] = [
