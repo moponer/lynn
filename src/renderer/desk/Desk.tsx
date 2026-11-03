@@ -69,6 +69,9 @@ function TopRail({
   onOpenSettings,
   onNew,
   onUndo,
+  pending,
+  rightOpen,
+  onToggleRight,
   mode = "desk",
 }: {
   desk: Desk;
@@ -78,6 +81,10 @@ function TopRail({
   onOpenSettings: () => void;
   onNew?: () => void;
   onUndo?: () => void;
+  /** 等你的件数（只在窄窗显示成按钮，宽屏右栏本来就一直看得见） */
+  pending?: number;
+  rightOpen?: boolean;
+  onToggleRight?: () => void;
   mode?: "desk" | "review";
 }) {
   const ctx = desk.usage.contextWindow > 0 ? Math.min(1, desk.usage.contextTokens / desk.usage.contextWindow) : 0;
@@ -116,6 +123,19 @@ function TopRail({
         <span className="cur mono">{current?.id ?? "—"}</span>
       </div>
       <div className="spacer" />
+
+      {/* 窄窗：右栏收成抽屉后，"等你拍板"必须有个进得去的入口（悬停边缘不算入口） */}
+      {pending !== undefined && pending > 0 && onToggleRight && (
+        <button
+          type="button"
+          className={`ghost-btn only-narrow pending-btn${rightOpen ? " on" : ""}`}
+          onClick={onToggleRight}
+          aria-pressed={rightOpen}
+          title={t("top.pendingHint")}
+        >
+          <Icon name="shield" size="sm" /> {t("top.pending", { n: pending })}
+        </button>
+      )}
 
       <div className="seg">
         <span className="seg-label">{t("top.permission")}</span>
@@ -710,12 +730,17 @@ function Roster({
   onCancel,
   onSelectJob,
   onCreateTeam,
+  open,
+  onClose,
 }: {
   desk: Desk;
   /** 当前在图纸上打开的那张单：印章优先对它，不再"取全局第一条" */
   current?: DeskJob;
   /** 成员卡 → 打开他手上的那张单 */
   onSelectJob?: (taskId: string) => void;
+  /** 窄窗抽屉态 */
+  open?: boolean;
+  onClose?: () => void;
   onAccept: (taskId: string) => void;
   onReject: (taskId: string) => void;
   onPlan: (id: string, action: "start" | "revise" | "reject", text?: string) => void;
@@ -742,7 +767,7 @@ function Roster({
   };
 
   return (
-    <aside className="right">
+    <aside className={`right${open ? " open" : ""}`}>
       <div className="right-scroll">
         <div className="panel-h">
           <div className="l">
@@ -750,6 +775,11 @@ function Roster({
             <span className="n">{t("roster.capacity", { n: desk.members.length })}</span>
           </div>
           <span className="cap">{t("roster.split", { a: active.length, b: idle.length })}</span>
+          {onClose && (
+            <button type="button" className="icon-btn only-narrow" onClick={onClose} title={t("common.close")}>
+              ✕
+            </button>
+          )}
         </div>
 
         {/* 建团队：给名字就行，ID 由系统生成——不让用户在面板里找 ID */}
@@ -1853,13 +1883,25 @@ export function DeskView({
   notice?: string | null;
 }) {
   const waitingFirst = useMemo(() => {
-    const w = desk.jobs.find((j) => j.status === "in_review" || j.status === "blocked");
+    const w = desk.jobs.find((j) => j.action !== "none");
     return w ?? desk.jobs[0];
   }, [desk.jobs]);
   const [activeId, setActiveId] = useState<string | undefined>(waitingFirst?.id);
   const [reviewId, setReviewId] = useState<string | null>(null);
+  /** 窄窗（≤1280）右栏抽屉：顶栏「待办 (n)」开关 */
+  const [rightOpen, setRightOpen] = useState(false);
   const current = desk.jobs.find((j) => j.id === activeId) ?? waitingFirst;
   const reviewJob = desk.jobs.find((j) => j.id === reviewId);
+  const pendingCount = (desk.decision ? 1 : 0) + desk.jobs.filter((j) => j.action === "accept").length;
+
+  useEffect(() => {
+    if (!rightOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setRightOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [rightOpen]);
 
   if (reviewJob) {
     return (
@@ -1889,7 +1931,11 @@ export function DeskView({
         onOpenSettings={onOpenSettings}
         onNew={onNew}
         onUndo={onUndo}
+        pending={pendingCount}
+        rightOpen={rightOpen}
+        onToggleRight={() => setRightOpen((v) => !v)}
       />
+      {rightOpen && <button type="button" className="right-backdrop only-narrow" aria-label="close" onClick={() => setRightOpen(false)} />}
       <div className="body">
         <Ledger
           desk={desk}
@@ -1924,8 +1970,13 @@ export function DeskView({
           onPlan={(id, action, text) => onDecisionResolve(id, action, text)}
           onAnswer={(id, text) => onDecisionResolve(id, "answer", text)}
           onCancel={onCancelTask}
-          onSelectJob={setActiveId}
+          onSelectJob={(id) => {
+            setActiveId(id);
+            setRightOpen(false);
+          }}
           onCreateTeam={onCreateTeam}
+          open={rightOpen}
+          onClose={() => setRightOpen(false)}
         />
       </div>
     </div>

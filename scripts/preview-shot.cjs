@@ -1,17 +1,20 @@
 // 把构建后的渲染层用 Electron 打开、截图，供设计走查。
-// 用法：npx electron scripts/preview-shot.cjs [输出路径]
+// 用法：npx electron scripts/preview-shot.cjs [输出路径] [settings|review|standby|wizard|pet|pending] [主题:亮暗]
+// 窄窗走查：LYNN_PREVIEW_WIDTH=1180 LYNN_PREVIEW_HEIGHT=900
 const { app, BrowserWindow } = require("electron");
 const path = require("node:path");
 const fs = require("node:fs");
 
 const out = process.argv[2] || path.join(__dirname, "..", "shots", "desk.png");
+const W = Number(process.env.LYNN_PREVIEW_WIDTH) || 1600;
+const H = Number(process.env.LYNN_PREVIEW_HEIGHT) || 1000;
 
 app.disableHardwareAcceleration();
 app.whenReady().then(async () => {
   const isPet = process.argv[3] === "pet";
   const win = new BrowserWindow({
-    width: isPet ? 240 : 1600,
-    height: isPet ? 300 : 1000,
+    width: isPet ? 240 : W,
+    height: isPet ? 300 : H,
     show: false,
     frame: !isPet,
     transparent: isPet,
@@ -75,6 +78,15 @@ app.whenReady().then(async () => {
     );
     await new Promise((r) => setTimeout(r, 900));
     console.log("STANDBY", await win.webContents.executeJavaScript(`!!document.querySelector('.standby')`));
+  }
+
+  // 可选：窄窗下点顶栏「待办 (n)」把右栏抽屉拉开
+  if (process.argv[3] === "pending") {
+    const ok = await win.webContents.executeJavaScript(
+      `(() => { const b = document.querySelector('.pending-btn'); if (b) b.click(); return !!b; })()`,
+    );
+    await new Promise((r) => setTimeout(r, 700));
+    console.log("PENDING", ok, await win.webContents.executeJavaScript(`!!document.querySelector('.right.open')`));
   }
 
   // 可选：进入审查台（点右栏印章区的"打回重做"）

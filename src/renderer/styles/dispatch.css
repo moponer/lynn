@@ -1560,10 +1560,27 @@ button:disabled,
   }
 }
 
-/* ---------- 窄窗退化：≥1280 三栏；1080–1280 右栏收成抽屉 ---------- */
+/* ---------- 窄窗退化：≥1280 三栏；1080–1280 右栏收成抽屉（顶栏「待办」开关） ---------- */
+.only-narrow { display: none; }
+
 @media (max-width: 1280px) {
-  .right { position: fixed; right: 0; top: 54px; bottom: 0; z-index: 30; box-shadow: -12px 0 30px -20px #000; transform: translateX(calc(100% - 8px)); transition: transform var(--dur) var(--ease-out); }
-  .right:hover, .right:focus-within { transform: none; }
+  .only-narrow { display: inline-flex; }
+  .right {
+    position: fixed; right: 0; top: 54px; bottom: 0; z-index: 30;
+    width: min(384px, calc(100vw - 40px));
+    box-shadow: -12px 0 30px -20px #000;
+    /* 收起来是"整块退场"，不再留 8px 悬停拉手：拉手不是入口，会被当成装饰 */
+    transform: translateX(100%);
+    transition: transform var(--dur) var(--ease-out);
+  }
+  .right.open { transform: none; }
+  .right-backdrop {
+    position: fixed; inset: 54px 0 0 0; z-index: 29;
+    background: rgba(6, 9, 12, .5);
+    border: 0; cursor: default;
+  }
+  .pending-btn.on { background: var(--seal-wash); color: var(--seal); }
+  .icon-btn.only-narrow { display: grid; }
   .spine { width: 180px; }
 }
 @media (max-width: 1120px) {
@@ -1640,27 +1657,6 @@ button.ev:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 .ac-link:hover:not(:disabled) { color: var(--ink); text-decoration: underline; text-underline-offset: 3px; }
 .ac-link:disabled { cursor: default; }
 .ac-link:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
-
-/* 窄窗口：右栏收成抽屉，但边缘留一个看得见的拉手（悬停即展开） */
-@media (max-width: 1280px) {
-  .right { overflow: visible; }
-  .right::after {
-    content: "编制表";
-    position: absolute;
-    left: -26px;
-    top: 18px;
-    writing-mode: vertical-rl;
-    padding: 8px 4px;
-    border-radius: 3px 0 0 3px;
-    background: var(--sheet-2);
-    color: var(--ink-3);
-    font-family: var(--f-mono);
-    font-size: var(--fs-label);
-    letter-spacing: .12em;
-    box-shadow: -6px 0 14px -12px #000;
-  }
-  .right:hover::after, .right:focus-within::after { color: var(--blue); }
-}
 
 /* ---------- 会话线程（M1-14） ---------- */
 .thread-bar { display: flex; align-items: center; gap: 4px; margin: 2px 8px 6px; }
