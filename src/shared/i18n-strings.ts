@@ -250,6 +250,10 @@ export const ZH_STRINGS: Record<string, string> = {
   "perm.auto": "自动",
   "perm.full": "全权",
   "sheet.evidenceEmpty": "还没有证据。成员交付时会附上文件 / 命令输出 / 测试结果。",
+  "win.minimize": "最小化",
+  "win.maximize": "最大化",
+  "win.restore": "还原",
+  "win.close": "关闭窗口（按设置进托盘或退出）",
 };
 
 export const EN_STRINGS: Record<string, string> = {
@@ -484,6 +488,10 @@ export const EN_STRINGS: Record<string, string> = {
   "perm.auto": "Auto",
   "perm.full": "Full",
   "sheet.evidenceEmpty": "No evidence yet. Members attach files / command output / test results when they deliver.",
+  "win.minimize": "Minimize",
+  "win.maximize": "Maximize",
+  "win.restore": "Restore",
+  "win.close": "Close window (tray or quit, per settings)",
 };
 
 export const BUILTIN_STRINGS: Record<Lang, Record<string, string>> = { zh: ZH_STRINGS, en: EN_STRINGS };

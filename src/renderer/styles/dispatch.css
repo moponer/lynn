@@ -129,6 +129,36 @@ svg.ic.lg { width: 20px; height: 20px; }
 
 .rail-top .spacer { flex: 1; }
 
+/* ---------- 自绘标题栏（frame:false）：顶栏整条可拖拽，交互控件不可拖 ---------- */
+.rail-top { -webkit-app-region: drag; user-select: none; }
+.rail-top button,
+.rail-top input,
+.rail-top select,
+.rail-top .seg,
+.rail-top .gauge,
+.rail-top .crumbs,
+.rail-top .win-ctl { -webkit-app-region: no-drag; }
+
+.win-ctl {
+  display: flex; align-items: center; gap: 1px;
+  margin-left: 6px; padding-left: 6px;
+  box-shadow: inset 1px 0 0 var(--rule-soft);
+}
+.win-btn {
+  width: 32px; height: 26px; display: grid; place-items: center;
+  border: 0; background: none; border-radius: var(--r-s);
+  color: var(--ink-3); cursor: default;
+}
+.win-btn:hover { background: var(--hover-bg); color: var(--ink); }
+.win-btn.close:hover { background: var(--red-wash); color: var(--red); }
+
+/* 待机页：顶部拖拽带 + 右上窗口按钮（不参与"点任意处唤醒"） */
+.sb-drag {
+  position: fixed; top: 0; left: 0; right: 128px; height: 34px;
+  -webkit-app-region: drag; z-index: 6;
+}
+.sb-win { position: fixed; top: 6px; right: 10px; z-index: 7; -webkit-app-region: no-drag; }
+
 /* segmented permission control */
 .seg {
   display: flex; align-items: center; gap: 2px; padding: 3px;

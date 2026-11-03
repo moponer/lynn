@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { AmbientMode, AmbientParams } from "../../shared/ambient";
 import { AmbientLayer } from "./AmbientLayer";
+import { WindowControls } from "../components/WindowControls";
 import type { Desk } from "./model";
 
 /**
@@ -26,7 +27,12 @@ export function Standby({
   }, []);
 
   useEffect(() => {
-    const wake = () => onExit();
+    // 点任意位置唤醒；唯独窗口按钮区不唤醒（否者点关闭前就先把自己叫醒）
+    const wake = (e: Event) => {
+      const target = e.target as HTMLElement | null;
+      if (target?.closest?.(".win-ctl")) return;
+      onExit();
+    };
     window.addEventListener("keydown", wake);
     window.addEventListener("pointerdown", wake);
     return () => {
@@ -44,6 +50,9 @@ export function Standby({
   return (
     <div className="standby">
       <AmbientLayer params={ambient} mode={mode} standby />
+      {/* 自绘标题栏：无边框窗口在待机页也要能拖动与关闭 */}
+      <div className="sb-drag" />
+      <WindowControls className="sb-win" />
       <div className="sb-center">
         <div className="sb-clock">
           {hh}

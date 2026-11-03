@@ -257,6 +257,8 @@ export interface SessionSnapshot {
 
 export type KernelEvent =
   | { type: "delta"; text: string; cardId?: string }
+  /** 壳层窗口事件（自绘标题栏）：最大化状态变化 */
+  | { type: "window"; maximized: boolean }
   | {
       type: "card";
       card: FeedCard;
@@ -626,6 +628,11 @@ export interface RpcContracts {
   "session.new": {
     params: void;
     result: { ok: true };
+  };
+  /** 自绘标题栏（frame:false）：最小化 / 最大化还原 / 关闭（关闭尊重"关窗进托盘"设置） */
+  "window.control": {
+    params: { action: "minimize" | "maximize" | "close" | "query" };
+    result: { ok: true; maximized: boolean };
   };
   /** 桌宠模式（P2）：独立透明置顶小窗，单击唤回主界面 */
   "pet.open": { params: void; result: { ok: true } };

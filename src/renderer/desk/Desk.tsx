@@ -1,6 +1,7 @@
 import { useMemo, useRef, useState } from "react";
 import type { FeedCard, PermissionMode, QueueItem } from "../../shared/contract";
 import { Icon, type IconName } from "../components/Icon";
+import { WindowControls } from "../components/WindowControls";
 import type { Desk, DeskDiff, DeskJob, DeskMember } from "./model";
 import { Slot, SandboxAction, SandboxHtml } from "./ui-host";
 import { AmbientLayer } from "./AmbientLayer";
@@ -60,7 +61,13 @@ function TopRail({
   const filled = Math.min(12, Math.max(0, Math.round(ctx * 12)));
   const t = useT();
   return (
-    <header className="rail-top">
+    <header
+      className="rail-top"
+      onDoubleClick={() => {
+        // 拖拽区双击 = 最大化/还原（no-drag 控件不受影响）
+        void window.lynn.rpc("window.control", { action: "maximize" });
+      }}
+    >
       <div className="brand">
         <div className="brand-mark">
           <Icon name="bell" />
@@ -153,6 +160,8 @@ function TopRail({
       <button className="ghost-btn" onClick={onOpenSettings} title={t("top.settings")}>
         <Icon name="user" size="sm" /> {t("top.settings")}
       </button>
+      {/* 自绘窗口按钮（frame:false）：拖拽由 .rail-top 的 -webkit-app-region: drag 提供 */}
+      <WindowControls />
     </header>
   );
 }

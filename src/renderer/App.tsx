@@ -171,6 +171,8 @@ export default function App() {
         setSnap((s) => (s ? { ...s, turn: ev.turn } : s));
         return;
       }
+      // 窗口事件只关系到自绘标题栏的按钮态，不触发快照重拉
+      if (ev.type === "window") return;
       void refresh();
     });
     return off;

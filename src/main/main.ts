@@ -249,6 +249,8 @@ function createWindow(): void {
     backgroundColor: lastBackground(),
     show: false,
     title: "风铃 Lynn · 指挥台",
+    // 自绘标题栏：不要系统标题栏，最小化/最大化/关闭由渲染层顶栏实现（拖拽走 -webkit-app-region）
+    frame: false,
     autoHideMenuBar: true,
     webPreferences: {
       preload: preload(),
@@ -259,6 +261,12 @@ function createWindow(): void {
   });
 
   win.once("ready-to-show", () => win?.show());
+  // 最大化状态同步给渲染层（自绘按钮要显示"最大化/还原"两个态）
+  const sendMaximized = () => {
+    if (win && !win.isDestroyed()) win.webContents.send("lynn:event", { type: "window", maximized: win.isMaximized() });
+  };
+  win.on("maximize", sendMaximized);
+  win.on("unmaximize", sendMaximized);
   // 外链一律交给系统浏览器；应用内导航只允许同一个 file:// 文档
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:\/\//i.test(url)) void shell.openExternal(url);
@@ -367,6 +375,21 @@ app.whenReady().then(async () => {
       }
       if (method === "plugins.probe") {
         return kernel.probePlugin((params as { id: string }).id);
+      }
+      // 自绘标题栏：窗口控制归壳（不经过内核）
+      if (method === "window.control") {
+        const p = params as { action: "minimize" | "maximize" | "close" | "query" };
+        if (!win || win.isDestroyed()) return { ok: true, maximized: false };
+        if (p.action === "minimize") {
+          win.minimize();
+        } else if (p.action === "maximize") {
+          if (win.isMaximized()) win.unmaximize();
+          else win.maximize();
+        } else if (p.action === "close") {
+          // 走 close 事件：尊重"关窗进托盘"设置（真退由托盘菜单触发）
+          win.close();
+        }
+        return { ok: true, maximized: win.isMaximized() };
       }
       if (method === "app.appearance") {
         const p = params as { mode?: string; desk?: string };

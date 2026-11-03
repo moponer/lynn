@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { ModelConfigView, PermissionMode } from "../../shared/contract";
 import { Icon } from "../components/Icon";
+import { WindowControls } from "../components/WindowControls";
 import { THEMES, type ThemeId, type ThemeMode } from "./theme";
 
 /**
@@ -87,6 +88,7 @@ export function Wizard({
             先跳过
           </button>
         )}
+        <WindowControls />
       </header>
 
       <div className="body" style={{ padding: 0 }}>
