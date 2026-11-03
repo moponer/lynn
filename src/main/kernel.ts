@@ -14,7 +14,7 @@ import type {
   TurnState,
   UsageView,
 } from "../shared/contract";
-import { ManagementTools } from "./management-tools";
+import { ManagementTools, MANAGEMENT_ONLY_TOOLS } from "./management-tools";
 import { streamChat, probeEndpoint, type ChatMessage, type ToolSchema } from "./llm";
 import { SettingsStore, loadApiKey, defaultDataRoot } from "./settings";
 import { applyPiEnvironment } from "./pi-home";
@@ -30,6 +30,13 @@ import { PRESETS, loadProviders, saveProviders, type ProviderEntry } from "./pro
 import { CalendarStore, dueReminders, parseNaturalDate } from "./calendar";
 import { SchedulerStore, recover as recoverScheduler, type DueItem } from "./scheduler";
 import { KnowledgeStore, watchKnowledge } from "./knowledge";
+import {
+  buildInjection,
+  discoverSkills,
+  matchSkills,
+  isToolAllowed,
+  type SkillEntry,
+} from "./skills";
 import { probeSoffice, readTable, writeTable, type EngineHealth } from "./office";
 import { TeamStore } from "./team-store";
 import { TaskStore } from "./task-store";
@@ -319,6 +326,9 @@ export class Kernel {
   private officeHealth!: EngineHealth;
   /** 知识库目录 watch（M2-09）：变更去抖后增量索引 */
   private kbWatch: { close: () => void } | null = null;
+  /** 技能（M2-10）：三级路径发现；命中后 allowed-tools 强制到工具门禁 */
+  private skillEntries: SkillEntry[] = [];
+  private activeSkills: SkillEntry[] = [];
   /** 下一次起 worker 时开新会话（session.new 置位；起过一次即清） */
   private createFreshSession = false;
   /** 用户点了停止：本轮结束时不追加"已完成"类文案 */
@@ -362,6 +372,7 @@ export class Kernel {
     this.knowledge = new KnowledgeStore(dataRoot);
     this.knowledge.reindex();
     this.officeHealth = { found: false, kind: "none", detail: "尚未探测" };
+    this.reloadSkills();
     const list = this.threads.list();
     const current = list[0] ?? this.threads.create("新会话");
     this.currentThreadId = current.id;
@@ -481,9 +492,16 @@ export class Kernel {
 
   private threadSaveTimer: NodeJS.Timeout | null = null;
 
-  /** system prompt（M1-17/M2-05）：固定头 + persona + 记忆两层 + 安全尾段；每轮现取 */
+  /** system prompt（M1-17/M2-05/M2-10）：固定头 + persona + 记忆两层 + 技能注入 + 安全尾段；每轮现取 */
   private systemPrompt(): string {
-    return composeSystemPrompt(this.persona.load()) + this.memory.systemPromptSection();
+    return composeSystemPrompt(this.persona.load()) + this.memory.systemPromptSection() + this.skillSection();
+  }
+
+  /** 激活技能的注入文本（submitTurn 时已算好；预算降级如实标注） */
+  private skillSection(): string {
+    if (!this.activeSkills.length) return "";
+    const inj = buildInjection(this.activeSkills);
+    return `\n${inj.text}\n`;
   }
 
   /** 壳层读偏好（托盘/通知开关，M1-18）：壳不直接碰 SettingsStore */
@@ -531,6 +549,39 @@ export class Kernel {
       this.log("notified", { title });
     } catch (err) {
       this.log("notify_failed", { title, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+
+  /** 发现技能（M2-10）：用户级 ~/.lynn/skills + 项目级 .lynn/skills（需信任）+ 插件携带；就近优先 */
+  private reloadSkills(): void {
+    const trusted = this.trust?.isTrusted(this.projectRoot) ?? false;
+    const allRoots: { dir: string; level: SkillEntry["level"] }[] = [
+      { dir: path.join(this.dataRoot, "skills"), level: "user" },
+      { dir: path.join(this.projectRoot, ".lynn", "skills"), level: "project" },
+      { dir: path.join(this.dataRoot, "plugins"), level: "plugin" },
+    ];
+    const roots = allRoots.filter((r) => r.level !== "project" || trusted);
+    const { entries, errors } = discoverSkills(roots);
+    this.skillEntries = entries;
+    for (const e of errors.slice(0, 5)) this.log("skill_error", { error: e });
+    for (const e of entries) {
+      for (const w of e.warnings.slice(0, 3)) this.log("skill_warning", { skill: e.name, warning: w });
+    }
+    this.log("skills_ready", { count: entries.length, projectTrusted: trusted });
+  }
+
+  /** 命中技能 → 本轮生效：注入预算内内容 + allowed-tools 强制子集 */
+  private activateSkillsFor(text: string): void {
+    this.activeSkills = matchSkills(text, this.skillEntries);
+    if (this.activeSkills.length) {
+      const inj = buildInjection(this.activeSkills);
+      this.card({
+        kind: "system",
+        badge: "工具",
+        title: `技能激活 · ${this.activeSkills.map((s) => s.name).join("、")}`,
+        body: inj.degraded ? "技能内容超预算，已降级为仅名称注入。" : undefined,
+      });
+      this.log("skills_activated", { skills: this.activeSkills.map((s) => s.name), degraded: inj.degraded });
     }
   }
 
@@ -1212,6 +1263,11 @@ export class Kernel {
           // 三类来源同一道门禁（§4.7）：先过权限，再执行
           const denial = await this.gateTool(name, args);
           if (denial) return denial;
+          // allowed-tools 强制（M2-10）：命中技能后只许声明子集；元工具（管理 8 件 + 定时任务等）始终放行
+          if (this.activeSkills.length && !isToolAllowed(name, this.activeSkills, MANAGEMENT_ONLY_TOOLS)) {
+            this.log("skill_tool_denied", { tool: name, allowed: this.activeSkills.flatMap((s) => s.allowedTools) });
+            return `工具 ${name} 不在当前激活技能的 allowed-tools 声明里（本次允许：${this.activeSkills.flatMap((s) => s.allowedTools).join("、") || "无"}）。按技能边界收窄行动，或在回复里说明为什么需要越界（用户可放宽技能声明）。`;
+          }
           // 工具面真值在壳：L1 先查，再落到管理型 8 件套（停用残留由执行层拒绝）
           return this.l1.has(name) ? await this.l1.execute(name, args) : this.runTool(name, args);
         } catch (err) {
@@ -1321,6 +1377,11 @@ export class Kernel {
     try {
       const denial = await this.gateTool(name, args);
       if (denial) return denial;
+      // allowed-tools 强制（M2-10）：两条路径（Pi onToolCall / 直连 executeToolCall）同一道闸
+      if (this.activeSkills.length && !isToolAllowed(name, this.activeSkills, MANAGEMENT_ONLY_TOOLS)) {
+        this.log("skill_tool_denied", { tool: name, allowed: this.activeSkills.flatMap((s) => s.allowedTools) });
+        return `工具 ${name} 不在当前激活技能的 allowed-tools 声明里（本次允许：${this.activeSkills.flatMap((s) => s.allowedTools).join("、") || "无"}）。按技能边界收窄行动，或在回复里说明为什么需要越界（用户可放宽技能声明）。`;
+      }
       if (this.mcp.has(name)) return await this.mcp.execute(name, args);
       return this.l1.has(name) ? await this.l1.execute(name, args) : this.runTool(name, args);
     } catch (err) {
@@ -1455,6 +1516,8 @@ export class Kernel {
 
   /** 提交一轮：卡片 + 落史 + 回合状态 + 结束后排水（排队输入） */
   private submitTurn(text: string, att?: TurnAttachments): void {
+    // 技能激活（M2-10）：每轮按输入重算，命中后 allowed-tools 强制到工具门禁
+    this.activateSkillsFor(text);
     // 本轮随附（M1-16）：文件注入 + 图片落盘；带不上的如实出卡，不静默丢
     let fullText = text;
     if (att && (att.files?.length || att.images?.length)) {
