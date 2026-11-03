@@ -15,11 +15,11 @@ import { useT } from "../i18n";
  * 三种声音：成员产出（等宽）/ 风铃（纸边批注）/ 你（朱砂印章）。
  */
 
-const PERMISSIONS: { mode: PermissionMode; label: string; en: string }[] = [
-  { mode: "plan", label: "计划", en: "PLAN" },
-  { mode: "ask", label: "询问", en: "ASK" },
-  { mode: "auto", label: "自动", en: "AUTO" },
-  { mode: "full", label: "全权", en: "FULL" },
+const PERMISSIONS: { mode: PermissionMode; labelKey: string; en: string }[] = [
+  { mode: "plan", labelKey: "perm.plan", en: "PLAN" },
+  { mode: "ask", labelKey: "perm.ask", en: "ASK" },
+  { mode: "auto", labelKey: "perm.auto", en: "AUTO" },
+  { mode: "full", labelKey: "perm.full", en: "FULL" },
 ];
 
 export function fmtTokens(n: number): string {
@@ -66,7 +66,7 @@ function TopRail({
           <Icon name="bell" />
         </div>
         <div>
-          <div className="brand-name">风铃</div>
+          <div className="brand-name">{t("top.brand")}</div>
           <div className="brand-sub">Lynn</div>
         </div>
       </div>
@@ -76,14 +76,14 @@ function TopRail({
           <Icon name="folder" size="sm" /> {desk.project}
         </span>
         <Icon name="chev" size="sm" />
-        <span className="seg">{mode === "review" ? "验收包" : "工单"}</span>
+        <span className="seg">{mode === "review" ? t("top.crumbReview") : t("top.crumbJob")}</span>
         <Icon name="chev" size="sm" />
         <span className="cur mono">{current?.id ?? "—"}</span>
       </div>
       <div className="spacer" />
 
       <div className="seg">
-        <span className="seg-label">权限</span>
+        <span className="seg-label">{t("top.permission")}</span>
         {PERMISSIONS.map((p) => (
           <button
             type="button"
@@ -91,9 +91,9 @@ function TopRail({
             aria-pressed={permission === p.mode}
             className={`seg-item${permission === p.mode ? " on" : ""}`}
             onClick={() => onPermission(p.mode)}
-            title={`切到 ${p.label}`}
+            title={t("top.switchTo", { label: t(p.labelKey) })}
           >
-            {p.label} <span className="en">{p.en}</span>
+            {t(p.labelKey)} <span className="en">{p.en}</span>
           </button>
         ))}
       </div>
@@ -116,13 +116,15 @@ function TopRail({
 
       <div
         className={`gauge${contextPct >= 90 ? " warn" : contextPct >= 70 ? " near" : ""}`}
-        title={`上下文 ${desk.usage.contextTokens} / ${desk.usage.contextWindow} · 会话累计 ${fmtTokens(desk.tokensUsed)} tokens${
-          contextPct >= 70 ? " · 接近上限时 Pi 会自动压缩，原文保留在卷宗" : ""
-        }`}
+        title={`${t("top.contextTitle", {
+          used: desk.usage.contextTokens,
+          total: desk.usage.contextWindow,
+          tokens: fmtTokens(desk.tokensUsed),
+        })}${contextPct >= 70 ? ` · ${t("top.contextHint")}` : ""}`}
       >
         <div className="gauge-read">
           <div className="v">{contextPct}%</div>
-          <div className="k">上下文</div>
+          <div className="k">{t("top.contextLabel")}</div>
         </div>
         <div className="gauge-bar">
           {Array.from({ length: 12 }, (_, i) => (
@@ -148,8 +150,8 @@ function TopRail({
       <button className="ghost-btn" onClick={onNew} title={t("top.newThread")}>
         <Icon name="plus" size="sm" /> {t("top.newThread")}
       </button>
-      <button className="ghost-btn" onClick={onOpenSettings} title="设置 / 我的风铃（M3-06）">
-        <Icon name="user" size="sm" /> 我的风铃
+      <button className="ghost-btn" onClick={onOpenSettings} title={t("top.settings")}>
+        <Icon name="user" size="sm" /> {t("top.settings")}
       </button>
     </header>
   );
@@ -187,17 +189,15 @@ function Ledger({
   return (
     <aside className="ledger">
       <div className="ledger-head">
-        <span className="h-cap">任务台账</span>
-        <span className="h-count">
-          {activeCount} 在办 · {desk.archived.length} 已归档
-        </span>
+        <span className="h-cap">{t("ledger.title")}</span>
+        <span className="h-count">{t("ledger.summary", { active: activeCount, archived: desk.archived.length })}</span>
       </div>
       <div className="thread-bar">
         <button
           type="button"
           className="thread-cur"
           onClick={() => setThreadsOpen((v) => !v)}
-          title="切换会话 / 搜历史"
+          title={t("ledger.switchThread")}
         >
           <Icon name="layers" size="sm" />
           <span className="t">{desk.thread.title}</span>
@@ -261,16 +261,16 @@ function Ledger({
         <input
           value={q}
           onChange={(e) => setQ(e.target.value)}
-          placeholder="搜工单、成员、产物"
+          placeholder={t("top.searchBoard")}
           style={{ background: "none", border: 0, outline: 0, color: "inherit", font: "inherit", flex: 1, minWidth: 0 }}
         />
       </label>
 
       <div className="ledger-scroll">
         <div className="grp-label">
-          <span className="dot" style={{ background: "var(--seal)" }} /> 等你拍板 · {waiting.length}
+          <span className="dot" style={{ background: "var(--seal)" }} /> {t("ledger.awaiting", { n: waiting.length })}
         </div>
-        {waiting.length === 0 && <div className="ledger-empty">没有等你的工单 —— 她会在需要你裁决时才呈上来</div>}
+        {waiting.length === 0 && <div className="ledger-empty">{t("ledger.awaitingEmpty")}</div>}
         {waiting.map((j) => (
           <JobRow key={j.id} job={j} active={j.id === activeId} onClick={() => onSelect(j.id)} />
         ))}
@@ -287,7 +287,7 @@ function Ledger({
           <div className="archive-band">
             <div className="ab-h">
               <Icon name="archive" size="sm" />
-              <span>归档带</span>
+              <span>{t("ledger.archiveStrip")}</span>
               <span className="mono" style={{ marginLeft: "auto" }}>
                 {archived.length}
               </span>
@@ -625,6 +625,7 @@ function Roster({
   onPlan: (id: string, action: "start" | "revise" | "reject", text?: string) => void;
   onAnswer: (id: string, text: string) => void;
 }) {
+  const t = useT();
   const active = desk.members.filter((m) => m.status !== "idle");
   const idle = desk.members.filter((m) => m.status === "idle");
   const decision = desk.decision;
@@ -635,18 +636,16 @@ function Roster({
       <div className="right-scroll">
         <div className="panel-h">
           <div className="l">
-            <span className="t">我的团队</span>
-            <span className="n">编制 {desk.members.length} / 6</span>
+            <span className="t">{t("roster.title")}</span>
+            <span className="n">{t("roster.capacity", { n: desk.members.length })}</span>
           </div>
-          <span className="cap">
-            在职 {active.length} · 空闲 {idle.length}
-          </span>
+          <span className="cap">{t("roster.split", { a: active.length, b: idle.length })}</span>
         </div>
 
         {desk.members.length === 0 && (
           <div className="note" style={{ boxShadow: "none" }}>
             <Icon name="users" size="sm" />
-            还没有编制。派一件需要动手的活，她会自己招人。
+            {t("roster.empty")}
           </div>
         )}
 
@@ -666,7 +665,7 @@ function Roster({
           <div className="sealcard-empty">
             <Icon name="shield" size="sm" />
             <div>
-              <b>暂无待你拍板</b>
+              <b>{t("roster.noDecision")}</b>
             </div>
           </div>
         )}
@@ -774,22 +773,23 @@ function ApprovalSeal({
   decision: NonNullable<Desk["decision"]>;
   onPlan: (id: string, action: "start" | "revise" | "reject", text?: string) => void;
 }) {
+  const t = useT();
   return (
     <div className="sealcard">
-      <SealHead k="等你批准" id={decision.jobId} />
+      <SealHead k={t("seal.approveHead")} id={decision.jobId} />
       <div className="sealcard-body">
         <SealGlyph />
         <div className="sealcard-text">
-          <div className="who">权限档位：询问</div>
+          <div className="who">{t("seal.permAskMode")}</div>
           <div className="ask">{decision.question}</div>
         </div>
       </div>
       <div className="seal-actions">
         <button type="button" className="btn btn-accept" onClick={() => onPlan(decision.id, "start")}>
-          <Icon name="check" size="sm" /> 允许这次
+          <Icon name="check" size="sm" /> {t("seal.allow")}
         </button>
         <button type="button" className="btn btn-reject" onClick={() => onPlan(decision.id, "reject")}>
-          拒绝
+          {t("seal.reject")}
         </button>
       </div>
     </div>
@@ -1055,23 +1055,23 @@ function ComposerZone({
     <div className="composer">
       {busy && (
         <div className="dispatch-strip">
-          <span className="lbl">进行中</span>
+          <span className="lbl">{t("composer.inProgress")}</span>
           <span className="dchip b">
-            <span className="pip" /> {turn.phase === "review" ? "等你裁决" : "她在跑"}
+            <span className="pip" /> {turn.phase === "review" ? t("composer.awaiting") : t("composer.running")}
           </span>
           {queue.length > 0 && (
             <>
-              <span className="dchip">已排队 {queue.length} 条</span>
+              <span className="dchip">{t("composer.queued", { n: queue.length })}</span>
               {queue.map((q) => (
                 <span key={q.id} className="dchip" title={q.text}>
                   {q.text.slice(0, 12)}
-                  <button type="button" className="x" onClick={() => onQueue("remove", q.id)} title="撤回">
+                  <button type="button" className="x" onClick={() => onQueue("remove", q.id)} title={t("composer.withdraw")}>
                     ×
                   </button>
                 </span>
               ))}
               <button type="button" className="strip-link" onClick={() => onQueue("clear")}>
-                清空
+                {t("common.clear")}
               </button>
             </>
           )}
@@ -1703,3 +1703,4 @@ export function DeskView({
     </div>
   );
 }
+ 
