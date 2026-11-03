@@ -30,6 +30,7 @@ export const MEMBER_EXEC_TOOLS = [
   "browser_fill",
   "browser_extract",
   "browser_close",
+  "kb_add",
 ] as const;
 
 export type MemberChatFn = typeof streamChat;
@@ -55,6 +56,8 @@ export interface MemberRunInput {
   office?: ToolkitOptions["office"];
   /** browser 能力桥接（M2-07）：单例控制器；不注入时成员调 browser 工具会得到如实提示 */
   browser?: ToolkitOptions["browser"];
+  /** 知识库写入桥接（M2-08） */
+  kb?: ToolkitOptions["kb"];
 }
 
 export interface MemberRunResult {
@@ -133,7 +136,7 @@ export function memberSystemPrompt(input: MemberRunInput): string {
 
 export async function runMemberTask(input: MemberRunInput): Promise<MemberRunResult> {
   const chat = input.chatFn ?? streamChat;
-  const toolkit = new Toolkit(input.workdir, { onAudit: input.onAudit, onBeforeWrite: input.onBeforeWrite, office: input.office, browser: input.browser });
+  const toolkit = new Toolkit(input.workdir, { onAudit: input.onAudit, onBeforeWrite: input.onBeforeWrite, office: input.office, browser: input.browser, kb: input.kb });
   const maxTurns = Math.max(1, Math.min(input.profile.limits?.maxTurns ?? 12, 40));
   const tools = memberToolSchemas(input.tools);
   const messages: ChatMessage[] = [

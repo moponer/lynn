@@ -39,6 +39,10 @@ export interface ToolkitOptions {
     extract: (kind: "text" | "table", selector?: string) => Promise<string>;
     close: () => Promise<string>;
   };
+  /** 知识库写入（M2-08）：抓取结果入 ~/.lynn/knowledge/ */
+  kb?: {
+    add: (name: string, markdown: string) => { ok: boolean; file?: string; error?: string };
+  };
 }
 
 const READ_CAP = 200_000;
@@ -120,6 +124,7 @@ export class Toolkit {
   private readonly onBeforeWrite?: ToolkitOptions["onBeforeWrite"];
   private readonly office?: ToolkitOptions["office"];
   private readonly browser?: ToolkitOptions["browser"];
+  private readonly kb?: ToolkitOptions["kb"];
 
   constructor(root: string, opts: ToolkitOptions = {}) {
     this.root = path.resolve(root);
@@ -130,6 +135,7 @@ export class Toolkit {
     this.onBeforeWrite = opts.onBeforeWrite;
     this.office = opts.office;
     this.browser = opts.browser;
+    this.kb = opts.kb;
   }
 
   getRoot(): string {
@@ -375,9 +381,19 @@ export class Toolkit {
       case "browser_extract":
       case "browser_close":
         return this.browserTool(name, args);
+      case "kb_add":
+        return this.kbAdd(args);
       default:
         throw new Error(`工作区里没有这个工具：${name}`);
     }
+  }
+
+  /** 知识库写入（M2-08）：抓取结果存为 markdown；未注入如实说 */
+  private kbAdd(args: Record<string, unknown>): string {
+    if (!this.kb) {
+      return "知识库写入未装配——把内容写进工作区文件即可，入库由风铃或用户处理。";
+    }
+    return JSON.stringify(this.kb.add(String(args.name ?? ""), String(args.markdown ?? "")), null, 2);
   }
 
   /** browser 工具（M2-07）：全局单例资源；未注入（壳没装配）就如实说 */
@@ -476,6 +492,18 @@ export const TOOLKIT_SCHEMAS = [
       name: "browser_close",
       description: "关闭浏览器（释放资源）。",
       parameters: { type: "object", properties: {} },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "kb_add",
+      description: "把抓取/整理的内容存入知识库（markdown，即时可检索）。同名不覆盖。",
+      parameters: {
+        type: "object",
+        properties: { name: { type: "string", description: "文档名" }, markdown: { type: "string", description: "正文（含 # 标题更好）" } },
+        required: ["name", "markdown"],
+      },
     },
   },
   {

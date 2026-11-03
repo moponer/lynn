@@ -1005,6 +1005,9 @@ export class Kernel {
         extract: (kind, selector) => this.browserCtl.extract(kind, selector),
         close: () => this.browserCtl.close(),
       },
+      kb: {
+        add: (name, markdown) => this.knowledge.addDoc(name, markdown),
+      },
       onEvent: (ev) => {
         if (ev.kind === "tool") {
           this.emit({

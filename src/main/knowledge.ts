@@ -174,6 +174,18 @@ export class KnowledgeStore {
     return { indexed, removed };
   }
 
+  /** 写入一篇文档并即时索引（M2-08：抓取结果入知识库；文件是权威，随时可手改） */
+  addDoc(name: string, markdown: string): { ok: boolean; file?: string; error?: string } {
+    const safe = name.replace(/[\\/:*?"<>|\s]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60);
+    if (!safe) return { ok: false, error: `文档名无法生成安全文件名：${name}` };
+    const rel = `${safe}.md`;
+    const full = path.join(this.dir, rel);
+    if (fs.existsSync(full)) return { ok: false, error: `文档已存在（不覆盖，换名或手改）：${rel}` };
+    fs.writeFileSync(full, markdown.trimEnd() + "\n", "utf-8");
+    this.indexFile(full);
+    return { ok: true, file: rel };
+  }
+
   search(q: string, limit = 8): { hits: KbHit[]; error?: string } {
     if (this.backend !== "sqlite") return { hits: [], error: "知识库索引不可用（node:sqlite 缺失）" };
     const match = safeQuery(q);
