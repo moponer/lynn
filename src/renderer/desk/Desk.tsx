@@ -5,7 +5,7 @@ import type { Desk, DeskDiff, DeskJob, DeskMember } from "./model";
 import { Slot, SandboxAction, SandboxHtml } from "./ui-host";
 import { AmbientLayer } from "./AmbientLayer";
 import type { AmbientMode, AmbientParams } from "../../shared/ambient";
-import { STAGES } from "./model";
+import { STAGES, STAGE_KEYS, STATUS_KEY, MEMBER_STATUS_KEY } from "./model";
 import { FeedView } from "./Feed";
 import { useT } from "../i18n";
 
@@ -308,18 +308,19 @@ function Ledger({
 }
 
 function JobRow({ job, active, onClick }: { job: DeskJob; active: boolean; onClick: () => void }) {
+  const t = useT();
   return (
     <button type="button" className={`job${active ? " on" : ""}`} onClick={onClick}>
       <div className="job-top">
         <span className="job-id">{job.id}</span>
         <span className={`st ${statusChipClass(job)}`}>
           {job.status === "in_progress" && <span className="pip" />}
-          {job.statusLabel}
+          {t(STATUS_KEY[job.status] ?? "status.todo")}
         </span>
       </div>
       <div className="job-title">{job.title}</div>
       <div className="job-meta">
-        <Icon name="user" size="sm" /> {job.member ?? "风铃"}
+        <Icon name="user" size="sm" /> {job.member ?? t("sheet.lynn")}
         <span style={{ color: "var(--ink-4)" }}>·</span>
         <span className="mono">{job.at ?? "—"}</span>
       </div>
@@ -329,7 +330,7 @@ function JobRow({ job, active, onClick }: { job: DeskJob; active: boolean; onCli
 
 // ============================ SHEET ============================
 
-const FEED_TAB = { k: "feed", label: "往来", icon: "bell" as IconName };
+const FEED_TAB = { k: "feed", labelKey: "sheet.tabFeed", icon: "bell" as IconName };
 
 function Sheet({
   job,
@@ -344,6 +345,7 @@ function Sheet({
 }) {
   const [tab, setTab] = useState("feed");
   const channel = useMemo(() => feed.filter((c) => !c.jobId), [feed]);
+  const t = useT();
 
   if (!job) {
     return (
@@ -354,12 +356,12 @@ function Sheet({
         <span className="crop br" />
         <div className="sheet-head">
           <div className="sheet-eyebrow">
-            <span>频道</span>
+            <span>{t("sheet.channel")}</span>
             <span style={{ opacity: 0.4 }}>/</span>
-            <span>还没有选中工单</span>
+            <span>{t("sheet.noJob")}</span>
           </div>
-          <h1 className="sheet-title">说吧，要办什么</h1>
-          <div className="sheet-sub">她先写清「要做什么、什么算完成」，再决定自己答还是组队。</div>
+          <h1 className="sheet-title">{t("sheet.emptyTitle")}</h1>
+          <div className="sheet-sub">{t("sheet.emptySub")}</div>
         </div>
         <div className="sheet-body">
           <div className="work feed-work">
@@ -368,13 +370,13 @@ function Sheet({
               onAction={onFeedAction}
               empty={
                 <>
-                  还没有往来。可以在下面写一句要办的事，或者直接问。
+                  {t("sheet.feedEmpty")}
                   <span className="feed-examples">
-                    <button type="button" onClick={() => onExample?.("把 ~/Downloads 里的 CSV 整理成一份周报")}>
-                      整理 CSV 成周报
+                    <button type="button" onClick={() => onExample?.(t("sheet.exampleCsv"))}>
+                      {t("sheet.exampleCsvBtn")}
                     </button>
-                    <button type="button" onClick={() => onExample?.("帮我看看这个仓库最该先修什么")}>
-                      看看仓库先修什么
+                    <button type="button" onClick={() => onExample?.(t("sheet.exampleRepo"))}>
+                      {t("sheet.exampleRepoBtn")}
                     </button>
                   </span>
                 </>
@@ -429,17 +431,17 @@ function Sheet({
           <span>{job.teamName ?? job.teamId}</span>
           <span style={{ opacity: 0.4 }}>/</span>
           <span>
-            派给 {job.member ?? "风铃"} · {job.memberRole ?? "调度"}
+            {t("sheet.assignedTo", { who: job.member ?? t("sheet.lynn") })} · {job.memberRole ?? t("sheet.roleDispatch")}
           </span>
         </div>
         <h1 className="sheet-title">{job.title}</h1>
         <div className="sheet-sub">
-          {job.statusLabel} · 已附 <span className="mono">{job.evidenceCount}</span> 项证据 · 打回上限{" "}
-          <span className="mono">{job.rejectLimit}</span> 轮（已用 <span className="mono">{job.rejections}</span>）
+          {t(STATUS_KEY[job.status] ?? "status.todo")} · {t("sheet.evidenceCount", { n: job.evidenceCount })} ·{" "}
+          {t("sheet.rejectLimit", { n: job.rejectLimit, used: job.rejections })}
           {job.budget && (
             <>
               {" "}
-              · 本单预算{" "}
+              · {t("sheet.budgetLabel")}{" "}
               <span className="mono">
                 {job.budgetKind === "money"
                   ? `¥${job.budget.used.toFixed(2)} / ¥${job.budget.total.toFixed(2)}`
@@ -450,16 +452,16 @@ function Sheet({
         </div>
 
         <div className="steps">
-          {STAGES.map((label, i) => {
+          {STAGE_KEYS.map((key, i) => {
             const done = i < job.stage;
             const now = i === job.stage;
             return (
-              <span key={label} style={{ display: "flex", alignItems: "center" }}>
+              <span key={key} style={{ display: "flex", alignItems: "center" }}>
                 <span className={`step${done ? " done" : now ? " now" : ""}`}>
                   <span className="n">{done ? "✓" : i + 1}</span>
-                  <span className="l">{label}</span>
+                  <span className="l">{t(key)}</span>
                 </span>
-                {i < STAGES.length - 1 && <span className={`step-line${done ? " done" : ""}`} />}
+                {i < STAGE_KEYS.length - 1 && <span className={`step-line${done ? " done" : ""}`} />}
               </span>
             );
           })}
@@ -469,18 +471,18 @@ function Sheet({
       <div className="tabs">
         {[
           FEED_TAB,
-          ...(job.diff ? [{ k: "diff", label: "差异", icon: "diff" as IconName }] : []),
-          ...(job.artifact ? [{ k: "artifact", label: "产物", icon: "table" as IconName }] : []),
-        ].map((t) => {
-          const count = t.k === "feed" ? jobFeed.length : 0;
+          ...(job.diff ? [{ k: "diff", labelKey: "sheet.tabDiff", icon: "diff" as IconName }] : []),
+          ...(job.artifact ? [{ k: "artifact", labelKey: "sheet.tabArtifact", icon: "table" as IconName }] : []),
+        ].map((tabDef) => {
+          const count = tabDef.k === "feed" ? jobFeed.length : 0;
           return (
             <button
               type="button"
-              key={t.k}
-              className={`tab${tab === t.k ? " on" : ""}`}
-              onClick={() => setTab(t.k)}
+              key={tabDef.k}
+              className={`tab${tab === tabDef.k ? " on" : ""}`}
+              onClick={() => setTab(tabDef.k)}
             >
-              <Icon name={t.icon} size="sm" /> {t.label}
+              <Icon name={tabDef.icon} size="sm" /> {t(tabDef.labelKey)}
               {count > 0 && <span className="tag">{count}</span>}
             </button>
           );
@@ -489,14 +491,14 @@ function Sheet({
 
       <div className="sheet-body">
         <div className="work feed-work">
-          {tab === "feed" && <FeedView cards={jobFeed} onAction={onFeedAction} empty="这个工单还没有往来。" />}
+          {tab === "feed" && <FeedView cards={jobFeed} onAction={onFeedAction} empty={t("sheet.jobFeedEmpty")} />}
           {tab === "diff" && job.diff && <DiffView diff={job.diff} />}
           {tab === "artifact" && job.artifact && <ArtifactView job={job} />}
         </div>
 
         <div className="spine">
           <div className="spine-h">
-            <span>证据链</span>
+            <span>{t("sheet.evidenceChain")}</span>
             <span className="mono">
               {evidence.filter((e) => e.level !== "pending").length} / {evidence.length}
             </span>
@@ -884,7 +886,7 @@ function MemberCard({ m, active }: { m: DeskMember; active: boolean }) {
         </div>
         <span className={`st ${chip}`}>
           {m.status === "running" && <span className="pip" />}
-          {m.statusLabel}
+          {t(MEMBER_STATUS_KEY[m.status] ?? "memberStatus.idle")}
         </span>
       </div>
       <div className="mcard-job">

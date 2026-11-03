@@ -22,8 +22,30 @@ export const STATUS_LABEL: Record<TaskStatus, string> = {
   canceled: "已取消",
 };
 
+/** M3-08：状态文案 key（渲染层用 t() 取词；STATUS_LABEL 保留为中文兜底） */
+export const STATUS_KEY: Record<TaskStatus, string> = {
+  backlog: "status.backlog",
+  todo: "status.todo",
+  in_progress: "status.in_progress",
+  in_review: "status.in_review",
+  blocked: "status.blocked",
+  done: "status.done",
+  canceled: "status.canceled",
+};
+
 /** 阶段流：受理 → 拆解 → 派单 → 执行 → 审查 → 汇报 → 归档 */
 export const STAGES = ["受理", "拆解", "派单", "执行", "审查", "汇报", "归档"] as const;
+
+/** M3-08：阶段文案 key（与 STAGES 同序） */
+export const STAGE_KEYS = [
+  "stage.intake",
+  "stage.breakdown",
+  "stage.dispatch",
+  "stage.execute",
+  "stage.review",
+  "stage.report",
+  "stage.archive",
+] as const;
 
 const STAGE_OF: Record<TaskStatus, number> = {
   backlog: 0,
@@ -154,6 +176,14 @@ const MEMBER_STATUS_LABEL: Record<DeskMember["status"], string> = {
   delivered: "待拍板",
   idle: "空闲",
   stuck: "卡住",
+};
+
+/** M3-08：成员状态文案 key */
+export const MEMBER_STATUS_KEY: Record<DeskMember["status"], string> = {
+  running: "memberStatus.running",
+  delivered: "memberStatus.delivered",
+  idle: "memberStatus.idle",
+  stuck: "memberStatus.stuck",
 };
 
 function evidenceOf(job: TaskTrackItem): DeskEvidence[] {
