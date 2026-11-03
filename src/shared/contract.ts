@@ -457,6 +457,21 @@ export interface RpcContracts {
     params: void;
     result: { ok: boolean };
   };
+  /** 模板导出/导入（M2-15）：导入白名单只收窄（越权工具剥掉并告警） */
+  "team.exportTemplate": {
+    params: { name: string; outFile: string };
+    result: { ok: boolean; file?: string; error?: string };
+  };
+  "team.importTemplate": {
+    params: { json: string };
+    result: {
+      ok: boolean;
+      name?: string;
+      members?: number;
+      proposal?: { name: string; members: { name: string; role: string; tools: string[] }[]; warnings: string[] };
+      error?: string;
+    };
+  };
   /** 定时任务（M2-02）：调度器在核心里；单飞/补跑/陈旧清理，lastStatus 如实 */
   "schedule.add": {
     params: { name: string; prompt: string; kind: "once" | "daily" | "interval"; at?: string; time?: string; intervalMin?: number };

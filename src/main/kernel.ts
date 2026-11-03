@@ -2196,6 +2196,24 @@ export class Kernel {
         return { ...this.officeHealth, csv: true, xlsx: this.officeHealth.found } as RpcContracts[M]["result"];
       }
 
+      // 模板导出/导入（M2-15）：第三方岗位说明白名单只收窄
+      case "team.exportTemplate": {
+        const { name, outFile } = params as { name: string; outFile: string };
+        return this.teamStore.exportTemplate(String(name), String(outFile)) as RpcContracts[M]["result"];
+      }
+
+      case "team.importTemplate": {
+        const { json } = params as { json: string };
+        try {
+          const { proposal, commit } = this.teamStore.importTemplate(String(json), MEMBER_EXEC_TOOLS);
+          // 导入默认落库（commit）——提案与告警如实回显，用户在设置页可删
+          const committed = commit();
+          return { ok: true, name: committed.name, members: committed.members, proposal } as RpcContracts[M]["result"];
+        } catch (err) {
+          return { ok: false, error: err instanceof Error ? err.message : String(err) } as RpcContracts[M]["result"];
+        }
+      }
+
       case "session.abort": {
         this.abortRequested = true;
         this.queue = [];

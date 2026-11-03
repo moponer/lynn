@@ -206,6 +206,14 @@ export interface MemberRecord {
   lastAcceptAt?: string;
 }
 
+/** 导入提案（M2-15）：先给用户看 diff，确认才落库 */
+export interface ImportProposal {
+  name: string;
+  members: { name: string; role: string; tools: string[] }[];
+  /** 越权工具被剥掉的告警 */
+  warnings: string[];
+}
+
 export class TeamStore {
   constructor(readonly dataRoot: string) {}
 
@@ -354,6 +362,70 @@ export class TeamStore {
     this.createTeam(teamId, teamName?.trim() || t.name);
     for (const m of t.members) this.writeMember(teamId, m);
     return { template: t.name, members: t.members.length };
+  }
+
+  // ---------- 模板导出/导入（M2-15）：第三方岗位说明不得扩权 ----------
+
+  /** 导出模板到指定文件（用户可分享的 JSON） */
+  exportTemplate(nameOrId: string, outFile: string): { ok: boolean; file?: string; error?: string } {
+    const t = this.findTemplate(nameOrId);
+    if (!t) return { ok: false, error: `没有这套编制模板：${nameOrId}` };
+    try {
+      fs.mkdirSync(path.dirname(outFile), { recursive: true });
+      fs.writeFileSync(outFile, JSON.stringify({ kind: "lynn-team-template", version: 1, ...t }, null, 2), "utf-8");
+      return { ok: true, file: outFile };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  /**
+   * 导入第三方岗位说明：**白名单只收窄不扩张**——
+   *  - 工具白名单不在内置执行工具集内的项剔除并告警（管理型工具一律剥掉）；
+   *  - diff 给用户确认（新增了哪些成员、每个成员留了哪些工具）；
+   *  - 确认后才写入 _templates（可 instantiate）。
+   */
+  importTemplate(jsonText: string, execTools: readonly string[]): { proposal: ImportProposal; commit: () => { name: string; members: number } } {
+    let parsed: { kind?: string; name?: string; sourceTeam?: string; members?: MemberProfile[] };
+    try {
+      parsed = JSON.parse(jsonText) as typeof parsed;
+    } catch (err) {
+      throw new Error(`不是合法的模板 JSON：${err instanceof Error ? err.message : String(err)}`);
+    }
+    if (parsed.kind && parsed.kind !== "lynn-team-template") {
+      throw new Error(`不是风铃团队模板（kind=${parsed.kind}）`);
+    }
+    const members = (parsed.members ?? []).filter((m) => m && m.name);
+    if (!members.length) throw new Error("模板里没有成员（members 为空）");
+    if (members.length > 6) throw new Error(`模板编制 ${members.length} 人超过 6 人上限（§4.10.6 组织膨胀防线）`);
+
+    const warnings: string[] = [];
+    const stripped = members.map((m) => {
+      const kept = (m.tools ?? []).filter((t) => execTools.includes(t));
+      const removed = (m.tools ?? []).filter((t) => !execTools.includes(t));
+      if (removed.length) warnings.push(`「${m.name}」的越权工具已剥掉：${removed.join("、")}`);
+      return { ...m, tools: kept };
+    });
+
+    const name = String(parsed.name ?? "导入编制").slice(0, 40);
+    const proposal: ImportProposal = {
+      name,
+      members: stripped.map((m) => ({ name: m.name, role: m.role, tools: m.tools })),
+      warnings,
+    };
+    const commit = (): { name: string; members: number } => {
+      const template: TeamTemplate = {
+        name,
+        sourceTeam: String(parsed.sourceTeam ?? "imported"),
+        createdAt: new Date().toISOString(),
+        members: stripped,
+      };
+      fs.mkdirSync(this.templatesDir(), { recursive: true });
+      const file = path.join(this.templatesDir(), `${memberFileName(template.name).replace(/\.md$/, "")}.json`);
+      fs.writeFileSync(file, JSON.stringify(template, null, 2), "utf-8");
+      return { name: template.name, members: stripped.length };
+    };
+    return { proposal, commit };
   }
 
   dissolveTeam(teamId: string): void {
