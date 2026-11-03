@@ -10,64 +10,22 @@ import type {
   UsageView,
 } from "../../shared/contract";
 import { actionOf, groupOf, type JobAction, type JobGroup } from "../../shared/task-groups";
+import {
+  MEMBER_STATE_KEY,
+  MEMBER_STATE_LABEL,
+  PHASE_STAGE,
+  STAGE_KEYS,
+  STAGE_OF,
+  STAGES,
+  STATUS_KEY,
+  STATUS_LABEL,
+} from "../../shared/lexicon";
 
 /** 值台数据模型：把内核的指挥板转成"图纸审查室"需要的形状（只做转译，不编造事实） */
 
-export const STATUS_LABEL: Record<TaskStatus, string> = {
-  backlog: "待受理",
-  todo: "待派单",
-  in_progress: "执行中",
-  in_review: "待审查",
-  blocked: "卡住",
-  done: "已归档",
-  canceled: "已取消",
-};
-
-/** M3-08：状态文案 key（渲染层用 t() 取词；STATUS_LABEL 保留为中文兜底） */
-export const STATUS_KEY: Record<TaskStatus, string> = {
-  backlog: "status.backlog",
-  todo: "status.todo",
-  in_progress: "status.in_progress",
-  in_review: "status.in_review",
-  blocked: "status.blocked",
-  done: "status.done",
-  canceled: "status.canceled",
-};
-
-/** 阶段流：受理 → 拆解 → 派单 → 执行 → 审查 → 汇报 → 归档 */
-export const STAGES = ["受理", "拆解", "派单", "执行", "审查", "汇报", "归档"] as const;
-
-/** M3-08：阶段文案 key（与 STAGES 同序） */
-export const STAGE_KEYS = [
-  "stage.intake",
-  "stage.breakdown",
-  "stage.dispatch",
-  "stage.execute",
-  "stage.review",
-  "stage.report",
-  "stage.archive",
-] as const;
-
-const STAGE_OF: Record<TaskStatus, number> = {
-  backlog: 0,
-  todo: 1,
-  in_progress: 3,
-  blocked: 3,
-  in_review: 4,
-  done: 6,
-  canceled: 0,
-};
-
-const PHASE_STAGE: Record<TurnState["phase"], number> = {
-  idle: 0,
-  accepted: 0,
-  planning: 1,
-  awaiting_plan: 2,
-  working: 3,
-  review: 4,
-  done: 6,
-  failed: 3,
-};
+// 词表只在 shared/lexicon.ts 定义一次；这里转出，渲染层继续从 model 取
+export { PHASE_STAGE, STAGE_KEYS, STAGE_OF, STAGES, STATUS_KEY, STATUS_LABEL };
+export { MEMBER_STATE_KEY as MEMBER_STATUS_KEY };
 
 export interface DeskEvidence {
   level: "ok" | "warn" | "pending";
@@ -131,6 +89,9 @@ export interface DeskJob {
 
 export interface DeskMember {
   name: string;
+  /** 归属团队：跨团队平铺时，同名的两个成员必须能区分 */
+  teamId: string;
+  teamName?: string;
   role: string;
   model: string;
   status: "running" | "delivered" | "idle" | "stuck";
@@ -162,6 +123,8 @@ export interface Desk {
   jobs: DeskJob[];
   archived: { id: string; title: string }[];
   members: DeskMember[];
+  /** 未解散的团队数：>1 时成员卡要标出归属，否则同名成员分不清 */
+  teamCount: number;
   decision?: DeskDecision;
   tokensUsed: number;
   /** 真实对话流（频道 + 每个工单的往来） */
@@ -175,21 +138,6 @@ export interface Desk {
   thread: { id: string; title: string };
   threads: { id: string; title: string; updatedAt: string }[];
 }
-
-const MEMBER_STATUS_LABEL: Record<DeskMember["status"], string> = {
-  running: "执行中",
-  delivered: "待拍板",
-  idle: "空闲",
-  stuck: "卡住",
-};
-
-/** M3-08：成员状态文案 key */
-export const MEMBER_STATUS_KEY: Record<DeskMember["status"], string> = {
-  running: "memberStatus.running",
-  delivered: "memberStatus.delivered",
-  idle: "memberStatus.idle",
-  stuck: "memberStatus.stuck",
-};
 
 function evidenceOf(job: TaskTrackItem): DeskEvidence[] {
   // 只列真实证据；没有就是空链（渲染层显示空态，绝不编造"未附"三件套）
@@ -283,10 +231,12 @@ export function deskFromSnapshot(snap: SessionSnapshot): Desk {
         const job = mine.find((j) => j.action !== "none") ?? mine.find((j) => j.group === "running") ?? mine[0];
         return {
           name: m.name,
+          teamId: t.id,
+          teamName: t.name,
           role: m.role,
           model: m.model ?? "未指定",
           status: m.status,
-          statusLabel: MEMBER_STATUS_LABEL[m.status] ?? m.status,
+          statusLabel: MEMBER_STATE_LABEL[m.status] ?? m.status,
           jobId: job?.id,
           jobTitle: job?.title,
           tools: m.toolWhitelist,
@@ -316,6 +266,7 @@ export function deskFromSnapshot(snap: SessionSnapshot): Desk {
       .filter((j) => j.status === "done" || j.status === "canceled")
       .map((j) => ({ id: j.id, title: j.title })),
     members,
+    teamCount: board.teams.filter((t) => t.status !== "dissolved").length,
     decision: first ? toDecision(first) : undefined,
     tokensUsed: board.tokensUsed,
     feed: snap.feed,

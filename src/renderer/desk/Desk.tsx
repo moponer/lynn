@@ -845,9 +845,10 @@ function Roster({
 
         {desk.members.map((m) => (
           <MemberCard
-            key={m.name}
+            key={`${m.teamId}:${m.name}`}
             m={m}
             active={!!decision?.jobId && m.jobId === decision.jobId}
+            showTeam={desk.teamCount > 1}
             onSelect={onSelectJob}
           />
         ))}
@@ -1084,7 +1085,18 @@ function BlockedSeal({ job, onStop }: { job: DeskJob; onStop?: (taskId: string) 
   );
 }
 
-function MemberCard({ m, active, onSelect }: { m: DeskMember; active: boolean; onSelect?: (jobId: string) => void }) {
+function MemberCard({
+  m,
+  active,
+  showTeam,
+  onSelect,
+}: {
+  m: DeskMember;
+  active: boolean;
+  /** 多团队时标出归属（单团队不啰嗦） */
+  showTeam?: boolean;
+  onSelect?: (jobId: string) => void;
+}) {
   const t = useT();
   const chip = m.status === "delivered" ? "st-wait" : m.status === "running" || m.status === "stuck" ? "st-live" : "st-idle";
   const open = () => {
@@ -1124,6 +1136,7 @@ function MemberCard({ m, active, onSelect }: { m: DeskMember; active: boolean; o
         {m.jobTitle ?? "—"}
       </div>
       <div className="mcard-spec">
+        {showTeam && m.teamName && <span className="chip">{m.teamName}</span>}
         {m.tools.slice(0, 4).map((tool) => (
           <span key={tool} className="chip b">
             {tool}
