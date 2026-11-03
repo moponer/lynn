@@ -24,6 +24,12 @@ export const MEMBER_EXEC_TOOLS = [
   "run_command",
   "office_read_table",
   "office_write_table",
+  "browser_navigate",
+  "browser_snapshot",
+  "browser_click",
+  "browser_fill",
+  "browser_extract",
+  "browser_close",
 ] as const;
 
 export type MemberChatFn = typeof streamChat;
@@ -47,6 +53,8 @@ export interface MemberRunInput {
   onBeforeWrite?: (rel: string, full: string, existed: boolean) => void;
   /** office 能力桥接（M2-06）：壳按引擎健康注入；不注入时成员调 office 工具会得到如实提示 */
   office?: ToolkitOptions["office"];
+  /** browser 能力桥接（M2-07）：单例控制器；不注入时成员调 browser 工具会得到如实提示 */
+  browser?: ToolkitOptions["browser"];
 }
 
 export interface MemberRunResult {
@@ -125,7 +133,7 @@ export function memberSystemPrompt(input: MemberRunInput): string {
 
 export async function runMemberTask(input: MemberRunInput): Promise<MemberRunResult> {
   const chat = input.chatFn ?? streamChat;
-  const toolkit = new Toolkit(input.workdir, { onAudit: input.onAudit, onBeforeWrite: input.onBeforeWrite, office: input.office });
+  const toolkit = new Toolkit(input.workdir, { onAudit: input.onAudit, onBeforeWrite: input.onBeforeWrite, office: input.office, browser: input.browser });
   const maxTurns = Math.max(1, Math.min(input.profile.limits?.maxTurns ?? 12, 40));
   const tools = memberToolSchemas(input.tools);
   const messages: ChatMessage[] = [

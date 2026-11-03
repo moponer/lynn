@@ -39,6 +39,7 @@ import {
   type SkillEntry,
 } from "./skills";
 import { probeSoffice, readTable, writeTable, type EngineHealth } from "./office";
+import { BrowserController, sensitiveUrl } from "./browser";
 import { TeamStore } from "./team-store";
 import { TaskStore } from "./task-store";
 import { TaskCase } from "./task-case";
@@ -325,6 +326,8 @@ export class Kernel {
   private knowledge!: KnowledgeStore;
   /** office 引擎健康（M2-06）：init 时探测一次，工具调用时如实降级 */
   private officeHealth!: EngineHealth;
+  /** 浏览器单例（M2-07）：headed 可接管；登录/支付/验证码由 controller 内拦截 */
+  private readonly browserCtl = new BrowserController({ headed: true });
   /** 知识库目录 watch（M2-09）：变更去抖后增量索引 */
   private kbWatch: { close: () => void } | null = null;
   /** 软上限已提醒标记（M2-11）：每会话一次，不刷屏 */
@@ -864,6 +867,14 @@ export class Kernel {
    *  - full：放行（连审批都不弹）
    */
   private async gateTool(name: string, args: Record<string, unknown>): Promise<string | null> {
+    // 敏感页强制 ask（M2-07）：登录/支付/验证码，任何档位都不放行到免审批
+    if (name === "browser_navigate") {
+      const s = sensitiveUrl(String(args.url ?? ""));
+      if (s.sensitive && (this.permission === "auto" || this.permission === "full")) {
+        this.log("browser_sensitive_blocked", { url: String(args.url) });
+        return `导航目标命中敏感特征（${s.why}）。请让用户手动处理登录/支付/验证码，或把该操作改为需要确认的方式。`;
+      }
+    }
     if (this.permission === "auto" || this.permission === "full") return null;
     if (READ_ONLY_TOOLS.has(name)) return null;
     if (this.permission === "plan") {
@@ -985,6 +996,14 @@ export class Kernel {
       office: {
         read: (file) => readTable(file, this.officeHealth),
         write: (file, table) => writeTable(file, table),
+      },
+      browser: {
+        navigate: (url) => this.browserCtl.navigate(url),
+        snapshot: () => this.browserCtl.snapshot(),
+        click: (target) => this.browserCtl.click(target),
+        fill: (target, value) => this.browserCtl.fill(target, value),
+        extract: (kind, selector) => this.browserCtl.extract(kind, selector),
+        close: () => this.browserCtl.close(),
       },
       onEvent: (ev) => {
         if (ev.kind === "tool") {

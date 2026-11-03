@@ -30,6 +30,15 @@ export interface ToolkitOptions {
     read: (file: string) => { table?: { headers: string[]; rows: string[][] }; error?: string };
     write: (file: string, table: { headers: string[]; rows: string[][] }) => { ok: boolean; error?: string };
   };
+  /** browser 能力注入（M2-07）：Playwright/Edge 单例；未注入时如实提示 */
+  browser?: {
+    navigate: (url: string) => Promise<string>;
+    snapshot: () => Promise<string>;
+    click: (target: string) => Promise<string>;
+    fill: (target: string, value: string) => Promise<string>;
+    extract: (kind: "text" | "table", selector?: string) => Promise<string>;
+    close: () => Promise<string>;
+  };
 }
 
 const READ_CAP = 200_000;
@@ -110,6 +119,7 @@ export class Toolkit {
   private readonly onAudit?: ToolkitOptions["onAudit"];
   private readonly onBeforeWrite?: ToolkitOptions["onBeforeWrite"];
   private readonly office?: ToolkitOptions["office"];
+  private readonly browser?: ToolkitOptions["browser"];
 
   constructor(root: string, opts: ToolkitOptions = {}) {
     this.root = path.resolve(root);
@@ -119,6 +129,7 @@ export class Toolkit {
     this.onAudit = opts.onAudit;
     this.onBeforeWrite = opts.onBeforeWrite;
     this.office = opts.office;
+    this.browser = opts.browser;
   }
 
   getRoot(): string {
@@ -357,8 +368,36 @@ export class Toolkit {
       case "office_read_table":
       case "office_write_table":
         return this.officeTool(name, args);
+      case "browser_navigate":
+      case "browser_snapshot":
+      case "browser_click":
+      case "browser_fill":
+      case "browser_extract":
+      case "browser_close":
+        return this.browserTool(name, args);
       default:
         throw new Error(`工作区里没有这个工具：${name}`);
+    }
+  }
+
+  /** browser 工具（M2-07）：全局单例资源；未注入（壳没装配）就如实说 */
+  private async browserTool(name: string, args: Record<string, unknown>): Promise<string> {
+    if (!this.browser) {
+      return "browser 能力未装配（当前进程没有浏览器桥接）——请回报此限制，改用 HTTP 抓取或说明需要浏览器。";
+    }
+    switch (name) {
+      case "browser_navigate":
+        return this.browser.navigate(String(args.url ?? ""));
+      case "browser_snapshot":
+        return this.browser.snapshot();
+      case "browser_click":
+        return this.browser.click(String(args.target ?? ""));
+      case "browser_fill":
+        return this.browser.fill(String(args.target ?? ""), String(args.value ?? ""));
+      case "browser_extract":
+        return this.browser.extract(args.kind === "table" ? "table" : "text", args.selector ? String(args.selector) : undefined);
+      default:
+        return this.browser.close();
     }
   }
 
@@ -383,6 +422,62 @@ export class Toolkit {
 
 /** 官方执行工具的 schema（成员白名单按名字过滤后使用） */
 export const TOOLKIT_SCHEMAS = [
+  {
+    type: "function" as const,
+    function: {
+      name: "browser_navigate",
+      description: "打开网页（http/https）。headed 模式用户随时可接管；登录/支付/验证码页强制需要用户批准。",
+      parameters: { type: "object", properties: { url: { type: "string" } }, required: ["url"] },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "browser_snapshot",
+      description: "页面可访问性快照（给模型看的结构；ref 用于 click/fill）。",
+      parameters: { type: "object", properties: {} },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "browser_click",
+      description: "点击元素（selector 或快照 ref）。敏感页会被拒绝并要求用户批准。",
+      parameters: { type: "object", properties: { target: { type: "string" } }, required: ["target"] },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "browser_fill",
+      description: "填表（selector + value）。敏感页会被拒绝并要求用户批准。",
+      parameters: {
+        type: "object",
+        properties: { target: { type: "string" }, value: { type: "string" } },
+        required: ["target", "value"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "browser_extract",
+      description: "抓取页面：text（正文，≤8000 字）或 table（表头+行，配合 office_write_table 落 csv）。",
+      parameters: {
+        type: "object",
+        properties: { kind: { type: "string", enum: ["text", "table"] }, selector: { type: "string" } },
+        required: ["kind"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "browser_close",
+      description: "关闭浏览器（释放资源）。",
+      parameters: { type: "object", properties: {} },
+    },
+  },
   {
     type: "function" as const,
     function: {
