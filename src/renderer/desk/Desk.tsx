@@ -708,17 +708,18 @@ function PlanSeal({
   onPlan: (id: string, action: "start" | "revise" | "reject", text?: string) => void;
 }) {
   const [revise, setRevise] = useState<string | null>(null);
+  const t = useT();
   const plan = decision.plan!;
   return (
     <div className="sealcard">
-      <SealHead k="任务契约" id={plan.taskId} />
+      <SealHead k={t("seal.contract")} id={plan.taskId} />
       <div className="sealcard-body">
         <SealGlyph />
         <div className="sealcard-text">
           <div className="who">
-            <b>{plan.member ?? "待定"}</b>
-            {plan.deadline ? ` · 截止 ${plan.deadline}` : ""}
-            {plan.budgetTokens ? ` · 预算 ${Math.round(plan.budgetTokens / 1000)}K` : ""}
+            <b>{plan.member ?? t("seal.tbd")}</b>
+            {plan.deadline ? ` · ${t("seal.deadline", { d: plan.deadline })}` : ""}
+            {plan.budgetTokens ? ` · ${t("seal.budget", { k: Math.round(plan.budgetTokens / 1000) })}` : ""}
           </div>
           <div className="ask">{plan.title}</div>
         </div>
@@ -727,13 +728,13 @@ function PlanSeal({
       {revise === null ? (
         <div className="seal-actions">
           <button type="button" className="btn btn-accept" onClick={() => onPlan(decision.id, "start")}>
-            <Icon name="check" size="sm" /> 开始
+            <Icon name="check" size="sm" /> {t("seal.start")}
           </button>
           <button type="button" className="btn" onClick={() => setRevise("")}>
-            <Icon name="undo" size="sm" /> 改一版
+            <Icon name="undo" size="sm" /> {t("seal.revise")}
           </button>
           <button type="button" className="btn btn-reject" onClick={() => onPlan(decision.id, "reject")}>
-            先不做
+            {t("seal.later")}
           </button>
         </div>
       ) : (
@@ -742,7 +743,7 @@ function PlanSeal({
             className="seal-input"
             value={revise}
             onChange={(e) => setRevise(e.target.value)}
-            placeholder="要改哪里？例如：验收标准加一条「必须提供 CSV 行数对账」"
+            placeholder={t("seal.revisePlaceholder")}
           />
           <div className="seal-actions">
             <button
@@ -751,10 +752,10 @@ function PlanSeal({
               disabled={!revise.trim()}
               onClick={() => onPlan(decision.id, "revise", revise)}
             >
-              交给她改
+              {t("seal.reviseSubmit")}
             </button>
             <button type="button" className="btn" onClick={() => setRevise(null)}>
-              取消
+              {t("common.cancel")}
             </button>
           </div>
         </div>
@@ -802,9 +803,10 @@ function QuestionSeal({
   onAnswer: (id: string, text: string) => void;
 }) {
   const [text, setText] = useState("");
+  const t = useT();
   return (
     <div className="sealcard">
-      <SealHead k="等你回答" id={decision.jobId} />
+      <SealHead k={t("seal.questionHead")} id={decision.jobId} />
       <div className="sealcard-body">
         <SealGlyph />
         <div className="sealcard-text">
@@ -816,11 +818,11 @@ function QuestionSeal({
         className="seal-input"
         value={text}
         onChange={(e) => setText(e.target.value)}
-        placeholder="写清你的决定（她会照这个继续）"
+        placeholder={t("seal.answerPlaceholder")}
       />
       <div className="seal-actions">
         <button type="button" className="btn btn-accept" disabled={!text.trim()} onClick={() => onAnswer(decision.id, text)}>
-          提交回答
+          {t("seal.submitAnswer")}
         </button>
       </div>
     </div>
@@ -829,14 +831,16 @@ function QuestionSeal({
 
 /** 工单交付：验收归档 / 打回（打回走审查台三要素） */
 function AcceptSeal({ job, onAccept, onReject }: { job: DeskJob; onAccept: () => void; onReject: () => void }) {
+  const t = useT();
   return (
     <div className="sealcard">
-      <SealHead k="等你拍板" id={job.id} />
+      <SealHead k={t("seal.acceptHead")} id={job.id} />
       <div className="sealcard-body">
         <SealGlyph />
         <div className="sealcard-text">
           <div className="who">
-            <b>{job.member ?? "成员"}</b> 提交{job.at ? ` · ${job.at}` : ""}
+            <b>{job.member ?? t("seal.member")}</b> {t("seal.submitted")}
+            {job.at ? ` · ${job.at}` : ""}
           </div>
           <div className="ask">{job.title}</div>
         </div>
@@ -844,19 +848,21 @@ function AcceptSeal({ job, onAccept, onReject }: { job: DeskJob; onAccept: () =>
       <SealChecks checks={job.evidence.filter((e) => e.verified).map((e) => ({ ok: true, text: e.title }))} />
       <div className="seal-actions">
         <button type="button" className="btn btn-accept" onClick={onAccept}>
-          <Icon name="check" size="sm" /> 验收归档
+          <Icon name="check" size="sm" /> {t("seal.accept")}
         </button>
         <button type="button" className="btn btn-reject" onClick={onReject}>
-          <Icon name="undo" size="sm" /> 打回重做
+          <Icon name="undo" size="sm" /> {t("seal.rejectRedo")}
         </button>
       </div>
       <div className="rounds">
-        <span>打回轮次</span>
+        <span>{t("seal.rounds")}</span>
         {[0, 1, 2].map((i) => (
           <span key={i} className={`sq${i < job.rejections ? " on" : ""}`} />
         ))}
         <span className="rounds-note">
-          {job.rejections >= job.rejectLimit ? "已满，需你决定" : `已用 ${job.rejections} / ${job.rejectLimit}`}
+          {job.rejections >= job.rejectLimit
+            ? t("seal.roundsFull")
+            : t("seal.roundsUsed", { a: job.rejections, b: job.rejectLimit })}
         </span>
       </div>
     </div>
@@ -864,6 +870,7 @@ function AcceptSeal({ job, onAccept, onReject }: { job: DeskJob; onAccept: () =>
 }
 
 function MemberCard({ m, active }: { m: DeskMember; active: boolean }) {
+  const t = useT();
   const chip = m.status === "delivered" ? "st-wait" : m.status === "running" || m.status === "stuck" ? "st-live" : "st-idle";
   return (
     <div className={`mcard${active ? " active" : ""}`}>
@@ -885,12 +892,12 @@ function MemberCard({ m, active }: { m: DeskMember; active: boolean }) {
         {m.jobTitle ?? "—"}
       </div>
       <div className="mcard-spec">
-        {m.tools.slice(0, 4).map((t) => (
-          <span key={t} className="chip b">
-            {t}
+        {m.tools.slice(0, 4).map((tool) => (
+          <span key={tool} className="chip b">
+            {tool}
           </span>
         ))}
-        <span className="chip r">上限 {m.turnLimit ?? "—"} 轮</span>
+        <span className="chip r">{t("member.turnLimit", { n: m.turnLimit ?? "—" })}</span>
       </div>
       <div className="mcard-foot">
         <div className="pbar">
