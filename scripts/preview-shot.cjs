@@ -23,6 +23,12 @@ app.whenReady().then(async () => {
     },
   });
 
+  // 渲染层报错必须可见：截图全黑时靠这条日志定位（而不是盯着黑图猜）
+  win.webContents.on("console-message", (_e, level, message, line, sourceId) => {
+    console.log(`[renderer:${level}] ${message} (${sourceId}:${line})`);
+  });
+  win.webContents.on("render-process-gone", (_e, details) => console.log("RENDER GONE", details));
+
   await win.loadFile(
     path.join(__dirname, "..", "dist", "renderer", "index.html"),
     isPet ? { query: { pet: "1" } } : undefined,

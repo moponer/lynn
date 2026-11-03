@@ -10,10 +10,10 @@ export function WindowControls({ className = "" }: { className?: string }) {
 
   useEffect(() => {
     let alive = true;
-    void window.lynn
-      .rpc("window.control", { action: "query" })
+    // Promise.resolve 包一层：截图/预览用的假桥 rpc 可能同步返回非 Promise
+    Promise.resolve(window.lynn.rpc("window.control", { action: "query" }))
       .then((r) => {
-        if (alive) setMaximized(r.maximized);
+        if (alive) setMaximized(Boolean(r?.maximized));
       })
       .catch(() => undefined);
     const off = window.lynn.onEvent((ev) => {
@@ -26,10 +26,13 @@ export function WindowControls({ className = "" }: { className?: string }) {
   }, []);
 
   const ctl = (action: "minimize" | "maximize" | "close") => {
-    void window.lynn
-      .rpc("window.control", { action })
-      .then((r) => setMaximized(r.maximized))
-      .catch(() => undefined);
+    try {
+      Promise.resolve(window.lynn.rpc("window.control", { action }))
+        .then((r) => setMaximized(Boolean(r?.maximized)))
+        .catch(() => undefined);
+    } catch {
+      /* 假桥/异常环境下按钮点击不炸界面 */
+    }
   };
 
   return (

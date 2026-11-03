@@ -308,7 +308,8 @@ export function deskFromSnapshot(snap: SessionSnapshot): Desk {
     usage: snap.usage,
     queue: snap.queue,
     autoStart: snap.prefs.autoStart,
-    thread: snap.thread,
-    threads: snap.threads,
+    // 老快照/预览数据可能没有 thread 字段：兜底成空线程，不让整页崩在白屏
+    thread: snap.thread ?? { id: "", title: "新会话" },
+    threads: snap.threads ?? [],
   };
 }

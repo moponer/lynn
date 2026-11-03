@@ -6,12 +6,13 @@ import { translate } from "../shared/i18n";
 const I18nContext = createContext<Record<string, string>>({});
 
 export function I18nProvider({ strings, children }: { strings: Record<string, string>; children: ReactNode }) {
-  return <I18nContext.Provider value={strings}>{children}</I18nContext.Provider>;
+  // 字典可能还没拉到（或预览假桥没实现 i18n.get）：空对象兜底，绝不把 undefined 传下去
+  return <I18nContext.Provider value={strings ?? {}}>{children}</I18nContext.Provider>;
 }
 
 export type TFn = (key: string, params?: Record<string, string | number>) => string;
 
 export function useT(): TFn {
   const strings = useContext(I18nContext);
-  return (key, params) => translate(strings, key, params) ?? key;
+  return (key, params) => translate(strings ?? {}, key, params) ?? key;
 }

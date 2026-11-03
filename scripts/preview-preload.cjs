@@ -94,7 +94,13 @@ const snapshot = {
   turn: { phase: "review", busy: false, pending: 0, taskId: "WO-2418" },
   usage: { turnIn: 3120, turnOut: 860, sessionIn: 18400, sessionOut: 3000, contextTokens: 42000, contextWindow: 128000 },
   queue: [],
-  prefs: { autoStart: false },
+  prefs: { autoStart: false, trayOnClose: true, notify: true, lang: "zh" },
+  project: { root: "C:/Users/demo/notes", trusted: true, hasMcp: false },
+  thread: { id: "t-main", title: "月报整理" },
+  threads: [
+    { id: "t-main", title: "月报整理", updatedAt: "2026-11-02T14:32:00.000Z" },
+    { id: "t-2", title: "插件工坊", updatedAt: "2026-11-01T10:05:00.000Z" },
+  ],
 };
 
 contextBridge.exposeInMainWorld("lynn", {
@@ -136,6 +142,11 @@ contextBridge.exposeInMainWorld("lynn", {
     }
     if (method === "plugins.status") {
       return { fingerprint: "3f9c1a2b4d5e6f70", count: 3, safeMode: false, snapshots: [] };
+    }
+    if (method === "window.control") return { ok: true, maximized: false };
+    if (method === "i18n.get") {
+      // 截图只验版式：直接给内置中文（与 src/shared/i18n-strings.ts 的 zh 同源，缺 key 回退键名）
+      return { lang: "zh", strings: {}, sources: [] };
     }
     return { ok: true };
   },

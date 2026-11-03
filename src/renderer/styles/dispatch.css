@@ -152,6 +152,16 @@ svg.ic.lg { width: 20px; height: 20px; }
 .win-btn:hover { background: var(--hover-bg); color: var(--ink); }
 .win-btn.close:hover { background: var(--red-wash); color: var(--red); }
 
+/* 窄屏顶栏减负：隐掉装饰性标签，保住面包屑与窗口按钮（数值本身有 title 说明） */
+@media (max-width: 1420px) {
+  .rail-top .seg-label { display: none; }
+  .rail-top .gauge-read .k { display: none; }
+  .rail-top { gap: 10px; }
+}
+@media (max-width: 1240px) {
+  .rail-top .crumbs { display: none; }
+}
+
 /* 待机页：顶部拖拽带 + 右上窗口按钮（不参与"点任意处唤醒"） */
 .sb-drag {
   position: fixed; top: 0; left: 0; right: 128px; height: 34px;

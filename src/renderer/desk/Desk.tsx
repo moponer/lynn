@@ -65,7 +65,11 @@ function TopRail({
       className="rail-top"
       onDoubleClick={() => {
         // 拖拽区双击 = 最大化/还原（no-drag 控件不受影响）
-        void window.lynn.rpc("window.control", { action: "maximize" });
+        try {
+          Promise.resolve(window.lynn.rpc("window.control", { action: "maximize" })).catch(() => undefined);
+        } catch {
+          /* 假桥环境下忽略 */
+        }
       }}
     >
       <div className="brand">
@@ -129,9 +133,9 @@ function TopRail({
           tokens: fmtTokens(desk.tokensUsed),
         })}${contextPct >= 70 ? ` · ${t("top.contextHint")}` : ""}`}
       >
+        {/* 只留百分比：含义由 title 说明，顶栏不再为一个标签挤出竖排 */}
         <div className="gauge-read">
           <div className="v">{contextPct}%</div>
-          <div className="k">{t("top.contextLabel")}</div>
         </div>
         <div className="gauge-bar">
           {Array.from({ length: 12 }, (_, i) => (

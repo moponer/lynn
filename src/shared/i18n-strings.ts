@@ -241,7 +241,7 @@ export const ZH_STRINGS: Record<string, string> = {
   "top.crumbReview": "验收包",
   "top.permission": "权限",
   "top.switchTo": "切到 {label}",
-  "top.settings": "设置 / 我的风铃",
+  "top.settings": "我的风铃",
   "top.contextTitle": "上下文 {used} / {total} · 会话累计 {tokens} tokens",
   "top.contextHint": "接近上限时 Pi 会自动压缩，原文保留在卷宗",
   "top.contextLabel": "上下文",

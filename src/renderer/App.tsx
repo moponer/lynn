@@ -57,7 +57,8 @@ export default function App() {
     let dead = false;
     rpc("i18n.get")
       .then((r) => {
-        if (!dead) setI18nStrings(r.strings);
+        // 拿不到字典就保持内置中文，不要把 undefined 塞进 context
+        if (!dead && r?.strings && Object.keys(r.strings).length > 0) setI18nStrings(r.strings);
       })
       .catch(() => {
         /* 拉不到就用内置 zh，不阻塞界面 */
