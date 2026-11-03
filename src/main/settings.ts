@@ -33,6 +33,8 @@ const DEFAULT_PREFS: Prefs = { autoStart: false, trayOnClose: true, notify: true
 
 interface SettingsFile {
   model?: StoredModelConfig;
+  /** 视觉/OCR 模型（M2-13）：与对话模型解耦，可独立配置 */
+  vision?: StoredModelConfig;
   prefs?: Partial<Prefs>;
 }
 
@@ -70,6 +72,11 @@ export class SettingsStore {
     return this.read().model ?? null;
   }
 
+  /** 视觉/OCR 模型（M2-13）：独立配置，与对话模型解耦；未配置返回 null（调用方如实降级） */
+  getVisionModel(): StoredModelConfig | null {
+    return this.read().vision ?? null;
+  }
+
   getPrefs(): Prefs {
     return { ...DEFAULT_PREFS, ...(this.read().prefs ?? {}) };
   }
@@ -88,6 +95,54 @@ export class SettingsStore {
     s.model = { ...s.model, apiKey: { encrypted: false, data: "" }, updatedAt: new Date().toISOString() };
     this.write(s);
     return true;
+  }
+
+  /** 清除视觉模型配置（M2-13：解耦后可单独撤下） */
+  clearVision(): boolean {
+    const s = this.read();
+    if (!s.vision) return false;
+    delete s.vision;
+    this.write(s);
+    return true;
+  }
+
+  /** 保存视觉/OCR 模型（M2-13）：与 saveModel 同一套加密纪律 */
+  saveVisionModel(input: {
+    provider: string;
+    baseUrl: string;
+    model: string;
+    apiKey?: string;
+    previous?: StoredModelConfig | null;
+  }): StoredModelConfig {
+    return this.saveTarget("vision", input);
+  }
+
+  private saveTarget(
+    target: "model" | "vision",
+    input: { provider: string; baseUrl: string; model: string; apiKey?: string; previous?: StoredModelConfig | null },
+  ): StoredModelConfig {
+    let apiKey: StoredModelConfig["apiKey"];
+    if (input.apiKey !== undefined && input.apiKey !== "") {
+      const canEncrypt = this.isEncryptionAvailable();
+      apiKey = canEncrypt
+        ? { encrypted: true, data: this.encrypt(input.apiKey).toString("base64") }
+        : { encrypted: false, data: input.apiKey };
+    } else if (input.previous?.apiKey) {
+      apiKey = input.previous.apiKey; // 未填 = 沿用旧 Key
+    } else {
+      throw new Error("首次配置必须填写 API Key");
+    }
+    const cfg: StoredModelConfig = {
+      provider: input.provider || input.previous?.provider || "OpenAI 兼容",
+      baseUrl: input.baseUrl.replace(/\/+$/, ""),
+      model: input.model,
+      apiKey,
+      updatedAt: new Date().toISOString(),
+    };
+    const s = this.read();
+    s[target] = cfg;
+    this.write(s);
+    return cfg;
   }
 
   saveModel(input: {

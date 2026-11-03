@@ -444,6 +444,19 @@ export interface RpcContracts {
     params: void;
     result: { found: boolean; kind: string; version?: string; sofficePath?: string; detail: string; csv: boolean; xlsx: boolean };
   };
+  /** 视觉/OCR 模型（M2-13）：与对话模型解耦，独立配置 */
+  "config.vision.get": {
+    params: void;
+    result: { configured: boolean; provider?: string; baseUrl?: string; model?: string; updatedAt?: string };
+  };
+  "config.vision.save": {
+    params: { provider: string; baseUrl: string; model: string; apiKey?: string };
+    result: { ok: boolean; error?: string };
+  };
+  "config.vision.clear": {
+    params: void;
+    result: { ok: boolean };
+  };
   /** 定时任务（M2-02）：调度器在核心里；单飞/补跑/陈旧清理，lastStatus 如实 */
   "schedule.add": {
     params: { name: string; prompt: string; kind: "once" | "daily" | "interval"; at?: string; time?: string; intervalMin?: number };

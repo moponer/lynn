@@ -2452,6 +2452,38 @@ export class Kernel {
         return { ok: this.settings.clearApiKey() } as RpcContracts[M]["result"];
       }
 
+      // 视觉/OCR 模型（M2-13）：与对话模型解耦，独立配置/探测/清除
+      case "config.vision.get": {
+        const v = this.settings.getVisionModel();
+        return {
+          configured: Boolean(v),
+          provider: v?.provider,
+          baseUrl: v?.baseUrl,
+          model: v?.model,
+          updatedAt: v?.updatedAt,
+        } as RpcContracts[M]["result"];
+      }
+
+      case "config.vision.save": {
+        const p = params as { provider: string; baseUrl: string; model: string; apiKey?: string };
+        try {
+          this.settings.saveVisionModel({
+            provider: p.provider,
+            baseUrl: p.baseUrl,
+            model: p.model,
+            apiKey: p.apiKey,
+            previous: this.settings.getVisionModel(),
+          });
+          return { ok: true } as RpcContracts[M]["result"];
+        } catch (err) {
+          return { ok: false, error: err instanceof Error ? err.message : String(err) } as RpcContracts[M]["result"];
+        }
+      }
+
+      case "config.vision.clear": {
+        return { ok: this.settings.clearVision() } as RpcContracts[M]["result"];
+      }
+
       case "trust.set": {
         const { trusted } = params as { trusted: boolean };
         this.trust.setTrusted(this.projectRoot, Boolean(trusted));
