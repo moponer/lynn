@@ -40,6 +40,7 @@ import {
 } from "./skills";
 import { probeSoffice, readTable, writeTable, type EngineHealth } from "./office";
 import { BrowserController, sensitiveUrl } from "./browser";
+import { COMPLIANCE_NOTE, loadMessaging, type ChannelConfig } from "./messaging";
 import { TeamStore } from "./team-store";
 import { TaskStore } from "./task-store";
 import { TaskCase } from "./task-case";
@@ -2500,6 +2501,19 @@ export class Kernel {
 
       case "config.vision.clear": {
         return { ok: this.settings.clearVision() } as RpcContracts[M]["result"];
+      }
+
+      // 消息平台（M2-16）：合规口径与状态在 handle；configure/send 是异步网络操作，在壳层（main.ts）
+      case "msg.status": {
+        const cfg = loadMessaging(this.dataRoot);
+        const view = (c?: ChannelConfig) =>
+          c ? { appId: c.appId, enabled: c.enabled, updatedAt: c.updatedAt } : null;
+        return {
+          compliance: COMPLIANCE_NOTE,
+          feishu: view(cfg.feishu),
+          qq: view(cfg.qq),
+          receiveSupported: false,
+        } as RpcContracts[M]["result"];
       }
 
       case "trust.set": {

@@ -6,6 +6,17 @@ import type { RpcMethod } from "../shared/contract";
 import { Kernel } from "./kernel";
 import { resolveFeedUrl, transition, type UpdateState } from "./updater";
 import { discoverModels } from "./providers";
+import {
+  COMPLIANCE_NOTE,
+  configureChannel,
+  feishuSend,
+  loadMessaging,
+  qqSend,
+  resolveEnabledChannel,
+  saveMessaging,
+  type ChannelConfig,
+  type TokenCache,
+} from "./messaging";
 
 /**
  * Electron 主进程 —— 薄壳（§4.1）。
@@ -131,6 +142,43 @@ function bindUpdater(): void {
     updateBroadcast();
   });
 }
+
+// 消息平台（M2-16）：合规路径——官方 API + 用户自建应用；凭据加密落盘
+const msgTokenCache: Record<"feishu" | "qq", TokenCache> = { feishu: {}, qq: {} };
+
+function decryptSecret(secret: ChannelConfig["secret"]): string {
+  return secret.encrypted ? safeStorage.decryptString(Buffer.from(secret.data, "base64")) : secret.data;
+}
+
+async function handleMsgRpc(method: string, params: Record<string, unknown>): Promise<unknown> {
+  if (method === "msg.configure") {
+    const p = params as { channel: "feishu" | "qq"; appId: string; appSecret?: string; enable?: boolean };
+    const encrypt: (plain: string) => ChannelConfig["secret"] = (plain) =>
+      safeStorage.isEncryptionAvailable()
+        ? { encrypted: true, data: safeStorage.encryptString(plain).toString("base64") }
+        : { encrypted: false, data: plain };
+    const r = configureChannel(loadMessaging(kernel.dataRoot), p.channel, p, encrypt);
+    if (!r.ok) return { ok: false, error: r.error };
+    saveMessaging(kernel.dataRoot, r.next);
+    return { ok: true, compliance: COMPLIANCE_NOTE };
+  }
+
+  // msg.send
+  const p = params as { channel: "feishu" | "qq"; receiveId: string; text: string };
+  const guard = resolveEnabledChannel(loadMessaging(kernel.dataRoot), p.channel);
+  if (!guard.ok) return { ok: false, error: guard.error };
+  const secret = decryptSecret(guard.ch.secret);
+  try {
+    return p.channel === "feishu"
+      ? await feishuSend({ appId: guard.ch.appId, appSecret: secret }, String(p.receiveId), String(p.text), globalThisFetch, msgTokenCache.feishu)
+      : await qqSend({ appId: guard.ch.appId, appSecret: secret }, String(p.receiveId), String(p.text), globalThisFetch, msgTokenCache.qq);
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+const globalThisFetch = ((url: string, init?: { method?: string; headers?: Record<string, string>; body?: string }) =>
+  fetch(url, init as RequestInit)) as never;
 
 async function handleUpdateRpc(method: string): Promise<unknown> {
   if (method === "update.status") return { ...updateState };
@@ -313,6 +361,9 @@ app.whenReady().then(async () => {
         const p = params as { baseUrl: string; apiKey?: string };
         if (!p.baseUrl) return { models: [], error: "缺 baseUrl" };
         return await discoverModels(p.baseUrl, p.apiKey);
+      }
+      if (method === "msg.configure" || method === "msg.send") {
+        return await handleMsgRpc(method, params as Record<string, unknown>);
       }
       if (method === "plugins.probe") {
         return kernel.probePlugin((params as { id: string }).id);

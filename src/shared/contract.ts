@@ -472,6 +472,24 @@ export interface RpcContracts {
       error?: string;
     };
   };
+  /** 消息平台（M2-16）：合规路径（官方 API + 用户自建应用）；收消息未实现如实标注 */
+  "msg.status": {
+    params: void;
+    result: {
+      compliance: string;
+      feishu: { appId: string; enabled: boolean; updatedAt: string } | null;
+      qq: { appId: string; enabled: boolean; updatedAt: string } | null;
+      receiveSupported: boolean;
+    };
+  };
+  "msg.configure": {
+    params: { channel: "feishu" | "qq"; appId: string; appSecret?: string; enable?: boolean };
+    result: { ok: boolean; compliance?: string; error?: string };
+  };
+  "msg.send": {
+    params: { channel: "feishu" | "qq"; receiveId: string; text: string };
+    result: { ok: boolean; error?: string };
+  };
   /** 定时任务（M2-02）：调度器在核心里；单飞/补跑/陈旧清理，lastStatus 如实 */
   "schedule.add": {
     params: { name: string; prompt: string; kind: "once" | "daily" | "interval"; at?: string; time?: string; intervalMin?: number };
