@@ -328,6 +328,12 @@ svg.ic.lg { width: 20px; height: 20px; }
 }
 .job-top { display: flex; align-items: center; gap: 7px; }
 .job-id { font-family: var(--f-mono); font-size: var(--fs-label); color: var(--ink-4); letter-spacing: .04em; }
+/* 多团队时首行换团队名：用户认"哪条任务线"，不认 WO-2418 */
+.job-team {
+  display: inline-flex; align-items: center; gap: 4px; min-width: 0;
+  font-size: var(--fs-label); color: var(--ink-3); letter-spacing: .04em;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .job-title { font-size: var(--fs-body); color: var(--ink-2); margin-top: 3px; line-height: 1.35; }
 .job.on .job-title { color: var(--ink); }
 .job-meta { display: flex; align-items: center; gap: 6px; margin-top: 6px; font-size: var(--fs-meta); color: var(--ink-4); }
@@ -1841,6 +1847,11 @@ button.ev:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
   display: flex; align-items: center; justify-content: space-between; gap: 8px;
   padding: 4px 6px 6px; color: var(--ink-3); font-size: var(--fs-label);
 }
+.jobmenu-title {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--ink-2); font-size: var(--fs-meta);
+}
+.jobmenu-sub { padding: 0 6px 6px; color: var(--ink-4); font-size: var(--fs-label); opacity: .7; }
 .jobmenu-ask { margin: 4px 6px 6px; font-size: var(--fs-meta); color: var(--ink-2); line-height: 1.5; }
 .jobmenu-item {
   text-align: left; padding: 6px 8px; border-radius: var(--r-s);
@@ -1882,7 +1893,10 @@ button.ev:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 }
 .tov-job.on { background: var(--blue-wash); }
 .tov-job-h { display: flex; align-items: center; gap: 8px; }
-.tov-id { color: var(--ink-4); font-size: var(--fs-label); }
+/* 工单号只是审计尾注：推到最右、降透明度，不再和任务名抢视线 */
+.tov-id { margin-left: auto; color: var(--ink-4); font-size: var(--fs-label); opacity: .6; }
+.tov-team { color: var(--ink-2); }
+.tov-count { color: var(--ink-4); font-size: var(--fs-label); }
 .tov-title {
   flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   color: var(--ink); font-size: var(--fs-body);

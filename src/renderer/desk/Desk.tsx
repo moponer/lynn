@@ -505,6 +505,7 @@ function Ledger({
                   key={j.id}
                   job={j}
                   active={j.id === activeId}
+                  showTeam={desk.teamCount > 1}
                   onClick={() => onSelect(j.id)}
                   onCancel={desk.running.includes(j.id) ? onCancelTask : undefined}
                   onMenu={(e) => setMenu({ job: j, x: e.clientX, y: e.clientY })}
@@ -603,12 +604,15 @@ function Ledger({
 function JobRow({
   job,
   active,
+  showTeam,
   onClick,
   onCancel,
   onMenu,
 }: {
   job: DeskJob;
   active: boolean;
+  /** 多团队时首行显示团队名（=这张单属于哪条任务线）；单团队不啰嗦 */
+  showTeam?: boolean;
   onClick: () => void;
   onCancel?: (taskId: string) => void;
   onMenu?: (e: React.MouseEvent) => void;
@@ -621,6 +625,8 @@ function JobRow({
       className={`job${active ? " on" : ""}`}
       role="button"
       tabIndex={0}
+      // 工单号不再占据首行（没人记得 WO-2418）：需要时悬停看，审计在图纸里
+      title={`${job.id}${job.teamName ? ` · ${job.teamName}` : ""}`}
       onClick={onClick}
       onContextMenu={(e) => {
         if (!onMenu) return;
@@ -635,7 +641,13 @@ function JobRow({
       }}
     >
       <div className="job-top">
-        <span className="job-id">{job.id}</span>
+        {showTeam && job.teamName ? (
+          <span className="job-team">
+            <Icon name="users" size="sm" /> {job.teamName}
+          </span>
+        ) : (
+          <span className="job-id">{job.id}</span>
+        )}
         <span className={`st ${statusChipClass(job)}`}>
           {running && <span className="pip" />}
           {t(STATUS_KEY[job.status] ?? "status.todo")}
@@ -720,8 +732,15 @@ function JobMenu({
   return (
     <div className="jobmenu" ref={box} style={style} role="menu" aria-label={job.id}>
       <div className="jobmenu-h">
-        <span className="mono">{job.id}</span>
+        {/* 菜单头也用任务名：工单号放下面一行小字，审计时再认 */}
+        <span className="jobmenu-title" title={job.title}>
+          {job.title}
+        </span>
         <span className={`st ${statusChipClass(job)}`}>{t(STATUS_KEY[job.status] ?? "status.todo")}</span>
+      </div>
+      <div className="jobmenu-sub mono" title={t("tov.idHint")}>
+        {job.id}
+        {job.teamName ? ` · ${job.teamName}` : ""}
       </div>
       {confirm ? (
         <>
@@ -2451,6 +2470,7 @@ function TaskOverview({
                   <Icon name="users" size="sm" />
                   <b>{g.teamName}</b>
                   <span className="mono">{t("tov.members", { n: members })}</span>
+                  <span className="tov-count">{t("tov.group", { n: g.jobs.length })}</span>
                 </div>
                 {g.jobs.map((j) => {
                   const running = desk.running.includes(j.id);
@@ -2459,7 +2479,7 @@ function TaskOverview({
                   return (
                     <div className={`tov-job${j.id === currentId ? " on" : ""}`} key={j.id}>
                       <div className="tov-job-h">
-                        <span className="mono tov-id">{j.id}</span>
+                        {/* 主标识是任务名（简报首行），工单号只是审计尾注：没人记得 WO-2418 */}
                         <span className="tov-title">{j.title}</span>
                         <span className={`st ${statusChipClass(j)}`}>
                           {running && <span className="pip" />}
@@ -2467,6 +2487,9 @@ function TaskOverview({
                         </span>
                       </div>
                       <div className="tov-job-meta">
+                        <span className="tov-team">
+                          <Icon name="users" size="sm" /> {j.teamName ?? j.teamId}
+                        </span>
                         <span>
                           <Icon name="user" size="sm" /> {j.member ?? "—"}
                         </span>
@@ -2478,6 +2501,9 @@ function TaskOverview({
                         ) : (
                           <span className="tov-here">{thread ? t("tov.threadHere") : t("tov.noThread")}</span>
                         )}
+                        <span className="mono tov-id" title={t("tov.idHint")}>
+                          {j.id}
+                        </span>
                       </div>
                       <div className="tov-job-actions">
                         <button type="button" className="ghost-btn" onClick={() => onOpen(j.id)}>
