@@ -50,6 +50,11 @@ export interface TaskRecord {
   updatedAt: string;
   /** 这一段的 Pi session（追溯用，§4.10.7） */
   sessionId?: string;
+  /**
+   * 这张单是在哪个会话（线程）里派的。
+   * 有了它，换到新会话后旧工单的"往来"才读得回来，也能回答"这单从哪来"。
+   */
+  threadId?: string;
 }
 
 export class TaskConflictError extends Error {
@@ -171,7 +176,14 @@ export class TaskStore {
   }
 
   /** 建立工单：状态从 backlog 起，版本 1。父子关系在建单时定，之后不可改（单亲） */
-  create(input: { id: string; title: string; teamId: string; parentId?: string; member?: string }): TaskRecord {
+  create(input: {
+    id: string;
+    title: string;
+    teamId: string;
+    parentId?: string;
+    member?: string;
+    threadId?: string;
+  }): TaskRecord {
     if (this.get(input.id)) throw new TaskRuleError(`工单已存在: ${input.id}`);
     if (input.parentId) {
       const parent = this.get(input.parentId);
@@ -194,6 +206,7 @@ export class TaskStore {
       approvals: [],
       createdAt: now,
       updatedAt: now,
+      threadId: input.threadId,
     };
     this.write(rec);
     return rec;
@@ -233,7 +246,11 @@ export class TaskStore {
    *  - → done：必须有用户的显式拍板记录；
    *  - 打回：走 reject()，轮次 +1，满 3 轮强制升级（转 blocked）。
    */
-  transition(id: string, to: TaskStatus, opts: { expectedVersion?: number; member?: string; sessionId?: string } = {}): TaskRecord {
+  transition(
+    id: string,
+    to: TaskStatus,
+    opts: { expectedVersion?: number; member?: string; sessionId?: string; threadId?: string } = {},
+  ): TaskRecord {
     const rec = this.mustGet(id);
     if (opts.expectedVersion !== undefined && rec.version !== opts.expectedVersion) {
       throw new TaskConflictError(id, opts.expectedVersion, rec.version);
@@ -254,6 +271,7 @@ export class TaskStore {
     rec.status = to;
     if (opts.member) rec.member = opts.member;
     if (opts.sessionId) rec.sessionId = opts.sessionId;
+    if (opts.threadId) rec.threadId = opts.threadId;
     return this.commit(rec);
   }
 
@@ -315,9 +333,20 @@ export class TaskStore {
   }
 
   /** 供内核集成：没有工单就补建，并推到 in_progress（派单即开工） */
-  ensureInProgress(input: { id: string; title: string; teamId: string; member?: string }): TaskRecord {
+  ensureInProgress(input: {
+    id: string;
+    title: string;
+    teamId: string;
+    member?: string;
+    threadId?: string;
+  }): TaskRecord {
     const existing = this.get(input.id);
     if (existing) {
+      // 老工单补上会话归属（派单时没记过的，下一次开工补记）
+      if (input.threadId && !existing.threadId) {
+        existing.threadId = input.threadId;
+        this.commit(existing);
+      }
       if (existing.status === "backlog" || existing.status === "todo") {
         const r1 = this.transition(input.id, existing.status === "backlog" ? "todo" : "in_progress", { member: input.member });
         return r1.status === "todo" ? this.transition(input.id, "in_progress", { member: input.member }) : r1;

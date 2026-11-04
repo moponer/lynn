@@ -85,6 +85,8 @@ export interface DeskJob {
   rejectDraft?: { what: string; expect: string; deadline: string };
   /** 最近一次汇报（四段式，真实数据） */
   report?: { conclusion: string; evidence: string; unfinished: string; decision: string };
+  /** 这张单是在哪个会话里派的（换会话后回原会话读往来） */
+  threadId?: string;
 }
 
 export interface DeskMember {
@@ -192,6 +194,7 @@ function toJob(job: TaskTrackItem, teamName?: string, member?: Member, feed: Fee
     budgetKind: "tokens",
     rejectDraft: job.rejectDraft,
     report: reportOf(feed, job.id),
+    threadId: job.threadId,
   };
 }
 

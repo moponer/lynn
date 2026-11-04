@@ -372,6 +372,7 @@ export default function App() {
         }}
         onThreadNew={() => void onNew()}
         onThreadSearch={(q) => rpc("thread.search", { q }).then((r) => r.results)}
+        onTaskFeed={(taskId) => rpc("task.feed", { taskId })}
         onCancelTask={(taskId) => {
           void rpc("task.cancel", { taskId }).then(async (r) => {
             if (!r.ok) setNotice(r.error ?? "停不下来");

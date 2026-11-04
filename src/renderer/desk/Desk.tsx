@@ -460,17 +460,43 @@ const FEED_TAB = { k: "feed", labelKey: "sheet.tabFeed", icon: "bell" as IconNam
 function Sheet({
   job,
   feed,
+  threadId,
+  onTaskFeed,
+  onThread,
   onFeedAction,
   onExample,
 }: {
   job?: DeskJob;
   feed: FeedCard[];
+  /** 当前会话 id：工单的出发会话不同时，往来要去那边读 */
+  threadId?: string;
+  onTaskFeed?: (taskId: string) => Promise<{ cards: FeedCard[]; threadId?: string; threadTitle?: string }>;
+  onThread?: (id: string) => void;
   onFeedAction?: (c: FeedCard) => void;
   onExample?: (text: string) => void;
 }) {
   const [tab, setTab] = useState("feed");
+  /** 来自另一个会话的往来（当前 feed 里没有） */
+  const [foreign, setForeign] = useState<{ cards: FeedCard[]; threadId: string; title?: string } | null>(null);
   const channel = useMemo(() => feed.filter((c) => !c.jobId), [feed]);
   const t = useT();
+  const jobId = job?.id;
+  const jobThread = job?.threadId;
+
+  useEffect(() => {
+    setForeign(null);
+    if (!jobId || !jobThread || jobThread === threadId || !onTaskFeed) return;
+    let alive = true;
+    void onTaskFeed(jobId)
+      .then((r) => {
+        if (!alive || !r.cards.length) return;
+        setForeign({ cards: r.cards, threadId: r.threadId ?? jobThread, title: r.threadTitle });
+      })
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, [jobId, jobThread, threadId, onTaskFeed]);
 
   if (!job) {
     return (
@@ -540,7 +566,9 @@ function Sheet({
   }
 
   const evidence = job.evidence;
-  const jobFeed = useMemo(() => feed.filter((c) => c.jobId === job.id || !c.jobId), [feed, job.id]);
+  // 只收本单的卡：频道消息不该混进工单往来（原来 `|| !c.jobId` 把全局对话塞进每张单）
+  const ownCards = feed.filter((c) => c.jobId === job.id);
+  const jobCards = ownCards.length > 0 ? ownCards : (foreign?.cards ?? []);
 
   return (
     <div className="sheet">
@@ -599,7 +627,7 @@ function Sheet({
           ...(job.diff ? [{ k: "diff", labelKey: "sheet.tabDiff", icon: "diff" as IconName }] : []),
           ...(job.artifact ? [{ k: "artifact", labelKey: "sheet.tabArtifact", icon: "table" as IconName }] : []),
         ].map((tabDef) => {
-          const count = tabDef.k === "feed" ? jobFeed.length : 0;
+          const count = tabDef.k === "feed" ? jobCards.length : 0;
           return (
             <button
               type="button"
@@ -616,7 +644,23 @@ function Sheet({
 
       <div className="sheet-body">
         <div className="work feed-work">
-          {tab === "feed" && <FeedView cards={jobFeed} onAction={onFeedAction} empty={t("sheet.jobFeedEmpty")} />}
+          {tab === "feed" && (
+            <>
+              {foreign && (
+                <div className="note" style={{ boxShadow: "none", marginBottom: 8 }}>
+                  <Icon name="layers" size="sm" />
+                  <span>
+                    {t("sheet.fromThread")}
+                    <b>{foreign.title ?? "…"}</b>
+                  </span>
+                  <button type="button" className="strip-link" onClick={() => onThread?.(foreign.threadId)}>
+                    {t("sheet.gotoThread")}
+                  </button>
+                </div>
+              )}
+              <FeedView cards={jobCards} onAction={onFeedAction} empty={t("sheet.jobFeedEmpty")} />
+            </>
+          )}
           {tab === "diff" && job.diff && <DiffView diff={job.diff} />}
           {tab === "artifact" && job.artifact && <ArtifactView job={job} />}
         </div>
@@ -1880,6 +1924,7 @@ export function DeskView({
   onThread,
   onThreadNew,
   onThreadSearch,
+  onTaskFeed,
   onCreateTeam,
   onCancelTask,
   notice,
@@ -1906,6 +1951,8 @@ export function DeskView({
   onThread?: (id: string) => void;
   onThreadNew?: () => void;
   onThreadSearch?: (q: string) => Promise<{ id: string; title: string; hits: string[] }[]>;
+  /** 工单往来（跨会话追溯）：工单出发会话 ≠ 当前会话时按 threadId 回读 */
+  onTaskFeed?: (taskId: string) => Promise<{ cards: FeedCard[]; threadId?: string; threadTitle?: string }>;
   /** 建团队（§4.10.3 修正）：用户只给名字，ID 由系统生成 */
   onCreateTeam?: (name: string) => void;
   /** 停一张在跑的单 */
@@ -1979,7 +2026,16 @@ export function DeskView({
         />
         <main className="center">
           <div className="sheet-wrap">
-            <Sheet job={current} feed={desk.feed} onFeedAction={onFeedAction} onExample={(t) => onSend(t, "queue")} />
+            <Sheet
+              key={current?.id ?? "none"}
+              job={current}
+              feed={desk.feed}
+              threadId={desk.thread.id}
+              onTaskFeed={onTaskFeed}
+              onThread={onThread}
+              onFeedAction={onFeedAction}
+              onExample={(t) => onSend(t, "queue")}
+            />
           </div>
           <ComposerZone
             configured={configured}

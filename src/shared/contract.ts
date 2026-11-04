@@ -213,6 +213,8 @@ export interface TaskTrackItem {
   evidence?: { label: string; ref: string; verified: boolean; at?: string }[];
   /** 她预填的打回三要素（来自最近一次打回） */
   rejectDraft?: { what: string; expect: string; deadline: string };
+  /** 这张单是在哪个会话里派的（跨会话追溯） */
+  threadId?: string;
 }
 
 export interface Decision {
@@ -290,6 +292,8 @@ export type KernelEvent =
       report?: FeedCard["report"];
     }
   | { type: "turn"; turn: TurnState }
+  /** 另一个会话有新动静（后台成员回报写回了它的出发会话）：前端只刷新，不 upsert */
+  | { type: "thread"; threadId: string }
   | { type: "done"; tokens: number }
   | { type: "error"; code?: string; message: string; action?: FeedCard["action"] };
 
@@ -572,6 +576,14 @@ export interface RpcContracts {
   "thread.search": {
     params: { q: string };
     result: { results: { id: string; title: string; hits: string[] }[] };
+  };
+  /**
+   * 某张工单的往来。工单在 A 会话派出、用户切到 B 会话后，
+   * 当前 feed 里没有它的卡，只能按 task.threadId 回原会话读。
+   */
+  "task.feed": {
+    params: { taskId: string };
+    result: { cards: FeedCard[]; threadId?: string; threadTitle?: string };
   };
   /** 撤销上一轮的文件改动（检查点回滚：改过的还原、新建的删掉） */
   "session.undo": {

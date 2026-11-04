@@ -558,6 +558,47 @@ export class Kernel {
     this.persistThreadSoon();
   }
 
+  /**
+   * 后台任务（成员执行）的卡片写回它出发的会话。
+   * 用户已经切到别的会话时，只落盘 + 发一个"该会话有动静"的事件，
+   * 绝不 push 进当前 feed——否则新会话会被旧任务的回报刷屏、旧会话反而缺卡。
+   */
+  private cardTo(threadId: string, c: Omit<FeedCard, "id" | "createdAt">): void {
+    if (!threadId || threadId === this.currentThreadId) {
+      this.card(c);
+      return;
+    }
+    const st = this.threads.loadState(threadId);
+    const seq =
+      st.feed.reduce((n, x) => Math.max(n, Number(/^c-(\d+)$/.exec(x.id)?.[1] ?? 0)), 0) + 1;
+    const full: FeedCard = {
+      ...c,
+      id: `c-${seq}`,
+      createdAt: new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }),
+    };
+    st.feed.push(full);
+    this.threads.saveState(threadId, { feed: st.feed.slice(-200), history: st.history });
+    this.notify({ type: "thread", threadId });
+  }
+
+  /** 同一张卡在别的会话里的状态更新（成员开工卡 → 回报/未完成） */
+  private patchCardTo(threadId: string, card: FeedCard, patch: Partial<FeedCard>): void {
+    if (!threadId || threadId === this.currentThreadId) {
+      this.patchCard(card, patch);
+      return;
+    }
+    const st = this.threads.loadState(threadId);
+    const hit = st.feed.find((x) => x.id === card.id);
+    if (!hit) {
+      // 出发会话里没这张卡（极端情况）：当作新卡补一条，别把结果丢掉
+      this.cardTo(threadId, { ...card, ...patch });
+      return;
+    }
+    Object.assign(hit, patch);
+    this.threads.saveState(threadId, { feed: st.feed.slice(-200), history: st.history });
+    this.notify({ type: "thread", threadId });
+  }
+
   /** 回合状态迁移：所有 UI 的"谁在干什么"都只读这一个字段 */
   private setTurn(patch: Partial<TurnState>): void {
     this.turn = { ...this.turn, ...patch, pending: this.queue.length };
@@ -882,13 +923,21 @@ export class Kernel {
    * 成员回报登记（风铃 review_result 与成员后台回报共用；§4.10.5 证据原则的执行点）。
    * 证据可点开验证：真实文件收进卷宗 artifacts/，验不了的只登记 verified:false，不冒充。
    */
-  private registerReport(teamId: string, taskId: string, member: string, text: string, evidence: string[], sessionId?: string): string {
+  private registerReport(
+    teamId: string,
+    taskId: string,
+    member: string,
+    text: string,
+    evidence: string[],
+    sessionId?: string,
+    threadId: string = this.currentThreadId,
+  ): string {
     this.tools.reviewResult(teamId, taskId, { member, text, evidence, sessionId: sessionId ?? this.host?.sessionId });
     this.taskCase.append(taskId, { kind: "report", member, text, meta: { evidence } });
     this.taskCase.appendSummary(taskId, `${member} 回报：${text.slice(0, 60)}`);
 
     try {
-      this.taskStore.ensureInProgress({ id: taskId, title: taskId, teamId, member });
+      this.taskStore.ensureInProgress({ id: taskId, title: taskId, teamId, member, threadId });
     } catch {
       // 工单已存在或状态已就位
     }
@@ -1023,6 +1072,8 @@ export class Kernel {
         title: (p.brief.split("\n").map((l) => l.trim()).find((l) => l.length > 0) ?? "").slice(0, 40) || p.taskId,
         teamId: p.teamId,
         member: p.member,
+        // 记下"这单从哪个会话派出"：换会话后旧工单的往来还能读回来
+        threadId: this.currentThreadId,
       });
     } catch {
       /* 工单状态已就位 */
@@ -1072,6 +1123,8 @@ export class Kernel {
     if (this.memberRuns.size >= MAX_CONCURRENT_MEMBERS) {
       return `同时最多 ${MAX_CONCURRENT_MEMBERS} 个成员在跑，现在已经有 ${this.memberRuns.size} 个（${[...this.memberRuns.keys()].join("、")}）。等其中一个回报或点「停」之后再派。`;
     }
+    // 后台执行可能跨会话：出发时的线程记下来，回报要写回那一个，不能落到用户当前看的会话里
+    const runThreadId = this.currentThreadId;
     // 同一个成员同时跟两张单 = 工具层互相堵死（真实事故：13:24 与 13:26 各派一张，然后两边都不动了）
     const memberKey = `${teamId}::${member}`;
     const busyTask = this.memberActive.get(memberKey);
@@ -1161,8 +1214,8 @@ export class Kernel {
         const used = Math.round((Date.now() - startedAt) / 1000);
         if (result.status === "reported" && result.evidence.length > 0) {
           // 只有真交了证据才登记；空回报进登记通道会抛错，原来那条路直接变成"崩溃"卡
-          this.registerReport(teamId, taskId, member, result.report, result.evidence);
-          this.patchCard(live, {
+          this.registerReport(teamId, taskId, member, result.report, result.evidence, undefined, runThreadId);
+          this.patchCardTo(runThreadId, live, {
             badge: "回报",
             title: `${member} 回报 · ${taskId}`,
             meta: `${result.turns} 轮 · ${used}s`,
@@ -1171,11 +1224,16 @@ export class Kernel {
           return;
         }
         if (result.status === "aborted") {
-          this.patchCard(live, { badge: "已停止", title: `${member} 已停止 · ${taskId}`, meta: `${used}s`, body: "用户中止。已写出的文件留在工作区。" });
+          this.patchCardTo(runThreadId, live, {
+            badge: "已停止",
+            title: `${member} 已停止 · ${taskId}`,
+            meta: `${used}s`,
+            body: "用户中止。已写出的文件留在工作区。",
+          });
           return;
         }
         // 没回报：如实说清、把单子标成"卡住"让它在待你区里显形，别静默消失
-        this.patchCard(live, {
+        this.patchCardTo(runThreadId, live, {
           badge: "未完成",
           title: `${member} 没交出回报 · ${taskId}`,
           meta: `${result.turns} 轮 · ${used}s`,
@@ -1188,7 +1246,7 @@ export class Kernel {
         }
       })
       .catch((err: unknown) => {
-        this.patchCard(live, {
+        this.patchCardTo(runThreadId, live, {
           badge: "崩溃",
           title: `${member} 执行崩溃 · ${taskId}`,
           meta: `${steps.length} 步`,
@@ -2157,6 +2215,7 @@ export class Kernel {
             statusNote: `${task.status} · ${task.member ?? "风铃"} · 证据 ${task.evidence.length}`,
             member: task.member ?? last.member,
             at: task.updatedAt,
+            threadId: task.threadId,
             evidenceCount: task.evidence.length,
             version: task.version,
             parentId: task.parentId ?? undefined,
@@ -3017,6 +3076,24 @@ export class Kernel {
       case "thread.search": {
         const p = params as { q: string };
         return { results: this.threads.search(p.q) } as RpcContracts[M]["result"];
+      }
+
+      case "task.feed": {
+        // 换会话后旧工单的往来：先按 threadId 回原会话读；老数据没记的，扫一遍线程兜底
+        const p = params as { taskId: string };
+        const owner = this.taskStore.get(p.taskId)?.threadId;
+        if (owner) {
+          return {
+            cards: this.threads.loadState(owner).feed.filter((c) => c.jobId === p.taskId),
+            threadId: owner,
+            threadTitle: this.threads.get(owner)?.title,
+          };
+        }
+        for (const meta of this.threads.list()) {
+          const cards = this.threads.loadState(meta.id).feed.filter((c) => c.jobId === p.taskId);
+          if (cards.length) return { cards, threadId: meta.id, threadTitle: meta.title };
+        }
+        return { cards: [] } as RpcContracts[M]["result"];
       }
 
       case "session.new": {
