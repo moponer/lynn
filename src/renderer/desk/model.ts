@@ -132,6 +132,8 @@ export interface Desk {
   /** 挂起的裁决（问题/契约/审批）——多条都要可见可翻，不能只露第一条（A5） */
   decisions: DeskDecision[];
   tokensUsed: number;
+  /** D3：会话级软预算（只在真的配了上限时存在；黄铜 chip 不显示假数据） */
+  budget?: { spent: number; soft: number };
   /** 真实对话流（频道 + 每个工单的往来） */
   feed: FeedCard[];
   turn: TurnState;
@@ -141,7 +143,8 @@ export interface Desk {
   autoStart: boolean;
   /** 当前会话线程与列表（M1-14） */
   thread: { id: string; title: string };
-  threads: { id: string; title: string; updatedAt: string }[];
+  /** C3：会话行带"这个会话里在办 / 已归档的单"计数（后端汇总，前端不猜） */
+  threads: { id: string; title: string; updatedAt: string; counts?: { active: number; archived: number } }[];
 }
 
 function evidenceOf(job: TaskTrackItem): DeskEvidence[] {
@@ -267,6 +270,9 @@ export function deskFromSnapshot(snap: SessionSnapshot): Desk {
       }),
     );
 
+  // D3：软预算只在后端真的配了上限（>0）时才存在——0 表示"未设预算"，不画一个假的 0%
+  const soft = snap.prefs.softBudgetTokens ?? 0;
+
   return {
     project: snap.workspace.project,
     subdir: snap.workspace.subdir,
@@ -278,6 +284,7 @@ export function deskFromSnapshot(snap: SessionSnapshot): Desk {
     teamCount: board.teams.filter((t) => t.status !== "dissolved").length,
     decisions: board.decisions.map(toDecision),
     tokensUsed: board.tokensUsed,
+    budget: soft > 0 ? { spent: snap.usage.sessionIn + snap.usage.sessionOut, soft } : undefined,
     feed: snap.feed,
     turn: snap.turn,
     usage: snap.usage,

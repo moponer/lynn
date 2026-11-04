@@ -184,6 +184,19 @@ function TopRail({
         }
       />
 
+      {/* D3：会话级预算——真的配了软上限才出现（黄铜=预算的唯一样式归属，不画假数据） */}
+      {desk.budget && (
+        <span
+          className={`budget-chip${desk.budget.spent >= desk.budget.soft ? " over" : ""}`}
+          title={t("top.budgetTitle", {
+            used: fmtTokens(desk.budget.spent),
+            total: fmtTokens(desk.budget.soft),
+          })}
+        >
+          {t("top.budget")} {Math.round((desk.budget.spent / desk.budget.soft) * 100)}%
+        </span>
+      )}
+
       {/* D3：33% 必须自带名字，不能靠 hover 才知道是上下文 */}
       <span className="gauge-label">{t("top.contextLabel")}</span>
       <div
@@ -244,6 +257,8 @@ function Ledger({
   onThread,
   onThreadNew,
   onThreadSearch,
+  onThreadRename,
+  onThreadRemove,
   onCancelTask,
 }: {
   desk: Desk;
@@ -252,6 +267,9 @@ function Ledger({
   onThread?: (id: string) => void;
   onThreadNew?: () => void;
   onThreadSearch?: (q: string) => Promise<{ id: string; title: string; hits: string[] }[]>;
+  /** 会话改名 / 删除（C5：列表只增不减、按时间找不到人） */
+  onThreadRename?: (id: string, title: string) => void;
+  onThreadRemove?: (id: string) => void;
   /** 停一张在跑的单（此前只能解散全队止损） */
   onCancelTask?: (taskId: string) => void;
 }) {
@@ -260,6 +278,8 @@ function Ledger({
   const [threadsOpen, setThreadsOpen] = useState(false);
   const [tq, setTq] = useState("");
   const [hits, setHits] = useState<{ id: string; title: string; hits: string[] }[]>([]);
+  const [renaming, setRenaming] = useState<{ id: string; title: string } | null>(null);
+  const [deleting, setDeleting] = useState<string | null>(null);
   const t = useT();
   const match = (j: DeskJob) => !q || `${j.id} ${j.title} ${j.member ?? ""}`.toLowerCase().includes(q.toLowerCase());
 
@@ -327,20 +347,99 @@ function Ledger({
                   <small>{h.hits[0]}</small>
                 </button>
               ))
-            : desk.threads.map((t) => (
-                <button
-                  type="button"
-                  key={t.id}
-                  className={`thread-row${t.id === desk.thread.id ? " on" : ""}`}
-                  onClick={() => {
-                    onThread?.(t.id);
-                    setThreadsOpen(false);
-                  }}
-                >
-                  <b>{t.title}</b>
-                  <small className="mono">{fmtTime(t.updatedAt)}</small>
-                </button>
-              ))}
+            : desk.threads.map((th) => {
+                const on = th.id === desk.thread.id;
+                // C5：会话列表要能改名/删除，否则列表只增不减、按时间也找不到人
+                const edit = renaming && renaming.id === th.id ? renaming : null;
+                return (
+                  <div className="thread-line" key={th.id}>
+                    {edit ? (
+                      <input
+                        className="thread-q thread-rename"
+                        autoFocus
+                        value={edit.title}
+                        aria-label={t("ledger.threadRename")}
+                        placeholder={t("ledger.threadRenameHint")}
+                        onChange={(e) => setRenaming({ id: th.id, title: e.target.value })}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            const title = edit.title.trim();
+                            if (title) onThreadRename?.(th.id, title);
+                            setRenaming(null);
+                          } else if (e.key === "Escape") {
+                            setRenaming(null);
+                          }
+                        }}
+                      />
+                    ) : (
+                      <>
+                        <button
+                          type="button"
+                          className={`thread-row${on ? " on" : ""}`}
+                          onClick={() => {
+                            onThread?.(th.id);
+                            setThreadsOpen(false);
+                          }}
+                        >
+                          <b>{th.title || t("ledger.untitled")}</b>
+                          <small className="mono thread-meta">
+                            <span>{fmtTime(th.updatedAt)}</span>
+                            {th.counts && th.counts.active + th.counts.archived > 0 && (
+                              <span className="thread-counts">
+                                {t("ledger.threadJobs", { active: th.counts.active, archived: th.counts.archived })}
+                              </span>
+                            )}
+                          </small>
+                        </button>
+                        <span className="thread-acts">
+                          <button
+                            type="button"
+                            className="thread-act"
+                            title={t("ledger.threadRename")}
+                            onClick={() => {
+                              setDeleting(null);
+                              setRenaming({ id: th.id, title: th.title });
+                            }}
+                          >
+                            <Icon name="pen" size="sm" />
+                          </button>
+                          <button
+                            type="button"
+                            className="thread-act"
+                            title={t("ledger.threadDelete")}
+                            onClick={() => {
+                              setRenaming(null);
+                              setDeleting(deleting === th.id ? null : th.id);
+                            }}
+                          >
+                            <Icon name="x" size="sm" />
+                          </button>
+                        </span>
+                      </>
+                    )}
+                    {deleting === th.id && (
+                      <div className="thread-ask">
+                        <span>{t("ledger.threadDeleteAsk")}</span>
+                        <span className="thread-ask-acts">
+                          <button type="button" className="ghost-btn" onClick={() => setDeleting(null)}>
+                            {t("common.cancel")}
+                          </button>
+                          <button
+                            type="button"
+                            className="ghost-btn thread-danger"
+                            onClick={() => {
+                              setDeleting(null);
+                              onThreadRemove?.(th.id);
+                            }}
+                          >
+                            {t("ledger.threadDelete")}
+                          </button>
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
           {tq.trim() && hits.length === 0 && <p className="sf-empty">没有匹配的历史。</p>}
         </div>
       )}
@@ -466,7 +565,7 @@ function JobRow({
       <div className="job-meta">
         <Icon name="user" size="sm" /> {job.member ?? t("sheet.lynn")}
         <span style={{ color: "var(--ink-4)" }}>·</span>
-        <span className="mono">{job.at ?? "—"}</span>
+        <span className="mono">{fmtTime(job.at)}</span>
         {running && onCancel && (
           <button
             type="button"
@@ -494,6 +593,7 @@ function Sheet({
   job,
   feed,
   threadId,
+  threadTitle,
   onTaskFeed,
   onThread,
   onFeedAction,
@@ -503,6 +603,8 @@ function Sheet({
   feed: FeedCard[];
   /** 当前会话 id：工单的出发会话不同时，往来要去那边读 */
   threadId?: string;
+  /** 工单出发会话的标题（C3：眉标要能"回到会话"，标题比 id 好认） */
+  threadTitle?: string;
   onTaskFeed?: (taskId: string) => Promise<{ cards: FeedCard[]; threadId?: string; threadTitle?: string }>;
   onThread?: (id: string) => void;
   onFeedAction?: (c: FeedCard) => void;
@@ -618,6 +720,18 @@ function Sheet({
           <span>
             {t("sheet.assignedTo", { who: job.member ?? t("sheet.lynn") })} · {job.memberRole ?? t("sheet.roleDispatch")}
           </span>
+          {/* C3：这张单从哪个会话来的，就要能从这儿回去（不再只能翻台账猜） */}
+          {job.threadId && job.threadId !== threadId && (
+            <button
+              type="button"
+              className="eyebrow-link"
+              title={t("sheet.backToThreadTitle", { title: threadTitle ?? job.threadId })}
+              onClick={() => onThread?.(job.threadId!)}
+            >
+              ← {t("sheet.backToThread")}
+              {threadTitle ? `《${threadTitle}》` : ""}
+            </button>
+          )}
         </div>
         <h1 className="sheet-title">{job.title}</h1>
         <div className="sheet-sub">
@@ -822,6 +936,7 @@ function Roster({
   onCancel,
   onSelectJob,
   onCreateTeam,
+  onThread,
   open,
   onClose,
 }: {
@@ -830,6 +945,8 @@ function Roster({
   current?: DeskJob;
   /** 成员卡 → 打开他手上的那张单 */
   onSelectJob?: (taskId: string) => void;
+  /** C3：印章头显示"来自会话"，并可切回去 */
+  onThread?: (id: string) => void;
   /** 窄窗抽屉态 */
   open?: boolean;
   onClose?: () => void;
@@ -855,6 +972,11 @@ function Roster({
   const decision = decisions[dPos];
   // 只有 in_review 可验收；blocked 只给"停掉/继续"，绝不出现"验收归档"
   const sealJob = current && current.action !== "none" ? current : desk.jobs.find((j) => j.action !== "none");
+  // C3：印章头要报"这张单来自哪个会话"——跨会话时给回程入口，同会话不啰嗦
+  const sealSource =
+    sealJob?.threadId && sealJob.threadId !== desk.thread.id
+      ? { id: sealJob.threadId, title: desk.threads.find((x) => x.id === sealJob.threadId)?.title }
+      : null;
   const [naming, setNaming] = useState(false);
   const [teamName, setTeamName] = useState("");
   const submitTeam = () => {
@@ -922,6 +1044,18 @@ function Roster({
 
         {/* 印章排在最前：它是"该你拍板"的唯一落点，不能藏在成员卡下面要滚动才看见 */}
         <div className="seal-slot">
+          {sealSource && (
+            <div className="seal-source">
+              <Icon name="layers" size="sm" />
+              <span>
+                {t("sheet.fromThreadShort")}
+                <b>{sealSource.title ?? sealSource.id}</b>
+              </span>
+              <button type="button" className="strip-link" onClick={() => onThread?.(sealSource.id)}>
+                {t("sheet.gotoThread")}
+              </button>
+            </div>
+          )}
           {decisions.length > 1 && (
             <div className="seal-pager">
               <span className="chip">{t("seal.pendingCount", { i: dPos + 1, n: decisions.length })}</span>
@@ -1950,7 +2084,7 @@ function ReviewDesk({
               <div className="sealcard-h">
                 <span className="k">等你拍板</span>
                 <span className="mono" style={{ fontSize: 9.5, color: "var(--ink-4)" }}>
-                  {job.at ?? ""}
+                  {fmtTime(job.at)}
                 </span>
               </div>
               <div className="sealcard-body">
@@ -2218,6 +2352,8 @@ export function DeskView({
   onThread,
   onThreadNew,
   onThreadSearch,
+  onThreadRename,
+  onThreadRemove,
   onTaskFeed,
   onCreateTeam,
   onCancelTask,
@@ -2245,6 +2381,8 @@ export function DeskView({
   onThread?: (id: string) => void;
   onThreadNew?: () => void;
   onThreadSearch?: (q: string) => Promise<{ id: string; title: string; hits: string[] }[]>;
+  onThreadRename?: (id: string, title: string) => void;
+  onThreadRemove?: (id: string) => void;
   /** 工单往来（跨会话追溯）：工单出发会话 ≠ 当前会话时按 threadId 回读 */
   onTaskFeed?: (taskId: string) => Promise<{ cards: FeedCard[]; threadId?: string; threadTitle?: string }>;
   /** 建团队（§4.10.3 修正）：用户只给名字，ID 由系统生成 */
@@ -2333,6 +2471,8 @@ export function DeskView({
           onThread={onThread}
           onThreadNew={onThreadNew}
           onThreadSearch={onThreadSearch}
+          onThreadRename={onThreadRename}
+          onThreadRemove={onThreadRemove}
           onCancelTask={onCancelTask}
         />
         <main className="center">
@@ -2342,6 +2482,7 @@ export function DeskView({
               job={current}
               feed={desk.feed}
               threadId={desk.thread.id}
+              threadTitle={desk.threads.find((x) => x.id === current?.threadId)?.title}
               onTaskFeed={onTaskFeed}
               onThread={onThread}
               onFeedAction={onFeedAction}
@@ -2374,6 +2515,10 @@ export function DeskView({
             setRightOpen(false);
           }}
           onCreateTeam={onCreateTeam}
+          onThread={(id) => {
+            setRightOpen(false);
+            onThread?.(id);
+          }}
           open={rightOpen}
           onClose={() => setRightOpen(false)}
         />

@@ -14,6 +14,8 @@ export interface ThreadMeta {
 export interface ThreadState {
   feed: FeedCard[];
   history: { role: "user" | "assistant"; content: string }[];
+  /** 会话累计用量（C4）：切回来时顶栏读数跟着会话走，不是一刀清零 */
+  usage?: { sessionIn: number; sessionOut: number; tokensUsed: number };
 }
 
 export class ThreadStore {
@@ -105,6 +107,7 @@ export class ThreadStore {
       return {
         feed: Array.isArray(raw.feed) ? raw.feed : [],
         history: Array.isArray(raw.history) ? raw.history : [],
+        usage: raw.usage,
       };
     } catch {
       return { feed: [], history: [] };

@@ -185,8 +185,8 @@ export interface FeedCard {
   jobId?: string;
   /** 错误码：前端按码给动作，不拼后端原文 */
   code?: string;
-  /** 错误卡附带的一个可执行动作 */
-  action?: "settings" | "retry" | "logs" | "reload" | "none";
+  /** 错误卡附带的一个可执行动作（stopRunning：新会话时"还有单在跑"，一键全停） */
+  action?: "settings" | "retry" | "logs" | "reload" | "stopRunning" | "none";
   /** 汇报卡的四段（一段不省） */
   report?: { conclusion: string; evidence: string; unfinished: string; decision: string };
 }
@@ -260,7 +260,8 @@ export interface SessionSnapshot {
   project: { root: string; trusted: boolean; hasMcp: boolean };
   /** 当前会话线程与线程列表（M1-14） */
   thread: { id: string; title: string };
-  threads: { id: string; title: string; updatedAt: string }[];
+  /** C3：会话行显示"这个会话派出过多少单"（后端按 task.threadId 汇总） */
+  threads: { id: string; title: string; updatedAt: string; counts?: { active: number; archived: number } }[];
   permission: PermissionMode;
   model: ModelConfigView;
   feed: FeedCard[];
@@ -268,7 +269,14 @@ export interface SessionSnapshot {
   turn: TurnState;
   usage: UsageView;
   queue: QueueItem[];
-  prefs: { autoStart: boolean; trayOnClose: boolean; notify: boolean; lang: "zh" | "en" };
+  prefs: {
+    autoStart: boolean;
+    trayOnClose: boolean;
+    notify: boolean;
+    lang: "zh" | "en";
+    /** D3：会话级软预算（0 = 未配置，界面不假装有预算） */
+    softBudgetTokens?: number;
+  };
 }
 
 // ---------- 事件流（主进程 → 渲染层） ----------
@@ -483,6 +491,11 @@ export interface RpcContracts {
   "task.cancel": {
     params: { taskId: string };
     result: { ok: boolean; error?: string };
+  };
+  /** 停掉所有在跑的成员单（C4：新会话时"还有 N 张单在跑"的一键止损） */
+  "task.cancelAll": {
+    params: void;
+    result: { ok: boolean; stopped: number };
   };
   /** 建团队（§4.10.3 修正）：用户只给名字，ID 由系统生成 */
   "team.create": {

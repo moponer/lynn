@@ -311,6 +311,15 @@ export default function App() {
         const lastUser = [...(snap?.feed ?? [])].reverse().find((c) => c.kind === "user");
         if (lastUser?.text) void onSend(lastUser.text, "queue");
       }
+      if (card.action === "stopRunning") {
+        // C4：新会话提示卡上的"全部停掉"——后台成员不因换会话而自己收手
+        void rpc("task.cancelAll")
+          .then(async (r) => {
+            setNotice(r.stopped > 0 ? `已停 ${r.stopped} 张在跑的单。` : "没有在跑的单。");
+            await refresh();
+          })
+          .catch((err) => setNotice(`停机失败：${err instanceof Error ? err.message : String(err)}`));
+      }
     },
     [onSend, refresh, snap?.feed],
   );
@@ -372,6 +381,18 @@ export default function App() {
         }}
         onThreadNew={() => void onNew()}
         onThreadSearch={(q) => rpc("thread.search", { q }).then((r) => r.results)}
+        onThreadRename={(id, title) => {
+          setNotice(null);
+          void rpc("thread.rename", { id, title })
+            .then(() => refresh())
+            .catch((err) => setNotice(`会话改名失败：${err instanceof Error ? err.message : String(err)}`));
+        }}
+        onThreadRemove={(id) => {
+          setNotice(null);
+          void rpc("thread.remove", { id })
+            .then(() => refresh())
+            .catch((err) => setNotice(`删除会话失败：${err instanceof Error ? err.message : String(err)}`));
+        }}
         onTaskFeed={(taskId) => rpc("task.feed", { taskId })}
         onCancelTask={(taskId) => {
           void rpc("task.cancel", { taskId }).then(async (r) => {

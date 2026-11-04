@@ -202,6 +202,30 @@ const ratio = (a, b) => {
   }
 }
 
+// ---------- 9) 时间必须走 fmtTime：ISO 原值不许直出到 JSX ----------
+// 背景：台账行与印章头曾各自 `{job.at ?? "—"}`，一屏里出现 2026-11-03T10:33:13.816Z，
+// 与走 fmtTime 的其它五处差 8 小时、还挤压行宽。裸 ISO 是审计线索的反面。
+function scanBareTime(dir) {
+  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+    const p = path.join(dir, e.name);
+    if (e.isDirectory()) {
+      scanBareTime(p);
+      continue;
+    }
+    if (!/\.tsx$/.test(e.name)) continue;
+    const text = fs.readFileSync(p, "utf-8");
+    text.split("\n").forEach((line, idx) => {
+      const s = line.trimStart();
+      if (s.startsWith("*") || s.startsWith("//") || s.startsWith("{/*")) return;
+      // `{job.at}` / `{job.at ?? "—"}`；同一行里已经调 fmtTime( 的不算
+      if (/\{[^{}]*\.at\s*(?:\?\?|\})/.test(line) && !/fmtTime\(/.test(line)) {
+        fail(p, idx + 1, `裸时间直出：${line.trim().slice(0, 80)}（改用 fmtTime）`);
+      }
+    });
+  }
+}
+scanBareTime(rendererDir);
+
 if (violations.length > 0) {
   console.error(`设计约束检查失败（${violations.length} 处）：`);
   for (const v of violations) console.error("  " + v);

@@ -87,5 +87,6 @@ const ACTION_LABEL: Record<NonNullable<FeedCard["action"]>, string> = {
   retry: "重试",
   logs: "看日志",
   reload: "重启运行时",
+  stopRunning: "全部停掉",
   none: "",
 };

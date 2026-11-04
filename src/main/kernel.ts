@@ -11,6 +11,7 @@ import type {
   RpcContracts,
   RpcMethod,
   TaskPlan,
+  TaskStatus,
   TurnPhase,
   TurnState,
   UsageView,
@@ -32,6 +33,7 @@ import { CalendarStore, dueReminders, parseNaturalDate } from "./calendar";
 import { SchedulerStore, recover as recoverScheduler, type DueItem } from "./scheduler";
 import { KnowledgeStore, watchKnowledge } from "./knowledge";
 import { appendUsage, evaluateBudget, pickModel } from "./budget";
+import { groupOf } from "../shared/task-groups";
 import {
   buildInjection,
   discoverSkills,
@@ -305,6 +307,34 @@ interface QueuedInput extends QueueItem {
 
 /** 计划档位下也允许的只读工具 */
 const READ_ONLY_TOOLS = new Set(["check_progress", "check_roster"]);
+
+/**
+ * C4：新会话提示（纯函数，便于单测）。
+ * 没有在跑的单就只说"留在会话列表里"；有就必须点名 + 给"全部停掉"的动作，
+ * 否则用户以为"从头开始"，后台还在烧预算、还会弹审批。
+ */
+export function newSessionNotice(running: string[]): { text: string; action?: "stopRunning" } {
+  if (running.length === 0) {
+    return { text: "新会话已开始。上一段对话留在「会话」列表里，随时能切回。" };
+  }
+  return {
+    text: `新会话已开始。上一段对话留在「会话」列表里，随时能切回。注意：还有 ${running.length} 张单在后台跑（${running.join("、")}），不停会继续消耗预算并可能弹审批。`,
+    action: "stopRunning",
+  };
+}
+
+/** C3：会话 → 工单归属计数（纯函数）。老单没记 threadId 就不归到任何会话，不猜。 */
+export function countTasksByThread(tasks: { threadId?: string; status: TaskStatus }[]): Map<string, { active: number; archived: number }> {
+  const out = new Map<string, { active: number; archived: number }>();
+  for (const task of tasks) {
+    if (!task.threadId) continue;
+    const c = out.get(task.threadId) ?? { active: 0, archived: 0 };
+    if (groupOf(task.status) === "archived") c.archived += 1;
+    else c.active += 1;
+    out.set(task.threadId, c);
+  }
+  return out;
+}
 
 export class Kernel {
   readonly dataRoot: string;
@@ -750,6 +780,8 @@ export class Kernel {
           .filter((m) => (m.role === "user" || m.role === "assistant") && typeof m.content === "string")
           .map((m) => ({ role: m.role as "user" | "assistant", content: m.content as string }))
           .slice(-200),
+        // C4：会话累计用量按线程落盘，切回来读数还对得上
+        usage: { sessionIn: this.usage.sessionIn, sessionOut: this.usage.sessionOut, tokensUsed: this.tokensUsed },
       });
     } catch {
       /* 落盘失败不影响对话 */
@@ -776,6 +808,16 @@ export class Kernel {
     this.feed = [];
     this.history = [];
     this.cardSeq = 0;
+    // C4：会话累计用量跟线程走（旧线程文件没有 usage 就如实从 0 起，不借别的会话的数）
+    this.tokensUsed = st.usage?.tokensUsed ?? 0;
+    this.usage = {
+      ...this.usage,
+      turnIn: 0,
+      turnOut: 0,
+      sessionIn: st.usage?.sessionIn ?? 0,
+      sessionOut: st.usage?.sessionOut ?? 0,
+      contextTokens: 0,
+    };
     for (const c of st.feed) {
       this.feed.push(c);
       const n = Number(/^c-(\d+)$/.exec(c.id)?.[1] ?? 0);
@@ -1280,7 +1322,11 @@ export class Kernel {
     const controller = this.memberAborts.get(taskId);
     if (!controller) return { ok: false, error: `没有在跑的 ${taskId}（可能已经结束或从未开工）` };
     controller.abort();
-    this.card({ kind: "system", text: `已停 ${taskId}：成员在本轮模型调用结束后收手，已写出的文件留在工作区。` });
+    const text = `已停 ${taskId}：成员在本轮模型调用结束后收手，已写出的文件留在工作区。`;
+    // C2 原则：工单相关卡片归出发会话——在别的会话点「停」不该把过程噪音写进当前会话
+    const owner = this.taskStore.get(taskId)?.threadId;
+    if (owner) this.cardTo(owner, { kind: "system", text });
+    else this.card({ kind: "system", text });
     return { ok: true };
   }
 
@@ -2306,13 +2352,17 @@ export class Kernel {
     switch (method) {
       case "session.snapshot": {
         const cfg = this.settings.getModel();
+        // C3：会话 → 工单归属计数（按 task.threadId 汇总；老单没记 threadId 就不归到任何会话，不猜）
+        const threadCounts = countTasksByThread(this.taskStore.list());
         const snap: RpcContracts["session.snapshot"]["result"] = {
           workspace: { project: path.basename(this.projectRoot), subdir: "指挥台" },
           thread: {
             id: this.currentThreadId,
             title: this.threads.get(this.currentThreadId)?.title ?? "新会话",
           },
-          threads: this.threads.list().map((t) => ({ id: t.id, title: t.title, updatedAt: t.updatedAt })),
+          threads: this.threads
+            .list()
+            .map((t) => ({ id: t.id, title: t.title, updatedAt: t.updatedAt, counts: threadCounts.get(t.id) })),
           project: {
             root: this.projectRoot,
             trusted: this.trust.isTrusted(this.projectRoot),
@@ -2609,6 +2659,16 @@ export class Kernel {
       case "task.cancel": {
         const { taskId } = params as { taskId: string };
         return this.cancelMemberTask(String(taskId)) as RpcContracts[M]["result"];
+      }
+
+      case "task.cancelAll": {
+        // C4：新会话提示卡上的一键止损；逐张停，失败的不假装成功（计数如实）
+        const ids = [...this.memberRuns.keys()];
+        let stopped = 0;
+        for (const id of ids) {
+          if (this.cancelMemberTask(id).ok) stopped += 1;
+        }
+        return { ok: true, stopped } as RpcContracts[M]["result"];
       }
 
       // 建团队（§4.10.3 修正）：界面上给名字就够，ID 由系统生成
@@ -3113,16 +3173,17 @@ export class Kernel {
         // 新对话 = 新线程：旧会话留在磁盘上可切回，不再清空历史
         this.persistThread();
         const meta = this.threads.create("新会话");
+        // C4：切走前把还在跑的单记下来——用户以为"从头开始"，后台其实还在烧预算、还可能弹审批
+        const running = [...this.memberRuns.keys()];
         this.switchThread(meta.id);
-        this.tokensUsed = 0;
-        this.usage = { turnIn: 0, turnOut: 0, sessionIn: 0, sessionOut: 0, contextTokens: 0, contextWindow: this.usage.contextWindow };
         try {
           fs.rmSync(this.timelineFile, { force: true });
           this.contextStore.clear();
         } catch {
           // 忽略
         }
-        this.card({ kind: "system", text: "新会话已开始。上一段对话留在「会话」列表里，随时能切回。" });
+        const notice = newSessionNotice(running);
+        this.card({ kind: "system", text: notice.text, ...(notice.action ? { action: notice.action } : {}) });
         return { ok: true, threadId: meta.id } as RpcContracts[M]["result"];
       }
 

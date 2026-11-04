@@ -186,6 +186,7 @@ svg.ic.lg { width: 20px; height: 20px; }
   .rail-top .seg-label { display: none; }
   .rail-top .gauge-read .k { display: none; }
   .rail-top .gauge-label { display: none; }
+  .rail-top .budget-chip { display: none; }
   .rail-top { gap: 10px; }
 }
 @media (max-width: 1240px) {
@@ -223,6 +224,13 @@ svg.ic.lg { width: 20px; height: 20px; }
 .gauge { display: flex; align-items: center; gap: 9px; }
 /* D3：上下文百分比自带名字（≤1420 才收起），不再靠 hover 猜语义 */
 .gauge-label { font-size: var(--fs-label); color: var(--ink-4); white-space: nowrap; }
+/* D3：会话级预算 chip——黄铜是预算的唯一样式归属（未配软上限时不渲染） */
+.budget-chip {
+  font-family: var(--f-mono); font-size: var(--fs-label); letter-spacing: .08em;
+  color: var(--brass); background: var(--brass-wash); padding: 3px 7px;
+  border-radius: var(--r-s); white-space: nowrap;
+}
+.budget-chip.over { font-weight: 600; }
 .gauge-read { text-align: right; line-height: 1.25; }
 .gauge-read .v { font-family: var(--f-mono); font-size: var(--fs-body); color: var(--ink); font-variant-numeric: tabular-nums; }
 .gauge-read .v em { font-style: normal; color: var(--ink-4); }
@@ -399,6 +407,14 @@ svg.ic.lg { width: 20px; height: 20px; }
   text-transform: uppercase; color: var(--ink-4);
   display: flex; align-items: center; gap: 9px;
 }
+/* C3：跨会话的工单在眉标尾给回程入口（标题比 id 好认） */
+.eyebrow-link {
+  margin-left: auto; background: none; color: var(--ink-3); cursor: pointer;
+  font-family: var(--f-cjk); font-size: var(--fs-label); letter-spacing: .04em;
+  padding: 2px 0; text-transform: none;
+}
+.eyebrow-link:hover { color: var(--blue); }
+.eyebrow-link:focus-visible { outline: 1.5px solid var(--blue); outline-offset: 1px; }
 .sheet-title {
   font-family: var(--f-display); font-weight: 600; font-size: var(--fs-head);
   letter-spacing: .005em; font-stretch: 104%;
@@ -626,6 +642,14 @@ svg.ic.lg { width: 20px; height: 20px; }
   background: var(--desk-2);
   padding-top: 2px;
 }
+/* C3：印章头报"这张单来自哪个会话"，给回程入口 */
+.seal-source {
+  display: flex; align-items: center; gap: 6px; margin-bottom: 6px;
+  padding: 5px 8px; border-radius: var(--r-s); background: var(--sheet-2);
+  font-size: var(--fs-label); color: var(--ink-3);
+}
+.seal-source b { color: var(--ink-2); font-weight: 500; }
+.seal-source .strip-link { margin-left: auto; }
 /* 多条挂起裁决的翻页条：计数 + 下一条（A5） */
 .seal-pager {
   display: flex; align-items: center; justify-content: space-between;
@@ -1776,9 +1800,35 @@ button.ev:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 }
 .thread-row b { font-weight: 500; color: var(--ink); font-size: var(--fs-body); }
 .thread-row small { color: var(--ink-3); font-size: var(--fs-label); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* C3：时间与"在办/归档"分两段，各自截断——挤在一起时两样都读不出来 */
+.thread-meta { display: flex; justify-content: space-between; gap: 8px; }
+.thread-meta > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.thread-counts { color: var(--ink-4); }
 .thread-row:hover { background: var(--hover-bg); }
 .thread-row.on { background: var(--blue-wash); }
 .thread-row.on b { color: var(--blue); }
+/* C5：会话行 hover 才出改名/删除，常驻会挤压标题；键盘 focus 同样显形 */
+.thread-line { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; }
+.thread-line .thread-row { flex: 1; min-width: 0; }
+.thread-acts { display: flex; gap: 1px; opacity: 0; transition: opacity var(--dur-fast) ease; }
+.thread-line:hover .thread-acts,
+.thread-line:focus-within .thread-acts { opacity: 1; }
+.thread-act {
+  width: 22px; height: 22px; display: grid; place-items: center;
+  border-radius: var(--r-s); background: none; color: var(--ink-3); cursor: pointer;
+}
+.thread-act:hover { color: var(--ink); background: var(--hover-bg-2); }
+.thread-act:focus-visible { outline: 1.5px solid var(--blue); outline-offset: 1px; }
+.thread-rename { flex: 1; min-width: 0; }
+.thread-ask {
+  flex: 0 0 100%; display: flex; flex-direction: column; gap: 6px;
+  padding: 6px 8px; border-radius: var(--r-s); background: var(--sheet);
+  font-size: var(--fs-meta); color: var(--ink-2);
+}
+.thread-ask-acts { display: flex; gap: 6px; justify-content: flex-end; }
+.thread-ask .ghost-btn { padding: 3px 9px; font-size: var(--fs-label); }
+.thread-danger { color: var(--red); }
+.thread-danger:hover { color: var(--red); background: var(--hover-bg-2); }
 
 /* ---- M1-16 本轮随附条 + @ 文件补全 ---- */
 .attach-strip {

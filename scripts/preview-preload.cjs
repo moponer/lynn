@@ -80,6 +80,8 @@ const snapshot = {
         statusNote: "in_review · 顾明 · 证据 2",
         member: "顾明",
         at: now,
+        // C3 演示：这张单是另一个会话派的——眉标出「回到会话」，印章头出「来自会话」
+        threadId: "t-2",
         evidenceCount: 2,
         version: 3,
         rejectRounds: 0,
@@ -161,12 +163,13 @@ const snapshot = {
   turn: { phase: "review", busy: false, pending: 0, taskId: "WO-2418" },
   usage: { turnIn: 3120, turnOut: 860, sessionIn: 18400, sessionOut: 3000, contextTokens: 42000, contextWindow: 128000 },
   queue: [],
-  prefs: { autoStart: false, trayOnClose: true, notify: true, lang: "zh" },
+  // D3：配了软上限才出预算 chip（60000 × 21400 累计 ≈ 36%）
+  prefs: { autoStart: false, trayOnClose: true, notify: true, lang: "zh", softBudgetTokens: 60000 },
   project: { root: "C:/Users/demo/notes", trusted: true, hasMcp: false },
   thread: { id: "t-main", title: "月报整理" },
   threads: [
-    { id: "t-main", title: "月报整理", updatedAt: "2026-11-02T14:32:00.000Z" },
-    { id: "t-2", title: "插件工坊", updatedAt: "2026-11-01T10:05:00.000Z" },
+    { id: "t-main", title: "月报整理", updatedAt: "2026-11-02T14:32:00.000Z", counts: { active: 0, archived: 2 } },
+    { id: "t-2", title: "插件工坊", updatedAt: "2026-11-01T10:05:00.000Z", counts: { active: 1, archived: 0 } },
   ],
 };
 
@@ -180,6 +183,10 @@ contextBridge.exposeInMainWorld("lynn", {
     if (method === "session.reload") return { ok: true };
     if (method === "app.openData") return { ok: true, path: "C:/Users/demo/.lynn" };
     if (method === "decision.resolve") return { ok: true };
+    if (method === "task.feed") return { cards: [], threadId: "t-2", threadTitle: "插件工坊" };
+    if (method === "thread.rename") return { ok: true, title: "改名" };
+    if (method === "thread.remove") return { ok: true };
+    if (method === "task.cancelAll") return { ok: true, stopped: 0 };
     if (method === "config.get") return snapshot.model;
     if (method === "config.prefs") return { ok: true, autoStart: false };
     if (method === "config.clearKey") return { ok: true };
