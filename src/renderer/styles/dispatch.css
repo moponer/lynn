@@ -838,6 +838,12 @@ textarea.composer-in::placeholder { color: var(--ink-4); }
   /* 满宽正常换行：之前被压成窄列逐字换行 */
   display: block; width: 100%; min-width: 0; white-space: normal; word-break: normal;
 }
+/* D5：首屏 0 工单的引导空态——居中两行，不再长得像一条被禁用的工单 */
+.ledger-lede {
+  padding: 26px 10px; text-align: center; width: 100%;
+}
+.ledger-lede .t { display: block; font-size: var(--fs-meta); color: var(--ink-3); margin-bottom: 4px; }
+.ledger-lede .h { display: block; font-size: var(--fs-meta); color: var(--ink-4); font-style: italic; line-height: 1.6; }
 
 /* 证据链空态 */
 .spine-empty { font-size: var(--fs-meta); line-height: 1.6; color: var(--ink-4); font-style: italic; }

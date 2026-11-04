@@ -358,8 +358,13 @@ function Ledger({
       </label>
 
       <div className="ledger-scroll">
-        {/* 空组不占位（原来每组一句斜体提示，读起来像一条工单） */}
-        {desk.jobs.length === 0 && <div className="ledger-empty">{t("ledger.runningEmpty")}</div>}
+        {/* 空组不占位（原来每组一句斜体提示，读起来像一条工单）；首屏空态居中成引导，不像一条被禁用的记录（D5） */}
+        {desk.jobs.length === 0 && (
+          <div className="ledger-lede">
+            <span className="t">{t("ledger.ledeTitle")}</span>
+            <span className="h">{t("ledger.runningEmpty")}</span>
+          </div>
+        )}
         {desk.jobs.length > 0 && visible.length === 0 && <div className="ledger-empty">{t("ledger.noMatch")}</div>}
         {GROUP_META.map((g) => {
           const items = byGroup(g.k);
