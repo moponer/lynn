@@ -101,6 +101,8 @@ export interface DeskMember {
   jobId?: string;
   jobTitle?: string;
   tools: string[];
+  /** 工具清单来源：assignment=本单实际授权（比模板窄），template=岗位模板（没有派单记录时） */
+  toolSource: "assignment" | "template";
   turnLimit?: number;
   progress: number;
   foot: string;
@@ -243,7 +245,12 @@ export function deskFromSnapshot(snap: SessionSnapshot): Desk {
           statusLabel: MEMBER_STATE_LABEL[m.status] ?? m.status,
           jobId: job?.id,
           jobTitle: job?.title,
-          tools: m.toolWhitelist,
+          tools: m.effectiveTools ?? m.toolWhitelist,
+          toolSource:
+            m.effectiveTools &&
+            !(m.effectiveTools.length === m.toolWhitelist.length && m.toolWhitelist.every((x) => m.effectiveTools!.includes(x)))
+              ? "assignment"
+              : "template",
           turnLimit: m.turnLimit,
           progress:
             snap.turn.member === m.name && typeof snap.turn.progress === "number" ? snap.turn.progress : m.progress,

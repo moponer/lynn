@@ -1235,12 +1235,18 @@ function MemberCard({
       <div className="mcard-spec">
         {showTeam && m.teamName && <span className="chip">{m.teamName}</span>}
         {m.tools.slice(0, 4).map((tool) => (
-          <span key={tool} className="chip b">
+          <span key={tool} className="chip b" title={m.toolSource === "assignment" ? t("member.toolsFromAssignment") : t("member.toolsFromTemplate")}>
             {tool}
           </span>
         ))}
-        {/* 不再静默截断：多出来的工具给 +N，别让人以为成员只有 4 件工具 */}
-        {hiddenTools > 0 && <span className="chip">+{hiddenTools}</span>}
+        {/* 不再静默截断：多出来的工具给 +N，hover 出完整清单（B3） */}
+        {hiddenTools > 0 && (
+          <span className="chip" title={t("member.moreTools", { n: hiddenTools, list: m.tools.slice(4).join("、") })}>
+            +{hiddenTools}
+          </span>
+        )}
+        {/* 授权收窄过的单子要点名：这是"扩权需要显式动作"的界面凭据 */}
+        {m.toolSource === "assignment" && <span className="chip r">{t("member.toolsFromAssignment")}</span>}
         <span className="chip r">{t("member.turnLimit", { n: m.turnLimit ?? "—" })}</span>
       </div>
       <div className="mcard-foot">

@@ -42,7 +42,7 @@ import {
 import { probeSoffice, readTable, writeTable, type EngineHealth } from "./office";
 import { BrowserController, sensitiveUrl } from "./browser";
 import { COMPLIANCE_NOTE, loadMessaging, type ChannelConfig } from "./messaging";
-import { TeamStore, generateTeamId } from "./team-store";
+import { TeamStore, effectiveToolsOf, generateTeamId } from "./team-store";
 import {
   createDraft,
   listDrafts,
@@ -2152,6 +2152,18 @@ export class Kernel {
               : activeTask?.status === "blocked" || activeTask?.status === "in_progress"
                 ? "stuck"
                 : "idle";
+          // 本单实际授权（B3）：从最近一条派单记录读回 min(模板, 分配)；没有派单记录就用岗位模板
+          let effectiveTools: string[] | undefined;
+          if (activeTask) {
+            const assigns = this.teamStore.readAssignments(entry.name, activeTask.id);
+            for (let i = assigns.length - 1; i >= 0; i--) {
+              const tools = effectiveToolsOf(assigns[i]);
+              if (tools) {
+                effectiveTools = tools;
+                break;
+              }
+            }
+          }
           return {
             name: p.name,
             role: p.role,
@@ -2165,6 +2177,7 @@ export class Kernel {
             rejections: activeTask?.rejectRounds ?? 0,
             rejectionLimit: activeTask?.rejectLimit ?? 3,
             toolWhitelist: p.tools,
+            effectiveTools,
             color: this.teamColor(i),
             model: p.model,
             turnLimit: p.limits.maxTurns,

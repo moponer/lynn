@@ -60,6 +60,8 @@ export interface Member {
   rejections: number;
   rejectionLimit: number;
   toolWhitelist: string[];
+  /** 本单实际授权（§4.10.3）：派单时落 assignments 的 tools；未派单/读不到时缺省=模板 */
+  effectiveTools?: string[];
   color: string;
   /** 成员默认模型（§4.10.2） */
   model?: string;

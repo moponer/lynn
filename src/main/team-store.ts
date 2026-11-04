@@ -228,6 +228,20 @@ export interface AssignmentRecord {
   rejectReason?: { what: string; expect: string; deadline: string };
 }
 
+/** 本单实际授权（§4.10.3 min(模板, 分配)）：从 assign 记录解析；坏行/缺字段返回 null（回落岗位模板） */
+export function effectiveToolsOf(rec: AssignmentRecord): string[] | null {
+  if (rec.kind !== "assign") return null;
+  try {
+    const parsed = JSON.parse(rec.text) as { tools?: unknown };
+    if (Array.isArray(parsed.tools) && parsed.tools.length > 0 && parsed.tools.every((t) => typeof t === "string")) {
+      return parsed.tools as string[];
+    }
+  } catch {
+    /* 坏行不炸 */
+  }
+  return null;
+}
+
 /** 成员战绩（M2-14）：历次验收结论聚合——资产，不是日志 */
 export interface MemberRecord {
   member: string;
