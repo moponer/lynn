@@ -161,6 +161,18 @@ export class TaskStore {
     return moved;
   }
 
+  /**
+   * 从台账彻底删掉一张单：`tasks/<id>/` 整目录（task.json + 卷宗 + artifacts + 工作区）一起删。
+   * 不可恢复——界面必须二次确认；执行中的单不许删（先停成员）。
+   */
+  remove(id: string): void {
+    const rec = this.mustGet(id);
+    if (rec.status === "in_progress") {
+      throw new TaskRuleError("这张单还在执行中：先停成员，再取消或删除");
+    }
+    fs.rmSync(this.dir(id), { recursive: true, force: true });
+  }
+
   /** 归档带里的工单（界面「归档带」用；只读） */
   archived(): TaskRecord[] {
     const dir = path.join(this.dataRoot, "tasks", "_archive");

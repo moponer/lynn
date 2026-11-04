@@ -400,6 +400,24 @@ export default function App() {
             await refresh();
           });
         }}
+        onDismissTask={(taskId) => {
+          setNotice(null);
+          void rpc("task.dismiss", { taskId })
+            .then(async (r) => {
+              if (!r.ok) setNotice(r.error ?? "取消失败");
+              await refresh();
+            })
+            .catch((err) => setNotice(`取消失败：${err instanceof Error ? err.message : String(err)}`));
+        }}
+        onRemoveTask={(taskId) => {
+          setNotice(null);
+          void rpc("task.remove", { taskId })
+            .then(async (r) => {
+              if (!r.ok) setNotice(r.error ?? "删除失败");
+              await refresh();
+            })
+            .catch((err) => setNotice(`删除失败：${err instanceof Error ? err.message : String(err)}`));
+        }}
         onCreateTeam={(name) => {
           void rpc("team.create", { name }).then(async (r) => {
             if (!r.ok) setNotice(`建团队失败：${r.error ?? "未知原因"}`);

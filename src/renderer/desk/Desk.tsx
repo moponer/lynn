@@ -76,6 +76,7 @@ function TopRail({
   onToggleRight,
   mode = "desk",
   onBack,
+  onOverview,
 }: {
   desk: Desk;
   current?: DeskJob;
@@ -91,11 +92,16 @@ function TopRail({
   mode?: "desk" | "review";
   /** 审查台返回值台（E2）：唯一的深页面必须有显式出口，不能靠空态里的斜体链接 */
   onBack?: () => void;
+  /** 任务总览（几个任务在跑、各在哪、进度多少） */
+  onOverview?: () => void;
 }) {
   const ctx = desk.usage.contextWindow > 0 ? Math.min(1, desk.usage.contextTokens / desk.usage.contextWindow) : 0;
   const contextPct = Math.round(ctx * 100);
   const filled = Math.min(12, Math.max(0, Math.round(ctx * 12)));
   const t = useT();
+  const openJobs = desk.jobs.filter((j) => j.status !== "done" && j.status !== "canceled");
+  const waiting = desk.jobs.filter((j) => j.action === "accept").length;
+  const stuck = desk.jobs.filter((j) => j.status === "blocked").length;
   return (
     <header
       className="rail-top"
@@ -133,6 +139,20 @@ function TopRail({
         <span className="cur mono">{current?.id ?? "—"}</span>
       </div>
       <div className="spacer" />
+
+      {/* 任务总览入口：ABC 三个任务并行时，用户得有个"现在到底几个在跑"的地方 */}
+      {onOverview && (
+        <button
+          type="button"
+          className={`ghost-btn tasks-btn${desk.running.length > 0 ? " live" : ""}`}
+          onClick={onOverview}
+          title={t("top.tasksHint", { running: desk.running.length, waiting, stuck })}
+        >
+          <Icon name="list" size="sm" />
+          {t("top.tasks", { n: openJobs.length })}
+          {desk.running.length > 0 && <span className="tasks-live">{t("top.tasksRunning", { n: desk.running.length })}</span>}
+        </button>
+      )}
 
       {/* 窄窗：右栏收成抽屉后，"等你拍板"必须有个进得去的入口（悬停边缘不算入口） */}
       {pending !== undefined && pending > 0 && onToggleRight && (
@@ -260,6 +280,8 @@ function Ledger({
   onThreadRename,
   onThreadRemove,
   onCancelTask,
+  onDismissTask,
+  onRemoveTask,
 }: {
   desk: Desk;
   activeId?: string;
@@ -272,6 +294,9 @@ function Ledger({
   onThreadRemove?: (id: string) => void;
   /** 停一张在跑的单（此前只能解散全队止损） */
   onCancelTask?: (taskId: string) => void;
+  /** 取消一张单（→ 归档带）/ 彻底删除（不可恢复） */
+  onDismissTask?: (taskId: string) => void;
+  onRemoveTask?: (taskId: string) => void;
 }) {
   const [q, setQ] = useState("");
   const [showAllArchive, setShowAllArchive] = useState(false);
@@ -280,6 +305,8 @@ function Ledger({
   const [hits, setHits] = useState<{ id: string; title: string; hits: string[] }[]>([]);
   const [renaming, setRenaming] = useState<{ id: string; title: string } | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
+  /** 工单卡右键菜单：卡住的单原来只能在台账里干瞪眼 */
+  const [menu, setMenu] = useState<{ job: DeskJob; x: number; y: number } | null>(null);
   const t = useT();
   const match = (j: DeskJob) => !q || `${j.id} ${j.title} ${j.member ?? ""}`.toLowerCase().includes(q.toLowerCase());
 
@@ -479,7 +506,8 @@ function Ledger({
                   job={j}
                   active={j.id === activeId}
                   onClick={() => onSelect(j.id)}
-                  onCancel={g.stoppable ? onCancelTask : undefined}
+                  onCancel={desk.running.includes(j.id) ? onCancelTask : undefined}
+                  onMenu={(e) => setMenu({ job: j, x: e.clientX, y: e.clientY })}
                 />
               ))}
             </div>
@@ -523,6 +551,51 @@ function Ledger({
         )}
 
       </div>
+      {menu && (
+        <JobMenu
+          job={menu.job}
+          x={menu.x}
+          y={menu.y}
+          running={desk.running.includes(menu.job.id)}
+          onClose={() => setMenu(null)}
+          onOpen={() => {
+            onSelect(menu.job.id);
+            setMenu(null);
+          }}
+          onThread={
+            menu.job.threadId && onThread
+              ? () => {
+                  onThread(menu.job.threadId!);
+                  setMenu(null);
+                }
+              : undefined
+          }
+          onStop={
+            onCancelTask && desk.running.includes(menu.job.id)
+              ? () => {
+                  onCancelTask(menu.job.id);
+                  setMenu(null);
+                }
+              : undefined
+          }
+          onDismiss={
+            onDismissTask
+              ? () => {
+                  onDismissTask(menu.job.id);
+                  setMenu(null);
+                }
+              : undefined
+          }
+          onRemove={
+            onRemoveTask
+              ? () => {
+                  onRemoveTask(menu.job.id);
+                  setMenu(null);
+                }
+              : undefined
+          }
+        />
+      )}
     </aside>
   );
 }
@@ -532,11 +605,13 @@ function JobRow({
   active,
   onClick,
   onCancel,
+  onMenu,
 }: {
   job: DeskJob;
   active: boolean;
   onClick: () => void;
   onCancel?: (taskId: string) => void;
+  onMenu?: (e: React.MouseEvent) => void;
 }) {
   const t = useT();
   const running = job.status === "in_progress";
@@ -547,6 +622,11 @@ function JobRow({
       role="button"
       tabIndex={0}
       onClick={onClick}
+      onContextMenu={(e) => {
+        if (!onMenu) return;
+        e.preventDefault();
+        onMenu(e);
+      }}
       onKeyDown={(e) => {
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
@@ -581,6 +661,113 @@ function JobRow({
           </button>
         )}
       </div>
+    </div>
+  );
+}
+
+/**
+ * 工单卡右键菜单（2026-11-04）：
+ * 卡住的单一度只能挂在台账里——「停」只 abort 成员、不改状态，「新对话」也不动后台。
+ * 这里给四件事：打开 / 去出发会话 / 停成员 / 取消或删除（二次确认）。
+ */
+function JobMenu({
+  job,
+  x,
+  y,
+  running,
+  onClose,
+  onOpen,
+  onThread,
+  onStop,
+  onDismiss,
+  onRemove,
+}: {
+  job: DeskJob;
+  x: number;
+  y: number;
+  running: boolean;
+  onClose: () => void;
+  onOpen: () => void;
+  onThread?: () => void;
+  onStop?: () => void;
+  onDismiss?: () => void;
+  onRemove?: () => void;
+}) {
+  const t = useT();
+  const [confirm, setConfirm] = useState<null | "dismiss" | "remove">(null);
+  const box = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const onDown = (e: MouseEvent) => {
+      if (box.current && !box.current.contains(e.target as Node)) onClose();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [onClose]);
+
+  const done = job.status === "done" || job.status === "canceled";
+  const style = {
+    left: Math.max(8, Math.min(x, (window.innerWidth || 1200) - 240)),
+    top: Math.max(8, Math.min(y, (window.innerHeight || 800) - 232)),
+  };
+  return (
+    <div className="jobmenu" ref={box} style={style} role="menu" aria-label={job.id}>
+      <div className="jobmenu-h">
+        <span className="mono">{job.id}</span>
+        <span className={`st ${statusChipClass(job)}`}>{t(STATUS_KEY[job.status] ?? "status.todo")}</span>
+      </div>
+      {confirm ? (
+        <>
+          <p className="jobmenu-ask">{confirm === "dismiss" ? t("menu.dismissAsk") : t("menu.removeAsk")}</p>
+          <button
+            type="button"
+            className={`jobmenu-item${confirm === "remove" ? " danger" : ""}`}
+            onClick={() => {
+              if (confirm === "dismiss") onDismiss?.();
+              else onRemove?.();
+              onClose();
+            }}
+          >
+            {t("menu.confirm")}
+          </button>
+          <button type="button" className="jobmenu-item" onClick={() => setConfirm(null)}>
+            {t("common.cancel")}
+          </button>
+        </>
+      ) : (
+        <>
+          <button type="button" className="jobmenu-item" onClick={onOpen}>
+            {t("menu.open")}
+          </button>
+          {onThread && (
+            <button type="button" className="jobmenu-item" onClick={onThread}>
+              {t("menu.thread")}
+            </button>
+          )}
+          {onStop && (
+            <button type="button" className="jobmenu-item" onClick={onStop}>
+              {t("menu.stop")}
+            </button>
+          )}
+          {!done && onDismiss && (
+            <button type="button" className="jobmenu-item" onClick={() => setConfirm("dismiss")}>
+              {t("menu.dismiss")}
+            </button>
+          )}
+          {!running && job.status !== "in_progress" && onRemove && (
+            <button type="button" className="jobmenu-item danger" onClick={() => setConfirm("remove")}>
+              {t("menu.remove")}
+            </button>
+          )}
+        </>
+      )}
     </div>
   );
 }
@@ -979,6 +1166,20 @@ function Roster({
       : null;
   const [naming, setNaming] = useState(false);
   const [teamName, setTeamName] = useState("");
+  /** 多团队分组：团队名 + 该队未归档的单数（回答"这队手上还有什么"） */
+  const memberGroups = useMemo(() => {
+    const map = new Map<string, { teamName: string; active: number; members: DeskMember[] }>();
+    for (const m of desk.members) {
+      const g = map.get(m.teamId) ?? {
+        teamName: m.teamName ?? m.teamId,
+        active: desk.jobs.filter((j) => j.teamId === m.teamId && j.status !== "done" && j.status !== "canceled").length,
+        members: [],
+      };
+      g.members.push(m);
+      map.set(m.teamId, g);
+    }
+    return map;
+  }, [desk.members, desk.jobs]);
   const submitTeam = () => {
     const name = teamName.trim();
     if (!name) return;
@@ -1095,15 +1296,34 @@ function Roster({
           )}
         </div>
 
-        {desk.members.map((m) => (
-          <MemberCard
-            key={`${m.teamId}:${m.name}`}
-            m={m}
-            active={!!decision?.jobId && m.jobId === decision.jobId}
-            showTeam={desk.teamCount > 1}
-            onSelect={onSelectJob}
-          />
-        ))}
+        {/* 多团队时按团队分组：3 个任务 3 个团队，扁平列表分不清谁在哪一队 */}
+        {desk.teamCount > 1
+          ? [...memberGroups.entries()].map(([teamId, g]) => (
+              <div className="mgroup" key={teamId}>
+                <div className="mgroup-h">
+                  <span className="t">{g.teamName}</span>
+                  <span className="n mono">{t("roster.groupCount", { n: g.members.length, active: g.active })}</span>
+                </div>
+                {g.members.map((m) => (
+                  <MemberCard
+                    key={`${m.teamId}:${m.name}`}
+                    m={m}
+                    active={!!decision?.jobId && m.jobId === decision.jobId}
+                    showTeam={false}
+                    onSelect={onSelectJob}
+                  />
+                ))}
+              </div>
+            ))
+          : desk.members.map((m) => (
+              <MemberCard
+                key={`${m.teamId}:${m.name}`}
+                m={m}
+                active={!!decision?.jobId && m.jobId === decision.jobId}
+                showTeam={false}
+                onSelect={onSelectJob}
+              />
+            ))}
       </div>
     </aside>
   );
@@ -2169,6 +2389,118 @@ function ReviewDesk({
 
 type CmdItem = { key: string; group: string; label: string; hint?: string; run: () => void };
 
+/**
+ * 任务总览（2026-11-04）：ABC 三个任务并行、各有一个团队时，
+ * "几个在跑 / 各自的团队与成员 / 进度多少 / 去哪个会话干预"必须有唯一总账。
+ */
+function TaskOverview({
+  desk,
+  currentId,
+  onClose,
+  onOpen,
+  onThread,
+  onStop,
+}: {
+  desk: Desk;
+  currentId?: string;
+  onClose: () => void;
+  onOpen: (taskId: string) => void;
+  onThread?: (id: string) => void;
+  onStop?: (taskId: string) => void;
+}) {
+  const t = useT();
+  const open = desk.jobs.filter((j) => j.status !== "done" && j.status !== "canceled");
+  const progressOf = (m?: string, teamId?: string) => {
+    if (!m) return undefined;
+    return desk.members.find((x) => x.name === m && x.teamId === teamId)?.progress;
+  };
+  const byTeam = new Map<string, { teamId: string; teamName: string; jobs: DeskJob[] }>();
+  for (const j of open) {
+    const g = byTeam.get(j.teamId) ?? { teamId: j.teamId, teamName: j.teamName ?? j.teamId, jobs: [] };
+    g.jobs.push(j);
+    byTeam.set(j.teamId, g);
+  }
+  const waiting = desk.jobs.filter((j) => j.action === "accept").length;
+  const stuck = desk.jobs.filter((j) => j.status === "blocked").length;
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return (
+    <div className="tov-backdrop" onClick={onClose}>
+      <section className="tov" role="dialog" aria-label={t("tov.title")} onClick={(e) => e.stopPropagation()}>
+        <header className="tov-head">
+          <span className="t">{t("tov.title")}</span>
+          <span className="mono tov-sum">{t("tov.summary", { running: desk.running.length, waiting, stuck })}</span>
+          <button type="button" className="icon-btn" onClick={onClose} aria-label={t("common.close")}>
+            <Icon name="x" size="sm" />
+          </button>
+        </header>
+        <div className="tov-body">
+          {open.length === 0 && <p className="tov-empty">{t("tov.empty")}</p>}
+          {[...byTeam.values()].map((g) => {
+            const members = desk.members.filter((m) => m.teamId === g.teamId).length;
+            return (
+              <div className="tov-group" key={g.teamId}>
+                <div className="tov-group-h">
+                  <Icon name="users" size="sm" />
+                  <b>{g.teamName}</b>
+                  <span className="mono">{t("tov.members", { n: members })}</span>
+                </div>
+                {g.jobs.map((j) => {
+                  const running = desk.running.includes(j.id);
+                  const progress = progressOf(j.member, j.teamId);
+                  const thread = j.threadId ? desk.threads.find((x) => x.id === j.threadId) : undefined;
+                  return (
+                    <div className={`tov-job${j.id === currentId ? " on" : ""}`} key={j.id}>
+                      <div className="tov-job-h">
+                        <span className="mono tov-id">{j.id}</span>
+                        <span className="tov-title">{j.title}</span>
+                        <span className={`st ${statusChipClass(j)}`}>
+                          {running && <span className="pip" />}
+                          {t(STATUS_KEY[j.status] ?? "status.todo")}
+                        </span>
+                      </div>
+                      <div className="tov-job-meta">
+                        <span>
+                          <Icon name="user" size="sm" /> {j.member ?? "—"}
+                        </span>
+                        {typeof progress === "number" && <span className="mono">{t("tov.progress", { n: progress })}</span>}
+                        {thread && thread.id !== desk.thread.id ? (
+                          <button type="button" className="strip-link" onClick={() => onThread?.(thread.id)}>
+                            {t("tov.thread", { title: thread.title })}
+                          </button>
+                        ) : (
+                          <span className="tov-here">{thread ? t("tov.threadHere") : t("tov.noThread")}</span>
+                        )}
+                      </div>
+                      <div className="tov-job-actions">
+                        <button type="button" className="ghost-btn" onClick={() => onOpen(j.id)}>
+                          {t("tov.open")}
+                        </button>
+                        {running && onStop && (
+                          <button type="button" className="ghost-btn" onClick={() => onStop(j.id)}>
+                            {t("ledger.stop")}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })}
+        </div>
+      </section>
+    </div>
+  );
+}
+
 /** Ctrl+K：跳工单 / 会话 / 动作。键盘上下选择，Enter 执行。 */
 function CommandPalette({
   desk,
@@ -2357,6 +2689,8 @@ export function DeskView({
   onTaskFeed,
   onCreateTeam,
   onCancelTask,
+  onDismissTask,
+  onRemoveTask,
   notice,
 }: {
   desk: Desk;
@@ -2389,6 +2723,9 @@ export function DeskView({
   onCreateTeam?: (name: string) => void;
   /** 停一张在跑的单 */
   onCancelTask?: (taskId: string) => void;
+  /** 取消一张单（→ 归档带）/ 彻底删除（不可恢复） */
+  onDismissTask?: (taskId: string) => void;
+  onRemoveTask?: (taskId: string) => void;
   /** 发送/新建失败时的可见提示（不允许静默失败） */
   notice?: string | null;
 }) {
@@ -2403,6 +2740,8 @@ export function DeskView({
   // E6：Ctrl+K 命令面板 / Ctrl+/ 快捷键清单——能力实际存在就必须可发现
   const [cmdkOpen, setCmdkOpen] = useState(false);
   const [keymapOpen, setKeymapOpen] = useState(false);
+  /** 任务总览（几个任务在跑 / 各自团队与进度 / 去会话） */
+  const [overviewOpen, setOverviewOpen] = useState(false);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -2461,6 +2800,7 @@ export function DeskView({
         pending={pendingCount}
         rightOpen={rightOpen}
         onToggleRight={() => setRightOpen((v) => !v)}
+        onOverview={() => setOverviewOpen(true)}
       />
       {rightOpen && <button type="button" className="right-backdrop only-narrow" aria-label="close" onClick={() => setRightOpen(false)} />}
       <div className="body">
@@ -2474,6 +2814,8 @@ export function DeskView({
           onThreadRename={onThreadRename}
           onThreadRemove={onThreadRemove}
           onCancelTask={onCancelTask}
+          onDismissTask={onDismissTask}
+          onRemoveTask={onRemoveTask}
         />
         <main className="center">
           <div className="sheet-wrap">
@@ -2540,6 +2882,23 @@ export function DeskView({
         />
       )}
       {keymapOpen && <KeymapOverlay onClose={() => setKeymapOpen(false)} />}
+      {overviewOpen && (
+        <TaskOverview
+          desk={desk}
+          currentId={current?.id}
+          onClose={() => setOverviewOpen(false)}
+          onOpen={(id) => {
+            setReviewId(null);
+            setActiveId(id);
+            setOverviewOpen(false);
+          }}
+          onThread={(id) => {
+            setOverviewOpen(false);
+            onThread?.(id);
+          }}
+          onStop={onCancelTask}
+        />
+      )}
     </div>
   );
 }

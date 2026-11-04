@@ -132,6 +132,8 @@ export interface Desk {
   /** 挂起的裁决（问题/契约/审批）——多条都要可见可翻，不能只露第一条（A5） */
   decisions: DeskDecision[];
   tokensUsed: number;
+  /** 真在跑的成员单（后端 memberRuns；不是 status=in_progress 的近似） */
+  running: string[];
   /** D3：会话级软预算（只在真的配了上限时存在；黄铜 chip 不显示假数据） */
   budget?: { spent: number; soft: number };
   /** 真实对话流（频道 + 每个工单的往来） */
@@ -284,6 +286,7 @@ export function deskFromSnapshot(snap: SessionSnapshot): Desk {
     teamCount: board.teams.filter((t) => t.status !== "dissolved").length,
     decisions: board.decisions.map(toDecision),
     tokensUsed: board.tokensUsed,
+    running: snap.running ?? [],
     budget: soft > 0 ? { spent: snap.usage.sessionIn + snap.usage.sessionOut, soft } : undefined,
     feed: snap.feed,
     turn: snap.turn,

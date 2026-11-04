@@ -58,7 +58,7 @@ const assignConfirmed = (kernel, taskId) => {
   confirmPlan(kernel, taskId);
 };
 
-test("任务契约：派单先停在 todo，确认后才进 in_progress，卷宗有 timeline 与摘要", () => {
+test("任务契约：派单先停在 todo；没模型时确认后也停在待办（不假开工）", () => {
   const { kernel, tasks, cases } = setup();
   assign(kernel, "WO-9");
   assert.equal(tasks.get("WO-9").status, "todo", "未确认前不能谎报执行中");
@@ -66,9 +66,14 @@ test("任务契约：派单先停在 todo，确认后才进 in_progress，卷宗
   confirmPlan(kernel, "WO-9");
   const rec = tasks.get("WO-9");
   assert.ok(rec, "应有权威工单记录");
-  assert.equal(rec.status, "in_progress");
+  // 本 setup 没有模型：确认了也起不来，工单必须停在待办并说明原因
+  assert.equal(rec.status, "todo", "起不来就不许假装执行中");
   assert.equal(rec.member, "林工");
   assert.ok(rec.version >= 2);
+  assert.match(
+    kernel.handle("session.snapshot").feed.map((c) => c.text ?? "").join("\n"),
+    /没开工（停在待办）/,
+  );
 
   const timeline = cases.readTimeline("WO-9");
   assert.ok(timeline.some((e) => e.kind === "assign" && e.member === "林工"));

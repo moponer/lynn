@@ -1830,6 +1830,81 @@ button.ev:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 .thread-danger { color: var(--red); }
 .thread-danger:hover { color: var(--red); background: var(--hover-bg-2); }
 
+/* ---------- 工单右键菜单（卡住的单必须能取消/删除） ---------- */
+.jobmenu {
+  position: fixed; z-index: 60; width: 228px; padding: 6px;
+  background: var(--sheet); border-radius: var(--r-m);
+  box-shadow: 0 1px 2px rgba(0,0,0,.4), 0 18px 40px -24px #000;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.jobmenu-h {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 4px 6px 6px; color: var(--ink-3); font-size: var(--fs-label);
+}
+.jobmenu-ask { margin: 4px 6px 6px; font-size: var(--fs-meta); color: var(--ink-2); line-height: 1.5; }
+.jobmenu-item {
+  text-align: left; padding: 6px 8px; border-radius: var(--r-s);
+  background: none; color: var(--ink-2); font: inherit; font-size: var(--fs-meta); cursor: pointer;
+}
+.jobmenu-item:hover { background: var(--hover-bg); color: var(--ink); }
+.jobmenu-item.danger { color: var(--seal); }
+.jobmenu-item.danger:hover { background: var(--seal-wash); color: var(--seal); }
+.jobmenu-item:focus-visible { outline: 1.5px solid var(--blue); outline-offset: -1px; }
+
+/* ---------- 任务总览（多任务并行） ---------- */
+.tasks-btn { gap: 6px; }
+.tasks-btn.live { color: var(--blue); }
+.tasks-live {
+  font-family: var(--f-mono); font-size: var(--fs-label); padding: 1px 5px;
+  border-radius: var(--r-s); background: var(--blue-wash); color: var(--blue);
+}
+.tov-backdrop {
+  position: fixed; inset: 0; z-index: 55; background: rgba(6,9,12,.55);
+  display: grid; place-items: center; padding: 24px;
+}
+.tov {
+  width: min(720px, 100%); max-height: min(78vh, 720px); display: flex; flex-direction: column;
+  background: var(--sheet); border-radius: var(--r-m);
+  box-shadow: 0 24px 60px -30px #000;
+}
+.tov-head { display: flex; align-items: center; gap: 10px; padding: 12px 14px 10px; }
+.tov-head .t { font-family: var(--f-display); font-size: var(--fs-body); color: var(--ink); }
+.tov-sum { margin-left: auto; color: var(--ink-3); font-size: var(--fs-label); }
+.tov-body { overflow-y: auto; padding: 0 14px 14px; display: flex; flex-direction: column; gap: 12px; }
+.tov-empty { color: var(--ink-3); font-size: var(--fs-meta); padding: 18px 4px; margin: 0; }
+.tov-group { display: flex; flex-direction: column; gap: 6px; }
+.tov-group-h { display: flex; align-items: center; gap: 6px; color: var(--ink-2); font-size: var(--fs-meta); }
+.tov-group-h b { font-weight: 500; }
+.tov-group-h .mono { color: var(--ink-4); font-size: var(--fs-label); }
+.tov-job {
+  background: var(--sheet-2); border-radius: var(--r-m); padding: 8px 10px;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.tov-job.on { background: var(--blue-wash); }
+.tov-job-h { display: flex; align-items: center; gap: 8px; }
+.tov-id { color: var(--ink-4); font-size: var(--fs-label); }
+.tov-title {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--ink); font-size: var(--fs-body);
+}
+.tov-job-meta { display: flex; align-items: center; gap: 10px; color: var(--ink-3); font-size: var(--fs-label); flex-wrap: wrap; }
+.tov-job-meta > span { display: inline-flex; align-items: center; gap: 4px; }
+.tov-here { color: var(--ink-4); }
+.tov-job-actions { display: flex; gap: 6px; justify-content: flex-end; }
+.tov-job-actions .ghost-btn { padding: 3px 9px; font-size: var(--fs-label); }
+@media (max-width: 1420px) {
+  .rail-top .tasks-live { display: none; }
+}
+
+/* ---------- 编制表按团队分组（多团队时） ---------- */
+.mgroup { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
+.mgroup-h {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+  padding: 2px 2px 0; color: var(--ink-3); font-size: var(--fs-label);
+}
+.mgroup-h .t { color: var(--ink-2); font-size: var(--fs-meta); font-weight: 500; }
+.mgroup-h .n { color: var(--ink-4); }
+
 /* ---- M1-16 本轮随附条 + @ 文件补全 ---- */
 .attach-strip {
   display: flex;

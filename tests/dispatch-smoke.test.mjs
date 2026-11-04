@@ -50,14 +50,15 @@ test("默认不自动开工：派单先出任务契约，工单停在 todo", () 
   assert.ok(!fs.existsSync(path.join(kernel.dataRoot, "team", "t1", "assignments", "task-1.jsonl")));
 });
 
-test("用户确认后才开工；无模型时如实告知无法开工，派单记录仍落盘", () => {
+test("用户确认后才尝试开工；无模型时如实告知并停在待办，派单记录仍落盘", () => {
   const { root, kernel, tasks } = setup();
   assign(kernel);
   const plan = kernel.handle("session.snapshot").board.decisions.find((d) => d.kind === "plan");
   const r = kernel.handle("decision.resolve", { id: plan.id, action: "start" });
   assert.equal(r.ok, true);
 
-  assert.equal(tasks.get("task-1").status, "in_progress");
+  // 起不来就不许留在"进行中"：停在待办，台账上不会出现永远转圈的单
+  assert.equal(tasks.get("task-1").status, "todo");
   const assigns = fs.readFileSync(path.join(root, "team", "t1", "assignments", "task-1.jsonl"), "utf-8");
   assert.ok(assigns.includes('"kind":"assign"'));
   // 工作区与简报包不建（没模型就没开工，不能先承诺工作区）

@@ -84,8 +84,11 @@ const TEAM_HINT = "团队 ID。**省略即可**：系统会绑定当前团队，
 /** 流式 delta 的发送去抖：一帧一次。渲染层再按 rAF 合帧，两处都不许降到"肉眼看得出卡"的档位 */
 const DELTA_FRAME_MS = 16;
 
-/** 同时最多几个成员在跑：再多就互相堵，而且用户根本看不出来谁在干什么 */
-const MAX_CONCURRENT_MEMBERS = 2;
+/**
+ * 默认同时最多几个成员在跑：三个任务并行是常态（ABC 各一个团队），
+ * 2 会把第三张单直接拒掉。可用 settings.prefs.maxParallelMembers 覆盖（上限 8）。
+ */
+const DEFAULT_MAX_PARALLEL_MEMBERS = 4;
 /** 成员多久没有任何动作就标"可能卡住"（蓝本 tether-ai 是 120s） */
 const MEMBER_STALL_MS = 120_000;
 
@@ -109,7 +112,7 @@ const TOOL_JSON: ToolSchema[] = [
     function: {
       name: "create_member",
       description:
-        "招募团队成员（书面岗位）：名字、岗位、单一目标、边界（不许做什么）、工具白名单、产出契约与验收标准。超过 6 人编制需要 justification。团队不存在会自动新建。",
+        "招募团队成员（书面岗位）：名字、岗位、单一目标、边界（不许做什么）、工具白名单、产出契约与验收标准。**团队最小 1 人**：一张单一个人做得完就只招 1 人，不要为凑角色多招（每个人都在烧预算/时限）。超过 6 人编制需要 justification。团队不存在会自动新建。",
       parameters: {
         type: "object",
         required: ["name", "role", "goal", "tools"],
@@ -137,7 +140,8 @@ const TOOL_JSON: ToolSchema[] = [
     type: "function",
     function: {
       name: "assign_task",
-      description: "向成员派单。成员只拿到简报包（任务+完成标准+时限），看不到你们的对话。团队不存在会自动新建。",
+      description:
+        "向成员派单。成员只拿到简报包（任务+完成标准+时限），看不到你们的对话。团队不存在会自动新建。多个任务并行时一任务一团队可以，但要先把任务清单（各派给谁、多久）告诉用户。",
       parameters: {
         type: "object",
         required: ["taskId", "member", "brief", "deadline"],
@@ -1108,7 +1112,11 @@ export class Kernel {
       : `用户拒绝了这次「${name}」调用。不要重试同一动作，改成向用户说明或换一条路（审批拒绝不算错误轮）。`;
   }
 
-  /** 用户确认任务契约后真正开工：记录派单 + 工单进 in_progress + 起成员 */
+  /**
+   * 用户确认任务契约后真正开工：记录派单 → 起成员 → **起得来才**进 in_progress。
+   * 原来先把工单推到 in_progress 再试，模型没配 / 并发满 / 成员忙时会留下一张
+   * 永远"进行中"却没人跑的单——用户实报的"卡住删不掉"就包括这一类。
+   */
   private startAssignment(p: PendingPlan): string {
     this.tools.assignTask(p.teamId, {
       taskId: p.taskId,
@@ -1118,15 +1126,23 @@ export class Kernel {
       tools: p.tools,
       sessionId: this.host?.sessionId, // M0-13：派单记录可回溯到当轮 Pi session
     });
+    // 先只到 todo（确认过了但还没真开工）
     try {
-      this.taskStore.ensureInProgress({
-        id: p.taskId,
-        title: (p.brief.split("\n").map((l) => l.trim()).find((l) => l.length > 0) ?? "").slice(0, 40) || p.taskId,
-        teamId: p.teamId,
-        member: p.member,
-        // 记下"这单从哪个会话派出"：换会话后旧工单的往来还能读回来
-        threadId: this.currentThreadId,
-      });
+      const existing = this.taskStore.get(p.taskId);
+      if (!existing) {
+        this.taskStore.create({
+          id: p.taskId,
+          title: (p.brief.split("\n").map((l) => l.trim()).find((l) => l.length > 0) ?? "").slice(0, 40) || p.taskId,
+          teamId: p.teamId,
+          member: p.member,
+          // 记下"这单从哪个会话派出"：换会话后旧工单的往来还能读回来
+          threadId: this.currentThreadId,
+        });
+        this.taskStore.transition(p.taskId, "todo");
+      } else if (existing.status === "backlog" || existing.status === "blocked") {
+        this.taskStore.transition(p.taskId, "todo", { threadId: this.currentThreadId });
+      }
+      // 其余状态（todo / in_progress / canceled / done）不动；缺失的 threadId 由成员回报时补记
     } catch {
       /* 工单状态已就位 */
     }
@@ -1138,8 +1154,19 @@ export class Kernel {
     });
     this.taskCase.appendSummary(p.taskId, `派给 ${p.member}（截止 ${p.deadline}）`);
     const kickoff = this.dispatchMember(p.teamId, p.taskId, p.member, p.brief, p.deadline, p.tools, p.draftId);
+    if (kickoff.ok) {
+      try {
+        this.taskStore.transition(p.taskId, "in_progress", { member: p.member, threadId: this.currentThreadId });
+      } catch {
+        /* 已是 in_progress */
+      }
+    } else {
+      // 停在 todo：没有假"进行中"；原因写进会话与卷宗，用户知道下一步该做什么
+      this.taskCase.append(p.taskId, { kind: "note", text: `未开工：${kickoff.message}` });
+      this.card({ kind: "system", text: `${p.taskId} 没开工（停在待办）：${kickoff.message}` });
+    }
     this.setTurn({ phase: "working", taskId: p.taskId, busy: this.busy });
-    return kickoff;
+    return kickoff.message;
   }
 
   /**
@@ -1155,25 +1182,29 @@ export class Kernel {
     deadline: string,
     toolsArg?: string[],
     draftId?: string,
-  ): string {
+  ): { ok: boolean; message: string } {
     const cfg = this.settings.getModel();
     const apiKey = cfg
       ? loadApiKey(this.settings, (b) => (this.decryptor ? this.decryptor(b) : b.toString("utf-8")))
       : null;
     if (!cfg || !apiKey) {
-      return "模型未配置（或 Key 无法解密）：派单已记录，但成员无法开工。请先在设置里配置模型。";
+      return { ok: false, message: "模型未配置（或 Key 无法解密）：派单已记录，但成员无法开工。请先在设置里配置模型。" };
     }
     let profile;
     try {
       profile = this.teamStore.readMember(teamId, member);
     } catch {
-      return `读不到 ${member} 的岗位档案，无法开工（档案文件可能被移动或改名）。`;
+      return { ok: false, message: `读不到 ${member} 的岗位档案，无法开工（档案文件可能被移动或改名）。` };
     }
     if (this.memberRuns.has(taskId)) {
-      return `${taskId} 已有成员在执行中，不重复开工。`;
+      return { ok: false, message: `${taskId} 已有成员在执行中，不重复开工。` };
     }
-    if (this.memberRuns.size >= MAX_CONCURRENT_MEMBERS) {
-      return `同时最多 ${MAX_CONCURRENT_MEMBERS} 个成员在跑，现在已经有 ${this.memberRuns.size} 个（${[...this.memberRuns.keys()].join("、")}）。等其中一个回报或点「停」之后再派。`;
+    const cap = this.maxParallelMembers();
+    if (this.memberRuns.size >= cap) {
+      return {
+        ok: false,
+        message: `同时最多 ${cap} 个成员在跑，现在已经有 ${this.memberRuns.size} 个（${[...this.memberRuns.keys()].join("、")}）。等其中一个回报或点「停」之后再派；确实要更多可以调 settings.prefs.maxParallelMembers。`,
+      };
     }
     // 后台执行可能跨会话：出发时的线程记下来，回报要写回那一个，不能落到用户当前看的会话里
     const runThreadId = this.currentThreadId;
@@ -1181,7 +1212,7 @@ export class Kernel {
     const memberKey = `${teamId}::${member}`;
     const busyTask = this.memberActive.get(memberKey);
     if (busyTask && busyTask !== taskId) {
-      return `成员「${member}」正在跑 ${busyTask}，同一成员同时只能跟一张单。等它回报后再派，或换一个成员。`;
+      return { ok: false, message: `成员「${member}」正在跑 ${busyTask}，同一成员同时只能跟一张单。等它回报后再派，或换一个成员。` };
     }
     // 执行工具 = 本次分配 ∩ 内置执行工具；submit_report 是回报通道，不占白名单
     const allowed = (toolsArg ?? profile.tools).filter((t) =>
@@ -1331,7 +1362,7 @@ export class Kernel {
       meta: `工具：${allowed.join("、") || "无"}`,
       body: `工作区 tasks/${taskId}/workspace/（成员文件活动限制在此，回报后自动进审查台）`,
     });
-    return "成员已开工（后台执行），回报后会自动进待审查。";
+    return { ok: true, message: "成员已开工（后台执行），回报后会自动进待审查。" };
   }
 
   /**
@@ -1342,10 +1373,82 @@ export class Kernel {
     const controller = this.memberAborts.get(taskId);
     if (!controller) return { ok: false, error: `没有在跑的 ${taskId}（可能已经结束或从未开工）` };
     controller.abort();
-    const text = `已停 ${taskId}：成员在本轮模型调用结束后收手，已写出的文件留在工作区。`;
+    // 停了就必须有可见变化：原来只 abort，工单永远停在 in_progress，台账上看着"还在跑"
+    let moved = false;
+    try {
+      const rec = this.taskStore.get(taskId);
+      if (rec && rec.status === "in_progress") {
+        this.taskStore.transition(taskId, "blocked", { member: rec.member });
+        this.taskCase.append(taskId, { kind: "transition", text: "→ blocked（用户手动停机）" });
+        moved = true;
+      }
+    } catch {
+      /* 状态已不在可迁移范围就不强改 */
+    }
+    const text = moved
+      ? `已停 ${taskId}：成员收手，工单转入「卡住」——可以右键取消或重新派单，不再一直挂在「进行中」。`
+      : `已停 ${taskId}：成员在本轮模型调用结束后收手，已写出的文件留在工作区。`;
     // C2 原则：工单相关卡片归出发会话——在别的会话点「停」不该把过程噪音写进当前会话
     const owner = this.taskStore.get(taskId)?.threadId;
     if (owner) this.cardTo(owner, { kind: "system", text });
+    else this.card({ kind: "system", text });
+    return { ok: true };
+  }
+
+  /** 并行上限（settings.prefs.maxParallelMembers，1–8；非法值回退默认 4） */
+  private maxParallelMembers(): number {
+    const raw = Number(this.settings.getPrefs().maxParallelMembers);
+    if (!Number.isFinite(raw) || raw < 1) return DEFAULT_MAX_PARALLEL_MEMBERS;
+    return Math.min(Math.floor(raw), 8);
+  }
+
+  /** 取消一张单（→ canceled，进归档带）：在跑的会先停下成员 */
+  dismissTask(taskId: string): { ok: boolean; error?: string } {
+    const rec = this.taskStore.get(taskId);
+    if (!rec) return { ok: false, error: `工单不存在：${taskId}` };
+    if (rec.status === "canceled") return { ok: true };
+    if (rec.status === "done") return { ok: false, error: `${taskId} 已经验收归档，不能取消` };
+    if (this.memberRuns.has(taskId)) this.cancelMemberTask(taskId);
+    try {
+      this.taskStore.transition(taskId, "canceled", { member: rec.member });
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+    this.taskCase.append(taskId, { kind: "note", text: "用户取消这张单" });
+    const text = `已取消 ${taskId}：从台账移到归档带（目录与卷宗保留，可搜可查）。`;
+    if (rec.threadId) this.cardTo(rec.threadId, { kind: "system", text });
+    else this.card({ kind: "system", text });
+    if (this.decisions.some((d) => d.jobId === taskId)) {
+      this.decisions = this.decisions.filter((d) => d.jobId !== taskId);
+      this.setTurn({});
+    }
+    return { ok: true };
+  }
+
+  /** 彻底删除一张单（tasks/<id>/ 整目录）：不可恢复，界面必须二次确认 */
+  removeTask(taskId: string): { ok: boolean; error?: string } {
+    if (this.memberRuns.has(taskId)) return { ok: false, error: `${taskId} 还在跑：先停成员再删` };
+    const rec = this.taskStore.get(taskId);
+    if (!rec) return { ok: false, error: `工单不存在：${taskId}` };
+    try {
+      this.taskStore.remove(taskId);
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+    // 派单账本也是台账的兜底来源：不删它，删完工单还会从 assignments 里"复活"一条
+    try {
+      fs.rmSync(path.join(this.dataRoot, "team", rec.teamId, "assignments", `${taskId}.jsonl`), { force: true });
+    } catch {
+      /* 没有账本文件是常态 */
+    }
+    this.memberProgress.delete(rec.member ?? "");
+    // 指向这张单的挂起裁决/契约一并撤掉，避免点开已删的工单
+    if (this.decisions.some((d) => d.jobId === taskId)) {
+      this.decisions = this.decisions.filter((d) => d.jobId !== taskId);
+      this.setTurn({});
+    }
+    const text = `已删除 ${taskId}：工单、卷宗与工作区一并移除（不可恢复）。`;
+    if (rec.threadId) this.cardTo(rec.threadId, { kind: "system", text });
     else this.card({ kind: "system", text });
     return { ok: true };
   }
@@ -2383,6 +2486,8 @@ export class Kernel {
           threads: this.threads
             .list()
             .map((t) => ({ id: t.id, title: t.title, updatedAt: t.updatedAt, counts: threadCounts.get(t.id) })),
+          // 真在跑的成员单：台账"进行中"不等于在跑（卡住/停机也会留在 in_progress 历史里）
+          running: this.runningTaskIds(),
           project: {
             root: this.projectRoot,
             trusted: this.trust.isTrusted(this.projectRoot),
@@ -2691,6 +2796,16 @@ export class Kernel {
         return { ok: true, stopped } as RpcContracts[M]["result"];
       }
 
+      case "task.dismiss": {
+        const { taskId } = params as { taskId: string };
+        return this.dismissTask(String(taskId)) as RpcContracts[M]["result"];
+      }
+
+      case "task.remove": {
+        const { taskId } = params as { taskId: string };
+        return this.removeTask(String(taskId)) as RpcContracts[M]["result"];
+      }
+
       // 建团队（§4.10.3 修正）：界面上给名字就够，ID 由系统生成
       case "team.create": {
         const { name } = params as { name?: string };
@@ -2781,6 +2896,20 @@ export class Kernel {
           this.pendingPlans.delete(id);
           if (action === "start" && plan) {
             const r = this.startAssignment(plan);
+            // 契约一确认就从右栏消失，目标/验收/截止不该跟着没：落一张带 jobId 的卡，
+            // 图纸「往来」能回看，跨会话的 task.feed 也读得到
+            this.card({
+              kind: "tool",
+              badge: "派单",
+              title: `${plan.member} · ${plan.taskId} · 契约`,
+              jobId: plan.taskId,
+              body: [
+                `目标：${d.plan?.goal ?? plan.brief.split("\n")[0] ?? ""}`,
+                `验收：${(d.plan?.acceptance ?? []).join("；") || "（未写）"}`,
+                `截止：${d.plan?.deadline ?? plan.deadline}`,
+                `团队：${plan.teamId}`,
+              ].join("\n"),
+            });
             this.card({ kind: "system", text: `计划已确认。${r}` });
             return { ok: true } as RpcContracts[M]["result"];
           }

@@ -29,6 +29,8 @@ export interface Prefs {
   fallbackModel: string;
   /** 界面语言（M3-08）：zh 是源语言；en 缺词条回退中文 */
   lang: "zh" | "en";
+  /** 同时最多几个成员在跑（默认 4）：三个任务并行是常态，2 会把第三张单直接拒掉 */
+  maxParallelMembers: number;
 }
 
 const DEFAULT_PREFS: Prefs = {
@@ -38,6 +40,7 @@ const DEFAULT_PREFS: Prefs = {
   softBudgetTokens: 0,
   fallbackModel: "",
   lang: "zh",
+  maxParallelMembers: 4,
 };
 
 interface SettingsFile {

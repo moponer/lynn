@@ -170,6 +170,39 @@ app.whenReady().then(async () => {
     );
   }
 
+  // 可选：任务总览（多任务并行：几个在跑、各自团队与进度、去会话）
+  if (process.argv[3] === "overview") {
+    const ok = await win.webContents.executeJavaScript(
+      `(() => { const b=document.querySelector('.tasks-btn'); if (b) b.click(); return !!b; })()`,
+    );
+    await new Promise((r) => setTimeout(r, 600));
+    console.log(
+      "OVERVIEW",
+      ok,
+      await win.webContents.executeJavaScript(`!!document.querySelector('.tov')`),
+      "jobs:",
+      await win.webContents.executeJavaScript(`document.querySelectorAll('.tov-job').length`),
+    );
+  }
+
+  // 可选：工单卡右键菜单（卡住的单：打开 / 去会话 / 停 / 取消 / 删除）
+  if (process.argv[3] === "jobmenu") {
+    const ok = await win.webContents.executeJavaScript(`(() => {
+      const el = document.querySelector('.job');
+      if (!el) return false;
+      const r = el.getBoundingClientRect();
+      el.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: r.left + 40, clientY: r.top + 24 }));
+      return true;
+    })()`);
+    await new Promise((r) => setTimeout(r, 500));
+    console.log(
+      "JOBMENU",
+      ok,
+      "items:",
+      await win.webContents.executeJavaScript(`document.querySelectorAll('.jobmenu-item').length`),
+    );
+  }
+
   // 可选：多条挂起裁决翻到下一条（A5）
   if (process.argv[3] === "sealnext") {
     const before = await win.webContents.executeJavaScript(

@@ -173,6 +173,66 @@ const snapshot = {
   ],
 };
 
+// 多任务并行夹具（LYNN_PREVIEW_MULTI=1）：两个团队、两张在跑的单——
+// 用来验「任务总览 / 在跑 N / 右栏按团队分组」，默认截图不受影响。
+if (process.env.LYNN_PREVIEW_MULTI) {
+  snapshot.board.teams.push({
+    id: "t2",
+    name: "超星刷课",
+    status: "active",
+    members: [
+      {
+        name: "阿黎",
+        role: "流程执行",
+        goal: "把剩余课程刷完并留下完成截图",
+        status: "running",
+        statusNote: "正在刷第 3 门课",
+        progress: 42,
+        budgetUsed: 12,
+        budgetTotal: 300,
+        rejections: 0,
+        rejectionLimit: 3,
+        toolWhitelist: ["browser_navigate", "browser_click"],
+        color: "#c9a227",
+        model: "deepseek-chat",
+        turnLimit: 12,
+      },
+    ],
+  });
+  const at = "2026-11-04T06:13:00.000Z";
+  snapshot.board.track.push(
+    {
+      id: "WO-2420",
+      teamId: "t2",
+      title: "超星剩余课程刷完（第 3 门进行中）",
+      status: "in_progress",
+      statusNote: "in_progress · 阿黎",
+      member: "阿黎",
+      at,
+      threadId: "t-2",
+      evidenceCount: 0,
+      version: 2,
+      rejectRounds: 0,
+      evidence: [],
+    },
+    {
+      id: "WO-2421",
+      teamId: "t1",
+      title: "竞品价格抓取（每日 09:00）",
+      status: "in_progress",
+      statusNote: "in_progress · 顾明",
+      member: "顾明",
+      at,
+      threadId: "t-main",
+      evidenceCount: 0,
+      version: 2,
+      rejectRounds: 0,
+      evidence: [],
+    },
+  );
+  snapshot.running = ["WO-2420", "WO-2421"];
+}
+
 contextBridge.exposeInMainWorld("lynn", {
   rpc: async (method) => {
     if (method === "session.snapshot") return snapshot;

@@ -262,6 +262,8 @@ export interface SessionSnapshot {
   thread: { id: string; title: string };
   /** C3：会话行显示"这个会话派出过多少单"（后端按 task.threadId 汇总） */
   threads: { id: string; title: string; updatedAt: string; counts?: { active: number; archived: number } }[];
+  /** 真在跑的成员单（不只 status=in_progress：卡住但没在跑的不能算） */
+  running?: string[];
   permission: PermissionMode;
   model: ModelConfigView;
   feed: FeedCard[];
@@ -496,6 +498,16 @@ export interface RpcContracts {
   "task.cancelAll": {
     params: void;
     result: { ok: boolean; stopped: number };
+  };
+  /** 取消一张单（→ canceled，进归档带；在跑的会先停成员） */
+  "task.dismiss": {
+    params: { taskId: string };
+    result: { ok: boolean; error?: string };
+  };
+  /** 从台账彻底删掉一张单（连同 tasks/<id>/ 目录；在跑的不许删） */
+  "task.remove": {
+    params: { taskId: string };
+    result: { ok: boolean; error?: string };
   };
   /** 建团队（§4.10.3 修正）：用户只给名字，ID 由系统生成 */
   "team.create": {
