@@ -84,6 +84,8 @@ const snapshot = {
         threadId: "t-2",
         // 只读授权演示：图纸上会显示「只读授权：…」
         readRoots: ["F:/spiker/hermix-desktop"],
+        // 成员读写工作区演示：图纸上会显示「成员工作区（可读写…）」
+        workspaceRoot: "F:/spiker/hermix-desktop",
         evidenceCount: 2,
         version: 3,
         rejectRounds: 0,

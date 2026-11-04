@@ -132,7 +132,10 @@ test("C1：跨会话派单 → 后台回报落回出发会话；新会话点名�
     // 等后台真跑完并登记
     await until(() => tasks.get("task-1").status === "in_review", 8000, "成员回报进待审查");
     assert.equal(kernel.runningTaskIds().length, 0, "回报之后不再算在跑");
-    assert.ok(fs.existsSync(path.join(root, "tasks", "task-1", "workspace", "report.md")), "成员真写了文件");
+    // 成员的工作区＝会话项目目录（可读写）；不是任务隔离目录
+    const wsRoot = kernel.handle("session.snapshot").board.track.find((t) => t.id === "task-1")?.workspaceRoot;
+    assert.ok(wsRoot, "工单要记下成员工作区");
+    assert.ok(fs.existsSync(path.join(wsRoot, "report.md")), "成员真把文件写进了工作区");
 
     // 回报卡落在出发会话 A，而不是用户正在看的 B
     const feedB = kernel.handle("session.snapshot").feed;

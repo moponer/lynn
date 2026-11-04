@@ -486,8 +486,11 @@ export class Kernel {
   private pendingPlans = new Map<string, PendingPlan>();
   /** 最近一次「任务契约已呈给用户」的时间：用来挡"派完单又问一遍是否开工" */
   private lastPlanAt = 0;
-  /** 等你批准的工具调用（decisionId → 决议器） */
-  private pendingApprovals = new Map<string, { resolve: (ok: boolean) => void }>();
+  /**
+   * 等你批准的请求（decisionId → 决议器）。
+   * `kind: "delete"` 是成员删除文件：切权限档批量放行时**不能**顺带批准它（删除要单独点头）。
+   */
+  private pendingApprovals = new Map<string, { resolve: (ok: boolean) => void; kind?: "tool" | "delete" }>();
   /** L2 MCP 工具（mcp__server__tool） */
   private mcp = new McpRegistry();
   /** 逐轮文件检查点（M1-12） */
@@ -640,7 +643,7 @@ export class Kernel {
         jobId: taskId,
         title: `${member} · ${taskId}`,
         // 越界被拦不是"成员出错"，是边界在生效：说清它能动哪儿，别让用户以为卡死了
-        body: `命令被纵深防御规则拦下：${ev.why}\n${ev.command}\n\n成员只能读写任务工作区 tasks/${taskId}/workspace/。要查外部项目，把材料复制进工作区，或让风铃换个做法（在本机端读、把结论交给成员）。`,
+        body: `命令被纵深防御规则拦下：${ev.why}\n${ev.command}\n\n成员只能在自己的工作区（派单时钉住的目录）里读写。要查别处，把材料复制进工作区，或右键这张单「授权只读访问某个目录」。`,
       });
     } else if (ev.kind === "cmd_net") {
       this.cardTo(threadId, { kind: "tool", badge: "出站", jobId: taskId, title: `${member} · ${taskId}`, body: `出站命令已审计：${ev.command}` });
@@ -1102,7 +1105,14 @@ export class Kernel {
     this.taskCase.appendSummary(taskId, `${member} 回报：${text.slice(0, 60)}`);
 
     try {
-      this.taskStore.ensureInProgress({ id: taskId, title: taskId, teamId, member, threadId });
+      this.taskStore.ensureInProgress({
+        id: taskId,
+        title: taskId,
+        teamId,
+        member,
+        threadId,
+        workspaceRoot: this.taskStore.get(taskId)?.workspaceRoot ?? this.projectRoot,
+      });
     } catch {
       // 工单已存在或状态已就位
     }
@@ -1247,6 +1257,8 @@ export class Kernel {
           member: p.member,
           // 记下"这单从哪个会话派出"：换会话后旧工单的往来还能读回来
           threadId: this.currentThreadId,
+          // 成员的读写工作区 = 这个会话的项目目录（开发类任务要能真改代码）
+          workspaceRoot: this.projectRoot,
         });
         this.taskStore.transition(p.taskId, "todo");
       } else if (existing.status === "backlog" || existing.status === "blocked") {
@@ -1330,11 +1342,27 @@ export class Kernel {
     );
     // M3-07：带 draftId 的派单（插件工程师），工作区即草稿区——产物只能写进草稿，
     // 不可能落进生效目录（plugin-host 扫描跳过 `_` 前缀目录，草稿永不自动生效）
-    const workdir = draftId ? path.join(draftsDir(this.dataRoot), draftId) : path.join(this.dataRoot, "tasks", taskId, "workspace");
+    // 成员的读写工作区：插件工坊=草稿区；否则用派单时钉住的会话项目目录（可读写），老单补记后同样落在项目目录
+    if (!draftId) {
+      const rec = this.taskStore.get(taskId);
+      if (rec && !rec.workspaceRoot) {
+        try {
+          this.taskStore.setWorkspaceRoot(taskId, this.projectRoot);
+        } catch {
+          /* 写不进去就退回默认任务工作区 */
+        }
+      }
+    }
+    const workdir = draftId
+      ? path.join(draftsDir(this.dataRoot), draftId)
+      : this.taskStore.get(taskId)?.workspaceRoot ?? path.join(this.dataRoot, "tasks", taskId, "workspace");
     fs.mkdirSync(workdir, { recursive: true });
+    // 简报放任务目录（别往用户项目里塞文件）
+    const briefFile = path.join(this.dataRoot, "tasks", taskId, "_brief.md");
+    fs.mkdirSync(path.dirname(briefFile), { recursive: true });
     fs.writeFileSync(
-      path.join(workdir, "_brief.md"),
-      `# 简报包（来自风铃）\n\n- 截止：${deadline}\n- 本次分配工具：${allowed.join("、") || "无"}\n\n${brief}\n`,
+      briefFile,
+      `# 简报包（来自风铃）\n\n- 截止：${deadline}\n- 工作区：${workdir}（可读写）\n- 本次分配工具：${allowed.join("、") || "无"}\n\n${brief}\n`,
       "utf-8",
     );
 
@@ -1401,6 +1429,8 @@ export class Kernel {
       chatFn: this.memberChatFn,
       // 用户授予的只读目录（写仍然只能在工作区）；用函数现取，跑到一半授权也立刻生效
       readRoots: () => this.taskStore.get(taskId)?.readRoots ?? [],
+      // 删除类命令必须用户点头：挂一张审批卡，超时按拒绝
+      onBeforeCommand: (cmd) => this.awaitCommandApproval(member, taskId, cmd),
       // 收件箱：风铃/巡检中途补的指示，成员每轮开头取（催办不杀进程、不重派）
       inbox: (() => {
         const box = this.memberInbox.get(taskId) ?? [];
@@ -1507,7 +1537,7 @@ export class Kernel {
       badge: "派单",
       title: `${member} 开工 · ${taskId}`,
       meta: `工具：${allowed.join("、") || "无"}`,
-      body: `工作区 tasks/${taskId}/workspace/（成员文件活动限制在此，回报后自动进审查台）`,
+      body: `工作区：${workdir}（可读写；删除类命令要你点头；回报后自动进审查台）`,
     });
     return { ok: true, message: "成员已开工（后台执行），回报后会自动进待审查。" };
   }
@@ -1590,6 +1620,47 @@ export class Kernel {
     const owner = rec.threadId ?? this.currentThreadId;
     this.cardTo(owner, { kind: "system", jobId: taskId, text: dir ? `已撤销只读访问 ${dir}` : `已撤销 ${taskId} 的全部只读访问` });
     return { ok: true, roots };
+  }
+
+  /**
+   * 删除类命令的用户审批：挂一张审批卡（右栏「等你拍板」），最长等 5 分钟，超时按拒绝。
+   * 成员被拒就停手（工具层已挡住，不存在"换个写法绕过"）。
+   */
+  private awaitCommandApproval(member: string, taskId: string, command: string): Promise<{ ok: boolean; reason?: string }> {
+    const id = `ap-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 5)}`;
+    const owner = this.taskStore.get(taskId)?.threadId ?? this.currentThreadId;
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.pendingApprovals.delete(id);
+        this.decisions = this.decisions.filter((d) => d.id !== id);
+        this.setTurn({ phase: "awaiting_plan" });
+        resolve({ ok: false, reason: "等了 5 分钟没人点头，按拒绝处理" });
+      }, 300_000);
+      timer.unref?.();
+      this.pendingApprovals.set(id, {
+        kind: "delete",
+        resolve: (ok: boolean) => {
+          clearTimeout(timer);
+          this.pendingApprovals.delete(id);
+          resolve(ok ? { ok: true } : { ok: false, reason: "用户拒绝了这次删除" });
+        },
+      });
+      this.decisions.push({
+        id,
+        from: member,
+        title: `${member} 要删除文件（${taskId}）`,
+        detail: command,
+        kind: "approval",
+        jobId: taskId,
+        at: new Date().toISOString(),
+      });
+      this.cardTo(owner, {
+        kind: "system",
+        jobId: taskId,
+        text: `${member} 申请执行删除类命令，等你点头（5 分钟内不答复按拒绝）：\n${command}`,
+      });
+      this.setTurn({ phase: "awaiting_plan" });
+    });
   }
 
   /** 并行上限（settings.prefs.maxParallelMembers，1–8；非法值回退默认 4） */
@@ -1836,8 +1907,15 @@ export class Kernel {
         const ctx: PendingPlan = { teamId, taskId, member, brief, deadline, tools, draftId };
         // 还没开工：工单只落 todo，不能谎报"执行中"（七态见 §4.10.4）
         if (!this.taskStore.get(taskId)) {
-          // 建单时就钉住会话：任务线判定（团队不复用）与 C3 的往来归属都靠它
-          this.taskStore.create({ id: taskId, title, teamId, member, threadId: this.currentThreadId });
+          // 建单时就钉住会话与工作区：任务线判定、往来归属、成员在哪儿改代码都靠它
+          this.taskStore.create({
+            id: taskId,
+            title,
+            teamId,
+            member,
+            threadId: this.currentThreadId,
+            workspaceRoot: this.projectRoot,
+          });
           this.taskStore.transition(taskId, "todo");
         }
         if (this.settings.getPrefs().autoStart) {
@@ -2698,6 +2776,7 @@ export class Kernel {
             at: task.updatedAt,
             threadId: task.threadId,
             readRoots: task.readRoots,
+            workspaceRoot: task.workspaceRoot,
             evidenceCount: task.evidence.length,
             version: task.version,
             parentId: task.parentId ?? undefined,
@@ -2745,6 +2824,7 @@ export class Kernel {
         at: task.updatedAt,
         threadId: task.threadId,
         readRoots: task.readRoots,
+        workspaceRoot: task.workspaceRoot,
         evidenceCount: task.evidence.length,
         version: task.version,
         parentId: task.parentId ?? undefined,
@@ -2851,6 +2931,8 @@ export class Kernel {
         // 切到 auto/full：把已经挂起的审批全部放行；切回 plan/ask：按拒绝处理
         const allow = mode === "auto" || mode === "full";
         for (const [id, pending] of this.pendingApprovals) {
+          // 删除审批不被"切权限档"顺带放行：那是用户明确要求逐次点头的事
+          if (pending.kind === "delete") continue;
           this.decisions = this.decisions.filter((d) => d.id !== id);
           pending.resolve(allow);
         }

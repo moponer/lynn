@@ -320,6 +320,7 @@ export const ZH_STRINGS: Record<string, string> = {
   "menu.grantRead": "授权只读访问某个目录…",
   "menu.revokeRead": "撤销只读授权",
   "sheet.readRoots": "只读授权：{dirs}",
+  "sheet.workspaceRoot": "成员工作区（可读写，删除需你点头）：{dir}",
   "menu.confirm": "确定",
   // 版本握手（界面新、内核旧）
   "app.stale": "后台是旧版本（界面已更新，内核还没重启）：新加的操作可能不生效。",
@@ -668,6 +669,7 @@ export const EN_STRINGS: Record<string, string> = {
   "menu.grantRead": "Grant read-only access…",
   "menu.revokeRead": "Revoke read-only access",
   "sheet.readRoots": "Read-only: {dirs}",
+  "sheet.workspaceRoot": "Member workspace (read-write; deletes need your approval): {dir}",
   "menu.confirm": "Confirm",
   "app.stale": "The core is older than the UI (it hasn't been restarted), so new actions may not work.",
   "app.restart": "Restart app",

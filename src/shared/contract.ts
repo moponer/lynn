@@ -221,6 +221,8 @@ export interface TaskTrackItem {
   threadId?: string;
   /** 本单的只读授权目录（用户显式授予；空 = 只能读工作区） */
   readRoots?: string[];
+  /** 成员的读写工作区（= 派单时会话的项目目录；可写，删除需用户点头） */
+  workspaceRoot?: string;
 }
 
 export interface Decision {

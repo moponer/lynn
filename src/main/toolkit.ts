@@ -48,6 +48,34 @@ export interface ToolkitOptions {
    * 传函数 = 每次读时现取——成员跑到一半用户才授权，也能立刻生效（不必停掉重派）。
    */
   readRoots?: string[] | (() => string[]);
+  /**
+   * 删除类命令的审批闸：成员可以改文件，但不能悄悄删。
+   * 返回 ok=false 时命令不执行；未注入时一律拒绝（宁可做不了，也不给无审批的删除）。
+   */
+  onBeforeCommand?: (command: string) => Promise<{ ok: boolean; reason?: string }>;
+}
+
+/** 删除类命令：一律要用户点头（含"移动/改名"——原位置等于删掉） */
+const DESTRUCTIVE: { re: RegExp; why: string }[] = [
+  { re: /\bdel\b/i, why: "del 删除文件" },
+  { re: /\berase\b/i, why: "erase 删除文件" },
+  { re: /\brmdir\b/i, why: "rmdir 删除目录" },
+  { re: /(^|[\s;&|(])rd\b/i, why: "rd 删除目录" },
+  { re: /(^|[\s;&|(])rm\b/i, why: "rm 删除文件/目录" },
+  { re: /remove-item/i, why: "Remove-Item 删除" },
+  { re: /(^|[\s;&|(])mv\b/i, why: "mv 移动（原位置即删除）" },
+  { re: /\bmove\b/i, why: "move 移动（原位置即删除）" },
+  { re: /\bren(ame)?\b/i, why: "改名/移动" },
+  { re: /git\s+clean/i, why: "git clean 删未跟踪文件" },
+  { re: /git\s+reset\s+--hard/i, why: "git reset --hard 丢弃改动" },
+];
+
+/** 纯函数：命令是否删除类（返回原因；null = 不是） */
+export function destructiveReason(command: string): string | null {
+  for (const d of DESTRUCTIVE) {
+    if (d.re.test(command)) return d.why;
+  }
+  return null;
 }
 
 const READ_CAP = 200_000;
@@ -198,6 +226,7 @@ export class Toolkit {
   private readonly browser?: ToolkitOptions["browser"];
   private readonly kb?: ToolkitOptions["kb"];
   private readonly readRootsSource: () => string[];
+  private readonly onBeforeCommand?: ToolkitOptions["onBeforeCommand"];
 
   constructor(root: string, opts: ToolkitOptions = {}) {
     this.root = path.resolve(root);
@@ -211,11 +240,24 @@ export class Toolkit {
     this.kb = opts.kb;
     const src = opts.readRoots;
     this.readRootsSource = typeof src === "function" ? src : () => src ?? [];
+    this.onBeforeCommand = opts.onBeforeCommand;
   }
 
   /** 本单授权的只读目录（界面/提示词要如实说明"能读哪儿"） */
   getReadRoots(): string[] {
     return this.readRootsSource().map((r) => path.resolve(r));
+  }
+
+  /**
+   * 工作区可读写，但**不写项目元数据**：`.git/`（版本库内部）与 `.lynn/`（风铃的项目配置/技能）
+   * 不归成员改——改这两个等于改历史或改她自己的行为。
+   */
+  private assertWritable(full: string): void {
+    const rel = path.relative(this.root, full);
+    const head = rel.split(/[\\/]/)[0];
+    if (head === ".git" || head === ".lynn") {
+      throw new Error(`拒绝写入 ${rel}：${head}/ 是项目元数据 / 风铃配置，不归成员改（要改请让用户处理）。`);
+    }
   }
 
   getRoot(): string {
@@ -276,6 +318,7 @@ export class Toolkit {
     const rel = String(args.path ?? "");
     const content = String(args.content ?? "");
     const full = resolveWithin(this.root, rel);
+    this.assertWritable(full);
     return this.serialize(full, () => {
       const existed = fs.existsSync(full);
       const before = existed ? fs.readFileSync(full, "utf-8") : "";
@@ -294,6 +337,7 @@ export class Toolkit {
     const all = Boolean(args.replace_all);
     if (!oldStr) throw new Error("old_string 不能为空（整文件替换请用 write_file）");
     const full = resolveWithin(this.root, rel);
+    this.assertWritable(full);
     return this.serialize(full, () => {
       if (!fs.existsSync(full)) throw new Error(`文件不存在：${rel}`);
       const before = fs.readFileSync(full, "utf-8");
@@ -399,13 +443,27 @@ export class Toolkit {
     return hits.length ? hits.join("\n") : "没有匹配行。";
   }
 
-  runCommand(args: Record<string, unknown>): Promise<string> {
+  async runCommand(args: Record<string, unknown>): Promise<string> {
     const command = String(args.command ?? "").trim();
-    if (!command) return Promise.resolve("命令为空。");
+    if (!command) return "命令为空。";
+    // 1) 明确破坏性的先硬拒（不给"审批放行"的机会）
     for (const d of DANGEROUS) {
       if (d.re.test(command)) {
         this.onAudit?.({ kind: "cmd_blocked", command, why: d.why, cwd: this.root });
-        return Promise.resolve(`已拒绝执行：${d.why}。这类命令不会自动执行（纵深防御规则，不是 OS 沙箱）。`);
+        return `已拒绝执行：${d.why}。这类命令不会自动执行（纵深防御规则，不是 OS 沙箱）。`;
+      }
+    }
+    // 2) 删除类命令：成员可以改文件，但删除必须用户点头
+    const destructive = destructiveReason(command);
+    if (destructive) {
+      if (!this.onBeforeCommand) {
+        this.onAudit?.({ kind: "cmd_blocked", command, why: `删除需要用户点头（${destructive}），当前没有审批通道`, cwd: this.root });
+        return `已拒绝：删除类命令（${destructive}）需要用户点头，这次没有审批通道。请改成可撤销的写法（write_file 覆盖），或在回报里说明为什么必须删。`;
+      }
+      const verdict = await this.onBeforeCommand(command);
+      if (!verdict.ok) {
+        this.onAudit?.({ kind: "cmd_blocked", command, why: `用户拒绝删除：${verdict.reason ?? destructive}`, cwd: this.root });
+        return `用户拒绝了这次删除（${destructive}）：${verdict.reason ?? "这个目录里的文件不能删"}。改用可撤销的写法（write_file 覆盖），或先交回报让用户决定。`;
       }
     }
     // 路径逃逸：文件工具钉在工作区，命令却能随手读全盘——这是"探针摸进你别的仓库"的直接原因

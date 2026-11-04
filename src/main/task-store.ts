@@ -60,6 +60,12 @@ export interface TaskRecord {
    * 审查外部项目靠它，且授权只由用户发起（模型不能自我扩权）。
    */
   readRoots?: string[];
+  /**
+   * 成员的读写工作区（= 派单时会话的工作区 / 项目目录）。
+   * 开发类任务要能真改代码，所以这里**可写**；删除类命令另走用户审批。
+   * 没记过就退回 `<dataRoot>/tasks/<id>/workspace/`（老单）。
+   */
+  workspaceRoot?: string;
 }
 
 export class TaskConflictError extends Error {
@@ -210,6 +216,7 @@ export class TaskStore {
     parentId?: string;
     member?: string;
     threadId?: string;
+    workspaceRoot?: string;
   }): TaskRecord {
     if (this.get(input.id)) throw new TaskRuleError(`工单已存在: ${input.id}`);
     if (input.parentId) {
@@ -234,6 +241,7 @@ export class TaskStore {
       createdAt: now,
       updatedAt: now,
       threadId: input.threadId,
+      workspaceRoot: input.workspaceRoot,
     };
     this.write(rec);
     return rec;
@@ -299,6 +307,14 @@ export class TaskStore {
     if (opts.member) rec.member = opts.member;
     if (opts.sessionId) rec.sessionId = opts.sessionId;
     if (opts.threadId) rec.threadId = opts.threadId;
+    return this.commit(rec);
+  }
+
+  /** 记这张单的读写工作区（派单时定；老单在首次开工时补记） */
+  setWorkspaceRoot(id: string, root: string): TaskRecord {
+    const rec = this.mustGet(id);
+    if (rec.workspaceRoot === root) return rec;
+    rec.workspaceRoot = path.resolve(root);
     return this.commit(rec);
   }
 
@@ -373,6 +389,7 @@ export class TaskStore {
     teamId: string;
     member?: string;
     threadId?: string;
+    workspaceRoot?: string;
   }): TaskRecord {
     const existing = this.get(input.id);
     if (existing) {

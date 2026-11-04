@@ -89,6 +89,8 @@ export interface DeskJob {
   threadId?: string;
   /** 用户授予的只读目录（写仍限工作区） */
   readRoots?: string[];
+  /** 成员的读写工作区（= 派单时会话的项目目录） */
+  workspaceRoot?: string;
 }
 
 export interface DeskMember {
@@ -208,6 +210,7 @@ function toJob(job: TaskTrackItem, teamName?: string, member?: Member, feed: Fee
     report: reportOf(feed, job.id),
     threadId: job.threadId,
     readRoots: job.readRoots,
+    workspaceRoot: job.workspaceRoot,
   };
 }
 

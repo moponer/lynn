@@ -45,6 +45,8 @@ export interface MemberRunInput {
   workdir: string;
   /** 用户授权的只读目录：读可以进，写仍然只能在工作区（函数 = 每次现取，跑到一半授权也生效） */
   readRoots?: string[] | (() => string[]);
+  /** 删除类命令的审批闸：成员能改代码，但删除必须用户点头 */
+  onBeforeCommand?: (command: string) => Promise<{ ok: boolean; reason?: string }>;
   model: { baseUrl: string; apiKey: string; model: string };
   /** 测试注入；默认真流式 */
   chatFn?: MemberChatFn;
@@ -126,7 +128,9 @@ export function memberSystemPrompt(input: MemberRunInput): string {
     "- 你没有 ask_user，不能问用户；口径拿不准就选一种并写明理由。需要升级时在回报正文里标 ESCALATE: 并说明。",
     "",
     "【工作区】",
-    `所有写入都被限制在任务工作区内（工具层强制）。写文件一律用工作区内相对路径。`,
+    `工作区：${input.workdir}（**可读可写**，就是用户的项目目录）。写文件用工作区内相对路径。`,
+    "- 不能写 `.git/` 与 `.lynn/`（项目元数据与风铃配置，工具层直接拒）。",
+    "- **删除类命令（del / rm / rmdir / move / 改名 / git clean / git reset --hard）必须用户点头**：会被挂起等批准，被拒就别换写法绕，改成可撤销的覆盖写，或在回报里说明。",
     ...(readRoots.length
       ? [
           `只读授权（用户已批准）：${readRoots.join("、")}。这些目录里的文件可以 read_file / list_dir / office_read_table 读，**写入仍然只能在工作区**；读时用绝对路径。`,
@@ -158,6 +162,7 @@ export async function runMemberTask(input: MemberRunInput): Promise<MemberRunRes
     browser: input.browser,
     kb: input.kb,
     readRoots: input.readRoots,
+    onBeforeCommand: input.onBeforeCommand,
   });
   const maxTurns = Math.max(1, Math.min(input.profile.limits?.maxTurns ?? 12, 40));
   const tools = memberToolSchemas(input.tools);

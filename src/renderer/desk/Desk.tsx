@@ -985,6 +985,12 @@ function Sheet({
             </button>
           )}
         </div>
+        {job.workspaceRoot && (
+          <div className="sheet-grant" title={job.workspaceRoot}>
+            <Icon name="folder" size="sm" />
+            <span>{t("sheet.workspaceRoot", { dir: job.workspaceRoot })}</span>
+          </div>
+        )}
         {job.readRoots && job.readRoots.length > 0 && (
           <div className="sheet-grant" title={job.readRoots.join("\n")}>
             <Icon name="lock" size="sm" />
