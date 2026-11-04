@@ -193,6 +193,7 @@ if (process.env.LYNN_PREVIEW_MULTI) {
         rejections: 0,
         rejectionLimit: 3,
         toolWhitelist: ["browser_navigate", "browser_click"],
+        lastStep: "browser_click · 第 3 门课第 12 节",
         color: "#c9a227",
         model: "deepseek-chat",
         turnLimit: 12,

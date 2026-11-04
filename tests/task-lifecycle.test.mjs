@@ -109,6 +109,31 @@ test("停掉在跑的成员：工单转「卡住」，不再永远挂着「进�
   }
 });
 
+test("在跑的单要能看见进度：进度卡归属工单，成员卡给「最近一步」", async () => {
+  const { kernel } = setup();
+  try {
+    await kernel.init();
+    kernel.memberChatFn = slowChat(80);
+    assignAndStart(kernel, "task-1");
+    await until(
+      () => kernel.handle("session.snapshot").board.teams.some((t) => t.members.some((m) => m.lastStep)),
+      5000,
+      "成员最近一步",
+    );
+    const snap = kernel.handle("session.snapshot");
+    // 图纸「往来」按 jobId 过滤：进度卡不带 jobId 时用户只看到「派单·契约」，以为没进度（实报）
+    assert.ok(
+      snap.feed.some((c) => c.badge === "进度" && c.jobId === "task-1"),
+      "进度卡必须归属这张工单",
+    );
+    const member = snap.board.teams.flatMap((t) => t.members).find((m) => m.lastStep);
+    assert.match(member.lastStep, /write_file|step-/);
+    kernel.handle("task.cancel", { taskId: "task-1" });
+  } finally {
+    await kernel.dispose();
+  }
+});
+
 test("取消一张单：进归档带（目录还在），重复取消幂等", async () => {
   const { root, kernel, tasks } = setup();
   try {

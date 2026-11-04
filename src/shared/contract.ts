@@ -67,6 +67,8 @@ export interface Member {
   model?: string;
   /** 轮次上限（§4.10.3，界面必显项） */
   turnLimit?: number;
+  /** 最近一步动作（"正在跑什么命令 / 写了哪个文件"）：进度条回答不了"在干什么" */
+  lastStep?: string;
 }
 
 export interface Team {

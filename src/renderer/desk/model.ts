@@ -105,6 +105,8 @@ export interface DeskMember {
   toolSource: "assignment" | "template";
   turnLimit?: number;
   progress: number;
+  /** 最近一步动作（进度条答不了"在干什么"） */
+  lastStep?: string;
   foot: string;
   rejections: number;
   rejectLimit: number;
@@ -257,6 +259,7 @@ export function deskFromSnapshot(snap: SessionSnapshot): Desk {
               ? "assignment"
               : "template",
           turnLimit: m.turnLimit,
+          lastStep: m.lastStep,
           progress:
             snap.turn.member === m.name && typeof snap.turn.progress === "number" ? snap.turn.progress : m.progress,
           // 没用过预算就说"上限"，别用 0/300K 冒充"已经花了 0"

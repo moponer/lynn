@@ -1917,6 +1917,15 @@ button.ev:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 .tov-job-meta { display: flex; align-items: center; gap: 10px; color: var(--ink-3); font-size: var(--fs-label); flex-wrap: wrap; }
 .tov-job-meta > span { display: inline-flex; align-items: center; gap: 4px; }
 .tov-here { color: var(--ink-4); }
+/* 最近一步：进度条答不了"现在在干什么" */
+.tov-step,
+.mcard-step {
+  display: flex; align-items: center; gap: 5px; min-width: 0;
+  color: var(--ink-3); font-size: var(--fs-label);
+}
+.tov-step > span,
+.mcard-step > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mcard-step { margin-top: 4px; }
 .tov-job-actions { display: flex; gap: 6px; justify-content: flex-end; }
 .tov-job-actions .ghost-btn { padding: 3px 9px; font-size: var(--fs-label); }
 @media (max-width: 1420px) {

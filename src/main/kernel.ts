@@ -368,6 +368,8 @@ export class Kernel {
   memberChatFn?: typeof streamChat;
   /** 成员进度（姓名 → 0–100）：只在内存里，用来画实时进度 */
   private memberProgress = new Map<string, number>();
+  /** 成员最近一步动作（`teamId::成员` → 文本）：右栏与任务总览要能回答"现在在干什么" */
+  private memberLastStep = new Map<string, string>();
   /** 成员本轮累计 token（`teamId::成员` → tokens）：编制表的预算读数不再是硬编码 0 */
   private memberUsage = new Map<string, number>();
   /** 每张单的中止器（用户点「停」）：没有它就只能解散全队来止损 */
@@ -553,9 +555,16 @@ export class Kernel {
     }
     this.log("tool_audit", { kind: ev.kind, taskId, member, why: ev.why });
     if (ev.kind === "cmd_blocked") {
-      this.cardTo(threadId, { kind: "tool", badge: "已拦截", title: `${member} · ${taskId}`, body: `命令被纵深防御规则拦下：${ev.why}\n${ev.command}` });
+      this.cardTo(threadId, {
+        kind: "tool",
+        badge: "已拦截",
+        jobId: taskId,
+        title: `${member} · ${taskId}`,
+        // 越界被拦不是"成员出错"，是边界在生效：说清它能动哪儿，别让用户以为卡死了
+        body: `命令被纵深防御规则拦下：${ev.why}\n${ev.command}\n\n成员只能读写任务工作区 tasks/${taskId}/workspace/。要查外部项目，把材料复制进工作区，或让风铃换个做法（在本机端读、把结论交给成员）。`,
+      });
     } else if (ev.kind === "cmd_net") {
-      this.cardTo(threadId, { kind: "tool", badge: "出站", title: `${member} · ${taskId}`, body: `出站命令已审计：${ev.command}` });
+      this.cardTo(threadId, { kind: "tool", badge: "出站", jobId: taskId, title: `${member} · ${taskId}`, body: `出站命令已审计：${ev.command}` });
     }
   }
 
@@ -604,10 +613,9 @@ export class Kernel {
    * 用户已经切到别的会话时，只落盘 + 发一个"该会话有动静"的事件，
    * 绝不 push 进当前 feed——否则新会话会被旧任务的回报刷屏、旧会话反而缺卡。
    */
-  private cardTo(threadId: string, c: Omit<FeedCard, "id" | "createdAt">): void {
+  private cardTo(threadId: string, c: Omit<FeedCard, "id" | "createdAt">): FeedCard {
     if (!threadId || threadId === this.currentThreadId) {
-      this.card(c);
-      return;
+      return this.card(c);
     }
     const st = this.threads.loadState(threadId);
     const seq =
@@ -620,6 +628,7 @@ export class Kernel {
     st.feed.push(full);
     this.threads.saveState(threadId, { feed: st.feed.slice(-200), history: st.history });
     this.notify({ type: "thread", threadId });
+    return full;
   }
 
   /** 同一张卡在别的会话里的状态更新（成员开工卡 → 回报/未完成） */
@@ -1228,29 +1237,54 @@ export class Kernel {
       "utf-8",
     );
 
-    // 进度卡：一张单一张卡，跑的过程中就地更新——不再一次工具调用刷一张卡
+    // 进度卡：一张单一张卡，跑的过程中就地更新——不再一次工具调用刷一张卡。
+    // 必须带 jobId 且写回出发会话：否则图纸「往来」里只有"派单·契约"一条，
+    // 用户看到的就是"跑了二十分钟什么都没发生"（实报）。
     const controller = new AbortController();
     const steps: string[] = [];
     const startedAt = Date.now();
-    const live = this.card({ kind: "tool", badge: "进度", title: `${member} 在干 · ${taskId}`, meta: "刚开工", body: "（等他第一步）" });
+    const elapsedSec = () => Math.round((Date.now() - startedAt) / 1000);
+    const live = this.cardTo(runThreadId, {
+      kind: "tool",
+      badge: "进度",
+      jobId: taskId,
+      title: `${member} 在干 · ${taskId}`,
+      meta: "刚开工",
+      body: "（等他第一步）",
+    });
     let lastStepAt = Date.now();
+    /** 里程碑汇报：不打断成员，但每 2 分钟给自己留一条可回看的进度卡（不催也要报） */
+    let lastMilestoneAt = Date.now();
     const pushStep = (text: string) => {
       steps.push(text);
       lastStepAt = Date.now();
+      this.memberLastStep.set(memberKey, text);
       const tail = steps.slice(-6).join("\n");
-      this.patchCard(live, {
-        meta: `${steps.length} 步 · ${Math.round((Date.now() - startedAt) / 1000)}s`,
+      this.patchCardTo(runThreadId, live, {
+        meta: `第 ${steps.length} 步 · ${elapsedSec()}s`,
         body: tail.length > 1500 ? `…\n${tail.slice(-1500)}` : tail,
       });
+      if (Date.now() - lastMilestoneAt >= 120_000) {
+        lastMilestoneAt = Date.now();
+        this.cardTo(runThreadId, {
+          kind: "tool",
+          badge: "进度",
+          jobId: taskId,
+          title: `${member} 第 ${steps.length} 步 · ${taskId}`,
+          meta: `已用时 ${elapsedSec()}s`,
+          body: steps.slice(-3).join("\n"),
+        });
+      }
     };
-    // 卡死可见：长时间没有任何动作就在卡上标出来（不自动杀，让人决定）
+    // 卡死可见：长时间没有任何动作就报一次（不自动杀，让人决定）
+    let stalledNotified = false;
     const stallTimer = setInterval(() => {
       const quiet = Date.now() - lastStepAt;
-      if (quiet < MEMBER_STALL_MS) return;
-      this.patchCard(live, {
-        meta: `${steps.length} 步 · 已 ${Math.round((Date.now() - startedAt) / 1000)}s · 可能卡住`,
-        body: `已经 ${Math.round(quiet / 1000)}s 没有任何动作。可以点台账上的「停」止损。\n\n最后动作：\n${steps.slice(-3).join("\n") || "（一步都没做）"}`,
-      });
+      if (quiet < MEMBER_STALL_MS || stalledNotified) return;
+      stalledNotified = true;
+      const body = `已经 ${Math.round(quiet / 1000)}s 没有任何动作。可以点台账/右键「停」，或再等等。\n\n最后动作：\n${steps.slice(-3).join("\n") || "（一步都没做）"}`;
+      this.patchCardTo(runThreadId, live, { meta: `第 ${steps.length} 步 · 可能卡住`, body });
+      this.cardTo(runThreadId, { kind: "system", jobId: taskId, text: `${member} · ${taskId}：${body}` });
     }, 15_000);
     stallTimer.unref?.();
 
@@ -1526,9 +1560,11 @@ export class Kernel {
         if (draftId && !listDrafts(this.dataRoot).some((d) => d.draftId === draftId)) {
           return `草稿 ${draftId} 不存在。先用 workshop.create 开草稿，再派单给插件工程师。`;
         }
-        // 标题取简报第一个非空行（首行为空时别把裸 taskId 当标题摆到台账上）
-        const titleLine = brief.split("\n").map((l) => l.trim()).find((l) => l.length > 0) ?? "";
-        const title = (titleLine || taskId).slice(0, 40);
+        // 标题取简报里最像"任务名"的一行：跳过【背景】这类段落标记，取第一个正行；
+        // 全是标记行时去掉标记再看（原来直接把"【背景】用户要审查……"摆上台账，读不出任务是什么）
+        const briefLines = brief.split("\n").map((l) => l.trim()).filter(Boolean);
+        const plain = briefLines.find((l) => !/^【[^】]*】/.test(l)) ?? briefLines[0]?.replace(/^【[^】]*】\s*/, "") ?? "";
+        const title = (plain || taskId).slice(0, 40);
         // M1-08 + §4.10.3 修正：显式 → 当前唯一在职队 → 模板复用 → 自动新建空队。
         // 绝不因为"团队不存在"把活退回去让用户给 ID（这正是此前卡死的根因）。
         let teamId = this.resolveTeamId(args.teamId ? String(args.teamId) : undefined);
@@ -2362,6 +2398,7 @@ export class Kernel {
             statusNote: p.goal,
             // 只有真在跑才给进度；空闲时归零，别留着上次的 100%
             progress: runningTask ? this.memberProgress.get(p.name) ?? 0 : 0,
+            lastStep: this.memberLastStep.get(key),
             budgetUsed: Math.round((this.memberUsage.get(key) ?? 0) / 1000),
             budgetTotal: Math.round(p.limits.budgetTokens / 1000),
             rejections: activeTask?.rejectRounds ?? 0,

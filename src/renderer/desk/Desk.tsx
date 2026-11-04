@@ -1682,6 +1682,13 @@ function MemberCard({
         {m.jobId ? `${m.jobId} · ` : ""}
         {m.jobTitle ?? "—"}
       </div>
+      {/* 在跑的成员要能看出"现在在干什么"：光有进度条等于没进度 */}
+      {m.lastStep && m.status !== "idle" && (
+        <div className="mcard-step" title={m.lastStep}>
+          <Icon name="term" size="sm" />
+          <span>{m.lastStep}</span>
+        </div>
+      )}
       <div className="mcard-spec">
         {showTeam && m.teamName && <span className="chip">{m.teamName}</span>}
         {m.tools.slice(0, 4).map((tool) => (
@@ -2433,6 +2440,11 @@ function TaskOverview({
     if (!m) return undefined;
     return desk.members.find((x) => x.name === m && x.teamId === teamId)?.progress;
   };
+  /** 最近一步：进度条答不了"在干什么" */
+  const stepOf = (m?: string, teamId?: string) => {
+    if (!m) return undefined;
+    return desk.members.find((x) => x.name === m && x.teamId === teamId)?.lastStep;
+  };
   const byTeam = new Map<string, { teamId: string; teamName: string; jobs: DeskJob[] }>();
   for (const j of open) {
     const g = byTeam.get(j.teamId) ?? { teamId: j.teamId, teamName: j.teamName ?? j.teamId, jobs: [] };
@@ -2475,6 +2487,8 @@ function TaskOverview({
                 {g.jobs.map((j) => {
                   const running = desk.running.includes(j.id);
                   const progress = progressOf(j.member, j.teamId);
+                  // 在跑的单显示"最近一步"：进度条答不了"现在在干什么"
+                  const step = running ? stepOf(j.member, j.teamId) : undefined;
                   const thread = j.threadId ? desk.threads.find((x) => x.id === j.threadId) : undefined;
                   return (
                     <div className={`tov-job${j.id === currentId ? " on" : ""}`} key={j.id}>
@@ -2505,6 +2519,12 @@ function TaskOverview({
                           {j.id}
                         </span>
                       </div>
+                      {step && (
+                        <div className="tov-step" title={step}>
+                          <Icon name="term" size="sm" />
+                          <span>{step}</span>
+                        </div>
+                      )}
                       <div className="tov-job-actions">
                         <button type="button" className="ghost-btn" onClick={() => onOpen(j.id)}>
                           {t("tov.open")}
