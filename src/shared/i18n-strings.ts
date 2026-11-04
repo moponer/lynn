@@ -46,6 +46,8 @@ export const ZH_STRINGS: Record<string, string> = {
   "top.newThread": "新会话",
   "top.searchHistory": "搜历史：关键词",
   "top.searchBoard": "搜工单、成员、产物",
+  "top.scopeThreads": "会话全文",
+  "ledger.scopeBoard": "本台账",
   "common.cancel": "取消",
   // 设置面板骨架
   "settings.title": "我的风铃",
@@ -326,6 +328,8 @@ export const EN_STRINGS: Record<string, string> = {
   "top.newThread": "New session",
   "top.searchHistory": "Search history",
   "top.searchBoard": "Search tasks, members, artifacts",
+  "top.scopeThreads": "All threads",
+  "ledger.scopeBoard": "This board",
   "common.cancel": "Cancel",
   "settings.title": "My Lynn",
   "settings.subtitle": "Skin · Form · Brain · Crew · Data",

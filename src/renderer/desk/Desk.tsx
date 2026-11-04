@@ -289,20 +289,25 @@ function Ledger({
 
       {threadsOpen && (
         <div className="thread-panel">
-          <input
-            className="thread-q"
-            value={tq}
-            placeholder={t("top.searchHistory")}
-            onChange={(e) => {
-              const v = e.target.value;
-              setTq(v);
-              if (!v.trim()) {
-                setHits([]);
-                return;
-              }
-              void (onThreadSearch?.(v) ?? Promise.resolve([])).then(setHits);
-            }}
-          />
+          <label className="search qrow">
+            <Icon name="search" size="sm" />
+            {/* E4：同族搜索框必须亮明搜索范围，不然用户把工单号敲进全文框还以为数据丢了 */}
+            <span className="scope-tag">{t("top.scopeThreads")}</span>
+            <input
+              className="thread-q qin"
+              value={tq}
+              placeholder={t("top.searchHistory")}
+              onChange={(e) => {
+                const v = e.target.value;
+                setTq(v);
+                if (!v.trim()) {
+                  setHits([]);
+                  return;
+                }
+                void (onThreadSearch?.(v) ?? Promise.resolve([])).then(setHits);
+              }}
+            />
+          </label>
           {tq.trim()
             ? hits.map((h) => (
                 <button
@@ -338,6 +343,8 @@ function Ledger({
 
       <label className="search">
         <Icon name="search" size="sm" />
+        {/* E4：与「会话全文」框同族，必须亮明这里是本台账范围 */}
+        <span className="scope-tag">{t("ledger.scopeBoard")}</span>
         <input
           value={q}
           onChange={(e) => setQ(e.target.value)}

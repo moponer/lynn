@@ -101,6 +101,15 @@ app.whenReady().then(async () => {
     console.log("REVIEW", ok, rev);
   }
 
+  // 可选：点开当前会话条，展示会话面板（E4：会话全文搜索框）
+  if (process.argv[3] === "threads") {
+    const ok = await win.webContents.executeJavaScript(
+      `(() => { const b=document.querySelector('.thread-cur'); if (b) b.click(); return !!b; })()`,
+    );
+    await new Promise((r) => setTimeout(r, 700));
+    console.log("THREADS", ok, await win.webContents.executeJavaScript(`!!document.querySelector('.thread-panel')`));
+  }
+
   // 可选：多条挂起裁决翻到下一条（A5）
   if (process.argv[3] === "sealnext") {
     const before = await win.webContents.executeJavaScript(
