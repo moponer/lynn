@@ -99,6 +99,21 @@ app.whenReady().then(async () => {
     console.log("REVIEW", ok, rev);
   }
 
+  // 可选：多条挂起裁决翻到下一条（A5）
+  if (process.argv[3] === "sealnext") {
+    const before = await win.webContents.executeJavaScript(
+      `document.querySelector('.seal-pager .chip')?.textContent ?? "no-pager"`,
+    );
+    const ok = await win.webContents.executeJavaScript(
+      `(() => { const b=document.querySelector('.seal-pager .icon-btn'); if (b) b.click(); return !!b; })()`,
+    );
+    await new Promise((r) => setTimeout(r, 700));
+    const after = await win.webContents.executeJavaScript(
+      `document.querySelector('.seal-pager .chip')?.textContent ?? "no-pager"`,
+    );
+    console.log("SEALNEXT", before, "->", after, "clicked:", ok);
+  }
+
   // 可选：切主题，参数形如 night:light / paper:dark / celadon:dark
   const themeArg = process.argv[4];
   if (themeArg) {

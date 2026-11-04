@@ -168,6 +168,8 @@ export const ZH_STRINGS: Record<string, string> = {
   "seal.rounds": "打回轮次",
   "seal.roundsFull": "已满，需你决定",
   "seal.roundsUsed": "打回 {a}/{b}",
+  "seal.pendingCount": "待处理 {i}/{n}",
+  "seal.nextDecision": "下一条",
   // 卡住 ≠ 交付：这里只给止损，不给验收
   "seal.blockedHead": "这张单卡住了",
   "seal.blockedBody": "连续两个节点没有交出新证据。可以在指令台说一句让她继续，或者停掉这张单。",
@@ -437,6 +439,8 @@ export const EN_STRINGS: Record<string, string> = {
   "seal.blockedStop": "Stop this job",
   "seal.blockedNote": "Stuck is not delivered — cannot be accepted",
   "seal.roundsUsed": "rejected {a}/{b}",
+  "seal.pendingCount": "Pending {i}/{n}",
+  "seal.nextDecision": "Next",
   "member.turnLimit": "up to {n} steps",
   "member.openJob": "Open job {id}",
   "member.progress": "This run: {n}%",

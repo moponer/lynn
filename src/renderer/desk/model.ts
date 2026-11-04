@@ -127,7 +127,8 @@ export interface Desk {
   members: DeskMember[];
   /** 未解散的团队数：>1 时成员卡要标出归属，否则同名成员分不清 */
   teamCount: number;
-  decision?: DeskDecision;
+  /** 挂起的裁决（问题/契约/审批）——多条都要可见可翻，不能只露第一条（A5） */
+  decisions: DeskDecision[];
   tokensUsed: number;
   /** 真实对话流（频道 + 每个工单的往来） */
   feed: FeedCard[];
@@ -259,8 +260,6 @@ export function deskFromSnapshot(snap: SessionSnapshot): Desk {
       }),
     );
 
-  const first = board.decisions[0];
-
   return {
     project: snap.workspace.project,
     subdir: snap.workspace.subdir,
@@ -270,7 +269,7 @@ export function deskFromSnapshot(snap: SessionSnapshot): Desk {
       .map((j) => ({ id: j.id, title: j.title, status: j.status })),
     members,
     teamCount: board.teams.filter((t) => t.status !== "dissolved").length,
-    decision: first ? toDecision(first) : undefined,
+    decisions: board.decisions.map(toDecision),
     tokensUsed: board.tokensUsed,
     feed: snap.feed,
     turn: snap.turn,

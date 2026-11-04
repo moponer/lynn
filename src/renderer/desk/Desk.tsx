@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { FeedCard, PermissionMode, QueueItem } from "../../shared/contract";
 import { Icon, type IconName } from "../components/Icon";
 import { WindowControls } from "../components/WindowControls";
-import type { Desk, DeskDiff, DeskJob, DeskMember } from "./model";
+import type { Desk, DeskDecision, DeskDiff, DeskJob, DeskMember } from "./model";
 import type { JobGroup } from "../../shared/task-groups";
 import { Slot, SandboxAction, SandboxHtml } from "./ui-host";
 import { AmbientLayer } from "./AmbientLayer";
@@ -815,7 +815,11 @@ function Roster({
   const t = useT();
   const active = desk.members.filter((m) => m.status !== "idle");
   const idle = desk.members.filter((m) => m.status === "idle");
-  const decision = desk.decision;
+  // 多条挂起裁决：当前索引钳在有效范围内——处理完一条快照刷新后自动落到下一条（A5）
+  const decisions = desk.decisions;
+  const [dIdx, setDIdx] = useState(0);
+  const dPos = Math.min(dIdx, Math.max(0, decisions.length - 1));
+  const decision = decisions[dPos];
   // 只有 in_review 可验收；blocked 只给"停掉/继续"，绝不出现"验收归档"
   const sealJob = current && current.action !== "none" ? current : desk.jobs.find((j) => j.action !== "none");
   const [naming, setNaming] = useState(false);
@@ -885,6 +889,20 @@ function Roster({
 
         {/* 印章排在最前：它是"该你拍板"的唯一落点，不能藏在成员卡下面要滚动才看见 */}
         <div className="seal-slot">
+          {decisions.length > 1 && (
+            <div className="seal-pager">
+              <span className="chip">{t("seal.pendingCount", { i: dPos + 1, n: decisions.length })}</span>
+              <button
+                type="button"
+                className="icon-btn"
+                aria-label={t("seal.nextDecision")}
+                title={t("seal.nextDecision")}
+                onClick={() => setDIdx((dPos + 1) % decisions.length)}
+              >
+                ›
+              </button>
+            </div>
+          )}
           {decision?.kind === "plan" && decision.plan ? (
             <PlanSeal decision={decision} onPlan={onPlan} />
           ) : decision?.kind === "approval" ? (
@@ -950,7 +968,7 @@ function PlanSeal({
   decision,
   onPlan,
 }: {
-  decision: NonNullable<Desk["decision"]>;
+  decision: DeskDecision;
   onPlan: (id: string, action: "start" | "revise" | "reject", text?: string) => void;
 }) {
   const [revise, setRevise] = useState<string | null>(null);
@@ -1015,7 +1033,7 @@ function ApprovalSeal({
   decision,
   onPlan,
 }: {
-  decision: NonNullable<Desk["decision"]>;
+  decision: DeskDecision;
   onPlan: (id: string, action: "start" | "revise" | "reject", text?: string) => void;
 }) {
   const t = useT();
@@ -1046,7 +1064,7 @@ function QuestionSeal({
   decision,
   onAnswer,
 }: {
-  decision: NonNullable<Desk["decision"]>;
+  decision: DeskDecision;
   onAnswer: (id: string, text: string) => void;
 }) {
   const [text, setText] = useState("");
@@ -1970,7 +1988,7 @@ export function DeskView({
   const [rightOpen, setRightOpen] = useState(false);
   const current = desk.jobs.find((j) => j.id === activeId) ?? waitingFirst;
   const reviewJob = desk.jobs.find((j) => j.id === reviewId);
-  const pendingCount = (desk.decision ? 1 : 0) + desk.jobs.filter((j) => j.action === "accept").length;
+  const pendingCount = desk.decisions.length + desk.jobs.filter((j) => j.action === "accept").length;
 
   useEffect(() => {
     if (!rightOpen) return;

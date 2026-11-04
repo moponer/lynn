@@ -71,7 +71,12 @@ export function Standby({
             </>
           )}
         </div>
-        {desk.decision && <div className="sb-decide">{desk.decision.question}</div>}
+        {desk.decisions[0] && (
+          <div className="sb-decide">
+            {desk.decisions[0].question}
+            {desk.decisions.length > 1 ? `（待处理 ${desk.decisions.length}）` : ""}
+          </div>
+        )}
       </div>
       <div className="sb-hint">
         <span className="mono">任意输入回到工作界面</span>

@@ -609,6 +609,12 @@ svg.ic.lg { width: 20px; height: 20px; }
   background: var(--desk-2);
   padding-top: 2px;
 }
+/* 多条挂起裁决的翻页条：计数 + 下一条（A5） */
+.seal-pager {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 6px;
+}
+.seal-pager .icon-btn { font-size: var(--fs-body); line-height: 1; }
 .sealcard-h { display: flex; align-items: center; justify-content: space-between; }
 .sealcard-h .k { font-family: var(--f-mono); font-size: var(--fs-label); letter-spacing: .18em; text-transform: uppercase; color: var(--seal); }
 .sealcard-body { display: flex; gap: 13px; margin-top: 11px; }
