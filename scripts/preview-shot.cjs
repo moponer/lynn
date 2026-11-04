@@ -111,6 +111,16 @@ app.whenReady().then(async () => {
     console.log("E3", ok, "fields:", n);
   }
 
+  // 可选：Ctrl+K 命令面板（E6）
+  if (process.argv[3] === "palette") {
+    await win.webContents.executeJavaScript(
+      `window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true }))`,
+    );
+    await new Promise((r) => setTimeout(r, 700));
+    const items = await win.webContents.executeJavaScript(`document.querySelectorAll('.cmdk-item').length`);
+    console.log("PALETTE", await win.webContents.executeJavaScript(`!!document.querySelector('.cmdk')`), "items:", items);
+  }
+
   // 可选：点开当前会话条，展示会话面板（E4：会话全文搜索框）
   if (process.argv[3] === "threads") {
     const ok = await win.webContents.executeJavaScript(

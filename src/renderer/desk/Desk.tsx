@@ -2031,6 +2031,170 @@ function ReviewDesk({
   );
 }
 
+// ============================ COMMAND PALETTE (E6) ============================
+
+type CmdItem = { key: string; group: string; label: string; hint?: string; run: () => void };
+
+/** Ctrl+K：跳工单 / 会话 / 动作。键盘上下选择，Enter 执行。 */
+function CommandPalette({
+  desk,
+  onClose,
+  onSelectJob,
+  onThread,
+  onOpenSettings,
+  onStandby,
+  onNew,
+}: {
+  desk: Desk;
+  onClose: () => void;
+  onSelectJob: (id: string) => void;
+  onThread?: (id: string) => void;
+  onOpenSettings: () => void;
+  onStandby: () => void;
+  onNew?: () => void;
+}) {
+  const t = useT();
+  const [q, setQ] = useState("");
+  const [idx, setIdx] = useState(0);
+  const items = useMemo<CmdItem[]>(() => {
+    const list: CmdItem[] = [];
+    for (const j of desk.jobs) {
+      list.push({ key: `job:${j.id}`, group: t("cmdk.jobs"), label: `${j.id} · ${j.title}`, run: () => onSelectJob(j.id) });
+    }
+    for (const th of desk.threads) {
+      list.push({ key: `th:${th.id}`, group: t("cmdk.threads"), label: th.title, hint: fmtTime(th.updatedAt), run: () => onThread?.(th.id) });
+    }
+    list.push(
+      { key: "a:new", group: t("cmdk.actions"), label: t("cmdk.newThread"), run: () => onNew?.() },
+      { key: "a:settings", group: t("cmdk.actions"), label: t("cmdk.settings"), run: () => onOpenSettings() },
+      { key: "a:standby", group: t("cmdk.actions"), label: t("cmdk.standby"), run: () => onStandby() },
+    );
+    return list;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [desk.jobs, desk.threads, t]);
+  const filtered = q.trim() ? items.filter((i) => i.label.toLowerCase().includes(q.trim().toLowerCase())) : items;
+  const sel = Math.min(idx, Math.max(0, filtered.length - 1));
+
+  useEffect(() => {
+    // capture：面板开着时键盘事件在这里先处理，不吃到底层
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        onClose();
+      } else if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setIdx((i) => Math.min(i + 1, filtered.length - 1));
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setIdx((i) => Math.max(i - 1, 0));
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        filtered[sel]?.run();
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [filtered, sel, onClose]);
+
+  // 分组保持 jobs → threads → actions 顺序
+  const groups: { name: string; items: CmdItem[] }[] = [];
+  for (const it of filtered) {
+    const g = groups.find((x) => x.name === it.group);
+    if (g) g.items.push(it);
+    else groups.push({ name: it.group, items: [it] });
+  }
+  let flat = -1;
+
+  return (
+    <div className="cmdk-overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
+      <div className="cmdk" role="dialog" aria-label={t("cmdk.title")}>
+        <div className="cmdk-inrow">
+          <Icon name="search" size="sm" />
+          <input
+            autoFocus
+            value={q}
+            onChange={(e) => {
+              setQ(e.target.value);
+              setIdx(0);
+            }}
+            placeholder={t("cmdk.placeholder")}
+          />
+        </div>
+        <div className="cmdk-list">
+          {filtered.length === 0 && <div className="cmdk-empty">{t("cmdk.empty")}</div>}
+          {groups.map((g) => (
+            <div key={g.name}>
+              <div className="cmdk-grp">{g.name}</div>
+              {g.items.map((it) => {
+                flat += 1;
+                const on = flat === sel;
+                return (
+                  <button
+                    type="button"
+                    key={it.key}
+                    className={`cmdk-item${on ? " on" : ""}`}
+                    onMouseEnter={() => setIdx(filtered.indexOf(it))}
+                    onClick={() => {
+                      it.run();
+                      onClose();
+                    }}
+                  >
+                    <span className="l">{it.label}</span>
+                    {it.hint && <span className="hint mono">{it.hint}</span>}
+                  </button>
+                );
+              })}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Ctrl+/：静态快捷键清单（从实际注册处抄来，不做不可发现的隐藏功能） */
+function KeymapOverlay({ onClose }: { onClose: () => void }) {
+  const t = useT();
+  const rows: { k: string; d: string }[] = [
+    { k: "Ctrl+K", d: t("keymap.palette") },
+    { k: "Ctrl+/", d: t("keymap.keymap") },
+    { k: "Ctrl+.", d: t("keymap.standby") },
+    { k: "Alt+Shift+L", d: t("keymap.global") },
+    { k: "Esc", d: t("keymap.close") },
+    { k: "Enter", d: t("keymap.send") },
+    { k: "Shift+Enter", d: t("keymap.newline") },
+    { k: "@", d: t("keymap.mention") },
+  ];
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [onClose]);
+  return (
+    <div className="cmdk-overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
+      <div className="cmdk" role="dialog" aria-label={t("keymap.title")}>
+        <div className="cmdk-head">{t("keymap.title")}</div>
+        <div className="cmdk-list">
+          {rows.map((r) => (
+            <div className="keymap-row" key={r.k}>
+              <span className="mono">{r.k}</span>
+              <span>{r.d}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ============================ DESK ============================
 
 export function DeskView({
@@ -2098,6 +2262,23 @@ export function DeskView({
   const [reviewId, setReviewId] = useState<string | null>(null);
   /** 窄窗（≤1280）右栏抽屉：顶栏「待办 (n)」开关 */
   const [rightOpen, setRightOpen] = useState(false);
+  // E6：Ctrl+K 命令面板 / Ctrl+/ 快捷键清单——能力实际存在就必须可发现
+  const [cmdkOpen, setCmdkOpen] = useState(false);
+  const [keymapOpen, setKeymapOpen] = useState(false);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && (e.key === "k" || e.key === "K")) {
+        e.preventDefault();
+        setCmdkOpen((v) => !v);
+      } else if ((e.ctrlKey || e.metaKey) && e.key === "/") {
+        e.preventDefault();
+        setKeymapOpen((v) => !v);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
   const current = desk.jobs.find((j) => j.id === activeId) ?? waitingFirst;
   const reviewJob = desk.jobs.find((j) => j.id === reviewId);
   const pendingCount = desk.decisions.length + desk.jobs.filter((j) => j.action === "accept").length;
@@ -2197,6 +2378,23 @@ export function DeskView({
           onClose={() => setRightOpen(false)}
         />
       </div>
+      {cmdkOpen && (
+        <CommandPalette
+          desk={desk}
+          onClose={() => setCmdkOpen(false)}
+          onSelectJob={(id) => {
+            setReviewId(null);
+            setActiveId(id);
+          }}
+          onThread={(id) => {
+            onThread?.(id);
+          }}
+          onOpenSettings={onOpenSettings}
+          onStandby={onStandby}
+          onNew={onNew}
+        />
+      )}
+      {keymapOpen && <KeymapOverlay onClose={() => setKeymapOpen(false)} />}
     </div>
   );
 }
