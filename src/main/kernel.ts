@@ -112,7 +112,7 @@ const TOOL_JSON: ToolSchema[] = [
     function: {
       name: "create_member",
       description:
-        "招募团队成员（书面岗位）：名字、岗位、单一目标、边界（不许做什么）、工具白名单、产出契约与验收标准。**团队最小 1 人**：一张单一个人做得完就只招 1 人，不要为凑角色多招（每个人都在烧预算/时限）。超过 6 人编制需要 justification。团队不存在会自动新建。",
+        "招募团队成员（书面岗位）：名字、岗位、单一目标、边界（不许做什么）、工具白名单、产出契约与验收标准。**团队最小 1 人**：一张单一个人做得完就只招 1 人，不要为凑角色多招（每个人都在烧预算/时限）。**一条任务线一支团队**：不要把人招进上一条任务的团队；沿用旧班底要显式传 teamId。超过 6 人编制需要 justification。团队不存在会自动新建。",
       parameters: {
         type: "object",
         required: ["name", "role", "goal", "tools"],
@@ -141,7 +141,7 @@ const TOOL_JSON: ToolSchema[] = [
     function: {
       name: "assign_task",
       description:
-        "向成员派单。成员只拿到简报包（任务+完成标准+时限），看不到你们的对话。团队不存在会自动新建。多个任务并行时一任务一团队可以，但要先把任务清单（各派给谁、多久）告诉用户。",
+        "向成员派单。成员只拿到简报包（任务+完成标准+时限），看不到你们的对话。**一条任务线一支团队**：不传 teamId 时，新会话会新建团队（不会塞进上一条任务的班底）；要沿用旧班底必须显式传 teamId 并说明理由。多个任务并行时一任务一团队可以，但要先把任务清单（各派给谁、多久）告诉用户。",
       parameters: {
         type: "object",
         required: ["taskId", "member", "brief", "deadline"],
@@ -1513,7 +1513,7 @@ export class Kernel {
           body: `目标：${args.goal}\n边界：${((args.boundaries as string[]) ?? []).join("；") || "（未写）"}`,
           members: [{ name: String(args.name), role: String(args.role), color: this.teamColor(0) }],
         });
-        return `已招募 ${args.name}（岗位档案已落盘，用户可读可改）。团队 ID：${teamId}（后续派单可省略 teamId，缺省就绑它）。`;
+        return `已招募 ${args.name}（岗位档案已落盘，用户可读可改）。团队 ID：${teamId}（**同一条任务线**的后续派单可省略 teamId；换新任务请显式给新团队，不要复用这条任务线的班底）。`;
       }
       case "assign_task": {
         const taskId = String(args.taskId);
@@ -1545,8 +1545,8 @@ export class Kernel {
           this.card({
             kind: "system",
             text: team.reused
-              ? `本机还没有这个团队，已建「${team.name}」并复用编制「${team.reused.name}」（${team.reused.members} 人），ID ${team.id}。`
-              : `本机还没有这个团队，已自建「${team.name}」（ID ${team.id}）。派单照常进行，不需要你提供团队 ID。`,
+              ? `已建「${team.name}」并复用编制「${team.reused.name}」（${team.reused.members} 人），ID ${team.id}。`
+              : `新任务线：已为它新建独立班底「${team.name}」（ID ${team.id}）。接着 create_member 招募即可——一条任务线一支团队，不和别的任务混在一起。`,
           });
         }
         // 成员档案不存在时如实说明该先招人——这是真缺人，不是缺团队
@@ -1554,7 +1554,19 @@ export class Kernel {
           return `团队 ${teamId} 仍不可用（建队失败），请如实告知用户并附上错误。`;
         }
         if (!this.teamStore.listMembers(teamId).some((p) => p.name === member)) {
-          return `团队 ${teamId} 里还没有成员「${member}」，先 create_member 招募（团队已经在了，不用再建队，也不用问用户要 ID）。`;
+          const here = this.teamStore.listMembers(teamId).map((p) => p.name).join("、") || "（空）";
+          // 成员在别的团队里：说清两条路（沿用旧班底要显式给 teamId，新任务就在本队招人）
+          const elsewhere = this.teamStore
+            .activeTeams()
+            .filter((t) => t.id !== teamId)
+            .map((t) => ({ id: t.id, name: t.name, names: this.teamStore.listMembers(t.id).map((p) => p.name) }))
+            .filter((x) => x.names.includes(member));
+          if (elsewhere.length > 0) {
+            return `团队 ${teamId} 里没有「${member}」，但它在 ${elsewhere
+              .map((x) => `${x.name}（${x.id}）`)
+              .join("、")} 里。如果是**同一条任务线**的后续单，请显式传 teamId=${elsewhere[0].id}；如果是**新任务**，就在当前团队重新 create_member（别把旧任务的人带过来）。`;
+          }
+          return `团队 ${teamId} 里还没有成员「${member}」（现有：${here}），先 create_member 招募（团队已经在了，不用再建队，也不用问用户要 ID）。`;
         }
         const plan: TaskPlan = {
           taskId,
@@ -1569,7 +1581,8 @@ export class Kernel {
         const ctx: PendingPlan = { teamId, taskId, member, brief, deadline, tools, draftId };
         // 还没开工：工单只落 todo，不能谎报"执行中"（七态见 §4.10.4）
         if (!this.taskStore.get(taskId)) {
-          this.taskStore.create({ id: taskId, title, teamId, member });
+          // 建单时就钉住会话：任务线判定（团队不复用）与 C3 的往来归属都靠它
+          this.taskStore.create({ id: taskId, title, teamId, member, threadId: this.currentThreadId });
           this.taskStore.transition(taskId, "todo");
         }
         if (this.settings.getPrefs().autoStart) {
@@ -1911,7 +1924,14 @@ export class Kernel {
     const wanted = (explicit ?? "").trim();
     if (wanted && this.teamStore.teamExists(wanted)) return wanted;
     const active = this.teamStore.activeTeams();
-    return active.length === 1 ? active[0].id : undefined;
+    if (active.length !== 1) return undefined;
+    const team = active[0];
+    // 唯一在职队也**不能跨任务线复用**：只有"它还没做过任务"或"最近一张单就来自当前会话"
+    // 才算同一条任务线。否则给新任务派单会把活塞进上一条任务的班底
+    //（用户实报：审查 hermix 项目，却进了「超星学习攻坚组」）。
+    const tasks = this.taskStore.list().filter((t) => t.teamId === team.id);
+    if (tasks.length === 0) return team.id;
+    return tasks[0].threadId && tasks[0].threadId === this.currentThreadId ? team.id : undefined;
   }
 
   /**
@@ -1923,7 +1943,8 @@ export class Kernel {
     template?: string,
   ): { id: string; name: string; reused: { name: string; members: number } | null } {
     const requested = (hint.teamId ?? "").trim();
-    const prettyName = (hint.teamName ?? "").trim() || requested || (hint.title ?? "").trim() || "默认团队";
+    // 团队名取人给的 name，没有就用任务标题（截断：右栏组头一行要放得下）
+    const prettyName = ((hint.teamName ?? "").trim() || requested || (hint.title ?? "").trim() || "默认团队").slice(0, 24);
     // 机器可读的 ID（纯 ASCII）可以沿用；中文一类当名字，ID 重新生成
     const machine = requested && /^[A-Za-z0-9._-]+$/.test(requested) ? requested : undefined;
     const id = machine ?? generateTeamId(prettyName, (c) => this.teamStore.teamExists(c));
