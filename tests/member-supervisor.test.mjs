@@ -1,0 +1,152 @@
+// 指挥者巡检 + 催办（2026-11-04 用户实报："光显示有个屁用，阿黎什么都不管？"）
+// 期望：成员长时间没动静或反复撞边界时，风铃自己起一轮跟进；她能给成员补一句指示（不重派）。
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { Kernel, supervisorCase } from "../dist/main/kernel.js";
+import { TeamStore } from "../dist/main/team-store.js";
+
+const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), "lynn-sup-"));
+
+function setup() {
+  const root = tmp();
+  fs.writeFileSync(
+    path.join(root, "settings.json"),
+    JSON.stringify({
+      model: {
+        provider: "test",
+        baseUrl: "http://127.0.0.1:9/v1",
+        model: "test-model",
+        apiKey: { encrypted: false, data: "test-key" },
+        updatedAt: new Date().toISOString(),
+      },
+    }),
+    "utf-8",
+  );
+  const teams = new TeamStore(root);
+  teams.createTeam("t1", "月报突击队");
+  teams.writeMember("t1", {
+    name: "林工",
+    role: "数据整理员",
+    goal: "出月报",
+    boundaries: ["只动工作区"],
+    tools: ["read_file", "write_file"],
+    model: "test-model",
+    limits: { maxTurns: 6, budgetTokens: 100000, wallClockMin: 10 },
+    outputContract: { deliverable: "report.md", evidence: ["文件"], acceptance: ["可对账"] },
+    escalateWhen: "卡住",
+    body: "",
+  });
+  return { root, kernel: new Kernel(root) };
+}
+
+const tc = (id, name, args) => ({ id, name, arguments: JSON.stringify(args) });
+
+function scripted(stepMs = 100) {
+  let i = 0;
+  const seen = [];
+  const chat = async (input) => {
+    seen.push(input.messages.map((m) => (typeof m.content === "string" ? m.content : "")).join("\n"));
+    await new Promise((r) => setTimeout(r, stepMs));
+    i += 1;
+    return {
+      content: "",
+      toolCalls: [tc(`s-${i}`, "write_file", { path: `step-${i}.md`, content: "…" })],
+      promptTokens: 1,
+      completionTokens: 1,
+    };
+  };
+  return { chat, seen };
+}
+
+async function until(fn, ms = 6000, label = "条件") {
+  const started = Date.now();
+  while (Date.now() - started < ms) {
+    if (fn()) return;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  assert.fail(`等待超时：${label}`);
+}
+
+function start(kernel, taskId = "task-1") {
+  kernel.runTool("assign_task", { teamId: "t1", taskId, member: "林工", brief: `做 ${taskId}`, deadline: "30 分钟" });
+  const plan = kernel.handle("session.snapshot").board.decisions.find((d) => d.kind === "plan" && d.jobId === taskId);
+  kernel.handle("decision.resolve", { id: plan.id, action: "start" });
+}
+
+test("巡检判定：3 分钟没动静 → 跟进；撞墙 3 次 → 优先跟进；冷却期内不重复", () => {
+  const now = 10_000_000;
+  const noted = new Map();
+  const quiet = supervisorCase([{ taskId: "A", member: "林工", quietMs: 200_000, blocked: 0 }], now, noted);
+  assert.equal(quiet?.taskId, "A");
+  assert.match(quiet.text, /没有任何动作/);
+
+  const blocked = supervisorCase([{ taskId: "B", member: "探针", quietMs: 1000, blocked: 3 }], now, noted);
+  assert.equal(blocked?.taskId, "B");
+  assert.match(blocked.text, /被边界拦下 3 次/);
+
+  noted.set("A", now - 60_000);
+  assert.equal(supervisorCase([{ taskId: "A", member: "林工", quietMs: 200_000, blocked: 0 }], now, noted), null, "10 分钟内不重复");
+
+  const fine = supervisorCase([{ taskId: "C", member: "林工", quietMs: 5_000, blocked: 1 }], now, noted);
+  assert.equal(fine, null, "正常在跑/被拦 1 次不该打扰");
+});
+
+test("催办：nudgeMember 送进成员下一轮上下文，不重派、不中断", async () => {
+  const { kernel } = setup();
+  try {
+    await kernel.init();
+    const { chat, seen } = scripted();
+    kernel.memberChatFn = chat;
+    start(kernel);
+    await until(() => seen.length >= 1, 5000, "成员开跑");
+
+    const r = kernel.nudgeMember("task-1", "你只能访问任务工作区，别再去读 F:/spiker");
+    assert.match(r, /已送达/);
+    await until(() => seen.some((s) => s.includes("【风铃补充指示】")), 6000, "补充指示进入上下文");
+    assert.ok(
+      seen.some((s) => s.includes("别再去读 F:/spiker")),
+      "成员下一轮必须看到这句",
+    );
+    assert.equal(kernel.runningTaskIds().length, 1, "催办不重启成员");
+    kernel.handle("task.cancel", { taskId: "task-1" });
+  } finally {
+    await kernel.dispose();
+  }
+});
+
+test("巡检接线：命中就落「阿黎开始跟进」卡并起内部回合；5 分钟内不刷第二张", async () => {
+  const { kernel } = setup();
+  try {
+    await kernel.init();
+    const { chat } = scripted(400);
+    kernel.memberChatFn = chat;
+    start(kernel);
+
+    // 只验接线：替换 submitTurn，免得真去调模型；把"最近一步"推到 4 分钟前
+    const turns = [];
+    kernel.submitTurn = (text, _att, opts) => {
+      turns.push({ text, internal: !!opts?.internal });
+      kernel.busy = true; // 模拟正在跑，防止第二个 tick 抢先
+    };
+    kernel.memberStepAt.set("task-1", Date.now() - 240_000);
+    kernel.supervisorTick();
+
+    assert.equal(turns.length, 1, "应当起一轮跟进");
+    assert.equal(turns[0].internal, true, "巡检回合不冒充用户发言");
+    assert.match(turns[0].text, /自动巡检|没有任何动作/);
+    assert.ok(
+      kernel.handle("session.snapshot").feed.some((c) => (c.text ?? "").includes("阿黎开始跟进")),
+      "用户要能看到她开始管了",
+    );
+
+    kernel.busy = false;
+    kernel.supervisorTick();
+    assert.equal(turns.length, 1, "5 分钟节流：不允许连续起回合");
+    kernel.handle("task.cancel", { taskId: "task-1" });
+  } finally {
+    await kernel.dispose();
+  }
+});

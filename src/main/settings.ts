@@ -31,6 +31,8 @@ export interface Prefs {
   lang: "zh" | "en";
   /** 同时最多几个成员在跑（默认 4）：三个任务并行是常态，2 会把第三张单直接拒掉 */
   maxParallelMembers: number;
+  /** 指挥者巡检（默认开）：成员长时间没动静或被边界反复拦下时，让风铃自己跟进一步 */
+  supervisor: boolean;
 }
 
 const DEFAULT_PREFS: Prefs = {
@@ -41,6 +43,7 @@ const DEFAULT_PREFS: Prefs = {
   fallbackModel: "",
   lang: "zh",
   maxParallelMembers: 4,
+  supervisor: true,
 };
 
 interface SettingsFile {

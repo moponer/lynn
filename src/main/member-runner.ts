@@ -60,6 +60,11 @@ export interface MemberRunInput {
   kb?: ToolkitOptions["kb"];
   /** 中止信号（用户点「停」/解散队伍）：模型流与工具轮都尽快收尾 */
   signal?: AbortSignal;
+  /**
+   * 收件箱：风铃（或巡检）在成员跑的中途补的指示。
+   * 每轮开头 drain 一次——不打断当前工具轮，但下一轮模型就能看到（催办不必杀进程重跑）。
+   */
+  inbox?: string[];
 }
 
 export interface MemberRunResult {
@@ -205,6 +210,13 @@ export async function runMemberTask(input: MemberRunInput): Promise<MemberRunRes
 
   try {
     while (finalReport === null && turns < maxTurns && !input.signal?.aborted) {
+      // 先看收件箱：风铃在跑的中途补的指示，这一轮就能进上下文（不用杀掉重跑、不丢已写文件）
+      while (input.inbox && input.inbox.length > 0) {
+        const note = input.inbox.shift();
+        if (!note) break;
+        messages.push({ role: "user", content: `【风铃补充指示】${note}` });
+        input.onEvent?.({ kind: "note", text: `收到补充指示：${note.slice(0, 120)}` });
+      }
       input.onEvent?.({
         kind: "turn",
         text: `第 ${turns + 1} / ${maxTurns} 轮`,

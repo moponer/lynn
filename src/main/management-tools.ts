@@ -70,6 +70,9 @@ export const MANAGEMENT_ONLY_TOOLS = [
   "ask_user",
   "dissolve_team",
   "ship_plugin",
+  // 指挥者的两只手：催办在跑的成员、停掉明显做不到的单
+  "nudge_member",
+  "stop_task",
 ] as const;
 
 export class ManagementTools {

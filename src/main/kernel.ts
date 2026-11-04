@@ -177,6 +177,38 @@ const TOOL_JSON: ToolSchema[] = [
   {
     type: "function",
     function: {
+      name: "nudge_member",
+      description:
+        "给**正在跑**的成员补一句指示（下一轮生效，不用重派、不丢已写文件）。用于纠正方向、划清边界（例如「你只能访问任务工作区，别再去读 F:\\\\spiker」）、要求先交阶段性回报。",
+      parameters: {
+        type: "object",
+        required: ["taskId", "note"],
+        properties: {
+          taskId: { type: "string" },
+          note: { type: "string", description: "一句话说清：改什么 / 先交什么 / 别再做什么" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "stop_task",
+      description:
+        "停掉一张在跑的单：成员收手，工单转「卡住」等你决定。用于明显卡死、反复越界、方向已错——不要让它一直烧预算。",
+      parameters: {
+        type: "object",
+        required: ["taskId"],
+        properties: {
+          taskId: { type: "string" },
+          reason: { type: "string", description: "为什么停（会记进卷宗与卡）" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "check_roster",
       description:
         "查看班底花名册与战绩（M2-14）：各成员岗位、工具白名单与历次验收结论（做过的单/过验/被打回/升级次数）。派单前先看战绩，把活给对的人。",
@@ -340,6 +372,42 @@ export function countTasksByThread(tasks: { threadId?: string; status: TaskStatu
   return out;
 }
 
+/**
+ * 指挥者巡检判定（纯函数，便于单测）：哪张单该让风铃主动跟进、为什么。
+ * 触发：①成员 3 分钟没有任何动作；②被边界拦下 ≥3 次（在撞墙，做的是做不到的事）。
+ * 每张单 10 分钟内最多跟进一次；命中就返回一条可直接注入的说明。
+ */
+export function supervisorCase(
+  runs: { taskId: string; member: string; quietMs: number; blocked: number; lastStep?: string }[],
+  now: number,
+  noted: Map<string, number>,
+  opts: { quietMs?: number; blockedLimit?: number; cooldownMs?: number } = {},
+): { taskId: string; member: string; text: string } | null {
+  const quietLimit = opts.quietMs ?? 180_000;
+  const blockedLimit = opts.blockedLimit ?? 3;
+  const cooldown = opts.cooldownMs ?? 10 * 60_000;
+  const candidates = runs
+    .filter((r) => now - (noted.get(r.taskId) ?? 0) >= cooldown)
+    .sort((a, b) => b.quietMs - a.quietMs);
+  for (const r of candidates) {
+    if (r.blocked >= blockedLimit) {
+      return {
+        taskId: r.taskId,
+        member: r.member,
+        text: `${r.member} 跑 ${r.taskId} 时被边界拦下 ${r.blocked} 次（它只能动任务工作区），最后一步：${r.lastStep ?? "无"}。它大概率在做做不到的事。`,
+      };
+    }
+    if (r.quietMs >= quietLimit) {
+      return {
+        taskId: r.taskId,
+        member: r.member,
+        text: `${r.member} 跑 ${r.taskId} 已经 ${Math.round(r.quietMs / 1000)}s 没有任何动作，最后一步：${r.lastStep ?? "无"}。`,
+      };
+    }
+  }
+  return null;
+}
+
 export class Kernel {
   readonly dataRoot: string;
   private settings: SettingsStore;
@@ -370,6 +438,15 @@ export class Kernel {
   private memberProgress = new Map<string, number>();
   /** 成员最近一步动作（`teamId::成员` → 文本）：右栏与任务总览要能回答"现在在干什么" */
   private memberLastStep = new Map<string, string>();
+  /** 成员收件箱（taskId → 待发指示）：风铃中途催办，不必杀掉重跑 */
+  private memberInbox = new Map<string, string[]>();
+  /** 每张单最近一步的时间戳与"被边界拦下"的次数：巡检据此判"没动静"与"在撞墙" */
+  private memberStepAt = new Map<string, number>();
+  private memberBlocked = new Map<string, number>();
+  /** 指挥者巡检：定时器与节流（不催也管） */
+  private supervisorTimer: NodeJS.Timeout | null = null;
+  private lastSupervisorAt = 0;
+  private supervisorNoted = new Map<string, number>();
   /** 成员本轮累计 token（`teamId::成员` → tokens）：编制表的预算读数不再是硬编码 0 */
   private memberUsage = new Map<string, number>();
   /** 每张单的中止器（用户点「停」）：没有它就只能解散全队来止损 */
@@ -555,6 +632,8 @@ export class Kernel {
     }
     this.log("tool_audit", { kind: ev.kind, taskId, member, why: ev.why });
     if (ev.kind === "cmd_blocked") {
+      // 撞墙计数：巡检据此判断"它在做做不到的事"（而不是单纯慢）
+      this.memberBlocked.set(taskId, (this.memberBlocked.get(taskId) ?? 0) + 1);
       this.cardTo(threadId, {
         kind: "tool",
         badge: "已拦截",
@@ -918,6 +997,10 @@ export class Kernel {
     if (released.length) this.log("scheduler_recovered", { released });
     this.scheduleTimer = setInterval(() => this.tickSchedules(), 30_000);
     this.scheduleTimer.unref?.();
+    // 指挥者巡检（2026-11-04）：成员长时间没动静 / 反复撞边界时，风铃自己跟进一步，
+    // 不再"派完就睡、等用户来问"。判定与节流见 supervisorTick / supervisorCase。
+    this.supervisorTimer = setInterval(() => this.supervisorTick(), 60_000);
+    this.supervisorTimer.unref?.();
     // 知识库增量索引（M2-09）：文件变更去抖 800ms 后增量重索引
     this.kbWatch = watchKnowledge(this.knowledge.dir, () => this.knowledge.reindex(), {
       onChange: (r) => {
@@ -1259,6 +1342,7 @@ export class Kernel {
       steps.push(text);
       lastStepAt = Date.now();
       this.memberLastStep.set(memberKey, text);
+      this.memberStepAt.set(taskId, Date.now());
       const tail = steps.slice(-6).join("\n");
       this.patchCardTo(runThreadId, live, {
         meta: `第 ${steps.length} 步 · ${elapsedSec()}s`,
@@ -1297,6 +1381,12 @@ export class Kernel {
       workdir,
       model: { baseUrl: cfg.baseUrl, apiKey, model: cfg.model },
       chatFn: this.memberChatFn,
+      // 收件箱：风铃/巡检中途补的指示，成员每轮开头取（催办不杀进程、不重派）
+      inbox: (() => {
+        const box = this.memberInbox.get(taskId) ?? [];
+        this.memberInbox.set(taskId, box);
+        return box;
+      })(),
       onAudit: (ev) => this.auditTool(teamId, taskId, member, ev, runThreadId),
       onBeforeWrite: (rel, full, existed) => this.checkpoints.beforeWrite(rel, full, existed),
       office: {
@@ -1384,6 +1474,9 @@ export class Kernel {
         clearInterval(stallTimer);
         this.memberRuns.delete(taskId);
         this.memberAborts.delete(taskId);
+        this.memberInbox.delete(taskId);
+        this.memberStepAt.delete(taskId);
+        this.memberBlocked.delete(taskId);
         if (this.memberActive.get(memberKey) === taskId) this.memberActive.delete(memberKey);
       });
     this.memberRuns.set(taskId, run);
@@ -1485,6 +1578,62 @@ export class Kernel {
     if (rec.threadId) this.cardTo(rec.threadId, { kind: "system", text });
     else this.card({ kind: "system", text });
     return { ok: true };
+  }
+
+  /**
+   * 给在跑的成员补一句指示（风铃催办）：进收件箱，成员下一轮开头就会看到。
+   * 不杀进程、不重派，已写出的文件与进度都保留。
+   */
+  nudgeMember(taskId: string, note: string): string {
+    const text = note.trim();
+    if (!text) return "补充指示不能为空：要它改什么、先交什么，写清楚。";
+    if (!this.memberRuns.has(taskId)) {
+      return `${taskId} 没有在跑（可能已结束/已停）：要改要求请重新派单，或用 check_progress 看它交了什么。`;
+    }
+    const box = this.memberInbox.get(taskId) ?? [];
+    box.push(text);
+    this.memberInbox.set(taskId, box);
+    const rec = this.taskStore.get(taskId);
+    const owner = rec?.threadId ?? this.currentThreadId;
+    this.cardTo(owner, {
+      kind: "system",
+      jobId: taskId,
+      text: `给 ${rec?.member ?? "成员"} 补了一句（下一轮生效）：${text.slice(0, 200)}`,
+    });
+    return `已送达 ${taskId}：成员下一轮会看到，不用重派。`;
+  }
+
+  /**
+   * 指挥者巡检（每分钟 tick，但真正触发受 5 分钟全局 / 10 分钟每单节流）：
+   * 成员长时间没动作、或反复撞边界时，风铃自己起一轮跟进——她不再"派完就睡"。
+   */
+  private supervisorTick(): void {
+    if (!this.settings.getPrefs().supervisor) return;
+    if (this.busy || this.memberRuns.size === 0) return;
+    const now = Date.now();
+    if (now - this.lastSupervisorAt < 5 * 60_000) return;
+    const runs = [...this.memberRuns.keys()].map((id) => {
+      const rec = this.taskStore.get(id);
+      const key = `${rec?.teamId ?? ""}::${rec?.member ?? ""}`;
+      return {
+        taskId: id,
+        member: rec?.member ?? "成员",
+        quietMs: now - (this.memberStepAt.get(id) ?? now),
+        blocked: this.memberBlocked.get(id) ?? 0,
+        lastStep: this.memberLastStep.get(key),
+      };
+    });
+    const hit = supervisorCase(runs, now, this.supervisorNoted);
+    if (!hit) return;
+    this.lastSupervisorAt = now;
+    this.supervisorNoted.set(hit.taskId, now);
+    const owner = this.taskStore.get(hit.taskId)?.threadId ?? this.currentThreadId;
+    this.cardTo(owner, { kind: "system", jobId: hit.taskId, text: `阿黎开始跟进 ${hit.taskId}：${hit.text}` });
+    this.submitTurn(
+      `[自动巡检] ${hit.text}\n\n请作为指挥者处理这张单：①check_progress 看细节；②能用一句话纠正就 nudge_member（下一轮生效，不用重派、不丢已写文件）；③明显做不到（例如要访问工作区外的目录）就 stop_task 停掉，并告诉我原因和替代方案；④只是慢就回一句「继续等」。不要重复派单。`,
+      undefined,
+      { internal: true },
+    );
   }
 
   /** 在跑的成员单（taskId 列表）：界面据此显示「停」按钮，而不是让用户去猜 */
@@ -1657,6 +1806,16 @@ export class Kernel {
           running: this.memberRuns.has(taskId),
         };
         return JSON.stringify(p, null, 2);
+      }
+      case "nudge_member": {
+        return this.nudgeMember(String(args.taskId), String(args.note ?? ""));
+      }
+      case "stop_task": {
+        const taskId = String(args.taskId);
+        const r = this.cancelMemberTask(taskId);
+        if (!r.ok) return `停不下来：${r.error ?? "未知原因"}`;
+        const why = args.reason ? `原因：${String(args.reason)}。` : "";
+        return `已停 ${taskId}。${why}工单转入「卡住」，可以向我说明情况，或让用户右键取消。`;
       }
       case "check_roster": {
         return JSON.stringify(this.tools.roster(args.teamId ? String(args.teamId) : undefined), null, 2);
@@ -1891,6 +2050,10 @@ export class Kernel {
     if (this.scheduleTimer) {
       clearInterval(this.scheduleTimer);
       this.scheduleTimer = null;
+    }
+    if (this.supervisorTimer) {
+      clearInterval(this.supervisorTimer);
+      this.supervisorTimer = null;
     }
     this.kbWatch?.close();
     this.kbWatch = null;
@@ -2161,13 +2324,18 @@ export class Kernel {
     }
   }
 
-  /** 提交一轮：卡片 + 落史 + 回合状态 + 结束后排水（排队输入） */
-  private submitTurn(text: string, att?: TurnAttachments): void {
+  /**
+   * 提交一轮：卡片 + 落史 + 回合状态 + 结束后排水（排队输入）。
+   * `internal`：巡检回合——不进「你」的声音、不改会话标题，用户看到的是那张「开始跟进」卡。
+   */
+  private submitTurn(text: string, att?: TurnAttachments, opts?: { internal?: boolean }): void {
     // 技能激活（M2-10）：每轮按输入重算，命中后 allowed-tools 强制到工具门禁
     this.activateSkillsFor(text);
     // 本轮随附（M1-16）：文件注入 + 图片落盘；带不上的如实出卡，不静默丢
     let fullText = text;
-    if (att && (att.files?.length || att.images?.length)) {
+    if (opts?.internal) {
+      fullText = text;
+    } else if (att && (att.files?.length || att.images?.length)) {
       const built = buildTurnAttachments(this.projectRoot, this.dataRoot, text, att);
       if (built.errors.length) {
         this.card({ kind: "system", text: `这些随附没带上：${built.errors.join("；")}。` });
@@ -2186,8 +2354,8 @@ export class Kernel {
     this.busy = true;
     this.l1.setBusy(true);
     this.abortRequested = false;
-    this.log("turn_start", { chars: text.length, model: this.settings.getModel()?.model ?? "", threadId: this.currentThreadId });
-    this.threads.autoTitle(this.currentThreadId, text);
+    this.log("turn_start", { chars: text.length, model: this.settings.getModel()?.model ?? "", threadId: this.currentThreadId, internal: !!opts?.internal });
+    if (!opts?.internal) this.threads.autoTitle(this.currentThreadId, text);
     this.checkpoints.begin(`turn-${Date.now()}`);
     this.setTurn({ phase: "accepted", busy: true, startedAt: new Date().toISOString(), canUndo: false, changedFiles: [] });
     void this.runChat(fullText).finally(() => {
