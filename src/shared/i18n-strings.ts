@@ -317,6 +317,9 @@ export const ZH_STRINGS: Record<string, string> = {
   "menu.dismissAsk": "取消后进归档带，目录与卷宗保留。确定？",
   "menu.removeAsk": "删除不可恢复：工单、卷宗、工作区一起删。确定？",
   "menu.confirm": "确定",
+  // 版本握手（界面新、内核旧）
+  "app.stale": "后台是旧版本（界面已更新，内核还没重启）：新加的操作可能不生效。",
+  "app.restart": "重启应用",
   // 任务总览（多任务并行）
   "top.tasks": "任务 {n}",
   "top.tasksRunning": "在跑 {n}",
@@ -658,6 +661,8 @@ export const EN_STRINGS: Record<string, string> = {
   "menu.dismissAsk": "It moves to the archive; files stay. Sure?",
   "menu.removeAsk": "Permanent: job, case files and workspace are removed. Sure?",
   "menu.confirm": "Confirm",
+  "app.stale": "The core is older than the UI (it hasn't been restarted), so new actions may not work.",
+  "app.restart": "Restart app",
   "top.tasks": "Tasks {n}",
   "top.tasksRunning": "{n} running",
   "top.tasksHint": "Tasks: {running} running · {waiting} awaiting you · {stuck} stuck",

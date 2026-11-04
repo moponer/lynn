@@ -1836,6 +1836,19 @@ button.ev:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 .thread-danger { color: var(--red); }
 .thread-danger:hover { color: var(--red); background: var(--hover-bg-2); }
 
+/* ---------- 版本握手提示（界面新、内核旧）：右下角提示卡，不压顶栏与图纸 ---------- */
+.stale-bar {
+  position: fixed; right: 16px; bottom: 64px; z-index: 80; max-width: 430px;
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 11px; border-radius: var(--r-m);
+  background: var(--sheet); color: var(--ink-2);
+  box-shadow: 0 1px 2px rgba(0,0,0,.4), 0 16px 36px -22px #000;
+  font-size: var(--fs-meta);
+}
+.stale-bar > svg { color: var(--brass); flex: none; }
+.stale-bar .ghost-btn { padding: 3px 9px; font-size: var(--fs-label); margin-left: auto; flex: none; }
+.stale-bar .icon-btn { background: none; width: 24px; height: 24px; flex: none; }
+
 /* ---------- 工单右键菜单（卡住的单必须能取消/删除） ---------- */
 .jobmenu {
   position: fixed; z-index: 60; width: 228px; padding: 6px;

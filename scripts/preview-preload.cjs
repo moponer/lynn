@@ -236,6 +236,10 @@ if (process.env.LYNN_PREVIEW_MULTI) {
 contextBridge.exposeInMainWorld("lynn", {
   rpc: async (method) => {
     if (method === "session.snapshot") return snapshot;
+    // 版本握手：预览没有真内核，给一个"刚刚构建"的时间；LYNN_PREVIEW_STALE=1 时模拟旧内核
+    if (method === "app.info") {
+      return process.env.LYNN_PREVIEW_STALE ? { ok: true } : { buildAt: new Date().toISOString() };
+    }
     if (method === "permission.set") return { ok: true, mode: "ask" };
     if (method === "feed.send") return { ok: true, queued: false };
     if (method === "session.abort") return { ok: true, aborted: true };

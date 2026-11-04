@@ -8,6 +8,7 @@ import type {
   SessionSnapshot,
 } from "../shared/contract";
 import { SettingsModal } from "./components/SettingsModal";
+import { Icon } from "./components/Icon";
 import { DeskView } from "./desk/Desk";
 import { deskFromSnapshot, type Desk } from "./desk/model";
 import { applyPluginTokens, applyTheme, loadTheme, type ThemeId, type ThemeMode } from "./desk/theme";
@@ -28,6 +29,9 @@ async function rpc<M extends RpcMethod>(
   return window.lynn.rpc(method, ...args);
 }
 
+/** 前端构建时间（vite define 注入）：与内核的 buildAt 比对，发现"界面新、内核旧" */
+declare const __LYNN_BUILD_AT__: string;
+
 /**
  * RPC 失败的可读文案：后端是旧版本时别把 `unknown rpc method: task.remove` 直接甩给用户，
  * 那看起来像"删除坏了"，实际只是应用没重启。
@@ -36,6 +40,13 @@ function rpcErrorText(err: unknown, fallback: string): string {
   const msg = err instanceof Error ? err.message : String(err);
   if (/unknown rpc method/i.test(msg)) return "这个操作需要重启应用后生效（后台还是旧版本）。";
   return `${fallback}：${msg}`;
+}
+
+/** 同一个口径，但输入是 `{ error }` 形式的 RPC 结果（壳层把内核异常包成返回值，不会 reject） */
+function rpcResultError(res: { error?: string } | undefined, fallback: string): string {
+  const msg = res?.error ?? "";
+  if (!msg) return fallback;
+  return rpcErrorText(new Error(msg), fallback);
 }
 
 /** 增量事件合并：同 id 的卡就地替换，不整表重拉 */
@@ -63,6 +74,8 @@ export default function App() {
   const [notice, setNotice] = useState<string | null>(null);
   /** M3-08：界面语言字典（内置 ⊕ 语言包插件），lang 变化即重拉 */
   const [i18nStrings, setI18nStrings] = useState<Record<string, string>>(ZH_STRINGS);
+  /** 版本握手：内核比界面旧（改了代码没重启）时给一条可见提示 + 一键重启 */
+  const [staleBackend, setStaleBackend] = useState(false);
   const lang = snap?.prefs.lang ?? "zh";
   useEffect(() => {
     let dead = false;
@@ -81,6 +94,29 @@ export default function App() {
       dead = true;
     };
   }, [lang]);
+
+  // 版本握手：旧内核没有 app.info（返回 {error}）或构建时间落后于界面 → 顶部提示「重启应用」
+  useEffect(() => {
+    let dead = false;
+    rpc("app.info")
+      .then((r) => {
+        if (dead) return;
+        const res = r as { buildAt?: string; error?: string };
+        if (res.error || !res.buildAt) {
+          setStaleBackend(true);
+          return;
+        }
+        const fe = typeof __LYNN_BUILD_AT__ === "string" ? Date.parse(__LYNN_BUILD_AT__) : Number.NaN;
+        const be = Date.parse(res.buildAt);
+        if (Number.isFinite(fe) && Number.isFinite(be) && be + 60_000 < fe) setStaleBackend(true);
+      })
+      .catch(() => {
+        if (!dead) setStaleBackend(true);
+      });
+    return () => {
+      dead = true;
+    };
+  }, []);
 
   useEffect(() => {
     applyTheme(theme.id, theme.mode);
@@ -371,6 +407,24 @@ export default function App() {
 
   return (
     <I18nProvider strings={i18nStrings}>
+      {staleBackend && (
+        <div className="stale-bar" role="status">
+          <Icon name="warn" size="sm" />
+          <span>{i18nStrings["app.stale"] ?? "后台是旧版本（界面已更新，内核还没重启）：新加的操作可能不生效。"}</span>
+          <button
+            type="button"
+            className="ghost-btn"
+            onClick={() => {
+              void rpc("app.restart").catch(() => setStaleBackend(false));
+            }}
+          >
+            {i18nStrings["app.restart"] ?? "重启应用"}
+          </button>
+          <button type="button" className="icon-btn" onClick={() => setStaleBackend(false)} aria-label="close">
+            <Icon name="x" size="sm" />
+          </button>
+        </div>
+      )}
       <DeskView
         desk={desk}
         permission={snap.permission}
@@ -410,7 +464,7 @@ export default function App() {
         onTaskFeed={(taskId) => rpc("task.feed", { taskId })}
         onCancelTask={(taskId) => {
           void rpc("task.cancel", { taskId }).then(async (r) => {
-            if (!r.ok) setNotice(r.error ?? "停不下来");
+            if (!r.ok) setNotice(rpcResultError(r, "停不下来"));
             await refresh();
           });
         }}
@@ -418,7 +472,7 @@ export default function App() {
           setNotice(null);
           void rpc("task.dismiss", { taskId })
             .then(async (r) => {
-              if (!r.ok) setNotice(r.error ?? "取消失败");
+              if (!r.ok) setNotice(rpcResultError(r, "取消失败"));
               await refresh();
             })
             .catch((err) => setNotice(rpcErrorText(err, "取消失败")));
@@ -427,7 +481,7 @@ export default function App() {
           setNotice(null);
           void rpc("task.remove", { taskId })
             .then(async (r) => {
-              if (!r.ok) setNotice(r.error ?? "删除失败");
+              if (!r.ok) setNotice(rpcResultError(r, "删除失败"));
               await refresh();
             })
             .catch((err) => setNotice(rpcErrorText(err, "删除失败")));

@@ -47,6 +47,19 @@ test("C4：会话用量按线程保存/恢复（ThreadStore 层）", () => {
   assert.equal(s.loadState(b.id).usage, undefined, "新线程没有借用别人的读数");
 });
 
+test("版本握手：app.info 给出可解析的构建时间（前端据此判断内核新旧）", async () => {
+  const root = tmp();
+  const kernel = new Kernel(root);
+  try {
+    await kernel.init();
+    const info = kernel.handle("app.info");
+    assert.ok(info.buildAt, "必须给出构建时间，否则前端无法判断新旧");
+    assert.ok(!Number.isNaN(Date.parse(info.buildAt)));
+  } finally {
+    await kernel.dispose();
+  }
+});
+
 test("C4：切会话再切回来，顶栏用量跟着线程走；session.new 的卡不带假的停机按钮", async () => {
   const root = tmp();
   const kernel = new Kernel(root);

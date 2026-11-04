@@ -2473,6 +2473,17 @@ export class Kernel {
 
   handle<M extends RpcMethod>(method: M, params: unknown): RpcContracts[M]["result"] {
     switch (method) {
+      case "app.info": {
+        // 内核构建时间：__filename 是编译产物 dist/main/kernel.js，mtime 就是这次构建的时刻
+        let buildAt = "";
+        try {
+          buildAt = fs.statSync(__filename).mtime.toISOString();
+        } catch {
+          /* 打包进 asar / 只读介质时拿不到 mtime：返回空串，前端只判断"方法在不在" */
+        }
+        return { buildAt } as RpcContracts[M]["result"];
+      }
+
       case "session.snapshot": {
         const cfg = this.settings.getModel();
         // C3：会话 → 工单归属计数（按 task.threadId 汇总；老单没记 threadId 就不归到任何会话，不猜）

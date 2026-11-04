@@ -499,6 +499,16 @@ export interface RpcContracts {
     params: void;
     result: { ok: boolean; stopped: number };
   };
+  /** 内核构建信息（版本握手：前端据此判断"后台是不是旧版本"） */
+  "app.info": {
+    params: void;
+    result: { buildAt: string };
+  };
+  /** 一键重启应用（壳层 app.relaunch）：改了代码没重启时，用户不必自己去托盘翻 */
+  "app.restart": {
+    params: void;
+    result: { ok: boolean };
+  };
   /** 取消一张单（→ canceled，进归档带；在跑的会先停成员） */
   "task.dismiss": {
     params: { taskId: string };

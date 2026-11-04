@@ -472,6 +472,12 @@ app.whenReady().then(async () => {
         const err = await shell.openPath(target);
         return err ? { ok: false, error: err } : { ok: true };
       }
+      if (method === "app.restart") {
+        // 一键重启：改了代码 / 内核比界面旧时，用户不必自己去托盘翻「退出」
+        app.relaunch();
+        setTimeout(() => app.exit(0), 80);
+        return { ok: true };
+      }
       if (method === "app.openData") {
         const kind = (params as { kind: "data" | "logs" }).kind;
         const target = kind === "logs" ? path.join(kernel.dataRoot, "logs") : kernel.dataRoot;
