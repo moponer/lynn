@@ -1,13 +1,16 @@
 // M3-08 渲染层 i18n：字典由 App 从主进程拉取（内置 ⊕ 语言包插件），经 context 下发。
-//  t(key) 缺 key 回退 key 本身——但内置 zh 是源语言全覆盖，正常路径不会裸露 key。
+//  渲染层**内置中文源语言**做兜底：主进程字典可能比界面旧（只重建了 renderer、或应用没重启），
+//  缺 key 时绝不能把 `menu.open` 这种内部键名露给用户；英文缺词条也按设计回退中文。
 import { createContext, useContext, type ReactNode } from "react";
-import { translate } from "../shared/i18n";
+import { mergeStrings, translate } from "../shared/i18n";
+import { ZH_STRINGS } from "../shared/i18n-strings";
 
 const I18nContext = createContext<Record<string, string>>({});
 
 export function I18nProvider({ strings, children }: { strings: Record<string, string>; children: ReactNode }) {
-  // 字典可能还没拉到（或预览假桥没实现 i18n.get）：空对象兜底，绝不把 undefined 传下去
-  return <I18nContext.Provider value={strings ?? {}}>{children}</I18nContext.Provider>;
+  // 顺序：内置中文 → 主进程字典（en 时是英文覆盖；zh 时同源）。绝不把 undefined 传下去
+  const dict = mergeStrings(ZH_STRINGS, strings ?? {});
+  return <I18nContext.Provider value={dict}>{children}</I18nContext.Provider>;
 }
 
 export type TFn = (key: string, params?: Record<string, string | number>) => string;

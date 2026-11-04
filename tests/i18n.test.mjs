@@ -11,6 +11,18 @@ import { Kernel } from "../dist/main/kernel.js";
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), "lynn-i18n-"));
 
+test("旧后端字典叠加内置中文：缺键回退中文，绝不把 menu.open 这种内部键名露给用户", () => {
+  // 真实事故：只重建了 renderer、主进程字典还是旧的 → 右键菜单显示 menu.open / menu.remove
+  const stale = { "menu.open": "打开这张单" }; // 模拟旧字典：只有老键
+  const dict = mergeStrings(ZH_STRINGS, stale);
+  assert.equal(translate(dict, "menu.open"), "打开这张单");
+  assert.equal(translate(dict, "menu.remove"), "删除这张单（不可恢复）", "缺的键必须回退中文");
+  assert.equal(translate(dict, "tov.group", { n: 2 }), "2 个任务");
+  // 英文覆盖仍然优先（en 缺词条按设计回退中文）
+  const en = mergeStrings(ZH_STRINGS, { "menu.open": "Open this job" });
+  assert.equal(translate(en, "menu.open"), "Open this job");
+});
+
 test("语言包校验：结构坏拒并列出全部问题；合法过审", () => {
   assert.equal(checkLangPack(null).ok, false);
   const bad = checkLangPack({ lang: "fr", strings: { a: "ok", b: 42 } });

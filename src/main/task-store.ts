@@ -170,7 +170,17 @@ export class TaskStore {
     if (rec.status === "in_progress") {
       throw new TaskRuleError("这张单还在执行中：先停成员，再取消或删除");
     }
-    fs.rmSync(this.dir(id), { recursive: true, force: true });
+    try {
+      // Windows 上刚写过的文件常被短暂占用（EBUSY/EPERM）：给几次重试，别让用户点一次失败一次
+      fs.rmSync(this.dir(id), { recursive: true, force: true, maxRetries: 6, retryDelay: 120 });
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code ?? "";
+      throw new TaskRuleError(
+        /EBUSY|EPERM|ENOTEMPTY/.test(code)
+          ? `删除失败：${id} 的目录被占用（可能成员刚写过文件）。等两秒再试，或先「取消」这张单。`
+          : `删除失败：${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   /** 归档带里的工单（界面「归档带」用；只读） */

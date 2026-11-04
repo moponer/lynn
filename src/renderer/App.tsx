@@ -17,6 +17,7 @@ import { Standby } from "./desk/Standby";
 import { Pet } from "./desk/Pet";
 import { ambientForTheme, type AmbientMode } from "../shared/ambient";
 import { ZH_STRINGS } from "../shared/i18n-strings";
+import { mergeStrings } from "../shared/i18n";
 import { I18nProvider } from "./i18n";
 
 /** 渲染层只认 contract.ts 里的类型化 RPC；不感知内核实现是直连还是 Pi。 */
@@ -25,6 +26,16 @@ async function rpc<M extends RpcMethod>(
   ...args: RpcContracts[M]["params"] extends void ? [] : [RpcContracts[M]["params"]]
 ): Promise<RpcContracts[M]["result"]> {
   return window.lynn.rpc(method, ...args);
+}
+
+/**
+ * RPC 失败的可读文案：后端是旧版本时别把 `unknown rpc method: task.remove` 直接甩给用户，
+ * 那看起来像"删除坏了"，实际只是应用没重启。
+ */
+function rpcErrorText(err: unknown, fallback: string): string {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (/unknown rpc method/i.test(msg)) return "这个操作需要重启应用后生效（后台还是旧版本）。";
+  return `${fallback}：${msg}`;
 }
 
 /** 增量事件合并：同 id 的卡就地替换，不整表重拉 */
@@ -57,8 +68,11 @@ export default function App() {
     let dead = false;
     rpc("i18n.get")
       .then((r) => {
-        // 拿不到字典就保持内置中文，不要把 undefined 塞进 context
-        if (!dead && r?.strings && Object.keys(r.strings).length > 0) setI18nStrings(r.strings);
+        // 拿不到字典就保持内置中文；拿到了也**叠在内置中文之上**——
+        // 主进程字典可能比界面旧（只重建了 renderer / 应用没重启），缺的键必须回退中文而不是露 `menu.open`
+        if (!dead && r?.strings && Object.keys(r.strings).length > 0) {
+          setI18nStrings(mergeStrings(ZH_STRINGS, r.strings));
+        }
       })
       .catch(() => {
         /* 拉不到就用内置 zh，不阻塞界面 */
@@ -318,7 +332,7 @@ export default function App() {
             setNotice(r.stopped > 0 ? `已停 ${r.stopped} 张在跑的单。` : "没有在跑的单。");
             await refresh();
           })
-          .catch((err) => setNotice(`停机失败：${err instanceof Error ? err.message : String(err)}`));
+          .catch((err) => setNotice(rpcErrorText(err, "停机失败")));
       }
     },
     [onSend, refresh, snap?.feed],
@@ -407,7 +421,7 @@ export default function App() {
               if (!r.ok) setNotice(r.error ?? "取消失败");
               await refresh();
             })
-            .catch((err) => setNotice(`取消失败：${err instanceof Error ? err.message : String(err)}`));
+            .catch((err) => setNotice(rpcErrorText(err, "取消失败")));
         }}
         onRemoveTask={(taskId) => {
           setNotice(null);
@@ -416,7 +430,7 @@ export default function App() {
               if (!r.ok) setNotice(r.error ?? "删除失败");
               await refresh();
             })
-            .catch((err) => setNotice(`删除失败：${err instanceof Error ? err.message : String(err)}`));
+            .catch((err) => setNotice(rpcErrorText(err, "删除失败")));
         }}
         onCreateTeam={(name) => {
           void rpc("team.create", { name }).then(async (r) => {
