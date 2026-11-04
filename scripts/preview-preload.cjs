@@ -116,7 +116,10 @@ const snapshot = {
         evidence: [],
       },
     ],
-    decisions: [
+    // A5 演示用三条挂起裁决；review 模式要进审查台（印章区得让位给验收印章），env 关掉
+    decisions: process.env.LYNN_PREVIEW_NO_DECISIONS
+      ? []
+      : [
       {
         id: "dc-plan",
         from: "顾明",
@@ -152,7 +155,7 @@ const snapshot = {
         jobId: "WO-2418",
         at: "11-02 14:41",
       },
-    ],
+    ].filter(Boolean),
     tokensUsed: 21400,
   },
   turn: { phase: "review", busy: false, pending: 0, taskId: "WO-2418" },

@@ -73,6 +73,7 @@ function TopRail({
   rightOpen,
   onToggleRight,
   mode = "desk",
+  onBack,
 }: {
   desk: Desk;
   current?: DeskJob;
@@ -86,6 +87,8 @@ function TopRail({
   rightOpen?: boolean;
   onToggleRight?: () => void;
   mode?: "desk" | "review";
+  /** 审查台返回值台（E2）：唯一的深页面必须有显式出口，不能靠空态里的斜体链接 */
+  onBack?: () => void;
 }) {
   const ctx = desk.usage.contextWindow > 0 ? Math.min(1, desk.usage.contextTokens / desk.usage.contextWindow) : 0;
   const contextPct = Math.round(ctx * 100);
@@ -113,6 +116,11 @@ function TopRail({
         </div>
       </div>
       <div className="vr" />
+      {mode === "review" && onBack && (
+        <button type="button" className="ghost-btn" onClick={onBack} title={t("top.backTitle")}>
+          <Icon name="undo" size="sm" /> {t("top.back")}
+        </button>
+      )}
       <div className="crumbs">
         <span className="crumb-chip">
           <Icon name="folder" size="sm" /> {desk.project}
@@ -137,23 +145,28 @@ function TopRail({
         </button>
       )}
 
-      <div className="seg">
-        <span className="seg-label">{t("top.permission")}</span>
-        {PERMISSIONS.map((p) => (
-          <button
-            type="button"
-            key={p.mode}
-            aria-pressed={permission === p.mode}
-            className={`seg-item${permission === p.mode ? " on" : ""}`}
-            onClick={() => onPermission(p.mode)}
-            title={t("top.switchTo", { label: t(p.labelKey) })}
-          >
-            {t(p.labelKey)}
-          </button>
-        ))}
-      </div>
+      {/* 审查台是深页面：权限档在这里是死按钮，干脆不渲染（E2） */}
+      {mode !== "review" && (
+        <>
+          <div className="seg">
+            <span className="seg-label">{t("top.permission")}</span>
+            {PERMISSIONS.map((p) => (
+              <button
+                type="button"
+                key={p.mode}
+                aria-pressed={permission === p.mode}
+                className={`seg-item${permission === p.mode ? " on" : ""}`}
+                onClick={() => onPermission(p.mode)}
+                title={t("top.switchTo", { label: t(p.labelKey) })}
+              >
+                {t(p.labelKey)}
+              </button>
+            ))}
+          </div>
 
-      <div className="vr" />
+          <div className="vr" />
+        </>
+      )}
 
       {/* status.bar 卡槽：官方受限组件（用量读数） */}
       <Slot
@@ -202,12 +215,16 @@ function TopRail({
           <Icon name="undo" size="sm" /> {t("top.undo")}
         </button>
       )}
-      <button className="ghost-btn" onClick={onNew} title={t("top.newThread")}>
-        <Icon name="plus" size="sm" /> {t("top.newThread")}
-      </button>
-      <button className="ghost-btn" onClick={onOpenSettings} title={t("top.settings")}>
-        <Icon name="user" size="sm" /> {t("top.settings")}
-      </button>
+      {mode !== "review" && (
+        <>
+          <button className="ghost-btn" onClick={onNew} title={t("top.newThread")}>
+            <Icon name="plus" size="sm" /> {t("top.newThread")}
+          </button>
+          <button className="ghost-btn" onClick={onOpenSettings} title={t("top.settings")}>
+            <Icon name="user" size="sm" /> {t("top.settings")}
+          </button>
+        </>
+      )}
       {/* 自绘窗口按钮（frame:false）：拖拽由 .rail-top 的 -webkit-app-region: drag 提供 */}
       <WindowControls />
     </header>
@@ -1615,6 +1632,16 @@ function ReviewDesk({
   const [expect, setExpect] = useState(r.reject.expect);
   const [deadline, setDeadline] = useState(r.reject.deadline);
   const [sent, setSent] = useState(false);
+  const t = useT();
+
+  // Esc = 返回值台（审查台唯一的深页面，必须有键盘出口）
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onBack();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onBack]);
 
   const ac = r.ac;
   const canReject = what.trim() !== "" && expect.trim() !== "" && deadline.trim() !== "";
@@ -1628,6 +1655,7 @@ function ReviewDesk({
         onPermission={() => {}}
         onOpenSettings={() => {}}
         mode="review"
+        onBack={onBack}
       />
       <div className="body">
         <aside className="ledger" style={{ width: 230 }}>
@@ -1687,9 +1715,10 @@ function ReviewDesk({
               <div className="job-title">{job.statusNote}</div>
             </div>
 
-            <div className="ledger-empty" style={{ marginTop: 8 }}>
+            {/* 次要出口：主出口在顶栏「返回值台」+ Esc；这里不再用斜体空态样式伪装 */}
+            <div className="grp-label" style={{ paddingTop: 10 }}>
               <a onClick={onBack} style={{ color: "var(--blue)", cursor: "pointer" }}>
-                ← 返回值台
+                ← {t("top.back")}
               </a>
             </div>
           </div>

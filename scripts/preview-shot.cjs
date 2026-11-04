@@ -10,6 +10,8 @@ const W = Number(process.env.LYNN_PREVIEW_WIDTH) || 1600;
 const H = Number(process.env.LYNN_PREVIEW_HEIGHT) || 1000;
 
 app.disableHardwareAcceleration();
+// review 模式要进审查台（印章区得让位给验收印章），关掉 A5 演示裁决
+if (process.argv[3] === "review") process.env.LYNN_PREVIEW_NO_DECISIONS = "1";
 app.whenReady().then(async () => {
   const isPet = process.argv[3] === "pet";
   const win = new BrowserWindow({
