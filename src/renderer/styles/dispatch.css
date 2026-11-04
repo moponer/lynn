@@ -331,6 +331,8 @@ svg.ic.lg { width: 20px; height: 20px; }
 }
 .st-run  { background: var(--blue-wash);  color: var(--blue); }
 .st-wait { background: var(--seal-wash);  color: var(--seal); }
+/* A6：台账/成员卡里的"等你拍板"——用蓝；朱砂只留给右栏印章这一处落点 */
+.st-hold { background: var(--blue-wash);  color: var(--blue); }
 .st-done { background: rgba(120,150,170,.12); color: var(--ink-3); }
 .st-live { background: var(--blue-wash); color: var(--blue); }
 .st-live .pip { width: 5px; height: 5px; border-radius: 50%; background: var(--blue); }
@@ -1148,7 +1150,7 @@ html[data-pet="1"] #root { background: transparent !important; }
   font-family: var(--f-mono); font-size: var(--fs-label); letter-spacing: .14em;
   color: var(--ink-4); margin-bottom: 3px;
 }
-.report-preview .seal-text { color: var(--seal); }
+.report-preview .seal-text { color: var(--ink-2); }
 
 /* ============================================================
    三套主题（规范 §3.1）

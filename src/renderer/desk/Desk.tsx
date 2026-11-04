@@ -53,7 +53,9 @@ function useTick(active: boolean): number {
 }
 
 function statusChipClass(job: DeskJob): string {
-  if (job.status === "in_review" || job.status === "blocked") return "st-wait";
+  // A6：朱砂只留给右栏印章；台账里"等你拍板"用蓝（st-hold），blocked 仍朱砂（要你止损，印章同样会出现）
+  if (job.status === "in_review") return "st-hold";
+  if (job.status === "blocked") return "st-wait";
   if (job.status === "in_progress") return "st-live";
   if (job.status === "done") return "st-done";
   return "st-idle";
@@ -738,10 +740,7 @@ function Sheet({
           <div className="k">提交</div>
           <div className="v">{fmtTime(job.at)}</div>
         </div>
-        <div className={`tb-cell${job.status === "in_review" || job.status === "blocked" ? " sealv" : ""}`}>
-          <div className="k">验收</div>
-          <div className="v">{job.status === "done" ? "已归档" : job.status === "in_review" ? "待你" : job.statusLabel}</div>
-        </div>
+        {/* A6：titleblock 不再有"验收 待你"——状态归阶段流、等你归印章 */}
       </div>
     </div>
   );
@@ -1267,7 +1266,8 @@ function MemberCard({
   onSelect?: (jobId: string) => void;
 }) {
   const t = useT();
-  const chip = m.status === "delivered" ? "st-wait" : m.status === "running" || m.status === "stuck" ? "st-live" : "st-idle";
+  // A6：成员"等你拍板"（delivered）不再占朱砂——印章是唯一落点
+  const chip = m.status === "delivered" ? "st-hold" : m.status === "running" || m.status === "stuck" ? "st-live" : "st-idle";
   const open = () => {
     if (m.jobId) onSelect?.(m.jobId);
   };
@@ -1750,7 +1750,7 @@ function ReviewDesk({
             <div className="job on">
               <div className="job-top">
                 <span className="job-id">交付人</span>
-                <span className="st st-wait">待你</span>
+                <span className="st st-wait">等你拍板</span>
               </div>
               <div className="job-title">
                 {job.member ?? "风铃"} · {job.memberRole ?? "调度"}
@@ -1921,7 +1921,7 @@ function ReviewDesk({
                 </div>
                 <div className="tb-cell sealv">
                   <div className="k">验收</div>
-                  <div className="v">{sent ? "已打回" : "待你"}</div>
+                  <div className="v">{sent ? "已打回" : "等你拍板"}</div>
                 </div>
               </div>
             </div>

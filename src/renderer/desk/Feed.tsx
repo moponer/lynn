@@ -69,7 +69,7 @@ export function FeedView({
                 <p>{c.report.evidence || "—"}</p>
                 <div className="rp-k">未完成</div>
                 <p>{c.report.unfinished || "—"}</p>
-                <div className="rp-k">待你拍板</div>
+                <div className="rp-k">等你拍板</div>
                 <p className="seal-text">{c.report.decision || "—"}</p>
               </div>
             ) : (
