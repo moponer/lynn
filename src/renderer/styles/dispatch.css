@@ -630,6 +630,15 @@ svg.ic.lg { width: 20px; height: 20px; }
   margin-bottom: 6px;
 }
 .seal-pager .icon-btn { font-size: var(--fs-body); line-height: 1; }
+/* E3：印章就地展开的打回三要素 */
+.seal-reject { margin-top: 10px; }
+.seal-field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
+.seal-field > span { font-size: var(--fs-label); color: var(--ink-3); letter-spacing: .08em; }
+.seal-review-link {
+  display: block; margin: 6px auto 0; border: 0; background: none; cursor: pointer;
+  font: inherit; font-size: var(--fs-meta); color: var(--blue);
+}
+.seal-review-link:hover { text-decoration: underline; }
 .sealcard-h { display: flex; align-items: center; justify-content: space-between; }
 .sealcard-h .k { font-family: var(--f-mono); font-size: var(--fs-label); letter-spacing: .18em; text-transform: uppercase; color: var(--seal); }
 .sealcard-body { display: flex; gap: 13px; margin-top: 11px; }

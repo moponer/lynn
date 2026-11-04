@@ -10,8 +10,8 @@ const W = Number(process.env.LYNN_PREVIEW_WIDTH) || 1600;
 const H = Number(process.env.LYNN_PREVIEW_HEIGHT) || 1000;
 
 app.disableHardwareAcceleration();
-// review 模式要进审查台（印章区得让位给验收印章），关掉 A5 演示裁决
-if (process.argv[3] === "review") process.env.LYNN_PREVIEW_NO_DECISIONS = "1";
+// review/e3 模式都要见到验收印章（决策印章优先级更高），关掉 A5 演示裁决
+if (process.argv[3] === "review" || process.argv[3] === "e3") process.env.LYNN_PREVIEW_NO_DECISIONS = "1";
 app.whenReady().then(async () => {
   const isPet = process.argv[3] === "pet";
   const win = new BrowserWindow({
@@ -91,14 +91,24 @@ app.whenReady().then(async () => {
     console.log("PENDING", ok, await win.webContents.executeJavaScript(`!!document.querySelector('.right.open')`));
   }
 
-  // 可选：进入审查台（点右栏印章区的"打回重做"）
+  // 可选：进入审查台（E3 后印章"打回"就地展开，进审查台走「打开完整验收包」链接）
   if (process.argv[3] === "review") {
     const ok = await win.webContents.executeJavaScript(
-      `(() => { const b=document.querySelector('.sealcard .btn-reject'); if (b) b.click(); return !!b; })()`,
+      `(() => { const b=document.querySelector('.seal-review-link'); if (b) b.click(); return !!b; })()`,
     );
     await new Promise((r) => setTimeout(r, 900));
     const rev = await win.webContents.executeJavaScript(`!!document.querySelector('.rev-pair')`);
     console.log("REVIEW", ok, rev);
+  }
+
+  // 可选：E3 打回三要素在印章就地展开
+  if (process.argv[3] === "e3") {
+    const ok = await win.webContents.executeJavaScript(
+      `(() => { const b=document.querySelector('.sealcard .btn-reject'); if (b) b.click(); return !!b; })()`,
+    );
+    await new Promise((r) => setTimeout(r, 700));
+    const n = await win.webContents.executeJavaScript(`document.querySelectorAll('.seal-reject .seal-field').length`);
+    console.log("E3", ok, "fields:", n);
   }
 
   // 可选：点开当前会话条，展示会话面板（E4：会话全文搜索框）

@@ -812,6 +812,7 @@ function Roster({
   current,
   onAccept,
   onReject,
+  onOpenReview,
   onPlan,
   onAnswer,
   onCancel,
@@ -829,7 +830,10 @@ function Roster({
   open?: boolean;
   onClose?: () => void;
   onAccept: (taskId: string) => void;
-  onReject: (taskId: string) => void;
+  /** 打回带三要素（E3）：印章就地展开表单，不再先跳审查台 */
+  onReject: (taskId: string, reason: { what: string; expect: string; deadline: string }) => void;
+  /** 打开完整验收包（查看证据链/产物） */
+  onOpenReview?: (taskId: string) => void;
   onPlan: (id: string, action: "start" | "revise" | "reject", text?: string) => void;
   onAnswer: (id: string, text: string) => void;
   /** 停掉一张卡住/在跑的单 */
@@ -935,7 +939,12 @@ function Roster({
           ) : decision ? (
             <QuestionSeal decision={decision} onAnswer={onAnswer} />
           ) : sealJob?.action === "accept" ? (
-            <AcceptSeal job={sealJob} onAccept={() => onAccept(sealJob.id)} onReject={() => onReject(sealJob.id)} />
+            <AcceptSeal
+              job={sealJob}
+              onAccept={() => onAccept(sealJob.id)}
+              onReject={(reason) => onReject(sealJob.id, reason)}
+              onOpenReview={onOpenReview ? () => onOpenReview(sealJob.id) : undefined}
+            />
           ) : sealJob?.action === "unblock" ? (
             <BlockedSeal job={sealJob} onStop={onCancel} />
           ) : (
@@ -1119,9 +1128,25 @@ function QuestionSeal({
   );
 }
 
-/** 工单交付：验收归档 / 打回（打回走审查台三要素） */
-function AcceptSeal({ job, onAccept, onReject }: { job: DeskJob; onAccept: () => void; onReject: () => void }) {
+/** 工单交付：验收 / 打回都在印章完成（E3：两条路合一，不再为打回跳全屏审查台；审查台降级为查看页） */
+function AcceptSeal({
+  job,
+  onAccept,
+  onReject,
+  onOpenReview,
+}: {
+  job: DeskJob;
+  onAccept: () => void;
+  onReject: (reason: { what: string; expect: string; deadline: string }) => void;
+  onOpenReview?: () => void;
+}) {
   const t = useT();
+  const [rejecting, setRejecting] = useState(false);
+  // 预填她留下的打回三要素草稿：改完直接发，不从零写
+  const [what, setWhat] = useState(job.rejectDraft?.what ?? "");
+  const [expect, setExpect] = useState(job.rejectDraft?.expect ?? "");
+  const [deadline, setDeadline] = useState(job.rejectDraft?.deadline ?? "15 分钟");
+  const canReject = what.trim() !== "" && expect.trim() !== "" && deadline.trim() !== "";
   return (
     <div className="sealcard">
       <SealHead k={t("seal.acceptHead")} id={job.id} />
@@ -1136,14 +1161,53 @@ function AcceptSeal({ job, onAccept, onReject }: { job: DeskJob; onAccept: () =>
         </div>
       </div>
       <SealChecks checks={job.evidence.filter((e) => e.verified).map((e) => ({ ok: true, text: e.title }))} />
-      <div className="seal-actions">
-        <button type="button" className="btn btn-accept" onClick={onAccept}>
-          <Icon name="check" size="sm" /> {t("seal.accept")}
+      {rejecting ? (
+        <div className="seal-reject">
+          {[
+            { k: t("seal.rejectWhat"), v: what, set: setWhat, ph: t("seal.rejectWhatPh"), rows: 2 },
+            { k: t("seal.rejectExpect"), v: expect, set: setExpect, ph: t("seal.rejectExpectPh"), rows: 2 },
+            { k: t("seal.rejectDeadline"), v: deadline, set: setDeadline, ph: t("seal.rejectDeadlinePh"), rows: 1 },
+          ].map((f) => (
+            <label className="seal-field" key={f.k}>
+              <span>{f.k}</span>
+              <textarea
+                className="seal-input"
+                value={f.v}
+                rows={f.rows}
+                onChange={(e) => f.set(e.target.value)}
+                placeholder={f.ph}
+              />
+            </label>
+          ))}
+          <div className="seal-actions">
+            <button
+              type="button"
+              className="btn btn-reject"
+              disabled={!canReject}
+              onClick={() => onReject({ what: what.trim(), expect: expect.trim(), deadline: deadline.trim() })}
+            >
+              <Icon name="undo" size="sm" /> {t("seal.rejectGo")}
+            </button>
+            <button type="button" className="btn" onClick={() => setRejecting(false)}>
+              {t("common.cancel")}
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="seal-actions">
+          <button type="button" className="btn btn-accept" onClick={onAccept}>
+            <Icon name="check" size="sm" /> {t("seal.accept")}
+          </button>
+          <button type="button" className="btn btn-reject" onClick={() => setRejecting(true)}>
+            <Icon name="undo" size="sm" /> {t("seal.rejectRedo")}
+          </button>
+        </div>
+      )}
+      {onOpenReview && !rejecting && (
+        <button type="button" className="seal-review-link" onClick={onOpenReview}>
+          {t("seal.openReview")}
         </button>
-        <button type="button" className="btn btn-reject" onClick={onReject}>
-          <Icon name="undo" size="sm" /> {t("seal.rejectRedo")}
-        </button>
-      </div>
+      )}
       <div className="rounds">
         <span>{t("seal.rounds")}</span>
         {[0, 1, 2].map((i) => (
@@ -2114,7 +2178,8 @@ export function DeskView({
           desk={desk}
           current={current}
           onAccept={(id) => onDecision(id, "approve")}
-          onReject={(id) => setReviewId(id)}
+          onReject={(id, reason) => onDecision(id, "reject", reason)}
+          onOpenReview={(id) => setReviewId(id)}
           onPlan={(id, action, text) => onDecisionResolve(id, action, text)}
           onAnswer={(id, text) => onDecisionResolve(id, "answer", text)}
           onCancel={onCancelTask}
