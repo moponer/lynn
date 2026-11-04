@@ -243,6 +243,8 @@ contextBridge.exposeInMainWorld("lynn", {
     if (method === "app.info") {
       return process.env.LYNN_PREVIEW_STALE ? { ok: true } : { buildAt: new Date().toISOString() };
     }
+    if (method === "app.pickDir") return { canceled: true };
+    if (method === "project.setRoot") return { ok: true, root: "F:/spiker/hermix-desktop", trusted: false };
     if (method === "permission.set") return { ok: true, mode: "ask" };
     if (method === "feed.send") return { ok: true, queued: false };
     if (method === "session.abort") return { ok: true, aborted: true };

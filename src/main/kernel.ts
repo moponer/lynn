@@ -870,6 +870,20 @@ export class Kernel {
     return true;
   }
 
+  /**
+   * 换工作区：改 projectRoot、重建 Pi 会话（cwd 跟着走）、重载项目级 MCP/技能。
+   * 目录存不存在由调用方校验（切会话恢复历史路径时不强校验——用户可能只是临时移走了）。
+   */
+  private applyProjectRoot(root: string): void {
+    const abs = path.resolve(root);
+    if (abs === this.projectRoot) return;
+    this.projectRoot = abs;
+    this.createFreshSession = true;
+    void this.resetAgentHost();
+    void this.reloadMcp();
+    this.log("project_root", { root: abs, trusted: this.trust.isTrusted(abs) });
+  }
+
   private persistThread(): void {
     if (!this.currentThreadId) return;
     try {
@@ -924,6 +938,10 @@ export class Kernel {
     }
     this.history = st.history;
     this.liveCard = null;
+    // 会话各带一个工作区：切回来要回到它自己的目录（不同项目的 @ 检索与 Pi cwd 不能串）
+    if (meta.projectRoot && path.resolve(meta.projectRoot) !== this.projectRoot) {
+      this.applyProjectRoot(meta.projectRoot);
+    }
     this.createFreshSession = true;
     void this.resetAgentHost();
     this.checkpoints.discard();
@@ -2797,6 +2815,7 @@ export class Kernel {
           thread: {
             id: this.currentThreadId,
             title: this.threads.get(this.currentThreadId)?.title ?? "新会话",
+            projectRoot: this.threads.get(this.currentThreadId)?.projectRoot,
           },
           threads: this.threads
             .list()
@@ -3643,10 +3662,31 @@ export class Kernel {
         return { cards: [] } as RpcContracts[M]["result"];
       }
 
+      case "project.setRoot": {
+        const { root } = params as { root: string };
+        const abs = path.resolve(String(root));
+        try {
+          if (!fs.statSync(abs).isDirectory()) {
+            return { ok: false, error: `${abs} 不是目录` } as RpcContracts[M]["result"];
+          }
+        } catch {
+          return { ok: false, error: `目录不存在：${abs}` } as RpcContracts[M]["result"];
+        }
+        const from = this.projectRoot;
+        this.applyProjectRoot(abs);
+        if (this.currentThreadId) this.threads.setProject(this.currentThreadId, abs);
+        this.card({
+          kind: "system",
+          text: `工作区已换成 ${abs}（原 ${from}）。@ 文件检索、附件与 Pi 的 cwd 都跟着走；项目级插件/MCP 只有该目录被信任时才加载。`,
+        });
+        return { ok: true, root: abs, trusted: this.trust.isTrusted(abs) } as RpcContracts[M]["result"];
+      }
+
       case "session.new": {
         // 新对话 = 新线程：旧会话留在磁盘上可切回，不再清空历史
+        const { projectRoot } = (params ?? {}) as { projectRoot?: string };
         this.persistThread();
-        const meta = this.threads.create("新会话");
+        const meta = this.threads.create("新会话", projectRoot ? String(projectRoot) : undefined);
         // C4：切走前把还在跑的单记下来——用户以为"从头开始"，后台其实还在烧预算、还可能弹审批
         const running = [...this.memberRuns.keys()];
         this.switchThread(meta.id);

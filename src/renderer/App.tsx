@@ -285,14 +285,40 @@ export default function App() {
     [refresh],
   );
 
-  /** 新对话：清空当前会话（工单、卷宗、成员档案保留） */
+  /**
+   * 新对话：先问"这个会话用哪个工作区"（取消 = 沿用当前）。
+   * 不同会话各带一个工作区，"审查 A 项目"和"整理 B 资料"不会串目录。
+   */
   const onNew = useCallback(async () => {
     setNotice(null);
     try {
-      await rpc("session.new");
+      let projectRoot: string | undefined;
+      try {
+        const picked = await rpc("app.pickDir", { title: "新会话的工作区（取消 = 沿用当前工作区）" });
+        projectRoot = picked?.path;
+      } catch {
+        // 旧内核没有 app.pickDir：沿用当前工作区，不打断新建
+        projectRoot = undefined;
+      }
+      await rpc("session.new", projectRoot ? { projectRoot } : {});
       await refresh();
     } catch (err) {
       setNotice(`新对话失败：${err instanceof Error ? err.message : String(err)}`);
+    }
+  }, [refresh]);
+
+  /** 换当前会话的工作区（点顶栏面包屑里的项目名） */
+  const onPickProject = useCallback(async () => {
+    setNotice(null);
+    try {
+      const picked = await rpc("app.pickDir", { title: "选择这个会话的工作区" });
+      if (!picked?.path) return;
+      const r = await rpc("project.setRoot", { root: picked.path });
+      if (!r.ok) setNotice(r.error ?? "换工作区失败");
+      else if (!r.trusted) setNotice("工作区已切换；这个目录还没被信任，项目级插件与 MCP 不会加载。");
+      await refresh();
+    } catch (err) {
+      setNotice(rpcErrorText(err, "换工作区失败"));
     }
   }, [refresh]);
 
@@ -440,6 +466,7 @@ export default function App() {
         onDecisionResolve={(id, a, text) => void onDecisionResolve(id, a, text)}
         onFeedAction={onFeedAction}
         onOpenSettings={() => setSettingsOpen(true)}
+        onPickProject={() => void onPickProject()}
         onStandby={() => setStandby(true)}
         onNew={() => void onNew()}
         onUndo={() => void onUndo()}

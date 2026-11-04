@@ -1503,6 +1503,9 @@ html[data-theme="celadon"][data-mode="light"] {
 }
 
 /* 亮色主题下不再用硬编码深色做 hover（那是"文字消失"的根因） */
+/* 面包屑项目名可点（换当前会话的工作区）：去掉按钮默认外观，保持 chip 质感 */
+.crumb-btn { border: 0; background: none; font: inherit; color: inherit; cursor: pointer; }
+.crumb-btn:disabled { cursor: default; }
 .crumb-chip:hover,
 .icon-btn:hover { background: var(--hover-bg); }
 .ghost-btn:hover { background: var(--hover-bg-2); }

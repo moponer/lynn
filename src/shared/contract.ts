@@ -263,9 +263,15 @@ export interface SessionSnapshot {
   /** 当前项目：项目级扩展只在 trusted 时加载（M1-13） */
   project: { root: string; trusted: boolean; hasMcp: boolean };
   /** 当前会话线程与线程列表（M1-14） */
-  thread: { id: string; title: string };
+  thread: { id: string; title: string; projectRoot?: string };
   /** C3：会话行显示"这个会话派出过多少单"（后端按 task.threadId 汇总） */
-  threads: { id: string; title: string; updatedAt: string; counts?: { active: number; archived: number } }[];
+  threads: {
+    id: string;
+    title: string;
+    updatedAt: string;
+    projectRoot?: string;
+    counts?: { active: number; archived: number };
+  }[];
   /** 真在跑的成员单（不只 status=in_progress：卡住但没在跑的不能算） */
   running?: string[];
   permission: PermissionMode;
@@ -720,8 +726,14 @@ export interface RpcContracts {
     result: { ok: boolean };
   };
   "session.new": {
-    params: void;
-    result: { ok: true };
+    /** projectRoot：这个会话的工作区（开会话时选；不传 = 沿用当前） */
+    params: { projectRoot?: string };
+    result: { ok: true; threadId?: string };
+  };
+  /** 换当前会话的工作区：影响 @ 检索、附件、Pi 的 cwd、项目级插件与 MCP */
+  "project.setRoot": {
+    params: { root: string };
+    result: { ok: boolean; root?: string; trusted?: boolean; error?: string };
   };
   /** 自绘标题栏（frame:false）：最小化 / 最大化还原 / 关闭（关闭尊重"关窗进托盘"设置） */
   "window.control": {

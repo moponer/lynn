@@ -9,6 +9,11 @@ export interface ThreadMeta {
   title: string;
   createdAt: string;
   updatedAt: string;
+  /**
+   * 这个会话的工作区（项目根）：开会话时可以选，之后也能改。
+   * 不同会话各带一个工作区，"审查 A 项目"和"整理 B 资料"不会互相串目录。
+   */
+  projectRoot?: string;
 }
 
 export interface ThreadState {
@@ -47,13 +52,14 @@ export class ThreadStore {
     return this.list().find((t) => t.id === id) ?? null;
   }
 
-  create(title?: string): ThreadMeta {
+  create(title?: string, projectRoot?: string): ThreadMeta {
     const at = new Date().toISOString();
     const meta: ThreadMeta = {
       id: `th-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
       title: (title?.trim() || "新会话").slice(0, 40),
       createdAt: at,
       updatedAt: at,
+      ...(projectRoot ? { projectRoot: path.resolve(projectRoot) } : {}),
     };
     const threads = this.list();
     threads.unshift(meta);
@@ -61,6 +67,17 @@ export class ThreadStore {
     this.saveState(meta.id, { feed: [], history: [] });
     fs.mkdirSync(this.piDir(meta.id), { recursive: true });
     return meta;
+  }
+
+  /** 改这个会话的工作区（下次切回来还是它） */
+  setProject(id: string, projectRoot: string): ThreadMeta {
+    const threads = this.list();
+    const t = threads.find((x) => x.id === id);
+    if (!t) throw new Error(`会话不存在：${id}`);
+    t.projectRoot = path.resolve(projectRoot);
+    t.updatedAt = new Date().toISOString();
+    this.writeIndex(threads);
+    return t;
   }
 
   rename(id: string, title: string): ThreadMeta {

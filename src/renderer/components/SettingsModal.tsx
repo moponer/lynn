@@ -736,7 +736,7 @@ export function SettingsModal({
               className="sf-btn"
               onClick={() => {
                 if (!window.confirm(t("data.clearConfirm"))) return;
-                void window.lynn.rpc("session.new").then(() => {
+                void window.lynn.rpc("session.new", {}).then(() => {
                   setPackMsg(t("data.cleared"));
                   onSaved();
                 });

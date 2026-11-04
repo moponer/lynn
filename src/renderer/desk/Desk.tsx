@@ -77,6 +77,7 @@ function TopRail({
   mode = "desk",
   onBack,
   onOverview,
+  onPickProject,
 }: {
   desk: Desk;
   current?: DeskJob;
@@ -94,6 +95,8 @@ function TopRail({
   onBack?: () => void;
   /** 任务总览（几个任务在跑、各在哪、进度多少） */
   onOverview?: () => void;
+  /** 换当前会话的工作区（项目根） */
+  onPickProject?: () => void;
 }) {
   const ctx = desk.usage.contextWindow > 0 ? Math.min(1, desk.usage.contextTokens / desk.usage.contextWindow) : 0;
   const contextPct = Math.round(ctx * 100);
@@ -130,9 +133,16 @@ function TopRail({
         </button>
       )}
       <div className="crumbs">
-        <span className="crumb-chip">
+        {/* 项目名可点：换当前会话的工作区（@ 检索、附件、Pi 的 cwd 都跟着走） */}
+        <button
+          type="button"
+          className="crumb-chip crumb-btn"
+          onClick={onPickProject}
+          disabled={!onPickProject}
+          title={t("top.projectHint", { dir: desk.project })}
+        >
           <Icon name="folder" size="sm" /> {desk.project}
-        </span>
+        </button>
         <Icon name="chev" size="sm" />
         <span className="seg">{mode === "review" ? t("top.crumbReview") : t("top.crumbJob")}</span>
         <Icon name="chev" size="sm" />
@@ -2766,6 +2776,7 @@ export function DeskView({
   onFileSearch,
   onFeedAction,
   onOpenSettings,
+  onPickProject,
   onStandby,
   onNew,
   onUndo,
@@ -2798,6 +2809,8 @@ export function DeskView({
   onDecisionResolve: (id: string, action: "answer" | "start" | "revise" | "reject", text?: string) => void;
   onFeedAction: (card: FeedCard) => void;
   onOpenSettings: () => void;
+  /** 换当前会话的工作区 */
+  onPickProject?: () => void;
   onStandby: () => void;
   onNew?: () => void;
   onUndo?: () => void;
@@ -2894,6 +2907,7 @@ export function DeskView({
         rightOpen={rightOpen}
         onToggleRight={() => setRightOpen((v) => !v)}
         onOverview={() => setOverviewOpen(true)}
+        onPickProject={onPickProject}
       />
       {rightOpen && <button type="button" className="right-backdrop only-narrow" aria-label="close" onClick={() => setRightOpen(false)} />}
       <div className="body">
