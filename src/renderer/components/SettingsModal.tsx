@@ -123,7 +123,7 @@ export function SettingsModal({
   } | null>(null);
 
   useEffect(() => {
-    if (tab === "data") void window.lynn.rpc("update.status").then(setUpdateInfo);
+    if (tab === "data" || tab === "overview") void window.lynn.rpc("update.status").then(setUpdateInfo);
   }, [tab]);
 
   const refreshPersona = async () => {
@@ -281,10 +281,6 @@ export function SettingsModal({
     }
     setPreview({ pack: r.pack, lines: describePack(r.pack) });
   };
-
-  const ctxPct = usage.contextWindow > 0 ? Math.round((usage.contextTokens / usage.contextWindow) * 100) : 0;
-  const statusBadge = current.configured && current.apiKeySet ? "ok" : current.configured ? "warn" : "bad";
-  const statusText = statusBadge === "ok" ? t("model.statusOk") : statusBadge === "warn" ? t("model.statusWarn") : t("model.statusBad");
 
   const page = useMemo(() => {
     if (tab === "model") {
@@ -798,47 +794,43 @@ export function SettingsModal({
       );
     }
 
+    // 概览 = 待办清单（E5）：只放需要用户处理的真问题，每条可点直达对应页；
+    // 上下文百分比/会话用量顶栏已有，不再画一遍（删掉的 sf-tile）。
+    const brokenPlugins = plugins.filter((p) => !p.loadable).length;
+    const todos: { key: string; text: string; tab: Tab }[] = [];
+    if (!current.configured) todos.push({ key: "model", text: t("overview.todoModel"), tab: "model" });
+    else if (!current.apiKeySet) todos.push({ key: "key", text: t("overview.todoKey"), tab: "model" });
+    if (project && !project.trusted) todos.push({ key: "trust", text: t("overview.todoTrust"), tab: "safety" });
+    if (brokenPlugins > 0) todos.push({ key: "plugins", text: t("overview.todoPlugins", { n: brokenPlugins }), tab: "plugins" });
+    if (uiErrors.length > 0) todos.push({ key: "ui", text: t("overview.todoUi"), tab: "plugins" });
+    if (updateInfo && (updateInfo.phase === "available" || updateInfo.phase === "downloaded")) {
+      todos.push({ key: "update", text: t("overview.todoUpdate", { v: updateInfo.latest ?? "" }), tab: "data" });
+    }
+
     return (
       <div className="sf-pane">
         <h3>{t("overview.title")}</h3>
-        <div className="sf-grid2">
-          <div className="sf-tile">
-            <span className="sf-label">{t("model.title")}</span>
-            <b>
-              {current.model || t("model.statusBad")} <span className={`sf-badge ${statusBadge}`}>{statusText}</span>
-            </b>
-            <small className="mono">{current.baseUrl || "—"}</small>
+        {todos.length === 0 ? (
+          <p className="sf-empty">{t("overview.allClear")}</p>
+        ) : (
+          <div className="sf-list">
+            {todos.map((td) => (
+              <div className="sf-row" key={td.key}>
+                <div className="sf-row-main">
+                  <b>{td.text}</b>
+                </div>
+                <button type="button" className="sf-btn primary" onClick={() => setTab(td.tab)}>
+                  {t("overview.goFix")}
+                </button>
+              </div>
+            ))}
           </div>
-          <div className="sf-tile">
-            <span className="sf-label">{t("overview.context")}</span>
-            <b>{ctxPct}%</b>
-            <small className="mono">
-              {usage.contextTokens} / {usage.contextWindow}
-            </small>
-          </div>
-          <div className="sf-tile">
-            <span className="sf-label">{t("overview.sessionUsage")}</span>
-            <b>{usage.sessionIn + usage.sessionOut} tokens</b>
-            <small className="mono">
-              {t("overview.in", { n: usage.sessionIn })} · {t("overview.out", { n: usage.sessionOut })}
-            </small>
-          </div>
-          <div className="sf-tile">
-            <span className="sf-label">{t("overview.contract")}</span>
-            <b>{autoStart ? t("safety.autoStart") : t("safety.alwaysAsk")}</b>
-            <small>{t("overview.contractHint")}</small>
-          </div>
-        </div>
+        )}
         <div className="sf-row">
           <div className="sf-row-main">
             <b>{t("overview.crew", { n: members.length })}</b>
             <small>{members.length === 0 ? t("overview.crewEmpty") : members.map((m) => m.name).join("、")}</small>
           </div>
-        </div>
-        <div className="sf-actions">
-          <button type="button" className="sf-btn primary" onClick={() => setTab("model")}>
-            {current.configured ? t("overview.adjustModel") : t("overview.configModel")}
-          </button>
         </div>
       </div>
     );
@@ -859,6 +851,8 @@ export function SettingsModal({
     notify,
     usage,
     members,
+    project,
+    updateInfo,
     busy,
     result,
     plugins,
@@ -869,9 +863,6 @@ export function SettingsModal({
     uiErrors,
     preview,
     packMsg,
-    ctxPct,
-    statusBadge,
-    statusText,
     onAmbient,
     onApplyThemeTokens,
     onAutoStart,
