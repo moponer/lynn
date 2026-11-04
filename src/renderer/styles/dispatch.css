@@ -185,6 +185,7 @@ svg.ic.lg { width: 20px; height: 20px; }
 @media (max-width: 1420px) {
   .rail-top .seg-label { display: none; }
   .rail-top .gauge-read .k { display: none; }
+  .rail-top .gauge-label { display: none; }
   .rail-top { gap: 10px; }
 }
 @media (max-width: 1240px) {
@@ -220,6 +221,8 @@ svg.ic.lg { width: 20px; height: 20px; }
 
 /* brass budget gauge */
 .gauge { display: flex; align-items: center; gap: 9px; }
+/* D3：上下文百分比自带名字（≤1420 才收起），不再靠 hover 猜语义 */
+.gauge-label { font-size: var(--fs-label); color: var(--ink-4); white-space: nowrap; }
 .gauge-read { text-align: right; line-height: 1.25; }
 .gauge-read .v { font-family: var(--f-mono); font-size: var(--fs-body); color: var(--ink); font-variant-numeric: tabular-nums; }
 .gauge-read .v em { font-style: normal; color: var(--ink-4); }

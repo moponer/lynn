@@ -182,6 +182,8 @@ function TopRail({
         }
       />
 
+      {/* D3：33% 必须自带名字，不能靠 hover 才知道是上下文 */}
+      <span className="gauge-label">{t("top.contextLabel")}</span>
       <div
         className={`gauge${contextPct >= 90 ? " warn" : contextPct >= 70 ? " near" : ""}`}
         title={`${t("top.contextTitle", {
@@ -603,8 +605,7 @@ function Sheet({
 
       <div className="sheet-head">
         <div className="sheet-eyebrow">
-          <span>工单 {job.id}</span>
-          <span style={{ opacity: 0.4 }}>/</span>
+          {/* D2 信息唯一归属：工单号只在 crumbs + titleblock，眉标不再报一遍 */}
           <span>{job.teamName ?? job.teamId}</span>
           <span style={{ opacity: 0.4 }}>/</span>
           <span>
@@ -613,8 +614,8 @@ function Sheet({
         </div>
         <h1 className="sheet-title">{job.title}</h1>
         <div className="sheet-sub">
-          {t(STATUS_KEY[job.status] ?? "status.todo")} · {t("sheet.evidenceCount", { n: job.evidenceCount })} ·{" "}
-          {t("sheet.rejectLimit", { n: job.rejectLimit, used: job.rejections })}
+          {/* D2：状态只在阶段流、打回轮次只在印章——副行只留证据读数与预算 */}
+          {t("sheet.evidenceCount", { n: job.evidenceCount })}
           {job.budget && (
             <>
               {" "}
