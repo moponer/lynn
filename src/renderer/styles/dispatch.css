@@ -421,6 +421,12 @@ svg.ic.lg { width: 20px; height: 20px; }
 }
 .eyebrow-link:hover { color: var(--blue); }
 .eyebrow-link:focus-visible { outline: 1.5px solid var(--blue); outline-offset: 1px; }
+/* 只读授权：让用户一眼看到"这张单能读哪儿" */
+.sheet-grant {
+  display: flex; align-items: center; gap: 6px; margin-top: 6px;
+  font-size: var(--fs-label); color: var(--ink-3);
+}
+.sheet-grant > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sheet-title {
   font-family: var(--f-display); font-weight: 600; font-size: var(--fs-head);
   letter-spacing: .005em; font-stretch: 104%;

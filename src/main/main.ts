@@ -1,4 +1,4 @@
-import { app, BrowserWindow, globalShortcut, ipcMain, Menu, nativeImage, Notification, safeStorage, screen, shell, Tray } from "electron";
+import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, nativeImage, Notification, safeStorage, screen, shell, Tray } from "electron";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { autoUpdater } from "electron-updater";
@@ -471,6 +471,16 @@ app.whenReady().then(async () => {
         if (!fs.existsSync(target)) return { ok: false, error: "文件不存在（可能已被移动）" };
         const err = await shell.openPath(target);
         return err ? { ok: false, error: err } : { ok: true };
+      }
+      if (method === "app.pickDir") {
+        // 只读授权的目录选择：原生对话框，用户亲手选，模型无法代为选择
+        const p = params as { title?: string } | undefined;
+        if (!win || win.isDestroyed()) return { canceled: true };
+        const r = await dialog.showOpenDialog(win, {
+          title: p?.title ?? "选择要授权只读访问的目录",
+          properties: ["openDirectory"],
+        });
+        return r.canceled || !r.filePaths[0] ? { canceled: true } : { path: r.filePaths[0] };
       }
       if (method === "app.restart") {
         // 一键重启：改了代码 / 内核比界面旧时，用户不必自己去托盘翻「退出」

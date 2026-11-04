@@ -1381,6 +1381,8 @@ export class Kernel {
       workdir,
       model: { baseUrl: cfg.baseUrl, apiKey, model: cfg.model },
       chatFn: this.memberChatFn,
+      // 用户授予的只读目录（写仍然只能在工作区）；用函数现取，跑到一半授权也立刻生效
+      readRoots: () => this.taskStore.get(taskId)?.readRoots ?? [],
       // 收件箱：风铃/巡检中途补的指示，成员每轮开头取（催办不杀进程、不重派）
       inbox: (() => {
         const box = this.memberInbox.get(taskId) ?? [];
@@ -1520,6 +1522,56 @@ export class Kernel {
     if (owner) this.cardTo(owner, { kind: "system", text });
     else this.card({ kind: "system", text });
     return { ok: true };
+  }
+
+  /**
+   * 用户授予"这张单可以只读访问某目录"（写仍只能在工作区）。
+   * 只由界面入口调用；模型没有拿到这个能力，所以不存在自我扩权。
+   */
+  grantReadRoot(taskId: string, dir: string): { ok: boolean; roots?: string[]; error?: string } {
+    const rec = this.taskStore.get(taskId);
+    if (!rec) return { ok: false, error: `工单不存在：${taskId}` };
+    let abs: string;
+    try {
+      abs = path.resolve(dir);
+    } catch {
+      return { ok: false, error: `路径不合法：${dir}` };
+    }
+    if (path.parse(abs).root === abs) return { ok: false, error: "不能把整个盘符授权出去：请选具体的项目目录。" };
+    const dataRoot = path.resolve(this.dataRoot);
+    if (abs === dataRoot || abs.startsWith(dataRoot + path.sep)) {
+      return { ok: false, error: "不能授权风铃自己的数据目录（里面是凭据、会话与团队档案）。" };
+    }
+    try {
+      if (!fs.statSync(abs).isDirectory()) return { ok: false, error: `${abs} 不是目录。` };
+    } catch {
+      return { ok: false, error: `目录不存在：${abs}` };
+    }
+    const roots = [...new Set([...(rec.readRoots ?? []), abs])];
+    this.taskStore.setReadRoots(taskId, roots);
+    this.taskCase.append(taskId, { kind: "note", text: `用户授予只读访问：${abs}（写仍限工作区）` });
+    const owner = rec.threadId ?? this.currentThreadId;
+    this.cardTo(owner, {
+      kind: "system",
+      jobId: taskId,
+      text: `已授权 ${taskId} 只读访问 ${abs}：成员可以读这里的文件，但写仍然只能在工作区。`,
+    });
+    // 正在跑的成员要立刻知道，否则它会继续撞墙
+    if (this.memberRuns.has(taskId)) {
+      this.nudgeMember(taskId, `用户已授权你只读访问 ${abs}（用绝对路径 read_file / list_dir）。写入仍然只能在工作区；别再反复试被拦的路径。`);
+    }
+    return { ok: true, roots };
+  }
+
+  revokeReadRoot(taskId: string, dir?: string): { ok: boolean; roots?: string[]; error?: string } {
+    const rec = this.taskStore.get(taskId);
+    if (!rec) return { ok: false, error: `工单不存在：${taskId}` };
+    const roots = dir ? (rec.readRoots ?? []).filter((r) => path.resolve(r) !== path.resolve(dir)) : [];
+    this.taskStore.setReadRoots(taskId, roots);
+    this.taskCase.append(taskId, { kind: "note", text: dir ? `撤销只读访问：${dir}` : "撤销全部只读访问" });
+    const owner = rec.threadId ?? this.currentThreadId;
+    this.cardTo(owner, { kind: "system", jobId: taskId, text: dir ? `已撤销只读访问 ${dir}` : `已撤销 ${taskId} 的全部只读访问` });
+    return { ok: true, roots };
   }
 
   /** 并行上限（settings.prefs.maxParallelMembers，1–8；非法值回退默认 4） */
@@ -2591,8 +2643,11 @@ export class Kernel {
   private buildTrack(): BoardData["track"] {
     const dir = path.join(this.dataRoot, "team");
     const track: BoardData["track"] = [];
-    if (!fs.existsSync(dir)) return track;
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    // 没有 team 目录也不能提前返回：底下的兜底要保证"有工单就必须出现在台账上"
+    const teamDirs = fs.existsSync(dir)
+      ? fs.readdirSync(dir, { withFileTypes: true }).filter((e) => e.isDirectory() && !e.name.startsWith("_"))
+      : [];
+    for (const entry of teamDirs) {
       if (!entry.isDirectory() || entry.name.startsWith("_")) continue;
       const adir = path.join(dir, entry.name, "assignments");
       if (!fs.existsSync(adir)) continue;
@@ -2624,6 +2679,7 @@ export class Kernel {
             member: task.member ?? last.member,
             at: task.updatedAt,
             threadId: task.threadId,
+            readRoots: task.readRoots,
             evidenceCount: task.evidence.length,
             version: task.version,
             parentId: task.parentId ?? undefined,
@@ -2655,6 +2711,28 @@ export class Kernel {
           evidenceCount,
         });
       }
+    }
+    // 兜底：有权威工单却没有派单账本的（手工建单 / 迁移 / 账本被删）也要出现在台账上，
+    // 否则用户看到的是"单不见了"。
+    const seen = new Set(track.map((t) => t.id));
+    for (const task of this.taskStore.list()) {
+      if (seen.has(task.id)) continue;
+      track.push({
+        id: task.id,
+        teamId: task.teamId,
+        title: task.title,
+        status: task.status,
+        statusNote: `${task.status} · ${task.member ?? "风铃"} · 证据 ${task.evidence.length}`,
+        member: task.member,
+        at: task.updatedAt,
+        threadId: task.threadId,
+        readRoots: task.readRoots,
+        evidenceCount: task.evidence.length,
+        version: task.version,
+        parentId: task.parentId ?? undefined,
+        rejectRounds: task.rejectRounds,
+        evidence: task.evidence.map((e) => ({ label: e.label, ref: e.ref ?? "", verified: e.verified, at: e.at })),
+      });
     }
     return track.reverse();
   }
@@ -3031,6 +3109,16 @@ export class Kernel {
           if (this.cancelMemberTask(id).ok) stopped += 1;
         }
         return { ok: true, stopped } as RpcContracts[M]["result"];
+      }
+
+      case "task.grantRead": {
+        const { taskId, dir } = params as { taskId: string; dir: string };
+        return this.grantReadRoot(String(taskId), String(dir)) as RpcContracts[M]["result"];
+      }
+
+      case "task.revokeRead": {
+        const { taskId, dir } = params as { taskId: string; dir?: string };
+        return this.revokeReadRoot(String(taskId), dir ? String(dir) : undefined) as RpcContracts[M]["result"];
       }
 
       case "task.dismiss": {

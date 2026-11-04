@@ -87,6 +87,8 @@ export interface DeskJob {
   report?: { conclusion: string; evidence: string; unfinished: string; decision: string };
   /** 这张单是在哪个会话里派的（换会话后回原会话读往来） */
   threadId?: string;
+  /** 用户授予的只读目录（写仍限工作区） */
+  readRoots?: string[];
 }
 
 export interface DeskMember {
@@ -205,6 +207,7 @@ function toJob(job: TaskTrackItem, teamName?: string, member?: Member, feed: Fee
     rejectDraft: job.rejectDraft,
     report: reportOf(feed, job.id),
     threadId: job.threadId,
+    readRoots: job.readRoots,
   };
 }
 

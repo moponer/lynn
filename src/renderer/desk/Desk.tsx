@@ -282,6 +282,8 @@ function Ledger({
   onCancelTask,
   onDismissTask,
   onRemoveTask,
+  onGrantRead,
+  onRevokeRead,
 }: {
   desk: Desk;
   activeId?: string;
@@ -297,6 +299,9 @@ function Ledger({
   /** 取消一张单（→ 归档带）/ 彻底删除（不可恢复） */
   onDismissTask?: (taskId: string) => void;
   onRemoveTask?: (taskId: string) => void;
+  /** 只读授权：成员能读这个目录，写仍限工作区 */
+  onGrantRead?: (taskId: string) => void;
+  onRevokeRead?: (taskId: string) => void;
 }) {
   const [q, setQ] = useState("");
   const [showAllArchive, setShowAllArchive] = useState(false);
@@ -595,6 +600,22 @@ function Ledger({
                 }
               : undefined
           }
+          onGrantRead={
+            onGrantRead
+              ? () => {
+                  onGrantRead(menu.job.id);
+                  setMenu(null);
+                }
+              : undefined
+          }
+          onRevokeRead={
+            onRevokeRead && (menu.job.readRoots?.length ?? 0) > 0
+              ? () => {
+                  onRevokeRead(menu.job.id);
+                  setMenu(null);
+                }
+              : undefined
+          }
         />
       )}
     </aside>
@@ -693,6 +714,8 @@ function JobMenu({
   onStop,
   onDismiss,
   onRemove,
+  onGrantRead,
+  onRevokeRead,
 }: {
   job: DeskJob;
   x: number;
@@ -704,6 +727,9 @@ function JobMenu({
   onStop?: () => void;
   onDismiss?: () => void;
   onRemove?: () => void;
+  /** 只读授权（用户亲手选目录；写仍限工作区） */
+  onGrantRead?: () => void;
+  onRevokeRead?: () => void;
 }) {
   const t = useT();
   const [confirm, setConfirm] = useState<null | "dismiss" | "remove">(null);
@@ -773,6 +799,16 @@ function JobMenu({
           {onStop && (
             <button type="button" className="jobmenu-item" onClick={onStop}>
               {t("menu.stop")}
+            </button>
+          )}
+          {onGrantRead && (
+            <button type="button" className="jobmenu-item" onClick={onGrantRead}>
+              {t("menu.grantRead")}
+            </button>
+          )}
+          {onRevokeRead && (
+            <button type="button" className="jobmenu-item" onClick={onRevokeRead}>
+              {t("menu.revokeRead")}
             </button>
           )}
           {!done && onDismiss && (
@@ -939,6 +975,12 @@ function Sheet({
             </button>
           )}
         </div>
+        {job.readRoots && job.readRoots.length > 0 && (
+          <div className="sheet-grant" title={job.readRoots.join("\n")}>
+            <Icon name="lock" size="sm" />
+            <span>{t("sheet.readRoots", { dirs: job.readRoots.join("、") })}</span>
+          </div>
+        )}
         <h1 className="sheet-title">{job.title}</h1>
         <div className="sheet-sub">
           {/* D2：状态只在阶段流、打回轮次只在印章——副行只留证据读数与预算 */}
@@ -2737,6 +2779,8 @@ export function DeskView({
   onCancelTask,
   onDismissTask,
   onRemoveTask,
+  onGrantRead,
+  onRevokeRead,
   notice,
 }: {
   desk: Desk;
@@ -2772,6 +2816,9 @@ export function DeskView({
   /** 取消一张单（→ 归档带）/ 彻底删除（不可恢复） */
   onDismissTask?: (taskId: string) => void;
   onRemoveTask?: (taskId: string) => void;
+  /** 只读授权：成员能读这个目录，写仍限工作区 */
+  onGrantRead?: (taskId: string) => void;
+  onRevokeRead?: (taskId: string) => void;
   /** 发送/新建失败时的可见提示（不允许静默失败） */
   notice?: string | null;
 }) {
@@ -2862,6 +2909,8 @@ export function DeskView({
           onCancelTask={onCancelTask}
           onDismissTask={onDismissTask}
           onRemoveTask={onRemoveTask}
+          onGrantRead={onGrantRead}
+          onRevokeRead={onRevokeRead}
         />
         <main className="center">
           <div className="sheet-wrap">

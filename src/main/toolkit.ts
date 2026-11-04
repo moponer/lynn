@@ -43,6 +43,11 @@ export interface ToolkitOptions {
   kb?: {
     add: (name: string, markdown: string) => { ok: boolean; file?: string; error?: string };
   };
+  /**
+   * 只读授权目录（用户显式授予，按任务生效）：读可以在这些目录里，**写永远只能在工作区**。
+   * 传函数 = 每次读时现取——成员跑到一半用户才授权，也能立刻生效（不必停掉重派）。
+   */
+  readRoots?: string[] | (() => string[]);
 }
 
 const READ_CAP = 200_000;
@@ -56,6 +61,30 @@ export function resolveWithin(root: string, target: string): string {
     throw new Error(`路径越界：${target} 不在工作区内。只能访问工作区里的文件。`);
   }
   return full;
+}
+
+/**
+ * 读路径解析：工作区 → 直接用；只读授权目录 → 允许读（`outside = true`）；其余拒绝。
+ * **写路径绝不能用这个函数**——审计与越界拦截都靠"写只走 resolveWithin"这条铁律。
+ */
+export function resolveReadable(
+  root: string,
+  readRoots: string[],
+  target: string,
+): { full: string; outside: boolean; root?: string } {
+  const base = path.resolve(root);
+  const full = target === "" || target === "." ? base : path.resolve(base, target);
+  const rel = path.relative(base, full);
+  if (!rel.startsWith("..") && !path.isAbsolute(rel)) return { full, outside: false };
+  for (const r of readRoots) {
+    const rb = path.resolve(r);
+    const rrel = path.relative(rb, full);
+    if (!rrel.startsWith("..") && !path.isAbsolute(rrel)) return { full, outside: true, root: rb };
+  }
+  throw new Error(
+    `路径越界：${target} 既不在工作区，也不是本单授权的只读目录。` +
+      (readRoots.length ? `已授权只读：${readRoots.join("、")}` : "（本单没有只读授权；需要的话让用户右键这张单「授权只读目录」）"),
+  );
 }
 
 /** 行级简版 diff：去掉公共前后缀，中间整段按 - / + 展示 */
@@ -168,6 +197,7 @@ export class Toolkit {
   private readonly office?: ToolkitOptions["office"];
   private readonly browser?: ToolkitOptions["browser"];
   private readonly kb?: ToolkitOptions["kb"];
+  private readonly readRootsSource: () => string[];
 
   constructor(root: string, opts: ToolkitOptions = {}) {
     this.root = path.resolve(root);
@@ -179,6 +209,13 @@ export class Toolkit {
     this.office = opts.office;
     this.browser = opts.browser;
     this.kb = opts.kb;
+    const src = opts.readRoots;
+    this.readRootsSource = typeof src === "function" ? src : () => src ?? [];
+  }
+
+  /** 本单授权的只读目录（界面/提示词要如实说明"能读哪儿"） */
+  getReadRoots(): string[] {
+    return this.readRootsSource().map((r) => path.resolve(r));
   }
 
   getRoot(): string {
@@ -223,7 +260,8 @@ export class Toolkit {
 
   readFile(args: Record<string, unknown>): string {
     const rel = String(args.path ?? "");
-    const full = resolveWithin(this.root, rel);
+    // 读允许只读授权目录；写永远只走 resolveWithin
+    const full = resolveReadable(this.root, this.getReadRoots(), rel).full;
     if (!fs.existsSync(full)) throw new Error(`文件不存在：${rel}`);
     const stat = fs.statSync(full);
     if (stat.isDirectory()) throw new Error(`${rel} 是目录，请用 list_dir`);
@@ -270,7 +308,7 @@ export class Toolkit {
 
   listDir(args: Record<string, unknown>): string {
     const rel = args.path === undefined || args.path === "" ? "." : String(args.path);
-    const full = resolveWithin(this.root, rel);
+    const full = resolveReadable(this.root, this.getReadRoots(), rel).full;
     if (!fs.existsSync(full)) throw new Error(`目录不存在：${rel}`);
     const entries = fs.readdirSync(full, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name));
     if (!entries.length) return "（空目录）";
@@ -475,11 +513,13 @@ export class Toolkit {
       return "office 能力未装配（当前进程没有 office 引擎桥接）——请回报此限制，改用 CSV 或在简报里说明。";
     }
     const rel = String(args.path ?? "");
-    const full = resolveWithin(this.root, rel);
     if (name === "office_read_table") {
+      // 读表格同样可读只读授权目录（审查项目里的 xlsx）；写仍限工作区
+      const full = resolveReadable(this.root, this.getReadRoots(), rel).full;
       const r = this.office.read(full);
       return JSON.stringify(r, null, 2);
     }
+    const full = resolveWithin(this.root, rel);
     const w = this.office.write(full, {
       headers: (args.headers as string[]) ?? [],
       rows: (args.rows as string[][]) ?? [],

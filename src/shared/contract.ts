@@ -219,6 +219,8 @@ export interface TaskTrackItem {
   rejectDraft?: { what: string; expect: string; deadline: string };
   /** 这张单是在哪个会话里派的（跨会话追溯） */
   threadId?: string;
+  /** 本单的只读授权目录（用户显式授予；空 = 只能读工作区） */
+  readRoots?: string[];
 }
 
 export interface Decision {
@@ -510,6 +512,23 @@ export interface RpcContracts {
   "app.restart": {
     params: void;
     result: { ok: boolean };
+  };
+  /**
+   * 只读授权：允许这张单的成员**读**某个目录（写仍然只能在工作区）。
+   * 只由用户在界面上发起（右键 → 授权只读目录），模型不能自我扩权。
+   */
+  "task.grantRead": {
+    params: { taskId: string; dir: string };
+    result: { ok: boolean; roots?: string[]; error?: string };
+  };
+  "task.revokeRead": {
+    params: { taskId: string; dir?: string };
+    result: { ok: boolean; roots?: string[]; error?: string };
+  };
+  /** 选目录（壳层原生对话框），只给授权入口用 */
+  "app.pickDir": {
+    params: { title?: string };
+    result: { path?: string; canceled?: boolean };
   };
   /** 取消一张单（→ canceled，进归档带；在跑的会先停成员） */
   "task.dismiss": {

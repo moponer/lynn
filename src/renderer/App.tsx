@@ -486,6 +486,27 @@ export default function App() {
             })
             .catch((err) => setNotice(rpcErrorText(err, "删除失败")));
         }}
+        onGrantRead={(taskId) => {
+          setNotice(null);
+          // 目录由用户在原生的选择框里点选——模型不能替用户授权
+          void rpc("app.pickDir", { title: "选择要授权只读访问的目录" })
+            .then(async (p) => {
+              if (!p.path) return;
+              const r = await rpc("task.grantRead", { taskId, dir: p.path });
+              if (!r.ok) setNotice(rpcResultError(r, "授权失败"));
+              await refresh();
+            })
+            .catch((err) => setNotice(rpcErrorText(err, "授权失败")));
+        }}
+        onRevokeRead={(taskId) => {
+          setNotice(null);
+          void rpc("task.revokeRead", { taskId })
+            .then(async (r) => {
+              if (!r.ok) setNotice(rpcResultError(r, "撤销失败"));
+              await refresh();
+            })
+            .catch((err) => setNotice(rpcErrorText(err, "撤销失败")));
+        }}
         onCreateTeam={(name) => {
           void rpc("team.create", { name }).then(async (r) => {
             if (!r.ok) setNotice(`建团队失败：${r.error ?? "未知原因"}`);

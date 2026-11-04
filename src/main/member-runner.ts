@@ -43,6 +43,8 @@ export interface MemberRunInput {
   tools: string[];
   /** 任务工作区：成员一切文件活动的边界（绝对路径） */
   workdir: string;
+  /** 用户授权的只读目录：读可以进，写仍然只能在工作区（函数 = 每次现取，跑到一半授权也生效） */
+  readRoots?: string[] | (() => string[]);
   model: { baseUrl: string; apiKey: string; model: string };
   /** 测试注入；默认真流式 */
   chatFn?: MemberChatFn;
@@ -110,6 +112,7 @@ export function memberToolSchemas(allowed: string[]): ToolSchema[] {
 
 export function memberSystemPrompt(input: MemberRunInput): string {
   const p = input.profile;
+  const readRoots = (typeof input.readRoots === "function" ? input.readRoots() : input.readRoots) ?? [];
   return [
     `你是「${p.name}」，岗位：${p.role}。你只对风铃（Lynn）负责，不直接面对用户。`,
     `你的单一目标：${p.goal}`,
@@ -123,7 +126,12 @@ export function memberSystemPrompt(input: MemberRunInput): string {
     "- 你没有 ask_user，不能问用户；口径拿不准就选一种并写明理由。需要升级时在回报正文里标 ESCALATE: 并说明。",
     "",
     "【工作区】",
-    `所有文件操作都被限制在任务工作区内（工具层强制）。你收到的路径一律按工作区内相对路径处理。`,
+    `所有写入都被限制在任务工作区内（工具层强制）。写文件一律用工作区内相对路径。`,
+    ...(readRoots.length
+      ? [
+          `只读授权（用户已批准）：${readRoots.join("、")}。这些目录里的文件可以 read_file / list_dir / office_read_table 读，**写入仍然只能在工作区**；读时用绝对路径。`,
+        ]
+      : []),
     "",
     `【本次任务简报（截止：${input.deadline}）】`,
     input.brief,
@@ -143,7 +151,14 @@ export function memberSystemPrompt(input: MemberRunInput): string {
 
 export async function runMemberTask(input: MemberRunInput): Promise<MemberRunResult> {
   const chat = input.chatFn ?? streamChat;
-  const toolkit = new Toolkit(input.workdir, { onAudit: input.onAudit, onBeforeWrite: input.onBeforeWrite, office: input.office, browser: input.browser, kb: input.kb });
+  const toolkit = new Toolkit(input.workdir, {
+    onAudit: input.onAudit,
+    onBeforeWrite: input.onBeforeWrite,
+    office: input.office,
+    browser: input.browser,
+    kb: input.kb,
+    readRoots: input.readRoots,
+  });
   const maxTurns = Math.max(1, Math.min(input.profile.limits?.maxTurns ?? 12, 40));
   const tools = memberToolSchemas(input.tools);
   const messages: ChatMessage[] = [

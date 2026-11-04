@@ -82,6 +82,8 @@ const snapshot = {
         at: now,
         // C3 演示：这张单是另一个会话派的——眉标出「回到会话」，印章头出「来自会话」
         threadId: "t-2",
+        // 只读授权演示：图纸上会显示「只读授权：…」
+        readRoots: ["F:/spiker/hermix-desktop"],
         evidenceCount: 2,
         version: 3,
         rejectRounds: 0,

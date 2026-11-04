@@ -55,6 +55,11 @@ export interface TaskRecord {
    * 有了它，换到新会话后旧工单的"往来"才读得回来，也能回答"这单从哪来"。
    */
   threadId?: string;
+  /**
+   * 本单的只读授权目录（用户显式授予）：读可以在这些目录里，写永远只能在工作区。
+   * 审查外部项目靠它，且授权只由用户发起（模型不能自我扩权）。
+   */
+  readRoots?: string[];
 }
 
 export class TaskConflictError extends Error {
@@ -294,6 +299,13 @@ export class TaskStore {
     if (opts.member) rec.member = opts.member;
     if (opts.sessionId) rec.sessionId = opts.sessionId;
     if (opts.threadId) rec.threadId = opts.threadId;
+    return this.commit(rec);
+  }
+
+  /** 设置/撤销只读授权目录（只由用户侧的授权入口调用） */
+  setReadRoots(id: string, roots: string[]): TaskRecord {
+    const rec = this.mustGet(id);
+    rec.readRoots = roots.length ? [...new Set(roots)] : undefined;
     return this.commit(rec);
   }
 
