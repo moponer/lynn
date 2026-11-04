@@ -357,6 +357,11 @@ export class Kernel {
   readonly l1: L1Host;
   /** 进行中的成员执行（taskId → 完成时自动回报审查台；M0-09） */
   private memberRuns = new Map<string, Promise<MemberRunResult>>();
+  /**
+   * 成员运行时的聊天函数（默认真 streamChat）。
+   * 只为整链路回归留的注入点：派单 → 后台执行 → 跨会话回报，真的跑一遍不该靠 mock 网络层。
+   */
+  memberChatFn?: typeof streamChat;
   /** 成员进度（姓名 → 0–100）：只在内存里，用来画实时进度 */
   private memberProgress = new Map<string, number>();
   /** 成员本轮累计 token（`teamId::成员` → tokens）：编制表的预算读数不再是硬编码 0 */
@@ -533,6 +538,8 @@ export class Kernel {
     taskId: string,
     member: string,
     ev: { kind: "cmd_blocked" | "cmd_net" | "cmd_run"; command: string; why?: string; cwd: string },
+    /** 出发会话：后台成员的审计卡要写回它，否则别的会话会被拦截记录刷屏（C2） */
+    threadId: string = this.currentThreadId,
   ): void {
     const rec = { at: new Date().toISOString(), kind: ev.kind, teamId, taskId, member, command: ev.command.slice(0, 500), why: ev.why, cwd: ev.cwd };
     try {
@@ -542,9 +549,9 @@ export class Kernel {
     }
     this.log("tool_audit", { kind: ev.kind, taskId, member, why: ev.why });
     if (ev.kind === "cmd_blocked") {
-      this.emit({ type: "tool", badge: "已拦截", title: `${member} · ${taskId}`, body: `命令被纵深防御规则拦下：${ev.why}\n${ev.command}` });
+      this.cardTo(threadId, { kind: "tool", badge: "已拦截", title: `${member} · ${taskId}`, body: `命令被纵深防御规则拦下：${ev.why}\n${ev.command}` });
     } else if (ev.kind === "cmd_net") {
-      this.emit({ type: "tool", badge: "出站", title: `${member} · ${taskId}`, body: `出站命令已审计：${ev.command}` });
+      this.cardTo(threadId, { kind: "tool", badge: "出站", title: `${member} · ${taskId}`, body: `出站命令已审计：${ev.command}` });
     }
   }
 
@@ -973,6 +980,8 @@ export class Kernel {
     evidence: string[],
     sessionId?: string,
     threadId: string = this.currentThreadId,
+    /** 证据在界面上的显示名（成员交的是相对工作区的路径，ref 会被解析成绝对路径） */
+    displayNames?: string[],
   ): string {
     this.tools.reviewResult(teamId, taskId, { member, text, evidence, sessionId: sessionId ?? this.host?.sessionId });
     this.taskCase.append(taskId, { kind: "report", member, text, meta: { evidence } });
@@ -984,7 +993,7 @@ export class Kernel {
       // 工单已存在或状态已就位
     }
     let verified = 0;
-    for (const e of evidence) {
+    for (const [i, e] of evidence.entries()) {
       let ref = e;
       let ok = this.taskCase.verifyRef(taskId, e);
       if (ok && !/^https?:\/\//i.test(e) && !e.startsWith("artifacts/")) {
@@ -998,7 +1007,7 @@ export class Kernel {
       if (ok) verified += 1;
       this.taskStore.addEvidence(taskId, {
         kind: ok ? "artifact" : "command",
-        label: e.slice(0, 80),
+        label: (displayNames?.[i] ?? e).slice(0, 80),
         ref,
         verified: ok,
       });
@@ -1014,8 +1023,9 @@ export class Kernel {
     } catch (err) {
       // 证据不足 → 停在执行中，如实告知；状态已就位 → 忽略
       if (!(err instanceof Error) || !/不允许的迁移/.test(err.message)) {
-        this.emit({
-          type: "tool",
+        // 后台回报也要归出发会话（C2）：否则在别的会话里会凭空多出一张"证据未通过"卡
+        this.cardTo(threadId, {
+          kind: "tool",
           badge: "回报",
           title: `证据未通过验证 · ${member} · ${taskId}`,
           body: `已登记 ${evidence.length} 项，其中可验证 ${verified} 项。无已验证证据不能进审查（§4.10.5）。`,
@@ -1024,8 +1034,8 @@ export class Kernel {
       }
     }
 
-    this.emit({
-      type: "tool",
+    this.cardTo(threadId, {
+      kind: "tool",
       badge: "回报",
       title: `${member} · ${taskId}`,
       body: `${text}\n证据：${evidence.join("、")}\n可验证：${verified}/${evidence.length}`,
@@ -1221,7 +1231,8 @@ export class Kernel {
       signal: controller.signal,
       workdir,
       model: { baseUrl: cfg.baseUrl, apiKey, model: cfg.model },
-      onAudit: (ev) => this.auditTool(teamId, taskId, member, ev),
+      chatFn: this.memberChatFn,
+      onAudit: (ev) => this.auditTool(teamId, taskId, member, ev, runThreadId),
       onBeforeWrite: (rel, full, existed) => this.checkpoints.beforeWrite(rel, full, existed),
       office: {
         read: (file) => readTable(file, this.officeHealth),
@@ -1255,8 +1266,17 @@ export class Kernel {
         this.memberUsage.set(memberKey, (this.memberUsage.get(memberKey) ?? 0) + result.promptTokens + result.completionTokens);
         const used = Math.round((Date.now() - startedAt) / 1000);
         if (result.status === "reported" && result.evidence.length > 0) {
+          // 成员交的证据是相对**工作区**的（"report.md"），卷宗校验只认卷宗目录 / cwd / dataRoot；
+          // 不先解析到工作区，真文件也会被判成"验不了"，工单停在执行中（C1 实机验暴露的真 bug）。
+          const evidence = result.evidence.map((e) => {
+            if (/^https?:\/\//i.test(e) || path.isAbsolute(e)) return e;
+            const abs = path.resolve(workdir, e);
+            const rel = path.relative(workdir, abs);
+            if (rel.startsWith("..") || path.isAbsolute(rel)) return e; // 越界不替换，交给校验如实判否
+            return fs.existsSync(abs) ? abs : e;
+          });
           // 只有真交了证据才登记；空回报进登记通道会抛错，原来那条路直接变成"崩溃"卡
-          this.registerReport(teamId, taskId, member, result.report, result.evidence, undefined, runThreadId);
+          this.registerReport(teamId, taskId, member, result.report, evidence, undefined, runThreadId, result.evidence);
           this.patchCardTo(runThreadId, live, {
             badge: "回报",
             title: `${member} 回报 · ${taskId}`,
