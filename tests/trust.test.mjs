@@ -35,6 +35,10 @@ test("未信任项目：项目级 mcp.json 不加载；信任后才进工具面"
   const kernel = new Kernel(root);
   try {
     await kernel.init();
+    // 2026-11-10：默认工作区不再固定为 <dataRoot>/project，测试显式把根指到项目目录
+    assert.equal(kernel.handle("project.setRoot", { root: project }).ok, true);
+    // 换根后的 MCP 重载是异步的：测试里等它跑完，再断言"未信任会出卡"
+    await kernel.reloadMcp({ quiet: false });
     const snap = kernel.handle("session.snapshot");
     assert.equal(snap.project.trusted, false);
     assert.equal(snap.project.hasMcp, true);

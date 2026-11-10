@@ -85,7 +85,13 @@ function setup(prefs) {
 }
 
 function assignAndStart(kernel, taskId, member = "林工") {
-  kernel.runTool("assign_task", { teamId: "t1", taskId, member, brief: `做 ${taskId}`, deadline: "30 分钟" });
+  kernel.runTool("assign_task", {
+    teamId: "t1",
+    taskId,
+    member,
+    brief: `【目标】完成工单 ${taskId} 的材料整理\n【完成标准】产出整理结果文件，内容与源材料核对一致\n【材料与位置】材料文件在工作区\n【限制】只处理本单 ${taskId}，不要动其他工单`,
+    deadline: "30 分钟",
+  });
   const plan = kernel.handle("session.snapshot").board.decisions.find((d) => d.kind === "plan" && d.jobId === taskId);
   assert.ok(plan, `应有 ${taskId} 的任务契约`);
   kernel.handle("decision.resolve", { id: plan.id, action: "start" });
@@ -166,7 +172,11 @@ test("删除一张单：目录一并消失；在跑的不许删", async () => {
     kernel.handle("task.cancel", { taskId: "task-1" });
     await until(() => kernel.handle("session.snapshot").running.length === 0, 5000, "成员收手");
 
-    assert.deepEqual(kernel.handle("task.remove", { taskId: "task-1" }), { ok: true });
+    const removed = kernel.handle("task.remove", { taskId: "task-1" });
+    assert.equal(removed.ok, true);
+    assert.ok(removed.removed?.length, "要如实返回删了什么");
+    assert.equal(removed.kept?.length, 1, "跨任务共享的工作区不随这张单删除，要如实列出来");
+    assert.ok(removed.kept[0].endsWith("workspace"), "kept 应是共享默认工作区");
     assert.equal(tasks.get("task-1"), null, "工单记录没了");
     assert.ok(!fs.existsSync(path.join(root, "tasks", "task-1")), "目录、卷宗、工作区一起删");
     assert.equal(kernel.handle("session.snapshot").board.track.find((t) => t.id === "task-1"), undefined);

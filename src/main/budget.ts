@@ -22,6 +22,10 @@ export interface UsageLine {
   model: string;
   /** 软超限后这一轮是否用了降级模型 */
   fallback?: boolean;
+  /** 命中缓存的前缀 token（端点没报就是缺省——不估假数） */
+  cacheRead?: number;
+  /** 写入缓存 / 未命中的输入 token */
+  cacheWrite?: number;
 }
 
 /** 按次记账：append 一行（损坏不炸，只是这条没记上——如实容忍） */

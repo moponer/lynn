@@ -10,6 +10,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { checkManifest, type PluginManifest } from "./plugin-manifest";
+import { checkPluginCss, checkThemeFile } from "./plugin-host";
 
 export const WORKSHOP_KINDS = ["L0", "L1", "L2"] as const;
 export type WorkshopKind = (typeof WORKSHOP_KINDS)[number];
@@ -218,14 +219,56 @@ export function reviewDraft(
             if (existing.skillNames.includes(s)) fail(`技能名冲突：「${s}」已有同名技能（§4.11.5）`);
           }
           // L0 技能插件必须真带技能产物（spec ↔ 交付对账）
-          if (!(manifest.contributes?.skills ?? []).length) {
-            fail("L0 插件必须声明 contributes.skills（「她会做事」的首选形式是技能，§4.11.1）");
-          } else {
-            for (const s of manifest.contributes!.skills!) {
-              if (!fs.existsSync(path.join(dir, s, "SKILL.md"))) {
-                fail(`技能 ${s} 缺 SKILL.md（声明了目录就要有内容）`);
+          const skills = manifest.contributes?.skills ?? [];
+          for (const s of skills) {
+            if (!fs.existsSync(path.join(dir, s, "SKILL.md"))) {
+              fail(`技能 ${s} 缺 SKILL.md（声明了目录就要有内容）`);
+            }
+          }
+          // L0 形态层（theme / style / langs）：声明式产物，同样逐项对账 + 静态检查
+          const themeRel = manifest.contributes?.theme;
+          if (themeRel) {
+            const themePath = path.join(dir, themeRel);
+            if (!fs.existsSync(themePath)) {
+              fail(`contributes.theme 指向的文件不存在：${themeRel}`);
+            } else {
+              let parsed: unknown;
+              try {
+                parsed = JSON.parse(fs.readFileSync(themePath, "utf-8"));
+              } catch (err) {
+                parsed = null;
+                fail(`theme 文件不是合法 JSON：${err instanceof Error ? err.message : String(err)}`);
+              }
+              if (parsed !== null) {
+                const tc = checkThemeFile(parsed);
+                if (!tc.ok) for (const i of tc.issues) fail(`theme 不合规格：${i}`);
               }
             }
+          }
+          const styleRel = manifest.contributes?.style;
+          if (styleRel) {
+            const stylePath = path.join(dir, styleRel);
+            if (!fs.existsSync(stylePath)) {
+              fail(`contributes.style 指向的文件不存在：${styleRel}`);
+            } else {
+              let body = "";
+              try {
+                body = fs.readFileSync(stylePath, "utf-8");
+              } catch (err) {
+                fail(`形态层读不出：${err instanceof Error ? err.message : String(err)}`);
+              }
+              const sc = checkPluginCss(body);
+              if (!sc.ok) for (const i of sc.issues) fail(`形态层不合规格：${i}`);
+            }
+          }
+          const langs = manifest.contributes?.langs ?? [];
+          for (const l of langs) {
+            if (!fs.existsSync(path.join(dir, l))) fail(`contributes.langs 指向的文件不存在：${l}`);
+          }
+          // L0 别只交个空的 manifest：至少要有一种声明式产物（技能 / 主题 / 形态层 / 语言包 / 卡槽视图）
+          const slotView = (manifest.contributes?.slots ?? []).length > 0;
+          if (!skills.length && !themeRel && !styleRel && !langs.length && !slotView) {
+            fail("L0 插件至少要交一种声明式产物：contributes.skills / theme / style / langs / slots（§4.11.1）");
           }
         }
         // L1：禁项扫描，命中即拒；entry 必须真实存在

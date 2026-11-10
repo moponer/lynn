@@ -21,7 +21,16 @@ export const UI_SLOTS = [
   "settings.section",
   "status.bar",
   "composer.action",
+  /**
+   * 控制台主视图（整屏舞台）。与 `stage.view` 的区别：这里是**内置视图注册表**的入口，
+   * 插件只声明「我要占这个卡槽 + 用哪个内置视图」，组件来自 `renderer/console/registry.ts`，
+   * 永不执行插件代码——第三方若声明本卡槽一律拒（见 INTERNAL_ONLY_SLOTS）。
+   */
+  "stage.console",
 ] as const;
+
+/** 只许官方插件占用的卡槽：入口在内置注册表里，第三方声明即提权 */
+export const INTERNAL_ONLY_SLOTS = ["stage.console"] as const;
 export type UiSlot = (typeof UI_SLOTS)[number];
 
 /** L1 插件权限声明（安装时必须逐项展示给用户，§4.2.2） */
@@ -55,6 +64,13 @@ export interface PluginManifest {
     slots?: UiSlot[];
     /** M3-08：语言包文件（相对路径，JSON 结构见 shared/i18n.ts）——L0 声明式，无代码 */
     langs?: string[];
+    /** L0：主题形态层（相对路径 .css）。只许属性选择器 + Token，禁 @import */
+    style?: string;
+    /**
+     * 声明 `stage.console` 时必填：要用内置注册表里的哪个视图（如 "console"）。
+     * 插件不携带视图代码，只选一个已在宿主注册好的视图。
+     */
+    view?: string;
   };
   permissions?: PluginPermissions;
   mcp?: { recipe: string };
@@ -76,6 +92,8 @@ export interface ManifestCheck {
 const ID_RE = /^[a-z][a-z0-9-]*(\.[a-z][a-z0-9-]*){1,3}$/;
 const SEMVER_RE = /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/;
 const TOOLNAME_RE = /^[a-z][a-z0-9_]*$/;
+/** 内置视图 id：只认小写字母数字与连字符（注册表里的键） */
+const VIEW_ID_RE = /^[a-z][a-z0-9-]*$/;
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
@@ -169,11 +187,29 @@ export function checkManifest(raw: unknown): ManifestCheck {
       for (const s of contributes.slots) {
         if (!(UI_SLOTS as readonly string[]).includes(s)) {
           fail("contributes.slots", `"${String(s)}" 不是已声明的卡槽（U 插件只能注册到白名单卡槽）`);
+          continue;
+        }
+        // 内置视图卡槽：入口在宿主注册表，第三方声明等于借道进主视图
+        if ((INTERNAL_ONLY_SLOTS as readonly string[]).includes(s) && m.source !== "official") {
+          fail("contributes.slots", `"${s}" 只许官方插件声明（内置视图注册表入口，第三方禁入）`);
+        }
+      }
+      if ((contributes.slots as unknown[]).includes("stage.console")) {
+        const view = contributes.view;
+        if (typeof view !== "string" || !VIEW_ID_RE.test(view)) {
+          fail("contributes.view", "占用 stage.console 必须声明 view（内置视图 id，小写字母数字与连字符）");
         }
       }
     }
     if (contributes.theme !== undefined && tier === "L0" && typeof contributes.theme !== "string") {
       fail("contributes.theme", "L0 主题必须指向 theme.json");
+    }
+    if (contributes.style !== undefined) {
+      if (typeof contributes.style !== "string" || !contributes.style.trim()) {
+        fail("contributes.style", "形态层必须是非空相对路径");
+      } else if (!contributes.style.endsWith(".css")) {
+        fail("contributes.style", "形态层必须是 .css 文件");
+      }
     }
     if (contributes.langs !== undefined) {
       if (!Array.isArray(contributes.langs)) {

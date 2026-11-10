@@ -159,10 +159,15 @@ export class MemoryStore {
     return text;
   }
 
-  /** 两层拼进 system prompt 的记忆段（USER 全文 + MEMORY 全文；空模板不占空间） */
+  /**
+   * 两层拼进 system prompt 的记忆段（USER 全文 + MEMORY 全文；空模板不占空间）。
+   * 行首写入时间戳（`- 2026-11-09 13:22 事实`）在注入时剥掉：磁盘保留可追溯，
+   * prompt 只留事实——否则同一条记忆重存一次，system prompt 中段就变，整段前缀缓存作废。
+   */
   systemPromptSection(): string {
-    const user = this.load("user");
-    const mem = this.load("memory");
+    const stripStamp = (text: string) => text.replace(/^- \d{4}-\d{2}-\d{2} \d{2}:\d{2}\s+/gm, "- ");
+    const user = stripStamp(this.load("user"));
+    const mem = stripStamp(this.load("memory"));
     const parts: string[] = [];
     if (user.trim().split(/\r?\n/).filter((l) => l.trim() && !l.startsWith("#") && !l.startsWith("<!--")).length > 0) {
       parts.push(`【用户记忆（USER.md，跨任务保留）】\n${user.trim()}`);

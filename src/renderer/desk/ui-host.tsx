@@ -13,7 +13,8 @@ import { BUILTIN_UI_PLUGINS, enabledUiPlugins, pluginsForSlot, type UiPluginMani
 export type UiPluginEntry = UiPluginManifest & { html?: string; fromDisk?: boolean };
 
 const KEY_DISABLED = "lynn.ui.disabled";
-const EVENT = "lynn:ui-plugins";
+/** 设置面板改动插件启停后广播：顶栏/指令台/控制台即时生效 */
+export const UI_PLUGINS_EVENT = "lynn:ui-plugins";
 
 function readDisabled(): string[] {
   try {
@@ -35,13 +36,18 @@ export function useUiPlugins(): {
   const [disabled, setDisabled] = useState<string[]>(readDisabled);
   const [disk, setDisk] = useState<UiPluginEntry[]>([]);
   const [errors, setErrors] = useState<string[]>([]);
+  const [rev, setRev] = useState(0);
 
   useEffect(() => {
-    const on = () => setDisabled(readDisabled());
-    window.addEventListener(EVENT, on);
+    const on = () => {
+      setDisabled(readDisabled());
+      // 主进程的启停（_state.json）也在这条事件上，重拉一次让卡槽跟着变
+      setRev((n) => n + 1);
+    };
+    window.addEventListener(UI_PLUGINS_EVENT, on);
     window.addEventListener("storage", on);
     return () => {
-      window.removeEventListener(EVENT, on);
+      window.removeEventListener(UI_PLUGINS_EVENT, on);
       window.removeEventListener("storage", on);
     };
   }, []);
@@ -62,7 +68,7 @@ export function useUiPlugins(): {
     return () => {
       alive = false;
     };
-  }, []);
+  }, [rev]);
 
   const builtin: UiPluginEntry[] = BUILTIN_UI_PLUGINS.map((p) => ({ ...p }));
   const seen = new Set(builtin.map((p) => p.id));
@@ -71,13 +77,14 @@ export function useUiPlugins(): {
   const toggle = (id: string) => {
     const next = readDisabled().includes(id) ? readDisabled().filter((x) => x !== id) : [...readDisabled(), id];
     localStorage.setItem(KEY_DISABLED, JSON.stringify(next));
-    window.dispatchEvent(new Event(EVENT));
+    window.dispatchEvent(new Event(UI_PLUGINS_EVENT));
     setDisabled(next);
   };
 
   return {
     all,
-    enabled: enabledUiPlugins(all, disabled),
+    // 主进程判为停用的（_state.json）一律不渲染：卡槽的单一真相在主进程
+    enabled: enabledUiPlugins(all, disabled).filter((p) => p.enabled !== false),
     disabled,
     errors,
     toggle,

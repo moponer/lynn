@@ -53,7 +53,7 @@ test("runCommand：越界命令真的不执行，并记一条 cmd_blocked 审计
   const t = new Toolkit(root, { onAudit: (ev) => audits.push(ev) });
   const out = await t.runCommand({ command: `Get-ChildItem 'D:\\qcc\\Hermix Desktop'` });
   assert.match(out, /已拒绝执行/);
-  assert.match(out, /越出工作区的路径/);
+  assert.match(out, /越出工作区/);
   assert.equal(audits.filter((a) => a.kind === "cmd_blocked").length, 1);
 });
 

@@ -80,7 +80,7 @@ export function Wizard({
           </span>
         </div>
         <div className="spacer" />
-        <span className="mono" style={{ fontSize: 10, color: "var(--ink-4)" }}>
+        <span className="mono" style={{ fontSize: "var(--fs-label)", color: "var(--ink-4)" }}>
           四步都可用默认，之后随时在「我的风铃」里换
         </span>
         {onSkip && (
@@ -125,12 +125,12 @@ export function Wizard({
                         onClick={() => onTheme(x.id, mode)}
                       >
                         <div className="tp" style={{ background: cc.desk }}>
-                          <div className="tp-top" style={{ background: cc.desk, opacity: 0.9 }} />
-                          <div className="tp-side" style={{ background: cc.desk, opacity: 0.92 }} />
-                          <div className="tp-sheet" style={{ background: cc.blue, opacity: 0.12 }} />
+                          <div className="tp-top" style={{ background: cc.sheet, opacity: 0.14 }} />
+                          <div className="tp-side" style={{ background: cc.desk, opacity: 0.9 }} />
+                          <div className="tp-sheet" style={{ background: cc.sheet }} />
                           <div className="tp-line" style={{ background: cc.blue, width: 62 }} />
                           <div className="tp-line" style={{ background: cc.blue, width: 40, opacity: 0.55, top: 46 }} />
-                          <div className="tp-box" style={{ background: cc.seal, opacity: 0.85 }} />
+                          <div className="tp-box" style={{ background: cc.seal, opacity: 0.9 }} />
                           <div className="tp-dot" style={{ background: cc.brass }} />
                         </div>
                         <div className="theme-name">
@@ -272,12 +272,12 @@ export function Wizard({
                   <button
                     type="button"
                     className="btn btn-accept"
-                    style={{ flex: "none", padding: "10px 26px", fontSize: 13 }}
+                    style={{ flex: "none", padding: "10px 26px", fontSize: "var(--fs-body)" }}
                     onClick={() => setStep((s) => s + 1)}
                   >
                     下一步 · {STEP_NAMES[step + 1]}
                   </button>
-                  <button className="ghost-btn" style={{ padding: "9px 16px", fontSize: 12.5 }} onClick={() => finish(true)}>
+                  <button className="ghost-btn" style={{ padding: "9px 16px", fontSize: "var(--fs-meta)" }} onClick={() => finish(true)}>
                     先用默认，之后再换
                   </button>
                 </>
@@ -286,17 +286,17 @@ export function Wizard({
                   <button
                     type="button"
                     className="btn btn-accept"
-                    style={{ flex: "none", padding: "10px 26px", fontSize: 13 }}
+                    style={{ flex: "none", padding: "10px 26px", fontSize: "var(--fs-body)" }}
                     onClick={() => finish(false)}
                   >
                     开始使用
                   </button>
-                  <button className="ghost-btn" style={{ padding: "9px 16px", fontSize: 12.5 }} onClick={() => finish(true)}>
+                  <button className="ghost-btn" style={{ padding: "9px 16px", fontSize: "var(--fs-meta)" }} onClick={() => finish(true)}>
                     先这样，之后再换
                   </button>
                 </>
               )}
-              <span style={{ fontSize: 11.5, color: "var(--ink-4)" }}>三分钟造完，直接开始第一次对话</span>
+              <span style={{ fontSize: "var(--fs-meta)", color: "var(--ink-4)" }}>三分钟造完，直接开始第一次对话</span>
             </div>
           </div>
         </div>

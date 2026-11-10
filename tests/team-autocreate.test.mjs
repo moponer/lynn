@@ -81,7 +81,7 @@ test("assign_task 缺团队时自动建队，不再回「团队不存在」让�
   const msg = kernel.runTool("assign_task", {
     taskId: "cx-1",
     member: "网页操作员",
-    brief: "打开超星，确认登录态",
+    brief: "【目标】打开超星网页并确认登录态\n【完成标准】产出登录态截图文件，页面元素可核对\n【材料与位置】目标网址见简报附带说明\n【限制】不要代填验证码，不要提交任何表单",
     deadline: "2026-11-04 12:00",
   });
 

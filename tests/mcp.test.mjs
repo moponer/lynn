@@ -95,3 +95,46 @@ test("进工具面，且与内置工具同一道权限门禁", async () => {
     await kernel.dispose();
   }
 });
+
+test("mcp.status：配置里写了几台就列几台，没连上不假装已连接", () => {
+  const root = tmp();
+  fs.writeFileSync(
+    path.join(root, "mcp.json"),
+    JSON.stringify({
+      servers: [
+        { id: "ghost", command: "lynn-not-a-real-binary-xyz", args: ["--x"] },
+        { id: "off", command: "node", enabled: false },
+      ],
+    }),
+    "utf-8",
+  );
+  // 空注册表只回空数组：不凭配置凭空造状态
+  assert.deepEqual(new McpRegistry().status(), []);
+
+  const kernel = new Kernel(root);
+  const r = kernel.handle("mcp.status");
+  assert.equal(r.servers.length, 2);
+  const ghost = r.servers.find((s) => s.id === "ghost");
+  assert.equal(ghost.enabled, true);
+  assert.equal(ghost.connected, false, "没握上手就不许显示已连接");
+  assert.match(ghost.command, /lynn-not-a-real-binary-xyz/);
+  assert.equal(r.servers.find((s) => s.id === "off").enabled, false);
+  assert.ok(r.globalFile.endsWith("mcp.json"));
+  assert.equal(r.projectTrusted, false, "没信任的项目级配置不加载");
+});
+
+test("mcp.reload：不重启应用也能重连（回执带实况，重连在后台完成）", async () => {
+  const root = tmp();
+  fs.writeFileSync(path.join(root, "mcp.json"), JSON.stringify({ servers: [{ id: "x", command: "node", enabled: false }] }), "utf-8");
+  const kernel = new Kernel(root);
+  try {
+    const r = kernel.handle("mcp.reload");
+    assert.equal(r.ok, true);
+    assert.equal(r.servers.length, 1);
+    assert.equal(r.servers[0].id, "x");
+    // 给后台重连一点时间跑完，别让测试进程挂着未决的 Promise
+    await new Promise((res) => setTimeout(res, 300));
+  } finally {
+    await kernel.dispose();
+  }
+});

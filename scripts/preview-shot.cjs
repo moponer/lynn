@@ -56,10 +56,13 @@ app.whenReady().then(async () => {
 
   // 造铃向导：默认跳过（否则每张截图都被首启向导挡住）；要截向导就传 wizard
   const wantWizard = process.argv[3] === "wizard";
+  // 舞台视图：LYNN_PREVIEW_STAGE=desk 截原值台，console（默认）截 stage.console 视图
+  const stage = process.env.LYNN_PREVIEW_STAGE;
+  const stageJs = stage ? `localStorage.setItem('lynn.stage.view', ${JSON.stringify(stage)});` : "";
   await win.webContents.executeJavaScript(
     wantWizard
       ? `localStorage.removeItem('lynn.onboarded'); location.reload();`
-      : `localStorage.setItem('lynn.onboarded','1'); location.reload();`,
+      : `localStorage.setItem('lynn.onboarded','1');${stageJs} location.reload();`,
   );
   await new Promise((r) => setTimeout(r, 2000));
 
@@ -71,6 +74,86 @@ app.whenReady().then(async () => {
     await new Promise((r) => setTimeout(r, 1500));
     const overlay = await win.webContents.executeJavaScript(`!!document.querySelector('.sf-overlay')`);
     console.log("SETTINGS", ok, overlay);
+  }
+
+  // 可选：我的风铃 → 团队（编制管理）
+  if (process.argv[3] === "team") {
+    const opened = await win.webContents.executeJavaScript(
+      `(() => { const b=[...document.querySelectorAll('.ghost-btn')].find(x=>x.textContent.includes('我的风铃')); if (b) b.click(); return !!b; })()`,
+    );
+    await new Promise((r) => setTimeout(r, 700));
+    const navOk = await win.webContents.executeJavaScript(
+      `(() => { const b=[...document.querySelectorAll('.sf-nav-item')].find(x=>x.textContent.includes('团队')); if (b) b.click(); return !!b; })()`,
+    );
+    await new Promise((r) => setTimeout(r, 900));
+    console.log(
+      "TEAM",
+      opened,
+      navOk,
+      "blocks:",
+      await win.webContents.executeJavaScript(`document.querySelectorAll('.team-block').length`),
+      "members:",
+      await win.webContents.executeJavaScript(`document.querySelectorAll('.team-block .sf-row').length`),
+    );
+  }
+
+  // 可选：我的风铃 → 团队 → 展开头像库（看 12 张工牌照）
+  if (process.argv[3] === "avatars") {
+    await win.webContents.executeJavaScript(
+      `(() => { const b=[...document.querySelectorAll('.ghost-btn')].find(x=>x.textContent.includes('我的风铃')); if (b) b.click(); })()`,
+    );
+    await new Promise((r) => setTimeout(r, 700));
+    await win.webContents.executeJavaScript(
+      `(() => { const b=[...document.querySelectorAll('.sf-nav-item')].find(x=>x.textContent.includes('团队')); if (b) b.click(); })()`,
+    );
+    await new Promise((r) => setTimeout(r, 900));
+    const ok = await win.webContents.executeJavaScript(
+      `(() => { const b=document.querySelector('.team-av-btn'); if (b) b.click(); return !!b; })()`,
+    );
+    await new Promise((r) => setTimeout(r, 500));
+    console.log(
+      "AVATARS",
+      ok,
+      "options:",
+      await win.webContents.executeJavaScript(`document.querySelectorAll('.team-av-opt').length`),
+    );
+  }
+
+  // 可选：我的风铃 → 自动化 / 能力页
+  if (process.argv[3] === "auto" || process.argv[3] === "plugins") {
+    const navLabel = process.argv[3] === "auto" ? "自动化" : "能力";
+    const opened = await win.webContents.executeJavaScript(
+      `(() => { const b=[...document.querySelectorAll('.ghost-btn')].find(x=>x.textContent.includes('我的风铃')); if (b) b.click(); return !!b; })()`,
+    );
+    await new Promise((r) => setTimeout(r, 700));
+    const navOk = await win.webContents.executeJavaScript(
+      `(() => { const b=[...document.querySelectorAll('.sf-nav-item')].find(x=>x.textContent.includes(${JSON.stringify(navLabel)})); if (b) b.click(); return !!b; })()`,
+    );
+    await new Promise((r) => setTimeout(r, 900));
+    console.log("PANEL", process.argv[3], opened, navOk);
+  }
+
+  // 可选：左栏切到「工单」视图
+  if (process.argv[3] === "jobs") {
+    const ok = await win.webContents.executeJavaScript(
+      `(() => { const b=[...document.querySelectorAll('.rail-seg-item')][1]; if (b) b.click(); return !!b; })()`,
+    );
+    await new Promise((r) => setTimeout(r, 600));
+    console.log("JOBS", ok, "rows:", await win.webContents.executeJavaScript(`document.querySelectorAll('.job').length`));
+  }
+
+  // 可选：控制台 → 档案抽屉（看无主单清理出口）
+  if (process.argv[3] === "archive") {
+    const ok = await win.webContents.executeJavaScript(
+      `(() => { const b=[...document.querySelectorAll('.cs-tool')].find(x=>x.textContent.includes('档案')); if (b) b.click(); return !!b; })()`,
+    );
+    await new Promise((r) => setTimeout(r, 700));
+    console.log(
+      "ARCHIVE",
+      ok,
+      "orphan:",
+      await win.webContents.executeJavaScript(`!!document.querySelector('.cs-orphan')`),
+    );
   }
 
   // 可选：进待机（Ctrl+.）

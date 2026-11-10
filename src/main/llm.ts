@@ -48,6 +48,10 @@ export interface StreamChatResult {
   /** usage 可能在最后一块；取不到就是 0，不造假数 */
   promptTokens: number;
   completionTokens: number;
+  /** 命中缓存的前缀 token（DeepSeek: prompt_cache_hit_tokens；Anthropic 兼容: cache_read_input_tokens；OpenAI: prompt_tokens_details.cached_tokens） */
+  cacheRead: number;
+  /** 写入缓存 / 未命中的输入（Anthropic: cache_creation_input_tokens；DeepSeek: prompt_cache_miss_tokens） */
+  cacheWrite: number;
 }
 
 interface SseChunk {
@@ -62,7 +66,19 @@ interface SseChunk {
     } | null;
     finish_reason?: string | null;
   }[];
-  usage?: { prompt_tokens?: number; completion_tokens?: number } | null;
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    /** DeepSeek：命中缓存的前缀 token */
+    prompt_cache_hit_tokens?: number;
+    /** DeepSeek：未命中的输入 token */
+    prompt_cache_miss_tokens?: number;
+    /** Anthropic 兼容端点 */
+    cache_read_input_tokens?: number;
+    cache_creation_input_tokens?: number;
+    /** OpenAI 兼容端点 */
+    prompt_tokens_details?: { cached_tokens?: number } | null;
+  } | null;
 }
 
 export class LlmError extends Error {
@@ -105,6 +121,8 @@ export async function streamChat(input: StreamChatInput): Promise<StreamChatResu
   let content = "";
   let promptTokens = 0;
   let completionTokens = 0;
+  let cacheRead = 0;
+  let cacheWrite = 0;
   const toolAcc = new Map<number, ToolCall>();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -113,6 +131,10 @@ export async function streamChat(input: StreamChatInput): Promise<StreamChatResu
     if (json.usage) {
       promptTokens = json.usage.prompt_tokens ?? promptTokens;
       completionTokens = json.usage.completion_tokens ?? completionTokens;
+      // 各家字段名不同：按优先级取，取不到保持 0（不造假命中率）
+      const u = json.usage;
+      cacheRead = u.prompt_cache_hit_tokens ?? u.cache_read_input_tokens ?? u.prompt_tokens_details?.cached_tokens ?? cacheRead;
+      cacheWrite = u.cache_creation_input_tokens ?? u.prompt_cache_miss_tokens ?? cacheWrite;
     }
     for (const choice of json.choices ?? []) {
       const d = choice.delta;
@@ -155,6 +177,8 @@ export async function streamChat(input: StreamChatInput): Promise<StreamChatResu
     toolCalls: [...toolAcc.values()].filter((t) => t.name),
     promptTokens,
     completionTokens,
+    cacheRead,
+    cacheWrite,
   };
 }
 

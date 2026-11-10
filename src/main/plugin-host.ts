@@ -28,14 +28,38 @@ export interface PluginView {
   enabled: boolean;
   /** L0 主题插件才有 */
   theme?: ThemeFile;
+  /** L0 形态层：插件目录里的 CSS 内容（已过 checkPluginCss），无则不下发 */
+  style?: string;
   /** M3-08：L0 语言包插件才有（可能同时带 zh/en 多个包） */
   langs?: LangPack[];
+  /** 占用的卡槽（设置页据此标注「控制台视图」等） */
+  slots?: string[];
+  /** 占内置视图卡槽时指名的视图 id（组件在宿主注册表里） */
+  view?: string;
   /** false = 该档加载器还没接（L1/L2） */
   loadable: boolean;
   description?: string;
 }
 
 const COLOR_RE = /^(#[0-9a-fA-F]{3,8}|rgba?\([^)]*\))$/;
+/** 形态层上限：整屏 CSS 远小于此，超了说明放的不是样式 */
+const STYLE_MAX = 256 * 1024;
+
+/**
+ * 形态层 CSS 的准入检查（与 theme.json 同级纪律：只下发给渲染层，不经脚本求值）。
+ *  - 禁 `@import`：否则插件能远程拉未申报样式
+ *  - 禁 `javascript:` / `expression()`：老 IE 攻击面，现代浏览器也已无正当用途
+ *  - 禁 `url(` 里的绝对协议（http/https）以外的外链不拦，但 data/file 拦掉
+ */
+export function checkPluginCss(raw: string): { ok: boolean; issues: string[] } {
+  const issues: string[] = [];
+  if (raw.length > STYLE_MAX) issues.push(`形态层超过 ${STYLE_MAX / 1024}KB（实际 ${Math.round(raw.length / 1024)}KB）`);
+  if (/@import\b/i.test(raw)) issues.push("形态层不得使用 @import（会绕过申报加载外部样式）");
+  if (/javascript\s*:/i.test(raw)) issues.push("形态层不得包含 javascript: URL");
+  if (/expression\s*\(/i.test(raw)) issues.push("形态层不得使用 expression()");
+  if (/url\(\s*['"]?\s*(file|data):/i.test(raw)) issues.push("形态层不得引用 file:/data: 资源");
+  return { ok: issues.length === 0, issues };
+}
 
 export function checkThemeFile(raw: unknown): { ok: boolean; issues: string[]; theme?: ThemeFile } {
   const issues: string[] = [];
@@ -139,6 +163,8 @@ export class PluginHost {
         enabled: safeMode ? official : (state[m.id] ?? !(m.tier === "L1" && !official)),
         loadable: m.tier === "L0" || m.tier === "L1",
         description: typeof (raw as { description?: string }).description === "string" ? (raw as { description?: string }).description : undefined,
+        slots: m.contributes?.slots,
+        view: m.contributes?.view,
       };
 
       if (m.tier === "L1") {
@@ -155,8 +181,11 @@ export class PluginHost {
       if (m.tier === "L0") {
         const themeRel = m.contributes?.theme;
         const langRels = m.contributes?.langs ?? [];
-        if (!themeRel && !langRels.length) {
-          errors.push(`${entry.name}: L0 插件至少要有 contributes.theme 或 contributes.langs（技能/命令加载器后续接入）`);
+        const slotList = m.contributes?.slots ?? [];
+        // L0 是声明式档：主题 / 形态层 / 语言包 / 内置视图卡槽，任一种都算有产物。
+        // 占内置视图卡槽的插件零代码（组件在宿主注册表里），所以 slots 单独也算数。
+        if (!themeRel && !langRels.length && !slotList.length && !m.contributes?.style) {
+          errors.push(`${entry.name}: L0 插件至少要有 contributes.theme / style / langs / slots 之一（技能加载器后续接入）`);
           continue;
         }
         if (themeRel) {
@@ -176,6 +205,22 @@ export class PluginHost {
             errors.push(`${entry.name}: theme.json 不是合法 JSON`);
             continue;
           }
+        }
+        // 形态层：与 theme.json 同一沙箱纪律，坏 CSS 整插件跳过（不降级跑半个主题）
+        const styleRel = m.contributes?.style;
+        if (styleRel) {
+          const stylePath = path.resolve(dir, styleRel);
+          if (!stylePath.startsWith(path.resolve(dir) + path.sep) || !fs.existsSync(stylePath)) {
+            errors.push(`${entry.name}: style 文件不存在或跳出插件目录`);
+            continue;
+          }
+          const css = fs.readFileSync(stylePath, "utf-8");
+          const cssCheck = checkPluginCss(css);
+          if (!cssCheck.ok) {
+            errors.push(`${entry.name}: ${cssCheck.issues.join("；")}`);
+            continue;
+          }
+          view.style = css;
         }
         // M3-08：语言包——同一沙箱纪律（路径不出插件目录 + 结构校验），坏包跳过不拖垮其它
         const packs: LangPack[] = [];

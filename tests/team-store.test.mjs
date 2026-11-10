@@ -116,3 +116,74 @@ test("解散团队：状态落盘，档案保留（保留编制复用的反面�
   assert.equal(rec.status, "dissolved");
   assert.equal(store.listMembers("t1").length, 1, "解散不清档案，供复盘与复用");
 });
+
+test("用户改岗位：只动角色/目标/提示词，工具白名单不在这里扩缩", () => {
+  store.createTeam("t1", "月报突击队");
+  store.writeMember("t1", profile);
+  const next = store.updateMember("t1", "林工", {
+    role: "数据工程师",
+    goal: "把周报第 3 节做成可核对的口径",
+    body: "先对账，再出稿；口径不一致就上报。",
+  });
+  assert.equal(next.role, "数据工程师");
+  assert.equal(next.tools.length, profile.tools.length, "工具白名单必须保持原样");
+  assert.equal(store.readMember("t1", "林工").body, "先对账，再出稿；口径不一致就上报。");
+  // 空角色/空目标拒：这两列是成员收敛行为的依据，不能存成空串
+  assert.throws(() => store.updateMember("t1", "林工", { role: "  " }), /角色不能为空/);
+  assert.throws(() => store.updateMember("t1", "林工", { goal: "" }), /单一目标不能为空/);
+  // 部分更新：没传的字段保持原值
+  const after = store.updateMember("t1", "林工", { goal: "只改目标" });
+  assert.equal(after.role, "数据工程师");
+  assert.equal(store.readMember("t1", "林工").goal, "只改目标");
+});
+
+test("删成员：只删岗位档案，派单记录保留（审计资产）；最后一名不许删", () => {
+  store.createTeam("t1", "月报突击队");
+  store.writeMember("t1", profile);
+  store.writeMember("t1", { ...profile, name: "小眉", role: "图表校对" });
+  store.appendAssignment("t1", { taskId: "0912", at: "14:05", kind: "assign", member: "林工", text: "跑一单" });
+  store.removeMember("t1", "林工");
+  assert.equal(store.listMembers("t1").length, 1);
+  assert.equal(store.listMembers("t1")[0].name, "小眉");
+  assert.equal(store.readAssignments("t1", "0912").length, 1, "派单记录不随成员删除");
+  assert.throws(() => store.removeMember("t1", "林工"), /没有成员/);
+  // 空编制既派不了活又占着"在职团队"：要清空请直接解散
+  assert.throws(() => store.removeMember("t1", "小眉"), /最后一名成员/);
+});
+
+test("头像库：12 款 id 唯一、无蓝紫；按名字分配稳定且会避开已用脸", async () => {
+  const { AVATARS, avatarFor, avatarById, isAvatarId } = await import("../dist/shared/avatars.js");
+  assert.equal(AVATARS.length, 12);
+  assert.equal(new Set(AVATARS.map((a) => a.id)).size, 12);
+  for (const a of AVATARS) {
+    assert.ok(isAvatarId(a.id));
+    const n = Number.parseInt(a.color.slice(1), 16);
+    const [r, g, b] = [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+    assert.ok(b <= Math.max(r, g), `${a.id} 不能是蓝/紫偏色：${a.color}`);
+    assert.equal(avatarById(a.id), a);
+  }
+  assert.equal(isAvatarId("a13"), false);
+  assert.equal(avatarFor("林工").id, avatarFor("林工").id, "同名必须稳定");
+  assert.notEqual(avatarFor("林工", [avatarFor("林工").id]).id, avatarFor("林工").id, "被占用就换一张");
+});
+
+test("岗位档案：avatar_id 写入 frontmatter 并能读回", () => {
+  const withAvatar = { ...profile, avatarId: "a09" };
+  const md = serializeMemberProfile(withAvatar);
+  assert.match(md, /avatar_id: "a09"/);
+  assert.equal(parseMemberProfile(md).avatarId, "a09");
+  assert.equal(parseMemberProfile(serializeMemberProfile(profile)).avatarId, undefined, "老档案没这字段也能读");
+});
+
+test("开源头像库：12 张脸 seed 唯一，换画风不动 id/色板契约", async () => {
+  const { AVATARS, avatarFor, avatarById } = await import("../dist/shared/avatars.js");
+  assert.equal(AVATARS.length, 12);
+  assert.equal(
+    new Set(AVATARS.map((a) => a.seed)).size,
+    12,
+    "两张脸共用一个 seed 会导致同队撞脸",
+  );
+  assert.ok(AVATARS.every((a) => typeof a.seed === "string" && a.seed.length > 0));
+  assert.equal(avatarById("a11")?.color, "#9a8f7a", "id → 岗位色契约不能随画风变");
+  assert.deepEqual(avatarFor("顾明"), avatarFor("顾明"), "同名成员跨会话必须同一张脸");
+});

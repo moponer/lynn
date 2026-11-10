@@ -2,8 +2,9 @@ import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, nativeImage,
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { autoUpdater } from "electron-updater";
-import type { RpcMethod } from "../shared/contract";
+import type { CaptureRect, RpcMethod } from "../shared/contract";
 import { Kernel } from "./kernel";
+import { createCaptureHost } from "./capture-host";
 import { defaultDataRoot } from "./settings";
 import { resolveFeedUrl, transition, type UpdateState } from "./updater";
 import { discoverModels } from "./providers";
@@ -39,6 +40,21 @@ let win: BrowserWindow | null = null;
 let pet: BrowserWindow | null = null;
 let tray: Tray | null = null;
 
+/**
+ * 区域截图（M2-13 消费侧）：全局快捷键 / 托盘 / 输入框按钮都能起。
+ * 截好的图先推事件、再留一份待取队列兜底（窗口刚起来或焦点切换时事件可能漏接），
+ * 渲染层按 shot.id 去重；图片只进「本轮随附」，用户自己决定发不发。
+ */
+const captureHost = createCaptureHost({
+  indexHtml,
+  preload,
+  hotkey: kernel.getPrefs().captureHotkey,
+  focusMain: () => focusMain(),
+  onShot: (shot) => {
+    if (win && !win.isDestroyed()) win.webContents.send("lynn:event", { type: "capture", shot });
+  },
+});
+
 /** 托盘图标（M1-18）：assets/tray.png（scripts/gen-tray-icon.mjs 生成） */
 function trayIcon() {
   const p = path.join(__dirname, "..", "assets", "tray.png");
@@ -54,6 +70,13 @@ function createTray(): void {
     Menu.buildFromTemplate([
       { label: "打开指挥台", click: () => focusMain() },
       { label: "桌宠", click: () => createPet() },
+      {
+        label: "区域截图",
+        click: () => {
+          const r = captureHost.start();
+          if (!r.ok) console.warn(`[capture] ${r.error ?? "截图没能启动"}`);
+        },
+      },
       { type: "separator" },
       {
         label: "退出",
@@ -76,6 +99,8 @@ function registerHotkey(): void {
   } catch (err) {
     console.warn(`[hotkey] 注册异常：${err instanceof Error ? err.message : String(err)}`);
   }
+  // 截图快捷键单独注册：失败不牵连呼出键，状态可在设置里如实看到
+  captureHost.register();
 }
 
 /** 系统通知（M1-18）：只在主窗口不可见时发，不做打扰源 */
@@ -225,8 +250,13 @@ async function handleUpdateRpc(method: string): Promise<unknown> {
   return { ...updateState };
 }
 
-const preload = () => path.join(__dirname, "preload.js");
-const indexHtml = () => path.join(__dirname, "../renderer/index.html");
+// 函数声明而非 const 箭头：截图壳层在模块顶层就要拿到这两个路径（提升，避开 TDZ）
+function preload(): string {
+  return path.join(__dirname, "preload.js");
+}
+function indexHtml(): string {
+  return path.join(__dirname, "../renderer/index.html");
+}
 
 /** 上次用的主题底色：渲染层切换时写进来，首帧直接用，避免亮色主题先闪一帧暗底 */
 function lastBackground(): string {
@@ -432,6 +462,34 @@ app.whenReady().then(async () => {
       if (method === "plugins.probe") {
         return kernel.probePlugin((params as { id: string }).id);
       }
+      // 区域截图：捕获与窗口都在壳层，内核完全不参与（不进模型工具面）
+      if (method === "capture.status") return captureHost.status();
+      if (method === "capture.start") return captureHost.start();
+      if (method === "capture.frame") return captureHost.frame();
+      if (method === "capture.commit") {
+        const p = params as { rect?: Partial<CaptureRect>; dataUrl?: string; action?: string } | undefined;
+        const r = p?.rect;
+        if (!r || ![r.x, r.y, r.width, r.height].every((n) => typeof n === "number" && Number.isFinite(n))) {
+          return { ok: false, error: "选区坐标无效" };
+        }
+        if (typeof p?.dataUrl !== "string" || !["attach", "copy", "save"].includes(p.action ?? "")) {
+          return { ok: false, error: "完成动作或图片数据无效" };
+        }
+        return captureHost.commit({ rect: r as CaptureRect, dataUrl: p.dataUrl, action: p.action as "attach" | "copy" | "save" });
+      }
+      if (method === "capture.cancel") return captureHost.cancel();
+      if (method === "capture.pending") return { shots: captureHost.takePending() };
+      // 改了截图快捷键要立刻重注册全局热键（设置页只跟内核打交道，热键归壳层）
+      if (method === "config.prefs") {
+        const r = kernel.handle("config.prefs", params);
+        const p = params as { captureHotkey?: string };
+        const out = r as { ok?: boolean; captureHotkey?: string };
+        if (p.captureHotkey !== undefined && out.ok && out.captureHotkey) {
+          const changed = captureHost.setHotkey(out.captureHotkey);
+          if (!changed.ok) console.warn(`[capture] ${changed.error ?? "改键没生效"}`);
+        }
+        return r;
+      }
       // 自绘标题栏：窗口控制归壳（不经过内核）
       if (method === "window.control") {
         const p = params as { action: "minimize" | "maximize" | "close" | "query" };
@@ -472,6 +530,16 @@ app.whenReady().then(async () => {
         const err = await shell.openPath(target);
         return err ? { ok: false, error: err } : { ok: true };
       }
+      if (method === "app.pickDirs") {
+        // 只读授权多选：一次选多个目录（整盘等敏感选择由内核再验）
+        const p = params as { title?: string } | undefined;
+        if (!win || win.isDestroyed()) return { canceled: true };
+        const r = await dialog.showOpenDialog(win, {
+          title: p?.title ?? "选择要授权只读访问的目录（可多选）",
+          properties: ["openDirectory", "multiSelections"],
+        });
+        return r.canceled || !r.filePaths.length ? { canceled: true } : { paths: r.filePaths };
+      }
       if (method === "app.pickDir") {
         // 只读授权的目录选择：原生对话框，用户亲手选，模型无法代为选择
         const p = params as { title?: string } | undefined;
@@ -487,6 +555,16 @@ app.whenReady().then(async () => {
         app.relaunch();
         setTimeout(() => app.exit(0), 80);
         return { ok: true };
+      }
+      if (method === "app.openPath") {
+        // 只允许打开数据根内的文件（导出包 / 工件），不当前端可调的任意文件执行器
+        const p = params as { path: string };
+        const base = path.resolve(kernel.dataRoot);
+        const target = path.resolve(String(p.path ?? ""));
+        if (!target.startsWith(base + path.sep)) return { ok: false, error: "只能打开风铃数据目录里的文件" };
+        if (!fs.existsSync(target)) return { ok: false, error: "文件不存在" };
+        const err = await shell.openPath(target);
+        return err ? { ok: false, error: err } : { ok: true };
       }
       if (method === "app.openData") {
         const kind = (params as { kind: "data" | "logs" }).kind;
@@ -526,6 +604,7 @@ app.whenReady().then(async () => {
 let quitting = false;
 
 app.on("before-quit", (event) => {
+  captureHost.dispose();
   globalShortcut.unregisterAll();
   if (quitting) return;
   event.preventDefault();

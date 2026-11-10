@@ -25,16 +25,19 @@ const GROUP_OF: Record<TaskStatus, JobGroup> = {
 /** 台账里按这个顺序渲染（归档单独走归档带） */
 export const GROUP_ORDER: Exclude<JobGroup, "archived">[] = ["waiting", "stuck", "running", "queued"];
 
-export function groupOf(status: TaskStatus): JobGroup {
+export function groupOf(status: TaskStatus, reviewer?: "lynn" | "user"): JobGroup {
+  /* 派给成员的活正在等风铃验：对用户来说是"有人正在弄"，不该占用他的待办 */
+  if (status === "in_review" && reviewer === "lynn") return "running";
   return GROUP_OF[status] ?? "queued";
 }
 
 /**
  * 只有 in_review 能验收：blocked 是"她卡住了、要新证据"，
  * 把它当交付会让用户在没产物时点下"验收归档"。
+ * reviewer=lynn 的单由风铃验，用户没有动作。
  */
-export function actionOf(status: TaskStatus): JobAction {
-  if (status === "in_review") return "accept";
+export function actionOf(status: TaskStatus, reviewer?: "lynn" | "user"): JobAction {
+  if (status === "in_review") return reviewer === "lynn" ? "none" : "accept";
   if (status === "blocked") return "unblock";
   return "none";
 }

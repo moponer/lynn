@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
+  CaptureShot,
   FeedCard,
   KernelEvent,
   PermissionMode,
@@ -10,14 +11,29 @@ import type {
 import { SettingsModal } from "./components/SettingsModal";
 import { Icon } from "./components/Icon";
 import { DeskView } from "./desk/Desk";
+import { useUiPlugins } from "./desk/ui-host";
+import { pluginsForSlot } from "../shared/ui-plugin";
+import { consoleViewOf } from "./console/registry";
 import { deskFromSnapshot, type Desk } from "./desk/model";
-import { applyPluginTokens, applyTheme, loadTheme, type ThemeId, type ThemeMode } from "./desk/theme";
+import { applyPluginStyle, applyPluginTokens, applyTheme, loadTheme, normalizeThemeId, type ThemeId, type ThemeMode } from "./desk/theme";
 import type { LynnPack } from "./desk/lynnpack";
 import { Wizard, type WizardResult } from "./desk/Wizard";
 import { Standby } from "./desk/Standby";
 import { Pet } from "./desk/Pet";
 import { ambientForTheme, type AmbientMode } from "../shared/ambient";
 import { ZH_STRINGS } from "../shared/i18n-strings";
+
+/** 舞台视图选择（跨会话记住）：值台 = 原来的桌面，控制台 = stage.console 视图 */
+const STAGE_KEY = "lynn.stage.view";
+type StageView = "desk" | "console";
+
+function readStageView(): StageView {
+  try {
+    return localStorage.getItem(STAGE_KEY) === "desk" ? "desk" : "console";
+  } catch {
+    return "console";
+  }
+}
 import { mergeStrings } from "../shared/i18n";
 import { I18nProvider } from "./i18n";
 
@@ -63,6 +79,8 @@ export default function App() {
   const isPet = typeof location !== "undefined" && new URLSearchParams(location.search).get("pet") === "1";
   const [snap, setSnap] = useState<SessionSnapshot | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  /** 从编制表「管理」直达团队页；undefined = 按默认（概览）打开 */
+  const [settingsTab, setSettingsTab] = useState<"team" | "auto" | undefined>(undefined);
   const [theme, setTheme] = useState(() => loadTheme());
   const [wizardOpen, setWizardOpen] = useState(() => !localStorage.getItem("lynn.onboarded"));
   const [standby, setStandby] = useState(false);
@@ -72,6 +90,38 @@ export default function App() {
   const ambient = useMemo(() => ambientForTheme(theme.id), [theme.id]);
   const [avatar, setAvatar] = useState(() => localStorage.getItem("lynn.avatar") !== "0");
   const [notice, setNotice] = useState<string | null>(null);
+  /**
+   * `stage.console` 卡槽：哪个插件占了它、用注册表里的哪个视图。
+   * 启用状态来自主进程（_state.json），不在本地记「当前是不是大屏」——
+   * 禁用插件 → 卡槽空 → 自动回落值台，不存在被暗开关卡在空视图里的情况。
+   */
+  const { enabled: uiPlugins } = useUiPlugins();
+  const consoleSlot = pluginsForSlot(uiPlugins, "stage.console")[0];
+  /**
+   * 值台 / 控制台二选一。选择记在本地（不是插件启停状态）：
+   * 插件被禁用 → 卡槽空 → 无论记的是什么都回落值台，不会卡在空视图里。
+   */
+  const [stageView, setStageView] = useState<StageView>(readStageView);
+  const chooseStage = useCallback((v: StageView) => {
+    setStageView(v);
+    try {
+      localStorage.setItem(STAGE_KEY, v);
+    } catch {
+      /* 隐私模式下不记住也不影响本次切换 */
+    }
+  }, []);
+  const ConsoleHost = consoleSlot && stageView === "console" ? consoleViewOf(consoleSlot.view) : null;
+  /** 截图结果：只进输入框的「本轮随附」，不自动发送 */
+  const [captureShot, setCaptureShot] = useState<CaptureShot | null>(null);
+  const seenShots = useRef(new Set<string>());
+  /** 事件 / 待取队列双通道共用，按 id 去重（窗口刚起来或焦点切换时可能同时收到） */
+  const acceptShot = useCallback((shot: CaptureShot) => {
+    if (!shot?.id || seenShots.current.has(shot.id)) return;
+    seenShots.current.add(shot.id);
+    setCaptureShot(shot);
+    const clip = shot.copied ? "，并已复制到剪贴板" : shot.copied === false ? "（剪贴板写入失败）" : "";
+    setNotice(`截图 ${shot.width}×${shot.height} 已放进本轮随附${clip}（处理 ${shot.ms}ms），发送前可以移除。`);
+  }, []);
   /** M3-08：界面语言字典（内置 ⊕ 语言包插件），lang 变化即重拉 */
   const [i18nStrings, setI18nStrings] = useState<Record<string, string>>(ZH_STRINGS);
   /** 版本握手：内核比界面旧（改了代码没重启）时给一条可见提示 + 一键重启 */
@@ -136,6 +186,7 @@ export default function App() {
 
   const changeTheme = useCallback((id: ThemeId, mode: ThemeMode) => {
     applyPluginTokens(undefined); // 换基础主题就清掉插件 Token 覆盖
+    applyPluginStyle(null); // 形态层一并卸载，避免插件样式悬空
     setTheme({ id, mode });
   }, []);
 
@@ -147,7 +198,8 @@ export default function App() {
   /** .lynnpack 导入：只应用配置（主题 / 形象），不含 Key、不含记忆 */
   const applyPack = useCallback(
     (p: LynnPack) => {
-      changeTheme(p.theme.id, p.theme.mode);
+      // 旧包里可能是已下线的主题 id：归一后再应用
+      changeTheme(normalizeThemeId(p.theme.id), p.theme.mode);
       changeAvatar(p.avatar);
     },
     [changeAvatar, changeTheme],
@@ -161,18 +213,23 @@ export default function App() {
     }
   }, []);
 
-  /** 造铃完成：主题立即生效；Key 有才写盘 */
+  /** 造铃完成：主题立即生效；改了端点/模型也要写盘（不能只在填了 Key 时才保存） */
   const finishWizard = useCallback(
     async (r: WizardResult) => {
       changeTheme(r.theme, r.mode);
-      if (r.apiKey) {
+      const customChanged =
+        r.baseUrl.trim() !== (snap?.model.baseUrl ?? "").trim() ||
+        r.model.trim() !== (snap?.model.model ?? "").trim();
+      if (r.provider && r.baseUrl && r.model && (r.apiKey || customChanged)) {
         try {
-          await rpc("config.save", {
+          const saved = await rpc("config.save", {
             provider: r.provider,
             baseUrl: r.baseUrl,
             model: r.model,
             apiKey: r.apiKey,
           });
+          // 换端点没填 Key / 首次没填 Key 会被如实拒绝；向导不阻塞，设置页可补
+          if (!saved.ok) console.warn(`[wizard] 模型配置未保存：${saved.error}`);
         } catch {
           // 存 Key 失败不阻塞进入主界面；用户可在「我的风铃」里重填
         }
@@ -182,7 +239,7 @@ export default function App() {
       setWizardOpen(false);
       await refresh();
     },
-    [changeAvatar, changeTheme, refresh],
+    [changeAvatar, changeTheme, refresh, snap?.model.baseUrl, snap?.model.model],
   );
 
   useEffect(() => {
@@ -202,7 +259,7 @@ export default function App() {
 
   // 流式补字合帧（对齐蓝本 tether-ai 的 rAF 合并）：一帧最多一次 setState，
   // 否则每个 delta 都重建整棵 feed，长回复会一顿一顿
-  const pendingDelta = useRef<{ id: string; text: string } | null>(null);
+  const pendingDelta = useRef<{ id: string; text?: string; thinking?: string } | null>(null);
   const deltaFrame = useRef<number | null>(null);
 
   useEffect(() => {
@@ -213,14 +270,30 @@ export default function App() {
         return;
       }
       if (ev.type === "delta" && ev.cardId) {
-        pendingDelta.current = { id: ev.cardId, text: ev.text };
+        pendingDelta.current = { id: ev.cardId, text: ev.text, thinking: ev.thinking };
         if (deltaFrame.current === null) {
           deltaFrame.current = window.requestAnimationFrame(() => {
             deltaFrame.current = null;
             const d = pendingDelta.current;
             pendingDelta.current = null;
             if (!d) return;
-            setSnap((s) => (s ? { ...s, feed: s.feed.map((c) => (c.id === d.id ? { ...c, text: d.text } : c)) } : s));
+            // 思考与正文各落各的字段：正文永远不把思考混进去
+            setSnap((s) =>
+              s
+                ? {
+                    ...s,
+                    feed: s.feed.map((c) =>
+                      c.id === d.id
+                        ? {
+                            ...c,
+                            ...(d.text !== undefined ? { text: d.text } : {}),
+                            ...(d.thinking !== undefined ? { thinking: d.thinking } : {}),
+                          }
+                        : c,
+                    ),
+                  }
+                : s,
+            );
           });
         }
         return;
@@ -231,6 +304,11 @@ export default function App() {
       }
       // 窗口事件只关系到自绘标题栏的按钮态，不触发快照重拉
       if (ev.type === "window") return;
+      // 截图只进随附条，不拉快照（拉了会重渲染整张指挥台，输入框草稿会抖）
+      if (ev.type === "capture") {
+        acceptShot(ev.shot);
+        return;
+      }
       void refresh();
     });
     return () => {
@@ -240,7 +318,23 @@ export default function App() {
         deltaFrame.current = null;
       }
     };
-  }, [refresh]);
+  }, [refresh, acceptShot]);
+
+  // 兜底：窗口刚起来 / 重新获得焦点时取回没接到的截图；与事件按 id 去重
+  useEffect(() => {
+    const pull = () => {
+      void rpc("capture.pending")
+        .then((r) => {
+          for (const s of r.shots ?? []) acceptShot(s);
+        })
+        .catch(() => {
+          /* 旧内核没有这个 RPC：截图仍走事件，不打扰用户 */
+        });
+    };
+    pull();
+    window.addEventListener("focus", pull);
+    return () => window.removeEventListener("focus", pull);
+  }, [acceptShot]);
 
   const desk: Desk | null = useMemo(() => (snap ? deskFromSnapshot(snap) : null), [snap]);
 
@@ -286,26 +380,179 @@ export default function App() {
   );
 
   /**
-   * 新对话：先问"这个会话用哪个工作区"（取消 = 沿用当前）。
-   * 不同会话各带一个工作区，"审查 A 项目"和"整理 B 资料"不会串目录。
+   * 新对话：不弹目录框（2026-11-10）。
+   * 默认继承当前会话的根；要换就点顶栏的项目 chip——选择不再挡在"开新会话"这一步。
    */
   const onNew = useCallback(async () => {
     setNotice(null);
     try {
-      let projectRoot: string | undefined;
-      try {
-        const picked = await rpc("app.pickDir", { title: "新会话的工作区（取消 = 沿用当前工作区）" });
-        projectRoot = picked?.path;
-      } catch {
-        // 旧内核没有 app.pickDir：沿用当前工作区，不打断新建
-        projectRoot = undefined;
-      }
-      await rpc("session.new", projectRoot ? { projectRoot } : {});
+      await rpc("session.new", {});
       await refresh();
     } catch (err) {
       setNotice(`新对话失败：${err instanceof Error ? err.message : String(err)}`);
     }
   }, [refresh]);
+
+  /**
+   * 只读授权（2026-11-10）：一次可选多个目录；盘符根需要二次确认。
+   * 目录只能由用户在原生对话框里点选，模型不能替用户授权。
+   */
+  const onGrantRead = useCallback(
+    async (taskId: string) => {
+      setNotice(null);
+      try {
+        const picked = await rpc("app.pickDirs", { title: "选择要授权只读访问的目录（可多选）" });
+        const paths = picked?.paths ?? [];
+        if (!paths.length) return;
+        const drives = paths.filter((p) => /^[a-zA-Z]:[\\/]?$/.test(p));
+        let allowDriveRoot = false;
+        if (drives.length) {
+          const ok = window.confirm(
+            `将把整个磁盘授权为只读：${drives.join("、")}\n\n成员能读盘上的所有文件（写仍然只能在任务工作区）。确定吗？`,
+          );
+          if (!ok) return;
+          allowDriveRoot = true;
+        }
+        const r = await rpc("task.grantRead", { taskId, dirs: paths, allowDriveRoot });
+        if (!r.ok) setNotice(rpcResultError(r, "授权失败"));
+        await refresh();
+      } catch (err) {
+        setNotice(rpcErrorText(err, "授权失败"));
+      }
+    },
+    [refresh],
+  );
+
+  /** 这次不用工作区：主根清空，任务产出落卷宗沙箱 */
+  const onClearWorkspace = useCallback(async () => {
+    setNotice(null);
+    try {
+      const r = await rpc("project.clearRoot");
+      if (!r.ok) setNotice(r.error ?? "清空工作区失败");
+      await refresh();
+    } catch (err) {
+      setNotice(rpcErrorText(err, "清空工作区失败"));
+    }
+  }, [refresh]);
+
+  /** 控制台 `cd`：空 = 选目录；- = 回默认；--none = 不用工作区；其它按路径（相对基于当前根） */
+  const onCd = useCallback(
+    async (arg: string): Promise<string> => {
+      const a = arg.trim();
+      try {
+        if (!a) {
+          const picked = await rpc("app.pickDir", { title: "切到哪个工作区" });
+          if (!picked?.path) return "已取消";
+          const r = await rpc("project.setRoot", { root: picked.path });
+          await refresh();
+          return r.ok ? `工作区：${r.root}` : (r.error ?? "切换失败");
+        }
+        if (a === "--none") {
+          const r = await rpc("project.clearRoot");
+          await refresh();
+          return r.ok ? "这次不用工作区（产出落任务卷宗）" : (r.error ?? "失败");
+        }
+        if (a === "-") {
+          const prefs = await rpc("workspace.prefs");
+          const def = prefs.defaultWorkspace;
+          if (!def) return "没有设置默认工作区（可在设置 → 数据 → 工作区里设）";
+          const r = await rpc("project.setRoot", { root: def });
+          await refresh();
+          return r.ok ? `工作区：${r.root}` : (r.error ?? "切换失败");
+        }
+        const r = await rpc("project.setRoot", { root: a });
+        await refresh();
+        return r.ok ? `工作区：${r.root}` : (r.error ?? "切换失败");
+      } catch (err) {
+        return `cd 失败：${err instanceof Error ? err.message : String(err)}`;
+      }
+    },
+    [refresh],
+  );
+
+  /** 给当前会话加只读目录（可多选；整盘要确认） */
+  const onAddReadRoots = useCallback(async () => {
+    setNotice(null);
+    try {
+      const picked = await rpc("app.pickDirs", { title: "选择要加入当前会话的只读目录（可多选）" });
+      const paths = picked?.paths ?? [];
+      if (!paths.length) return;
+      const isDrive = (p: string) => /^[a-zA-Z]:[\\/]?$/.test(p);
+      const drives = paths.filter(isDrive);
+      if (drives.length) {
+        const ok = window.confirm(`将把整个磁盘作为只读根：${drives.join("、")}\n\n成员能读盘上所有文件（写仍然只能在工作区）。继续？`);
+        if (!ok) return;
+      }
+      for (const p of paths) {
+        const r = await rpc("workspace.addRoot", {
+          path: p,
+          mode: "ro",
+          ...(isDrive(p) ? { allowDriveRoot: true } : {}),
+        });
+        if (!r.ok) {
+          setNotice(r.error ?? "添加只读目录失败");
+          break;
+        }
+      }
+      await refresh();
+    } catch (err) {
+      setNotice(rpcErrorText(err, "添加只读目录失败"));
+    }
+  }, [refresh]);
+
+  /** 审查快照：把工作区复制进任务沙箱再跑测试（原项目不动） */
+  const onSnapshotProject = useCallback(
+    async (taskId: string) => {
+      setNotice(null);
+      const ok = window.confirm(
+        "把这张单的工作区复制进任务沙箱？\n\n会排除 node_modules / .git / dist 等大目录，原项目一个字节都不动。之后成员在副本里跑构建和测试。",
+      );
+      if (!ok) return;
+      try {
+        const r = await rpc("task.snapshotProject", { taskId });
+        if (!r.ok) setNotice(r.error ?? "快照失败");
+        else setNotice(`已复制进任务沙箱：${r.root ?? ""}`);
+        await refresh();
+      } catch (err) {
+        setNotice(rpcErrorText(err, "快照失败"));
+      }
+    },
+    [refresh],
+  );
+
+  /** 导出任务卷宗 zip（交付物 + 时间线 + 摘要），导出后用系统程序打开 */
+  const onExportTask = useCallback(
+    async (taskId: string) => {
+      setNotice(null);
+      try {
+        const r = await rpc("task.export", { taskId });
+        if (!r.ok) {
+          setNotice(r.error ?? "导出失败");
+        } else {
+          setNotice(`已导出 ${r.path ?? ""}`);
+          if (r.path) await rpc("app.openPath", { path: r.path });
+        }
+        await refresh();
+      } catch (err) {
+        setNotice(rpcErrorText(err, "导出失败"));
+      }
+    },
+    [refresh],
+  );
+
+  const onRemoveReadRoot = useCallback(
+    async (p: string) => {
+      setNotice(null);
+      try {
+        const r = await rpc("workspace.removeRoot", { path: p });
+        if (!r.ok) setNotice(r.error ?? "撤销失败");
+        await refresh();
+      } catch (err) {
+        setNotice(rpcErrorText(err, "撤销失败"));
+      }
+    },
+    [refresh],
+  );
 
   /** 换当前会话的工作区（点顶栏面包屑里的项目名） */
   const onPickProject = useCallback(async () => {
@@ -451,6 +698,67 @@ export default function App() {
           </button>
         </div>
       )}
+      {ConsoleHost ? (
+        <ConsoleHost
+          desk={desk}
+          permission={snap.permission}
+          configured={snap.model.configured}
+          onExit={() => chooseStage("desk")}
+          onSend={(t) => void onSend(t, "queue")}
+          onCd={onCd}
+          onAbort={() => void onAbort()}
+          onPermission={(m) => void onPermission(m)}
+          onOpenSettings={() => {
+            setSettingsTab(undefined);
+            setSettingsOpen(true);
+          }}
+          onDecisionResolve={(id, a, t) => void onDecisionResolve(id, a, t)}
+          onDecision={(taskId, action, reason) => void onDecision(taskId, action, reason)}
+          onCancelTask={(taskId) => {
+            void rpc("task.cancel", { taskId }).then(async (r) => {
+              if (!r.ok) setNotice(rpcResultError(r, "停不下来"));
+              await refresh();
+            });
+          }}
+          onDismissTask={(taskId) => {
+            void rpc("task.dismiss", { taskId }).then(async (r) => {
+              if (!r.ok) setNotice(rpcResultError(r, "取消失败"));
+              await refresh();
+            });
+          }}
+          onRemoveTask={(taskId) => {
+            setNotice(null);
+            void rpc("task.remove", { taskId })
+              .then(async (r) => {
+                if (!r.ok) setNotice(rpcResultError(r, "删除失败"));
+                else if (r.kept?.length) setNotice(`已删工单与卷宗；${r.kept.join("、")} 里的文件没动。`);
+                await refresh();
+              })
+              .catch((err) => setNotice(rpcErrorText(err, "删除失败")));
+          }}
+          onGrantRead={onGrantRead}
+          onReopenTask={(taskId) => {
+            setNotice(null);
+            void rpc("task.decide", { taskId, action: "reopen" })
+              .then(async (r) => {
+                if (!r.ok) setNotice(rpcResultError(r, "重开失败"));
+                await refresh();
+              })
+              .catch((err) => setNotice(rpcErrorText(err, "重开失败")));
+          }}
+          onPurgeOrphans={() => {
+            setNotice(null);
+            void rpc("task.purgeOrphans")
+              .then(async (r) => {
+                setNotice(
+                  `清掉 ${r.removed} 张无主单${r.kept ? `，${r.kept} 张目录被占用没删掉` : ""}。`,
+                );
+                await refresh();
+              })
+              .catch((err) => setNotice(rpcErrorText(err, "清理失败")));
+          }}
+        />
+      ) : (
       <DeskView
         desk={desk}
         permission={snap.permission}
@@ -465,8 +773,20 @@ export default function App() {
         onDecision={(id, a, reason) => void onDecision(id, a, reason)}
         onDecisionResolve={(id, a, text) => void onDecisionResolve(id, a, text)}
         onFeedAction={onFeedAction}
-        onOpenSettings={() => setSettingsOpen(true)}
+        onOpenSettings={() => {
+          setSettingsTab(undefined);
+          setSettingsOpen(true);
+        }}
+        onManageTeam={() => {
+          setSettingsTab("team");
+          setSettingsOpen(true);
+        }}
         onPickProject={() => void onPickProject()}
+        onClearWorkspace={() => void onClearWorkspace()}
+        onAddReadRoots={() => void onAddReadRoots()}
+        onRemoveReadRoot={(p) => void onRemoveReadRoot(p)}
+        onSnapshotProject={(id) => void onSnapshotProject(id)}
+        onExportTask={(id) => void onExportTask(id)}
         onStandby={() => setStandby(true)}
         onNew={() => void onNew()}
         onUndo={() => void onUndo()}
@@ -485,7 +805,20 @@ export default function App() {
         onThreadRemove={(id) => {
           setNotice(null);
           void rpc("thread.remove", { id })
-            .then(() => refresh())
+            .then((r) => {
+              // 会话=任务容器：删会话会连带清掉它名下的工单，清了几张必须说出来，
+              // 否则用户只会发现"工单自己消失了"，比留着更让人不安
+              const n = r.removedTasks ?? 0;
+              const kept = r.keptTasks ?? 0;
+              if (n || kept) {
+                setNotice(
+                  `已删会话，连带清掉 ${n} 张工单${kept ? `（还有 ${kept} 张目录被占用，留在台账里）` : ""}。`,
+                );
+              } else if (r.threadsLeft === 0) {
+                setNotice("会话都删光了。说一句话就会顺手再开一条。");
+              }
+              return refresh();
+            })
             .catch((err) => setNotice(`删除会话失败：${err instanceof Error ? err.message : String(err)}`));
         }}
         onTaskFeed={(taskId) => rpc("task.feed", { taskId })}
@@ -509,22 +842,12 @@ export default function App() {
           void rpc("task.remove", { taskId })
             .then(async (r) => {
               if (!r.ok) setNotice(rpcResultError(r, "删除失败"));
+              else if (r.kept?.length) setNotice(`已删工单与卷宗；${r.kept.join("、")} 里的文件没动。`);
               await refresh();
             })
             .catch((err) => setNotice(rpcErrorText(err, "删除失败")));
         }}
-        onGrantRead={(taskId) => {
-          setNotice(null);
-          // 目录由用户在原生的选择框里点选——模型不能替用户授权
-          void rpc("app.pickDir", { title: "选择要授权只读访问的目录" })
-            .then(async (p) => {
-              if (!p.path) return;
-              const r = await rpc("task.grantRead", { taskId, dir: p.path });
-              if (!r.ok) setNotice(rpcResultError(r, "授权失败"));
-              await refresh();
-            })
-            .catch((err) => setNotice(rpcErrorText(err, "授权失败")));
-        }}
+        onGrantRead={onGrantRead}
         onRevokeRead={(taskId) => {
           setNotice(null);
           void rpc("task.revokeRead", { taskId })
@@ -540,8 +863,19 @@ export default function App() {
             await refresh();
           });
         }}
+        captureShot={captureShot}
         notice={notice}
       />
+      )}
+      {/* 有控制台可用、但当前不在控制台时才给入口（插件停用 → 卡槽空 → 入口一并消失） */}
+      {consoleSlot && !ConsoleHost && !settingsOpen && (
+        <div className="cs-viewswitch" role="group" aria-label="视图切换">
+          <span className="cs-vs-cur">值台</span>
+          <button type="button" onClick={() => chooseStage("console")} title="切到沉浸控制台（大屏态势视图）">
+            控制台 <span aria-hidden="true">›</span>
+          </button>
+        </div>
+      )}
       {settingsOpen && (
         <SettingsModal
           current={snap.model}
@@ -560,6 +894,7 @@ export default function App() {
           onAvatar={changeAvatar}
           onPack={applyPack}
           onApplyThemeTokens={(tokens) => applyPluginTokens(tokens)}
+          onApplyPluginStyle={(id, css) => applyPluginStyle(id, css)}
           onAmbient={(m) => {
             setAmbientMode(m);
             localStorage.setItem("lynn.ambient", m);
@@ -578,6 +913,7 @@ export default function App() {
           }}
           onClose={() => setSettingsOpen(false)}
           onSaved={() => void refresh()}
+          initialTab={settingsTab}
         />
       )}
     </I18nProvider>

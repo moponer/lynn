@@ -6,7 +6,9 @@ import "@fontsource/ibm-plex-mono/400.css";
 import "@fontsource/ibm-plex-mono/500.css";
 import App from "./App";
 import { ErrorBoundary } from "./components/ErrorBoundary";
+import { CaptureOverlay } from "./capture/CaptureOverlay";
 import "./styles/dispatch.css";
+import "./styles/capture.css";
 
 // 未捕获异常一律落盘：白屏时至少留下现场（写 <数据根>/logs/renderer.log）
 const report = (payload: { kind: "error" | "rejection"; message: string; stack?: string; source?: string }) => {
@@ -24,10 +26,11 @@ window.addEventListener("unhandledrejection", (e) => {
   report({ kind: "rejection", message: r instanceof Error ? r.message : String(r), stack: r instanceof Error ? r.stack : undefined });
 });
 
+// 选区窗是同一份 index.html + 独立 query：只挂选区树，不加载指挥台状态与会话快照
+const isCapture = new URLSearchParams(location.search).get("capture") === "1";
+
 createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    <ErrorBoundary>
-      <App />
-    </ErrorBoundary>
+    <ErrorBoundary>{isCapture ? <CaptureOverlay /> : <App />}</ErrorBoundary>
   </React.StrictMode>,
 );

@@ -111,8 +111,9 @@ test("Kernel：技能被发现；激活后 allowed-tools 真的拦工具（直�
     const meta = await kernel.executeToolCall("report_to_user", { text: "hi" });
     assert.ok(!meta.includes("allowed-tools"), "元工具始终放行");
 
-    // system prompt 注入
-    assert.ok(kernel.systemPrompt().includes("月报整理"));
+    // 注入位置（2026-11-10 缓存友好化）：技能内容进当轮消息尾部，不进 system prompt
+    assert.ok(kernel.pendingSkillText.includes("月报整理"), "技能正文在当轮注入");
+    assert.ok(!kernel.systemPrompt().includes("月报整理"), "system prompt 保持稳定（前缀缓存友好）");
   } finally {
     await kernel.dispose();
   }

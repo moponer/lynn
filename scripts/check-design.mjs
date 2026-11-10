@@ -60,12 +60,8 @@ const css = scanCss(cssFile);
 
 // ---------- 2) 主题块必须四色齐全 ----------
 const themeBlocks = [
-  [":root", /:root\s*\{([\s\S]*?)\}/],
-  ["夜航·亮", /html\[data-theme="night"\]\[data-mode="light"\]\s*\{([\s\S]*?)\}/],
-  ["纸墨·亮", /html\[data-theme="paper"\]\[data-mode="light"\]\s*\{([\s\S]*?)\}/],
-  ["纸墨·暗", /html\[data-theme="paper"\]\[data-mode="dark"\]\s*\{([\s\S]*?)\}/],
-  ["青瓦·暗", /html\[data-theme="celadon"\]\[data-mode="dark"\]\s*\{([\s\S]*?)\}/],
-  ["青瓦·亮", /html\[data-theme="celadon"\]\[data-mode="light"\]\s*\{([\s\S]*?)\}/],
+  [":root（暗）", /:root\s*\{([\s\S]*?)\}/],
+  ["亮（Notion）", /html\[data-mode="light"\]\s*\{([\s\S]*?)\}/],
 ];
 
 for (const [name, re] of themeBlocks) {
@@ -103,15 +99,19 @@ function checkFile(file) {
 checkFile(cssFile);
 walk(path.join(rendererDir));
 
-// ---------- 5) 字号必须走 token（禁止裸 px） ----------
-for (const m of css.matchAll(/font-size:\s*([\d.]+)px/g)) {
-  fail(cssFile, 1, `裸字号 ${m[1]}px：改用 var(--fs-*)（最小 10px）`);
+// ---------- 5) 字号必须走 token（禁止裸 px；两套样式表都查） ----------
+for (const file of [cssFile, path.join(root, "src/renderer/styles/capture.css")]) {
+  if (!fs.existsSync(file)) continue;
+  const text = fs.readFileSync(file, "utf-8");
+  for (const m of text.matchAll(/font-size:\s*([\d.]+)px/g)) {
+    fail(file, 1, `裸字号 ${m[1]}px：改用 var(--fs-*)（最小 12px）`);
+  }
 }
 
 // ---------- 6) 文本颜色禁止硬编码 hex（主题块除外） ----------
 {
   const themeRanges = [];
-  for (const m of css.matchAll(/(:root|html\[data-theme[^{]*)\{/g)) {
+  for (const m of css.matchAll(/(:root|html\[data-(?:theme|mode)[^{]*)\{/g)) {
     const start = m.index;
     const open = css.indexOf("{", start);
     const close = css.indexOf("}", open);
@@ -123,7 +123,7 @@ for (const m of css.matchAll(/font-size:\s*([\d.]+)px/g)) {
   }
 }
 
-// ---------- 7) 对比度：六主题的正文/次级文字必须达到 AA ----------
+// ---------- 7) 对比度：暗/亮两套的正文/次级文字必须达到 AA ----------
 function hexToL(hex) {
   const h = hex.replace("#", "");
   const ch = [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16) / 255);
@@ -140,7 +140,7 @@ const ratio = (a, b) => {
   const blocks = [];
   for (const m of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
     const sel = m[1].trim();
-    if (!sel.startsWith(":root") && !sel.startsWith("html[data-theme")) continue;
+    if (!sel.startsWith(":root") && !sel.startsWith("html[data-theme") && !sel.startsWith("html[data-mode")) continue;
     const decls = {};
     for (const d of m[2].split(";")) {
       const mm = /^\s*(--[\w-]+)\s*:\s*(#[0-9a-fA-F]{3,8})\s*$/.exec(d);
@@ -149,12 +149,8 @@ const ratio = (a, b) => {
     blocks.push({ sel, decls });
   }
   const themes = [
-    ["夜航·暗", 'html[data-theme="night"][data-mode="dark"]'],
-    ["夜航·亮", 'html[data-theme="night"][data-mode="light"]'],
-    ["纸墨·亮", 'html[data-theme="paper"][data-mode="light"]'],
-    ["纸墨·暗", 'html[data-theme="paper"][data-mode="dark"]'],
-    ["青瓦·暗", 'html[data-theme="celadon"][data-mode="dark"]'],
-    ["青瓦·亮", 'html[data-theme="celadon"][data-mode="light"]'],
+    ["暗", ":root"],
+    ["亮", 'html[data-mode="light"]'],
   ];
   for (const [name, sel] of themes) {
     const t = {};
@@ -200,6 +196,31 @@ const ratio = (a, b) => {
   for (const [name, line] of missing) {
     fail(cssFile, line, `未定义的 CSS 变量 ${name}：var() 会让整条声明在计算值阶段失效`);
   }
+}
+
+// ---------- 9b) 内联字号必须走 token：TSX 里不许写裸数字 ----------
+// 背景：9.5px / 10px / 11.5px 这类内联字号绕过了字号阶梯，1080p 上已经读不清。
+// 只允许 fontSize: "var(--fs-*)"。
+{
+  const walkTsx = (dir) => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) {
+        walkTsx(p);
+        continue;
+      }
+      if (!/\.tsx$/.test(e.name)) continue;
+      const text = fs.readFileSync(p, "utf-8");
+      text.split("\n").forEach((line, idx) => {
+        const s = line.trimStart();
+        if (s.startsWith("*") || s.startsWith("//") || s.startsWith("{/*")) return;
+        if (/fontSize\s*:\s*["'`]?\s*[\d.]/.test(line)) {
+          fail(p, idx + 1, `内联字号必须用 var(--fs-*)：${line.trim().slice(0, 80)}`);
+        }
+      });
+    }
+  };
+  walkTsx(rendererDir);
 }
 
 // ---------- 9) 时间必须走 fmtTime：ISO 原值不许直出到 JSX ----------

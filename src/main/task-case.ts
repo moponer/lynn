@@ -1,3 +1,4 @@
+import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -61,6 +62,30 @@ export class TaskCase {
     return base;
   }
 
+  /** 内容 hash 索引：同一份内容只存一份（同名不同内容仍然各存各的） */
+  private hashIndexFile(id: string): string {
+    return path.join(this.artifactsDir(id), "_hashes.json");
+  }
+
+  private readHashIndex(id: string): Record<string, string> {
+    const f = this.hashIndexFile(id);
+    try {
+      return fs.existsSync(f) ? (JSON.parse(fs.readFileSync(f, "utf-8")) as Record<string, string>) : {};
+    } catch {
+      return {};
+    }
+  }
+
+  private writeHashIndex(id: string, idx: Record<string, string>): void {
+    try {
+      const f = this.hashIndexFile(id);
+      fs.mkdirSync(path.dirname(f), { recursive: true });
+      fs.writeFileSync(f, JSON.stringify(idx, null, 2), "utf-8");
+    } catch {
+      /* 索引写不进去只影响去重，不影响工件本身 */
+    }
+  }
+
   /** 把一个真实文件收进 artifacts/（永久保留），返回卷宗内相对路径 */
   importArtifact(id: string, srcPath: string): { ref: string; abs: string; bytes: number } {
     const abs = path.resolve(srcPath);
@@ -68,6 +93,16 @@ export class TaskCase {
     if (!st.isFile()) throw new Error(`不是文件: ${srcPath}`);
     const dir = this.artifactsDir(id);
     fs.mkdirSync(dir, { recursive: true });
+    const buf = fs.readFileSync(abs);
+    const hash = crypto.createHash("sha256").update(buf).digest("hex");
+    const idx = this.readHashIndex(id);
+    const known = idx[hash];
+    if (known) {
+      const existing = path.join(dir, known);
+      if (fs.existsSync(existing)) {
+        return { ref: `artifacts/${known}`, abs: existing, bytes: st.size };
+      }
+    }
     let name = this.safeName(abs);
     let target = path.join(dir, name);
     if (fs.existsSync(target)) {
@@ -76,7 +111,9 @@ export class TaskCase {
       name = `${stamp}-${name}`;
       target = path.join(dir, name);
     }
-    fs.copyFileSync(abs, target);
+    fs.writeFileSync(target, buf);
+    idx[hash] = name;
+    this.writeHashIndex(id, idx);
     const ref = `artifacts/${name}`;
     this.append(id, { kind: "artifact", text: `收录工件 ${name}`, meta: { ref, bytes: st.size } });
     return { ref, abs: target, bytes: st.size };

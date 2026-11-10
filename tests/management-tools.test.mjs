@@ -137,3 +137,16 @@ test("审计账本：每个动作追加一条，可归因", () => {
     .map((l) => JSON.parse(l));
   assert.deepEqual(audit.map((a) => a.tool), ["create_member", "assign_task"]);
 });
+
+test("create_member：自动从头像库挑脸，同队不撞脸；指定 id 无效当场拒", () => {
+  for (let i = 0; i < 4; i++) tools.createMember("t1", member({ name: `成员${i}` }));
+  const faces = store.listMembers("t1").map((p) => p.avatarId);
+  assert.equal(faces.every(Boolean), true, "招募时必须落一个头像 id");
+  assert.equal(new Set(faces).size, faces.length, "同一队里不能两个人用同一张脸");
+
+  // 同一个名字重招（换个队）仍是同一张脸：界面不会突然换人
+  const again = member({ name: "成员0" });
+  assert.throws(() => tools.createMember("t1", { ...again, avatarId: "nope" }), /未知头像 id/);
+  tools.createMember("t1", { ...again, avatarId: "a11" });
+  assert.equal(store.readMember("t1", "成员0").avatarId, "a11", "用户/风铃指定的 id 必须原样落盘");
+});

@@ -12,6 +12,15 @@ export default defineConfig({
   build: {
     outDir: "dist/renderer",
     emptyOutDir: true,
+    rollupOptions: {
+      output: {
+        // DiceBear 的插画数据是几百 KB 的静态路径表，单独成块：
+        // 主 bundle 不跟着膨胀，浏览器也能长期缓存这一块不常变的美术资源。
+        manualChunks(id) {
+          if (id.includes("node_modules/@dicebear/")) return "avatars";
+        },
+      },
+    },
   },
   resolve: {
     alias: {

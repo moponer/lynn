@@ -19,17 +19,24 @@ const base = {
   sandbox: false,
 };
 
-test("卡槽白名单与计划书一致（8 个，名字不变）", () => {
-  assert.deepEqual(UI_SLOTS, [
-    "theme.tokens",
-    "stage.view",
-    "card.renderer",
-    "avatar.driver",
-    "sidebar.item",
-    "settings.section",
-    "status.bar",
-    "composer.action",
-  ]);
+// 冻结的 8 个卡槽：名字与顺序都不得改动（v1 冻结承诺）。
+// v1 允许**新增**卡槽（PLUGIN-CONTRACT.md 第 7 行），但每个新增项都必须在下面登记——
+// 偷偷加一个卡槽同样会红，只是出口从"数量相等"变成"新增项显式列出"。
+const FROZEN_SLOTS = [
+  "theme.tokens",
+  "stage.view",
+  "card.renderer",
+  "avatar.driver",
+  "sidebar.item",
+  "settings.section",
+  "status.bar",
+  "composer.action",
+];
+
+test("卡槽白名单：冻结 8 个原样保留，新增卡槽须显式登记", () => {
+  assert.deepEqual(UI_SLOTS.slice(0, FROZEN_SLOTS.length), FROZEN_SLOTS, "冻结卡槽的名字与顺序不得改动");
+  // v1 新增项（CONSOLE-UPDATE：内置视图卡槽，仅官方可声明）
+  assert.deepEqual(UI_SLOTS.slice(FROZEN_SLOTS.length), ["stage.console"]);
 });
 
 test("不留内置示例插件（界面上不允许有只做样子的东西）", () => {

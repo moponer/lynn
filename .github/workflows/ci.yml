@@ -20,6 +20,8 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
       - run: npm ci
+      # 架构红线：Pi 基座完整不变，禁止 patch / fork / 改 dist；并与 npm 官方 tarball 对账
+      - run: npm run check:pi-base -- --tarball
       - run: npm run typecheck
       - run: npm run lint:design
       - run: npm test

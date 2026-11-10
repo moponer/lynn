@@ -26,3 +26,19 @@ test("只有 in_review 可以验收；卡住只给解卡，不给签字", () => 
 test("台账渲染顺序固定：等你 → 卡住 → 进行中 → 未开工", () => {
   assert.deepEqual(GROUP_ORDER, ["waiting", "stuck", "running", "queued"]);
 });
+
+/*
+ * 验收权分层（背景 bug）：成员一交回报，工单就变 in_review，值台立刻把三张单
+ * 都标成"等你拍板"弹给用户——可这些活归风铃管，用户只该审她交来的最终结果。
+ */
+test("派给成员的活等风铃验：不占用户待办，也不给验收按钮", () => {
+  assert.equal(groupOf("in_review", "lynn"), "running");
+  assert.equal(actionOf("in_review", "lynn"), "none");
+});
+
+test("reviewer 缺省按用户验：老单和风铃自己的交付都不会被偷偷归档", () => {
+  assert.equal(groupOf("in_review"), "waiting");
+  assert.equal(actionOf("in_review"), "accept");
+  assert.equal(groupOf("in_review", "user"), "waiting");
+  assert.equal(actionOf("in_review", "user"), "accept");
+});

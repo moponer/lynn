@@ -25,9 +25,13 @@ export interface RpcToolSpec {
 }
 
 export interface AgentStats {
-  tokens: { input: number; output: number; total: number };
+  tokens: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number };
+  /** 累计费用（模型定价货币；未知价时为 0） */
+  cost: number;
   contextTokens: number;
   contextWindow: number;
+  /** 上下文占用百分比（可能为 null = 未知） */
+  contextPercent?: number | null;
   sessionId?: string;
   sessionFile?: string;
 }
@@ -35,6 +39,8 @@ export interface AgentStats {
 export interface AgentHostOptions {
   /** 子进程入口（agent/pi-rpc-entry.mjs） */
   entryPath: string;
+  /** worker 启动/ready 窗口毫秒数（默认 20s；杀软扫描或机器高载时可放宽） */
+  readyTimeoutMs?: number;
   /** 模型配置（经环境变量下发，不落盘、不经 argv 暴露） */
   model: { baseUrl: string; apiKey: string; model: string; provider?: string };
   tools: RpcToolSpec[];
@@ -142,7 +148,12 @@ export class AgentHost {
     }
 
     const readyPromise = new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error(`RPC worker 启动超时。${this.stderr.trim()}`)), 20_000);
+      // 启动窗口可调（默认 20s）：Windows 上杀软扫描/机器高载会把 Pi SDK 冷启动挤出窗口
+      // （实机 2026-11-09：残留进程烧满 CPU 时必现启动超时），测试/低配机可放宽
+      const timer = setTimeout(
+        () => reject(new Error(`RPC worker 启动超时。${this.stderr.trim()}`)),
+        this.options.readyTimeoutMs ?? 20_000,
+      );
       this.readyResolver = () => {
         clearTimeout(timer);
         resolve();
@@ -244,13 +255,38 @@ export class AgentHost {
     });
   }
 
+  /** 与官方 RPC 宿主共用的最小接口（旧自建协议只作回退用） */
+  prompt(text: string): Promise<{ disposition?: string }> {
+    return this.request("prompt", { text });
+  }
+  steer(text: string): Promise<unknown> {
+    return this.request("prompt", { text, streamingBehavior: "steer" });
+  }
+  abort(): Promise<unknown> {
+    return this.request("abort");
+  }
+
   /** 会话用量（token / 上下文占比）：失败返回 null，不编造数字 */
   async stats(): Promise<AgentStats | null> {
     if (!this.isRunning()) return null;
     try {
       const r = await this.request<AgentStats>("get_stats");
       if (!r || !r.tokens) return null;
-      return r;
+      return {
+        tokens: {
+          input: r.tokens.input ?? 0,
+          output: r.tokens.output ?? 0,
+          cacheRead: r.tokens.cacheRead ?? 0,
+          cacheWrite: r.tokens.cacheWrite ?? 0,
+          total: r.tokens.total ?? (r.tokens.input ?? 0) + (r.tokens.output ?? 0),
+        },
+        cost: r.cost ?? 0,
+        contextTokens: r.contextTokens ?? 0,
+        contextWindow: r.contextWindow ?? 128_000,
+        contextPercent: r.contextPercent ?? undefined,
+        sessionId: r.sessionId,
+        sessionFile: r.sessionFile,
+      };
     } catch {
       return null;
     }

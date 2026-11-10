@@ -3,6 +3,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { FeedCard } from "../shared/contract";
+import { normalizeRoots, primaryOf, type RootSet } from "./roots";
 
 export interface ThreadMeta {
   id: string;
@@ -10,17 +11,24 @@ export interface ThreadMeta {
   createdAt: string;
   updatedAt: string;
   /**
-   * 这个会话的工作区（项目根）：开会话时可以选，之后也能改。
-   * 不同会话各带一个工作区，"审查 A 项目"和"整理 B 资料"不会互相串目录。
+   * 会话的根集合（工作区模型，2026-11-10）：主根 + 附加只读/可写根。
+   * 不同会话各带一套根，"审查 A 项目"和"整理 B 资料"不会互相串目录。
+   */
+  roots?: RootSet;
+  /**
+   * 主根的镜像（兼容旧代码/旧数据）：只读派生，改根时与 roots 一起同步。
+   * 新代码请用 roots。
    */
   projectRoot?: string;
+  /** 这个对话单独指定的模型；不设 = 跟随全局默认模型 */
+  modelId?: string;
 }
 
 export interface ThreadState {
   feed: FeedCard[];
   history: { role: "user" | "assistant"; content: string }[];
   /** 会话累计用量（C4）：切回来时顶栏读数跟着会话走，不是一刀清零 */
-  usage?: { sessionIn: number; sessionOut: number; tokensUsed: number };
+  usage?: { sessionIn: number; sessionOut: number; cacheRead?: number; cacheWrite?: number; cost?: number; tokensUsed: number };
 }
 
 export class ThreadStore {
@@ -52,14 +60,20 @@ export class ThreadStore {
     return this.list().find((t) => t.id === id) ?? null;
   }
 
-  create(title?: string, projectRoot?: string): ThreadMeta {
+  /**
+   * 建会话。roots 支持 RootSet（推荐）或旧的项目根字符串。
+   * 不传 = 无根（由内核按默认工作区兜底，不在存储层猜）。
+   */
+  create(title?: string, roots?: RootSet | string): ThreadMeta {
     const at = new Date().toISOString();
+    const normalized = typeof roots === "string" ? normalizeRoots({ primary: roots }) : normalizeRoots(roots);
     const meta: ThreadMeta = {
       id: `th-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
       title: (title?.trim() || "新会话").slice(0, 40),
       createdAt: at,
       updatedAt: at,
-      ...(projectRoot ? { projectRoot: path.resolve(projectRoot) } : {}),
+      ...(normalized ? { roots: normalized } : {}),
+      ...(primaryOf(normalized) ? { projectRoot: primaryOf(normalized) } : {}),
     };
     const threads = this.list();
     threads.unshift(meta);
@@ -69,12 +83,36 @@ export class ThreadStore {
     return meta;
   }
 
-  /** 改这个会话的工作区（下次切回来还是它） */
-  setProject(id: string, projectRoot: string): ThreadMeta {
+  /** 改这个会话的根集合（主根镜像同步落盘，旧代码照常可读） */
+  setRoots(id: string, roots: RootSet): ThreadMeta {
     const threads = this.list();
     const t = threads.find((x) => x.id === id);
     if (!t) throw new Error(`会话不存在：${id}`);
-    t.projectRoot = path.resolve(projectRoot);
+    const normalized = normalizeRoots(roots) ?? { extras: [] };
+    t.roots = normalized;
+    const primary = primaryOf(normalized);
+    if (primary) t.projectRoot = primary;
+    else delete t.projectRoot;
+    t.updatedAt = new Date().toISOString();
+    this.writeIndex(threads);
+    return t;
+  }
+
+  /** 兼容旧入口：改主根（附加根保留） */
+  setProject(id: string, projectRoot: string): ThreadMeta {
+    const t = this.get(id);
+    if (!t) throw new Error(`会话不存在：${id}`);
+    const base = normalizeRoots(t.roots) ?? { extras: [] };
+    return this.setRoots(id, { ...base, primary: path.resolve(projectRoot) });
+  }
+
+  /** 给这个对话单独指定模型；传 null = 跟随全局默认 */
+  setModel(id: string, modelId: string | null): ThreadMeta {
+    const threads = this.list();
+    const t = threads.find((x) => x.id === id);
+    if (!t) throw new Error(`会话不存在：${id}`);
+    if (modelId) t.modelId = modelId;
+    else delete t.modelId;
     t.updatedAt = new Date().toISOString();
     this.writeIndex(threads);
     return t;

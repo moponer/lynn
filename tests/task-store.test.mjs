@@ -74,14 +74,16 @@ test("进归档必须有用户拍板记录", () => {
   assert.equal(store.transition("WO-4", "done").status, "done");
 });
 
-test("非法迁移被拒（backlog 不能直接 done，done 是终态）", () => {
+test("非法迁移被拒（backlog 不能直接 done；done 只能被用户重开回执行中）", () => {
   const store = newStore();
   store.create({ id: "WO-5", title: "x", teamId: "t1" });
   assert.throws(() => store.transition("WO-5", "done"), /不允许的迁移/);
   toReview(store, "WO-5");
   store.approve("WO-5");
   store.transition("WO-5", "done");
-  assert.throws(() => store.transition("WO-5", "in_progress"), /不允许的迁移/);
+  /* 归档不是死路：风铃代验可能判错，用户得能把单子拉回来（唯一出边） */
+  assert.equal(store.transition("WO-5", "in_progress").status, "in_progress");
+  assert.throws(() => store.transition("WO-5", "todo"), /不允许的迁移/);
 });
 
 test("version 乐观并发：旧版本写被拒，不覆盖别人的写", () => {
@@ -180,4 +182,21 @@ test("归档：完成超 14 天才进归档带；进行中的不动", () => {
   store.approve("A-2");
   store.transition("A-2", "done");
   assert.deepEqual(store.archiveOld(14), []);
+});
+
+test("验收入记在单上：成员单归风铃，最终交付归用户", () => {
+  const store = newStore();
+  store.create({ id: "WO-R", title: "成员交的活", teamId: "t1" });
+  toReview(store, "WO-R");
+  // 新单不预设 reviewer，缺省按用户验——老数据不会被新规则偷偷归档
+  assert.equal(store.get("WO-R").reviewer, undefined);
+
+  assert.equal(store.setReviewer("WO-R", "lynn").reviewer, "lynn");
+  assert.equal(store.get("WO-R").reviewer, "lynn");
+
+  // 风铃代验同样要走 approve + transition：证据与拍板两条前置一个都不少
+  store.approve("WO-R", "lynn", "风铃代验");
+  const done = store.transition("WO-R", "done");
+  assert.equal(done.status, "done");
+  assert.equal(done.approvals.at(-1).by, "lynn", "卷宗里得能追到是风铃签的");
 });

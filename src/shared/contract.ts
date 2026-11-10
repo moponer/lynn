@@ -25,6 +25,56 @@ export type TaskStatus =
 
 export type MemberStatus = "running" | "delivered" | "idle" | "stuck";
 
+// ---------- 截图（壳层能力，M2-13 消费侧） ----------
+
+/** 选区矩形；坐标一律是选区窗口内的 DIP，物理像素换算在主进程做 */
+export interface CaptureRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface CaptureSize {
+  width: number;
+  height: number;
+}
+
+/** 自动识别到的窗口（选区窗内 DIP 坐标，按面积升序） */
+export interface CaptureWindow {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  title: string;
+}
+
+/** 一张已裁好的截图：直接进本轮随附条，不写临时文件、不自动发送 */
+export interface CaptureShot {
+  /** 事件与待取队列双通道共用，渲染层按 id 去重 */
+  id: string;
+  name: string;
+  /** data:image/png;base64,...（已含标注） */
+  data: string;
+  width: number;
+  height: number;
+  /** 捕获 + 合成编码耗时（毫秒），如实回显，不冒充端到端耗时 */
+  ms: number;
+  /** 是否真的写进了系统剪贴板（失败如实标 false） */
+  copied?: boolean;
+}
+
+export interface CaptureStatus {
+  /** 原生捕获引擎是否可用（缺平台二进制时如实为 false） */
+  engine: boolean;
+  engineError?: string;
+  hotkey: string;
+  /** 全局快捷键是否真的注册上了（被别的程序占用时为 false） */
+  registered: boolean;
+  active: boolean;
+  note: string;
+}
+
 // ---------- 模型配置（用户自配，§4.4） ----------
 
 /** 存储层的模型配置（apiKey 加密落盘，不进渲染层） */
@@ -46,6 +96,19 @@ export interface ModelConfigView {
   apiKeySet: boolean;
 }
 
+/** 模型库里一条的脱敏视图（编辑 / 删除 / 设为默认 / 用于当前对话） */
+export interface ModelEntryView {
+  id: string;
+  label: string;
+  provider: string;
+  baseUrl: string;
+  model: string;
+  apiKeySet: boolean;
+  isDefault: boolean;
+  isThreadModel: boolean;
+  updatedAt: string;
+}
+
 // ---------- 成员（书面岗位，§4.10.2） ----------
 
 export interface Member {
@@ -63,6 +126,8 @@ export interface Member {
   /** 本单实际授权（§4.10.3）：派单时落 assignments 的 tools；未派单/读不到时缺省=模板 */
   effectiveTools?: string[];
   color: string;
+  /** 头像库 id：和岗位档案一致，成员卡/设置页/工具卡用同一张脸 */
+  avatarId?: string;
   /** 成员默认模型（§4.10.2） */
   model?: string;
   /** 轮次上限（§4.10.3，界面必显项） */
@@ -76,6 +141,52 @@ export interface Team {
   name: string;
   status: "active" | "paused" | "dissolved";
   members: Member[];
+}
+
+/** 编制管理（用户手动）：带岗位说明正文，设置页按需拉，不塞进每轮快照 */
+export interface TeamAdminMember {
+  name: string;
+  role: string;
+  /** 单一目标（成员收敛行为的依据） */
+  goal: string;
+  /** 岗位说明 / 角色提示词正文（Markdown） */
+  body: string;
+  /** 工具白名单（这里只读：扩权必须走风铃/模板导入的收窄校验） */
+  tools: string[];
+  model: string;
+  /** 头像库 id：设置页里挑的那张，读出来才能让选择器高亮当前项 */
+  avatarId?: string;
+}
+
+/** MCP 服务器实况（mcp.status / mcp.reload）：配置一条不少，连没连上照实说 */
+export interface McpServerView {
+  id: string;
+  command: string;
+  enabled: boolean;
+  lazy: boolean;
+  connected: boolean;
+  tools: number;
+  error?: string;
+}
+
+export interface McpStatusView {
+  servers: McpServerView[];
+  /** 全局配置路径（~/.lynn/mcp.json） */
+  globalFile: string;
+  /** 项目级配置路径（<project>/.lynn/mcp.json） */
+  projectFile: string;
+  /** 项目级配置是否被信任（未信任不加载） */
+  projectTrusted: boolean;
+  /** 配置文件本身读坏了的原因（有就如实报） */
+  errors?: string[];
+}
+
+export interface TeamAdminView {
+  id: string;
+  name: string;
+  status: "active" | "paused" | "dissolved";
+  createdAt: string;
+  members: TeamAdminMember[];
 }
 
 // ---------- 指挥频道卡片（§3.8 证据链卡） ----------
@@ -122,10 +233,28 @@ export interface TurnState {
 export interface UsageView {
   turnIn: number;
   turnOut: number;
+  /** 未命中缓存的输入 token（= 实际计费输入；不含缓存读/写） */
   sessionIn: number;
   sessionOut: number;
+  /** 缓存命中 token（复用已有缓存，不再重新计费） */
+  cacheRead: number;
+  /** 缓存写入 token（本次新写入缓存，下一轮可复用） */
+  cacheWrite: number;
+  /** 累计费用（模型定价货币；未知价时为 0，不估假费用） */
+  cost: number;
   contextTokens: number;
   contextWindow: number;
+  /** 上下文占用百分比（0–100；压缩后首条回复前可能为 null = 未知，不显示假数） */
+  contextPercent?: number | null;
+}
+
+/**
+ * 缓存命中率（%）：命中 / (未命中输入 + 命中 + 写入)。
+ * prompt 为 0 时返回 undefined，界面据此隐藏命中率而不是显示假 0。
+ */
+export function cacheHitRate(v: UsageView): number | undefined {
+  const prompt = v.sessionIn + v.cacheRead + v.cacheWrite;
+  return prompt > 0 ? (v.cacheRead / prompt) * 100 : undefined;
 }
 
 export interface QueueItem {
@@ -166,6 +295,10 @@ export type ToolCardBadge =
   | "已停止"
   /** 成员跑完但没有交出回报 */
   | "未完成"
+  /** 心跳巡检（M3-01） */
+  | "心跳"
+  /** 风铃沉淀记忆（M3-01） */
+  | "记忆"
   /** 成员执行崩溃 */
   | "崩溃";
 
@@ -177,12 +310,22 @@ export interface FeedCard {
   text?: string;
   /** 是否正在流式生成（lynn 卡） */
   streaming?: boolean;
+  /**
+   * 同一张单反复撞同一堵墙（如权限拦截）时聚合计数：
+   * 13 次"已拦截"只占一行，展开看最后一次的原因。0/1 不显示。
+   */
+  count?: number;
+  /**
+   * 思考过程（reasoning 模型才有；来自 Pi 的 thinking_delta）。
+   * 跟正文分开存、分开渲染：正文只装 text_delta，思考单独成块、默认收起。
+   */
+  thinking?: string;
   /** tool 卡 */
   badge?: ToolCardBadge;
   title?: string;
   meta?: string;
   body?: string;
-  members?: { name: string; role: string; color: string }[];
+  members?: { name: string; role: string; color: string; avatarId?: string }[];
   /** 归属工单（「往来」页签按它过滤；空 = 频道） */
   jobId?: string;
   /** 错误码：前端按码给动作，不拼后端原文 */
@@ -213,8 +356,15 @@ export interface TaskTrackItem {
   parentId?: string;
   /** 打回轮次（权威工单记录才有） */
   rejectRounds?: number;
+  /**
+   * 验收人：lynn = 派给成员的活，风铃自己验（她点头即归档，不弹给用户）；
+   * user = 风铃交付给用户的最终结果，只有用户能拍板。缺省按 user。
+   */
+  reviewer?: "lynn" | "user";
   /** 真实证据索引（可点开验证）；空数组=还没有证据 */
   evidence?: { label: string; ref: string; verified: boolean; at?: string }[];
+  /** 交付物（用户要带走的东西；验收后永久保留） */
+  deliverables?: { path: string; ref: string; bytes?: number }[];
   /** 她预填的打回三要素（来自最近一次打回） */
   rejectDraft?: { what: string; expect: string; deadline: string };
   /** 这张单是在哪个会话里派的（跨会话追溯） */
@@ -261,7 +411,14 @@ export interface UpdateStatusView {
 }
 
 export interface SessionSnapshot {
-  workspace: { project: string; subdir: string };
+  workspace: {
+    project: string;
+    subdir: string;
+    /** 会话主根（空 = 这次不用工作区） */
+    primary?: string;
+    /** 会话附加根（只读/可写）；目录名太长，界面显示 label 或末段 */
+    extras?: { path: string; mode: "rw" | "ro"; label?: string }[];
+  };
   /** 当前项目：项目级扩展只在 trusted 时加载（M1-13） */
   project: { root: string; trusted: boolean; hasMcp: boolean };
   /** 当前会话线程与线程列表（M1-14） */
@@ -276,6 +433,11 @@ export interface SessionSnapshot {
   }[];
   /** 真在跑的成员单（不只 status=in_progress：卡住但没在跑的不能算） */
   running?: string[];
+  /**
+   * 无主单：threadId 指向已删会话的工单（老版本删会话不级联留下的）。
+   * 不为 0 时界面要给一键清理出口，否则这些单永远留在台账里，谁也删不掉。
+   */
+  orphans?: number;
   permission: PermissionMode;
   model: ModelConfigView;
   feed: FeedCard[];
@@ -296,9 +458,12 @@ export interface SessionSnapshot {
 // ---------- 事件流（主进程 → 渲染层） ----------
 
 export type KernelEvent =
-  | { type: "delta"; text: string; cardId?: string }
+  /** 流式补字：text 是正文，thinking 是思考（两者互斥更新，渲染层分开落） */
+  | { type: "delta"; text?: string; thinking?: string; cardId?: string }
   /** 壳层窗口事件（自绘标题栏）：最大化状态变化 */
   | { type: "window"; maximized: boolean }
+  /** 截图完成：图片进输入框的「本轮随附」，用户自己决定发不发 */
+  | { type: "capture"; shot: CaptureShot }
   | {
       type: "card";
       card: FeedCard;
@@ -349,6 +514,42 @@ export interface RpcContracts {
   "files.search": {
     params: { q: string; limit?: number };
     result: { files: { path: string; size: number }[] };
+  };
+  /**
+   * 区域截图（壳层能力，M2-13 消费侧）：先冻结光标所在显示器，再由选区窗裁剪。
+   * 截好的图只进「本轮随附」，不自动发送、不自动进剪贴板。
+   */
+  "capture.status": {
+    params: void;
+    result: CaptureStatus;
+  };
+  "capture.start": {
+    params: void;
+    result: { ok: boolean; error?: string };
+  };
+  /** 选区窗加载后取冻结帧 + 可自动识别的窗口矩形（不二次抓屏，也不会拍到选区窗自己） */
+  "capture.frame": {
+    params: void;
+    /** view 是选区窗内容区的 DIP 尺寸；主进程已把冻结帧裁到这块，坐标口径完全对齐 */
+    result: { ok: boolean; data?: string; width: number; height: number; view: CaptureSize; windows: CaptureWindow[]; error?: string };
+  };
+  /**
+   * 完成：dataUrl 是选区窗把「冻结帧 + 标注」合成后按 rect 裁好的 PNG。
+   * action: attach=进本轮随附条（并复制）、copy=只复制、save=另存为（不关闭选区窗）。
+   * 主进程会核对 PNG 尺寸与 rect 是否一致，防止界面和落盘结果错位。
+   */
+  "capture.commit": {
+    params: { rect: CaptureRect; dataUrl: string; action: "attach" | "copy" | "save" };
+    result: { ok: boolean; error?: string; path?: string };
+  };
+  "capture.cancel": {
+    params: void;
+    result: { ok: true };
+  };
+  /** 事件丢失兜底：窗口刚起来或重新获得焦点时，取回并清空未消费的截图 */
+  "capture.pending": {
+    params: void;
+    result: { shots: CaptureShot[] };
   };
   /** persona.md 语气人设（M1-17） */
   "persona.get": {
@@ -413,6 +614,27 @@ export interface RpcContracts {
   "memory.rollback": {
     params: { kind: "user" | "memory"; versionId: string };
     result: { ok: boolean; text: string; hot: boolean };
+  };
+  /** ---------- 技能管理（M2-10）：发现/启停（禁用清单持久化在 prefs.disabledSkills） ---------- */
+  "skills.list": {
+    params: void;
+    result: {
+      skills: {
+        name: string;
+        description: string;
+        allowedTools: string[];
+        level: "user" | "project" | "plugin";
+        dir: string;
+        disabled: boolean;
+        warnings: string[];
+      }[];
+      /** 解析失败/重名等诊断（不拦列表） */
+      errors: string[];
+    };
+  };
+  "skills.toggle": {
+    params: { name: string; enabled: boolean };
+    result: { ok: true; enabled: boolean } | { ok: false; error: string };
   };
   /** 多 provider（M2-12）：预设只是推荐值；models.yaml 增删厂商不改主程序 */
   "providers.presets": {
@@ -526,7 +748,8 @@ export interface RpcContracts {
    * 只由用户在界面上发起（右键 → 授权只读目录），模型不能自我扩权。
    */
   "task.grantRead": {
-    params: { taskId: string; dir: string };
+    /** dir 兼容旧调用；dirs 支持一次授权多个；allowDriveRoot = 用户已确认整盘只读 */
+    params: { taskId: string; dir?: string; dirs?: string[]; allowDriveRoot?: boolean };
     result: { ok: boolean; roots?: string[]; error?: string };
   };
   "task.revokeRead": {
@@ -538,20 +761,74 @@ export interface RpcContracts {
     params: { title?: string };
     result: { path?: string; canceled?: boolean };
   };
+  /** 一次选多个目录（只读授权用；多选是常态，不再一个个点） */
+  "app.pickDirs": {
+    params: { title?: string };
+    result: { paths?: string[]; canceled?: boolean };
+  };
+  /**
+   * 审查快照：把这张单的工作区（只读看过/要跑测试的项目）复制进任务沙箱，
+   * 之后成员在副本里跑构建测试，原项目不动。
+   */
+  "task.snapshotProject": {
+    params: { taskId: string };
+    result: { ok: boolean; error?: string; root?: string; bytes?: number };
+  };
+  /** 导出任务卷宗 zip（task.json / timeline / summary / artifacts / 交付清单） */
+  "task.export": {
+    params: { taskId: string };
+    result: { ok: boolean; error?: string; path?: string };
+  };
+  /** 用系统程序打开一个路径（仅限数据根内，防止被当成任意文件执行器） */
+  "app.openPath": {
+    params: { path: string };
+    result: { ok: boolean; error?: string };
+  };
   /** 取消一张单（→ canceled，进归档带；在跑的会先停成员） */
   "task.dismiss": {
     params: { taskId: string };
     result: { ok: boolean; error?: string };
   };
-  /** 从台账彻底删掉一张单（连同 tasks/<id>/ 目录；在跑的不许删） */
+  /**
+   * 从台账彻底删掉一张单（连同 tasks/<id>/ 目录；在跑的不许删）。
+   * removed = 实际删掉的东西；kept = 没有动的路径（用户项目 / 跨任务共享的工作区）。
+   */
   "task.remove": {
     params: { taskId: string };
-    result: { ok: boolean; error?: string };
+    result: { ok: boolean; error?: string; removed?: string[]; kept?: string[] };
+  };
+  /**
+   * 清掉无主单：threadId 指向已删会话的工单（老版本删会话只删了对话记录）。
+   * 没有 threadId 的历史单不算无主——那可能是早于会话归属的记录，不猜、不删。
+   */
+  "task.purgeOrphans": {
+    params: void;
+    result: { ok: boolean; removed: number; kept: number };
   };
   /** 建团队（§4.10.3 修正）：用户只给名字，ID 由系统生成 */
   "team.create": {
     params: { name?: string };
     result: { ok: boolean; id?: string; name?: string; error?: string };
+  };
+  /** 编制管理：列出全部团队与成员岗位（含岗位说明正文） */
+  "team.list": {
+    params: void;
+    result: { teams: TeamAdminView[]; error?: string };
+  };
+  /** 改成员岗位：角色 / 单一目标 / 提示词正文 / 头像库 id（不给扩工具权限） */
+  "team.member.save": {
+    params: { teamId: string; name: string; role?: string; goal?: string; body?: string; avatarId?: string };
+    result: { ok: true } | { ok: false; error: string };
+  };
+  /** 删成员：只删岗位档案（派单/回报记录留作审计资产）；手上有单先停 */
+  "team.member.remove": {
+    params: { teamId: string; name: string };
+    result: { ok: true } | { ok: false; error: string };
+  };
+  /** 解散团队：档案保留为资产、不能再派活；手上有单先停 */
+  "team.dissolve": {
+    params: { teamId: string };
+    result: { ok: true } | { ok: false; error: string };
   };
   /** 模板导出/导入（M2-15）：导入白名单只收窄（越权工具剥掉并告警） */
   "team.exportTemplate": {
@@ -586,10 +863,21 @@ export interface RpcContracts {
     params: { channel: "feishu" | "qq"; receiveId: string; text: string };
     result: { ok: boolean; error?: string };
   };
+  /** MCP 扩展服务器（L2）：配置里有什么 + 实际连上没连上，两个都如实报 */
+  "mcp.status": {
+    params: void;
+    result: McpStatusView;
+  };
+  /** 立刻重连（不重启应用）：返回重连后的实况 */
+  "mcp.reload": {
+    params: void;
+    result: McpStatusView & { ok: true };
+  };
   /** 定时任务（M2-02）：调度器在核心里；单飞/补跑/陈旧清理，lastStatus 如实 */
   "schedule.add": {
     params: { name: string; prompt: string; kind: "once" | "daily" | "interval"; at?: string; time?: string; intervalMin?: number };
-    result: { ok: boolean; task: { id: string; name: string; nextRun?: string } };
+    /** 失败要能说清原因（时间格式 / 缺字段），不要只回 ok:false */
+    result: { ok: true; task: { id: string; name: string; nextRun?: string } } | { ok: false; error: string };
   };
   "schedule.list": {
     params: void;
@@ -635,9 +923,14 @@ export interface RpcContracts {
     params: { id: string; title: string };
     result: { ok: boolean; title: string };
   };
+  /**
+   * 删会话。会话是任务容器：连同它名下的工单一并撤掉（在跑的先停），
+   * `removedTasks` 是真正清掉的单数，`keptTasks` 是因目录占用等原因留在台账里的。
+   */
   "thread.remove": {
     params: { id: string };
-    result: { ok: boolean };
+    /** threadsLeft=0 表示刚才删掉的是最后一条：界面进空场，不偷偷补一条新会话 */
+    result: { ok: boolean; removedTasks?: number; keptTasks?: number; threadsLeft?: number };
   };
   "thread.search": {
     params: { q: string };
@@ -688,7 +981,8 @@ export interface RpcContracts {
   "task.decide": {
     params: {
       taskId: string;
-      action: "approve" | "reject";
+      /** reopen = 把已归档的单拉回执行中（风铃代验判错时的唯一退路，只有用户能开） */
+      action: "approve" | "reject" | "reopen";
       reason?: { what: string; expect: string; deadline: string };
     };
     result:
@@ -701,16 +995,54 @@ export interface RpcContracts {
   };
   "config.save": {
     params: { provider: string; baseUrl: string; model: string; apiKey?: string };
-    result: { ok: true };
+    /** 换端点却留空 Key 时如实拒绝（旧 Key 不能带到新服务商） */
+    result: { ok: true } | { ok: false; error: string };
   };
   "config.test": {
     params: { baseUrl: string; apiKey: string; model: string };
     result: { ok: true; latencyMs: number } | { ok: false; error: string };
   };
-  /** 偏好设置（M2-11 加软预算与备用模型；M3-08 加界面语言） */
+
+  // ---------- 模型库：多条配置 / 全局默认 / 每对话覆盖 ----------
+
+  "model.list": {
+    params: void;
+    result: {
+      models: ModelEntryView[];
+      defaultModelId: string | null;
+      threadModelId: string | null;
+      activeModelId: string | null;
+      threadTitle: string;
+    };
+  };
+  "model.save": {
+    /** 不带 id = 新增；带 id = 编辑那条。apiKey 留空 = 沿用该条已保存的 Key */
+    params: { id?: string; label: string; provider: string; baseUrl: string; model: string; apiKey?: string };
+    result: { ok: true; id: string } | { ok: false; error: string };
+  };
+  "model.remove": {
+    params: { id: string };
+    result: { ok: true; defaultModelId: string | null } | { ok: false; error: string };
+  };
+  "model.setDefault": {
+    params: { id: string };
+    result: { ok: true } | { ok: false; error: string };
+  };
+  /** null = 这个对话跟随全局默认 */
+  "model.setThread": {
+    params: { id: string | null };
+    result: { ok: true } | { ok: false; error: string };
+  };
+  "model.test": {
+    /** 传 id 测已保存的 Key；不传 id 用表单里临时填的 Key 测 */
+    params: { id?: string; baseUrl?: string; apiKey?: string; model?: string };
+    result: { ok: true; latencyMs: number } | { ok: false; error: string };
+  };
+
+  /** 偏好设置（M2-11 加软预算与备用模型；M3-08 加界面语言；截图加快捷键；M3-01 加心跳） */
   "config.prefs": {
-    params: { autoStart: boolean; trayOnClose?: boolean; notify?: boolean; softBudgetTokens?: number; fallbackModel?: string; lang?: "zh" | "en" };
-    result: { ok: true; autoStart: boolean; trayOnClose: boolean; notify: boolean; softBudgetTokens: number; fallbackModel: string; lang: "zh" | "en" };
+    params: { autoStart: boolean; trayOnClose?: boolean; notify?: boolean; softBudgetTokens?: number; fallbackModel?: string; lang?: "zh" | "en"; captureHotkey?: string; heartbeat?: boolean };
+    result: { ok: true; autoStart: boolean; trayOnClose: boolean; notify: boolean; softBudgetTokens: number; fallbackModel: string; lang: "zh" | "en"; captureHotkey: string; heartbeat: boolean };
   };
   /** M3-08：当前界面语言的合并字典（内置 + 启用的语言包插件覆盖），渲染层按 lang 变化拉取 */
   "i18n.get": {
@@ -737,6 +1069,66 @@ export interface RpcContracts {
     params: { root: string };
     result: { ok: boolean; root?: string; trusted?: boolean; error?: string };
   };
+  /** 这次不用工作区（临时对话）：主根清空，任务产出落卷宗沙箱 */
+  "project.clearRoot": {
+    params: void;
+    result: { ok: boolean; error?: string };
+  };
+  /** 全局工作区偏好：默认主根 + 常用只读根（L0） */
+  "workspace.prefs": {
+    params: void;
+    result: { defaultWorkspace?: string; knownReadRoots: string[] };
+  };
+  "workspace.savePrefs": {
+    params: { defaultWorkspace?: string | null; knownReadRoots?: string[] };
+    result: { ok: boolean; error?: string; defaultWorkspace?: string; knownReadRoots?: string[] };
+  };
+  /** 数据用量与保留策略（清理只碰过程文件，交付物与证据永久） */
+  "data.usage": {
+    params: void;
+    result: {
+      usage: {
+        totalBytes: number;
+        tasksBytes: number;
+        scratchBytes: number;
+        artifactsBytes: number;
+        sandboxBytes: number;
+        logsBytes: number;
+        checkpointsBytes: number;
+      };
+      retention: { scratchDays: number; checkpointDays: number; logDays: number };
+    };
+  };
+  "data.cleanup": {
+    params: { retention?: { scratchDays?: number; checkpointDays?: number; logDays?: number } };
+    result: { ok: true; freedBytes: number; removed: number };
+  };
+  /** 当前会话的根集合（主根 + 附加根）；readable/writable 是派生结果 */
+  "workspace.get": {
+    params: void;
+    result: {
+      primary?: string;
+      extras: { path: string; mode: "rw" | "ro"; scope: string; label?: string }[];
+      readable: string[];
+      writable: string[];
+    };
+  };
+  /** 给当前会话加一个附加根（rw 只能由用户入口调用；模型没有这个能力） */
+  "workspace.addRoot": {
+    params: {
+      path: string;
+      mode?: "rw" | "ro";
+      scope?: "session" | "team" | "task";
+      label?: string;
+      /** 整盘只读需要用户显式确认 */
+      allowDriveRoot?: boolean;
+    };
+    result: { ok: boolean; error?: string; roots?: string[] };
+  };
+  "workspace.removeRoot": {
+    params: { path: string };
+    result: { ok: boolean; error?: string; roots?: string[] };
+  };
   /** 自绘标题栏（frame:false）：最小化 / 最大化还原 / 关闭（关闭尊重"关窗进托盘"设置） */
   "window.control": {
     params: { action: "minimize" | "maximize" | "close" | "query" };
@@ -759,8 +1151,14 @@ export interface RpcContracts {
         loadable: boolean;
         description?: string;
         theme?: { name?: string; dark?: Record<string, string>; light?: Record<string, string> };
+        /** L0 形态层：插件内 CSS 原文（渲染层注入 <style>，不经脚本求值） */
+        style?: string;
         /** M3-08：L0 语言包插件才有 */
         langs?: { lang: "zh" | "en"; strings: Record<string, string> }[];
+        /** 占用的卡槽（设置页据此标注「控制台视图」等） */
+        slots?: string[];
+        /** 占内置视图卡槽时指名的视图 id */
+        view?: string;
       }[];
       errors: string[];
     };
@@ -789,6 +1187,11 @@ export interface RpcContracts {
   "plugins.rollback": {
     params: { file?: string };
     result: { ok: boolean; detail: string };
+  };
+  /** 安全模式开关：连续崩溃自动进入，退出只能由用户显式点（人与机器各一侧的闸门） */
+  "plugins.safeMode": {
+    params: { on: boolean };
+    result: { ok: true };
   };
   /** ---------- M3-07 插件工坊：规格 → 草稿区 → 准入 → 启用（§4.11） ---------- */
   "workshop.create": {
@@ -851,6 +1254,12 @@ export interface RpcContracts {
         description?: string;
         /** iframe 文档内容（已按白名单校验过 manifest） */
         html?: string;
+        /** 声明 stage.console 时的内置视图 id（渲染层注册表里的键） */
+        view?: string;
+        /** 插件档位 */
+        tier?: string;
+        /** 启用状态（主进程 _state.json 唯一真相） */
+        enabled?: boolean;
       }[];
       errors: string[];
     };

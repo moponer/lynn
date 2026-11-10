@@ -249,6 +249,8 @@ export class McpRegistry {
   private lazyCfgs = new Map<string, McpServerConfig>();
 
   async startAll(servers: McpServerConfig[]): Promise<void> {
+    // 每次重载重新记账：上一次的失败不该赖在这张表上
+    this.errors = [];
     for (const cfg of servers) {
       if (cfg.enabled === false) continue;
       if (cfg.lazy === true) {
@@ -355,6 +357,24 @@ export class McpRegistry {
 
   size(): number {
     return this.names.size;
+  }
+
+  /**
+   * 给界面看的实况：哪些连上了、各带几个工具、哪些待命、哪些连不上。
+   * 只报事实——没连上的 server 不会因为"配置里写了"就显示成已连接。
+   */
+  status(): { id: string; connected: boolean; lazy: boolean; tools: number; error?: string }[] {
+    const out: { id: string; connected: boolean; lazy: boolean; tools: number; error?: string }[] = [];
+    for (const [id, client] of this.clients) {
+      out.push({ id, connected: true, lazy: false, tools: client.tools().length });
+    }
+    for (const id of this.lazyCfgs.keys()) {
+      out.push({ id, connected: false, lazy: true, tools: 0 });
+    }
+    for (const e of this.errors) {
+      if (!out.some((s) => s.id === e.id)) out.push({ id: e.id, connected: false, lazy: false, tools: 0, error: e.message });
+    }
+    return out.sort((a, b) => a.id.localeCompare(b.id));
   }
 
   lazyIds(): string[] {

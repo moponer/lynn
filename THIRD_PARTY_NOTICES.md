@@ -10,8 +10,10 @@
 | `electron-updater` | MIT | 自动更新（generic feed，用户确认后下载） |
 | `jiti` | MIT | L1 进程内扩展的 TypeScript 直跑加载器 |
 | `playwright-core` | Apache-2.0 | 浏览器执行域：驱动**用户本机已安装的 Edge**（`channel: msedge`），不下载浏览器 |
+| `node-screenshots`（含各平台 N-API 二进制包） | Apache-2.0 | 区域截图的原生捕获引擎（Rust XCap，Windows 走 DXGI）：抓屏、裁剪、PNG 编码；缺平台二进制时如实报不可用 |
 | `react` / `react-dom` | MIT | 渲染层 UI |
 | `@fontsource-variable/archivo` / `@fontsource/ibm-plex-mono` | OFL 1.1 | 随包拉丁字体（SIL Open Font License） |
+| `@dicebear/core` / `@dicebear/collection` | MIT | 成员头像的开源插画库：用固定 seed 在**本地**生成 SVG，不联网、无 CDN、不上报；当前画风 `notionists`（DiceBear 设计，MIT） |
 | `electron` / `electron-builder` | MIT | 桌面壳与打包 |
 | `typescript` / `vite` / `@vitejs/plugin-react` | Apache-2.0 / MIT / MIT | 构建链 |
 | `@types/*` | MIT / Apache-2.0 | 类型定义（仅开发期） |
@@ -20,12 +22,13 @@
 
 - **浏览器能力**：lynn 不捆绑、不下载浏览器，只驱动用户本机 Edge（playwright-core，Apache-2.0）。登录 / 支付 / 验证码类页面在代码层强制拦截，需要用户确认（见隐私说明）。
 - **遥测**：Pi 生态包 `pi-telemetry` 是上游 `@earendil-works/pi-ai` 的依赖树成员，但 lynn 在运行时以 `PI_TELEMETRY=0` 禁用之，并有自动化测试锁定该行为；应用自身无遥测。
+- **头像**：只用 DiceBear JS 库离线生成 SVG（data-uri），不请求 `api.dicebear.com`，没有外链图片；12 张脸的 seed 固定在 `src/shared/avatars.ts`，同名成员跨会话不换脸。
 - 消息平台（QQ / 飞书）只走官方开放平台 API + 用户自建应用凭据，不接非官方协议。
 
 ## 依赖清单（自动生成）
 
 <!-- AUTO-DEPS START（由 scripts/gen-notices.mjs 生成，勿手改） -->
-共 440 个顶层包（含直接与传递依赖）：
+共 484 个顶层包（含直接与传递依赖）：
 
 ```
 @anthropic-ai/sdk@0.129.0
@@ -68,6 +71,39 @@
 @babel/template@7.29.7
 @babel/traverse@7.29.12
 @babel/types@7.29.11
+@dicebear/adventurer-neutral@9.4.3
+@dicebear/adventurer@9.4.3
+@dicebear/avataaars-neutral@9.4.3
+@dicebear/avataaars@9.4.3
+@dicebear/big-ears-neutral@9.4.3
+@dicebear/big-ears@9.4.3
+@dicebear/big-smile@9.4.3
+@dicebear/bottts-neutral@9.4.3
+@dicebear/bottts@9.4.3
+@dicebear/collection@9.4.3
+@dicebear/core@9.4.3
+@dicebear/croodles-neutral@9.4.3
+@dicebear/croodles@9.4.3
+@dicebear/dylan@9.4.3
+@dicebear/fun-emoji@9.4.3
+@dicebear/glass@9.4.3
+@dicebear/icons@9.4.3
+@dicebear/identicon@9.4.3
+@dicebear/initials@9.4.3
+@dicebear/lorelei-neutral@9.4.3
+@dicebear/lorelei@9.4.3
+@dicebear/micah@9.4.3
+@dicebear/miniavs@9.4.3
+@dicebear/notionists-neutral@9.4.3
+@dicebear/notionists@9.4.3
+@dicebear/open-peeps@9.4.3
+@dicebear/personas@9.4.3
+@dicebear/pixel-art-neutral@9.4.3
+@dicebear/pixel-art@9.4.3
+@dicebear/rings@9.4.3
+@dicebear/shapes@9.4.3
+@dicebear/thumbs@9.4.3
+@dicebear/toon-head@9.4.3
 @earendil-works/pi-agent-core@1.4.0
 @earendil-works/pi-ai@1.4.0
 @earendil-works/pi-codemode@1.4.0
@@ -178,6 +214,7 @@
 @types/estree@1.0.10
 @types/fs-extra@9.0.13
 @types/http-cache-semantics@4.2.0
+@types/json-schema@7.0.15
 @types/keyv@3.1.4
 @types/ms@2.1.0
 @types/node@22.20.5
@@ -366,6 +403,16 @@ node-fetch@3.3.2
 node-gyp@12.4.0
 node-int64@0.4.0
 node-releases@2.0.63
+node-screenshots-darwin-arm64@0.2.8
+node-screenshots-darwin-x64@0.2.8
+node-screenshots-linux-arm64-gnu@0.2.8
+node-screenshots-linux-loong64-gnu@0.2.8
+node-screenshots-linux-x64-gnu@0.2.8
+node-screenshots-linux-x64-musl@0.2.8
+node-screenshots-win32-arm64-msvc@0.2.8
+node-screenshots-win32-ia32-msvc@0.2.8
+node-screenshots-win32-x64-msvc@0.2.8
+node-screenshots@0.2.8
 nopt@9.0.0
 normalize-url@6.1.0
 object-keys@1.1.1

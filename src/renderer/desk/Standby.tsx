@@ -41,8 +41,9 @@ export function Standby({
     };
   }, [onExit]);
 
-  const waiting = desk.jobs.filter((j) => j.status === "in_review" || j.status === "blocked").length;
-  const running = desk.jobs.filter((j) => j.status === "in_progress").length;
+  /* "等你拍板"只算真正要你动手的：风铃自己验的单不算（reviewer=lynn 的 action 是 none） */
+  const waiting = desk.jobs.filter((j) => j.action !== "none").length;
+  const running = desk.jobs.filter((j) => j.action === "none" && j.group === "running").length;
   const hh = String(now.getHours()).padStart(2, "0");
   const mm = String(now.getMinutes()).padStart(2, "0");
   const date = now.toLocaleDateString("zh-CN", { month: "long", day: "numeric", weekday: "long" });

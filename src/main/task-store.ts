@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { TaskStatus } from "../shared/contract";
+import type { Root } from "./roots";
 
 /**
  * 工单实体（计划书 §4.8 / §4.10.4 / §4.10.5）。
@@ -30,6 +31,33 @@ export interface ApprovalRecord {
   note?: string;
 }
 
+/**
+ * 任务工作区（2026-11-10 工作区模型）：
+ *  - project：在用户项目里干活（root = 会话主根），生成物进 deliverables
+ *  - sandbox：不碰用户项目（root = tasks/<id>/workspace），删起来干净
+ * scratch 永远在数据根内，可被清理；deliverables 是交付物，永不被自动删。
+ */
+export interface TaskWorkspaceRecord {
+  mode: "project" | "sandbox";
+  root: string;
+  /** 生成物目录（项目模式在项目内 deliverables/<taskId>/，沙箱模式在 workspace/deliverables/） */
+  deliverablesDir?: string;
+  /** 过程文件目录（永远在数据根内） */
+  scratchDir?: string;
+  /** 任务级附加根（用户在这张单上追加的只读/可写目录） */
+  roots?: Root[];
+}
+
+/** 验收固化的交付物（task.json 里的权威清单） */
+export interface DeliverableRef {
+  /** 交付时相对工作区的路径 */
+  path: string;
+  /** 卷宗内副本（artifacts/x）或外部绝对路径（超阈值/只读根证据只登记引用） */
+  ref: string;
+  bytes?: number;
+  at: string;
+}
+
 export interface TaskRecord {
   id: string;
   title: string;
@@ -46,6 +74,13 @@ export interface TaskRecord {
   rejectLimit: number;
   /** 用户的显式拍板记录（→ done 的必要条件） */
   approvals: ApprovalRecord[];
+  /**
+   * 这张单由谁验收：
+   *   lynn —— 派给团队成员的活，风铃自己验（不合格就打回重做，她 accept 即归档）
+   *   user —— 风铃交付给你的最终结果，只有你能拍板（§4.10.5 只对这一级生效）
+   * 缺省按 user 处理：老单与风铃自己干的活都走用户终审，不会因为新字段被偷偷归档。
+   */
+  reviewer?: "lynn" | "user";
   createdAt: string;
   updatedAt: string;
   /** 这一段的 Pi session（追溯用，§4.10.7） */
@@ -66,6 +101,10 @@ export interface TaskRecord {
    * 没记过就退回 `<dataRoot>/tasks/<id>/workspace/`（老单）。
    */
   workspaceRoot?: string;
+  /** 任务工作区的新形态（2026-11-10）；缺省时由 workspaceRoot 推导（老单） */
+  workspace?: TaskWorkspaceRecord;
+  /** 验收固化的交付物清单（与证据分开；交付物永久保留） */
+  deliverables?: DeliverableRef[];
 }
 
 export class TaskConflictError extends Error {
@@ -93,7 +132,8 @@ const LEGAL: Record<TaskStatus, TaskStatus[]> = {
   in_progress: ["in_review", "blocked", "canceled"],
   in_review: ["done", "in_progress", "blocked", "canceled"],
   blocked: ["in_progress", "todo", "canceled"],
-  done: [],
+  /* 归档可被用户重开：风铃代验可能判错，锁死的单用户收不了场，所以留这条唯一退路 */
+  done: ["in_progress"],
   canceled: [],
 };
 
@@ -217,6 +257,7 @@ export class TaskStore {
     member?: string;
     threadId?: string;
     workspaceRoot?: string;
+    workspace?: TaskWorkspaceRecord;
   }): TaskRecord {
     if (this.get(input.id)) throw new TaskRuleError(`工单已存在: ${input.id}`);
     if (input.parentId) {
@@ -241,7 +282,8 @@ export class TaskStore {
       createdAt: now,
       updatedAt: now,
       threadId: input.threadId,
-      workspaceRoot: input.workspaceRoot,
+      workspaceRoot: input.workspaceRoot ?? input.workspace?.root,
+      ...(input.workspace ? { workspace: input.workspace } : {}),
     };
     this.write(rec);
     return rec;
@@ -318,6 +360,22 @@ export class TaskStore {
     return this.commit(rec);
   }
 
+  /** 换这张单的工作区记录（审查快照切沙箱时用；与 workspaceRoot 镜像一起写） */
+  setWorkspace(id: string, ws: TaskWorkspaceRecord): TaskRecord {
+    const rec = this.mustGet(id);
+    const next = { ...ws, root: path.resolve(ws.root) };
+    rec.workspace = next;
+    rec.workspaceRoot = next.root;
+    return this.commit(rec);
+  }
+
+  /** 记交付物清单（验收固化；与证据分开） */
+  setDeliverables(id: string, items: DeliverableRef[]): TaskRecord {
+    const rec = this.mustGet(id);
+    rec.deliverables = items;
+    return this.commit(rec);
+  }
+
   /** 设置/撤销只读授权目录（只由用户侧的授权入口调用） */
   setReadRoots(id: string, roots: string[]): TaskRecord {
     const rec = this.mustGet(id);
@@ -380,6 +438,14 @@ export class TaskStore {
     }
     rec.approvals.push({ by, action: "approve", at: new Date().toISOString(), note });
     return this.commit(rec, opts.expectedVersion);
+  }
+
+  /** 记这张单的验收人（成员单交给风铃，最终交付留给你） */
+  setReviewer(id: string, reviewer: "lynn" | "user"): TaskRecord {
+    const rec = this.mustGet(id);
+    if (rec.reviewer === reviewer) return rec;
+    rec.reviewer = reviewer;
+    return this.commit(rec);
   }
 
   /** 供内核集成：没有工单就补建，并推到 in_progress（派单即开工） */

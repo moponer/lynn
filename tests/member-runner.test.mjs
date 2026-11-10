@@ -108,6 +108,14 @@ test("memberSystemPrompt：goal/边界/工具/产出契约/截止时间全部编
   assert.ok(sys.includes("read_file、write_file"));
   assert.ok(sys.includes("submit_report"));
   assert.ok(!sys.includes("run_command")); // 未分配的工具不出现在提示词里
+  // 死字段修复回归：escalateWhen / body 必须编译进成员提示词（2026-11-09 实锤此前从未注入）
+  assert.match(sys, /何时必须停手升级.*卡住/);
+  assert.ok(!sys.includes("岗位工作方式"), "body 为空时不出现空段");
+  const withBody = memberSystemPrompt({
+    ...input,
+    profile: profile({ body: "先列目录再逐个核对；产出前用眼睛检查一遍数字。" }),
+  });
+  assert.match(withBody, /岗位工作方式（档案正文）】\n先列目录再逐个核对/);
 });
 
 // ---------- 执行循环 ----------
@@ -215,4 +223,50 @@ test("runMemberTask：模型光说话不调工具会被要求走 submit_report�
   });
   assert.equal(r.status, "reported");
   assert.equal(r.turns, 3);
+});
+
+// ---------- 2026-11-10：只读根证据 + 交付物 ----------
+
+test("runMemberTask：只读根里的文件可以作为证据（审查项目不再交不出证据）", async () => {
+  const wd = tmpWorkdir();
+  const ro = fs.mkdtempSync(path.join(os.tmpdir(), "lynn-readroot-"));
+  const target = path.join(ro, "audit.csv");
+  fs.writeFileSync(target, "科目,金额\n收入,100\n", "utf-8");
+  const chat = scriptedChat([
+    { toolCalls: [tc("1", "submit_report", { text: "审查完成，见附件", evidence: [target] })] },
+  ]);
+  const r = await runMemberTask({
+    profile: profile(),
+    brief: "审查外部项目",
+    deadline: "今天",
+    tools: ["read_file"],
+    workdir: wd,
+    readRoots: [ro],
+    model: { baseUrl: "http://x", apiKey: "k", model: "m" },
+    chatFn: chat,
+  });
+  assert.equal(r.status, "reported", "只读根里的真实文件应被接受");
+  assert.deepEqual(r.evidence, [target]);
+});
+
+test("runMemberTask：交付物与证据分开；交付物不存在同样拒收", async () => {
+  const wd = tmpWorkdir();
+  const chat = scriptedChat([
+    { toolCalls: [tc("1", "submit_report", { text: "完成", evidence: ["report.md"], deliverables: ["没有的表.xlsx"] })] },
+    { toolCalls: [tc("2", "write_file", { path: "report.md", content: "# 报告" })] },
+    { toolCalls: [tc("3", "write_file", { path: "交付/汇总.xlsx", content: "fake-xlsx" })] },
+    { toolCalls: [tc("4", "submit_report", { text: "完成", evidence: ["report.md"], deliverables: ["交付/汇总.xlsx"] })] },
+  ]);
+  const r = await runMemberTask({
+    profile: profile(),
+    brief: "出报告和表格",
+    deadline: "今天",
+    tools: ["write_file"],
+    workdir: wd,
+    model: { baseUrl: "http://x", apiKey: "k", model: "m" },
+    chatFn: chat,
+  });
+  assert.equal(r.status, "reported");
+  assert.deepEqual(r.evidence, ["report.md"]);
+  assert.deepEqual(r.deliverables, ["交付/汇总.xlsx"], "交付物单独返回，交给卷宗固化");
 });

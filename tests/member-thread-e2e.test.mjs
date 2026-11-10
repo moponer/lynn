@@ -98,7 +98,7 @@ function setup() {
 }
 
 const assign = (kernel, taskId, member = "林工") =>
-  kernel.runTool("assign_task", { teamId: "t1", taskId, member, brief: "整理 9 月材料出月报", deadline: "30 分钟" });
+  kernel.runTool("assign_task", { teamId: "t1", taskId, member, brief: "【目标】把 9 月材料整理成月报\n【完成标准】产出月报文件，数字与源材料核对一致\n【材料与位置】材料文件在工作区\n【限制】只做 9 月，不要改源材料", deadline: "30 分钟" });
 
 const start = (kernel, taskId) => {
   const plan = kernel.handle("session.snapshot").board.decisions.find((d) => d.kind === "plan" && d.jobId === taskId);

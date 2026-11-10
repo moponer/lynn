@@ -1,0 +1,202 @@
+/* 区域截图：选区窗（冻结帧 Canvas + 遮罩 + 工具栏）+ 输入框里的启动按钮。
+   与 dispatch.css 分开：选区窗是独立窗口，主界面只用到 .capture-trigger。 */
+
+.cap-root {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  background: #000;
+  cursor: crosshair;
+  user-select: none;
+}
+
+/* 工作画布是物理像素尺寸，CSS 缩到视口；标注在上面重绘 */
+.cap-frame {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.cap-shade {
+  position: absolute;
+  z-index: 2;
+  background: rgba(8, 12, 16, .56);
+  pointer-events: none;
+}
+
+/* 自动识别到的窗口：鼠标停哪高亮哪，单击即截整个窗口 */
+.cap-win {
+  position: absolute;
+  z-index: 3;
+  box-shadow: inset 0 0 0 2px #07c160, 0 0 0 1px rgba(0, 0, 0, .35);
+  pointer-events: none;
+}
+.cap-win-label {
+  position: absolute;
+  left: 0;
+  top: -25px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  background: rgba(12, 18, 24, .9);
+  color: #f2f4f6;
+  font-size: var(--fs-meta);
+  white-space: nowrap;
+}
+
+.cap-outline {
+  position: absolute;
+  z-index: 4;
+  box-shadow: 0 0 0 1.5px #07c160, 0 0 0 4px rgba(7, 193, 96, .28);
+  pointer-events: none;
+}
+.cap-size {
+  position: absolute;
+  left: 7px;
+  top: 7px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  background: rgba(12, 18, 24, .88);
+  color: #f2f4f6;
+  font-size: var(--fs-meta);
+  line-height: 1.4;
+  white-space: nowrap;
+}
+.cap-handle {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  background: #07c160;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, .9), 0 0 0 2px rgba(0, 0, 0, .45);
+  pointer-events: none;
+}
+.cap-handle.nw { left: -5px; top: -5px; }
+.cap-handle.n { left: calc(50% - 5px); top: -5px; }
+.cap-handle.ne { right: -5px; top: -5px; }
+.cap-handle.e { right: -5px; top: calc(50% - 5px); }
+.cap-handle.se { right: -5px; bottom: -5px; }
+.cap-handle.s { left: calc(50% - 5px); bottom: -5px; }
+.cap-handle.sw { left: -5px; bottom: -5px; }
+.cap-handle.w { left: -5px; top: calc(50% - 5px); }
+
+/* 工具栏：微信式两行，跟随选区下沿（空间不够就退到选区内底部） */
+.cap-bar {
+  position: absolute;
+  z-index: 6;
+  max-width: calc(100vw - 16px);
+  padding: 6px 8px;
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  border-radius: 8px;
+  background: rgba(18, 24, 30, .95);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, .45);
+  pointer-events: auto;
+  cursor: default;
+}
+.cap-bar-tools { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.cap-preview {
+  position: relative;
+  flex: 0 0 auto;
+  overflow: hidden;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, .35);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, .25);
+}
+.cap-preview-inner {
+  position: absolute;
+  transform-origin: 0 0;
+  background-repeat: no-repeat;
+}
+.cap-tool {
+  padding: 4px 7px;
+  border-radius: 4px;
+  background: transparent;
+  color: #d8dde2;
+  font-size: var(--fs-meta);
+  line-height: 1.4;
+  white-space: nowrap;
+}
+.cap-tool:hover { background: rgba(255, 255, 255, .12); }
+.cap-tool.on { background: rgba(255, 255, 255, .22); color: #fff; }
+.cap-tool.primary { background: #e0574c; color: #fff; }
+.cap-tool:disabled { opacity: .5; cursor: not-allowed; }
+.cap-swatch {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, .35);
+}
+.cap-swatch.on { box-shadow: 0 0 0 2px #fff; }
+.cap-sep { width: 1px; height: 16px; margin: 0 3px; background: rgba(255, 255, 255, .22); }
+
+.cap-text-input {
+  position: absolute;
+  z-index: 7;
+  min-width: 190px;
+  padding: 5px 8px;
+  border-radius: 4px;
+  background: #fff;
+  color: #12181f;
+  font-size: var(--fs-body);
+  outline: none;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, .45);
+}
+
+/* 放大镜：命令式更新，跟随光标取色 */
+.cap-mag {
+  position: absolute;
+  z-index: 5;
+  width: 96px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  border-radius: 5px;
+  background: rgba(12, 18, 24, .9);
+  color: #f2f4f6;
+  font-size: var(--fs-label);
+  line-height: 1.3;
+  pointer-events: none;
+}
+.cap-mag canvas { width: 64px; height: 64px; image-rendering: pixelated; }
+
+.cap-hint,
+.cap-msg {
+  position: absolute;
+  z-index: 8;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 8px 14px;
+  border-radius: 6px;
+  background: rgba(12, 18, 24, .88);
+  color: #f2f4f6;
+  font-size: var(--fs-meta);
+  line-height: 1.5;
+  letter-spacing: .02em;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.cap-hint { bottom: 28px; }
+.cap-msg { top: 24px; z-index: 9; }
+
+.capture-trigger {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px;
+  border-radius: 5px;
+  background: var(--sheet-3);
+  color: var(--ink-3);
+  font-size: var(--fs-label);
+  white-space: nowrap;
+}
+.capture-trigger:hover { color: var(--blue); }
+.capture-trigger:disabled { opacity: .5; cursor: not-allowed; }
+.capture-err { color: var(--seal); }

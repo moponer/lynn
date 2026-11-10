@@ -1,6 +1,6 @@
 # 风铃 Lynn · 打包配置（§4.6 / M0 测试包）
-# 说明：先关闭 asar —— RPC 子进程要用「真文件路径」加载 agent/pi-rpc-entry.mjs
-# 与 node_modules 里的 Pi ESM 包；asar 内 ESM 解析不可靠。体积换稳定，后续再优化。
+# 说明：先关闭 asar —— RPC 子进程要用「真文件路径」加载 Pi 官方 rpc-entry.js
+# 与 agent/extensions/lynn-bridge.mjs；asar 内 ESM 解析不可靠。体积换稳定，后续再优化。
 appId: ai.lynn.desktop
 productName: Lynn
 copyright: Copyright © 2026 Lynn
@@ -15,6 +15,12 @@ files:
   - dist/**/*
   - agent/**/*
   - assets/**/*
+  # 官方 RPC 入口与扩展运行时依赖：显式带上，避免依赖自动收集漏掉 bundle/chunks
+  - node_modules/@earendil-works/**/*
+  - node_modules/typebox/**/*
+  # 区域截图：node-screenshots 主包 + 对应平台的 N-API 预编译二进制（asar:false 要显式带上）
+  - node_modules/node-screenshots/**/*
+  - node_modules/node-screenshots-*/**/*
   - package.json
   - "!**/*.map"
   - "!**/*.ts"

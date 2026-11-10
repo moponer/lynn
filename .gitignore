@@ -3,3 +3,14 @@ dist/
 release/
 *.log
 .DS_Store
+
+# 本地运行时与工具产物（不进仓库）
+/tasks/
+.tmp/
+.workbuddy/
+
+# 设计走查截图（本地证据，按需单独归档）
+/shots/
+
+# 插件草稿（工坊运行时）
+src-tauri/resources/dsh-engine/

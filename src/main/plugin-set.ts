@@ -188,6 +188,15 @@ export class PluginSetStore {
     return fs.existsSync(this.safeFile);
   }
 
+  /**
+   * 单个插件此刻是否启用（与 plugin-host 的判定同源）：
+   * 安全模式下一律只认官方；未写状态时按档位默认——L1 第三方默认关（影子态），其余默认开。
+   */
+  enabledOf(id: string, tier: string, official: boolean): boolean {
+    if (this.isSafeMode()) return official;
+    return this.readState()[id] ?? !(tier === "L1" && !official);
+  }
+
   safeModeInfo(): { at: string; reason: string } | null {
     try {
       return JSON.parse(fs.readFileSync(this.safeFile, "utf-8")) as { at: string; reason: string };

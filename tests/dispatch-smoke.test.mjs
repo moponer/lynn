@@ -33,7 +33,7 @@ const assign = (kernel) =>
     teamId: "t1",
     taskId: "task-1",
     member: "林工",
-    brief: "整理材料出月报",
+    brief: "【目标】把 9 月订单表整理成月报\n【完成标准】产出月报.md，数字与源表核对一致\n【材料与位置】材料文件在工作区 orders.csv\n【限制】只做 9 月，不要改源表口径",
     deadline: "周五",
   });
 

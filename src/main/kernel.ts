@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import type {
   BoardData,
@@ -18,14 +19,17 @@ import type {
 } from "../shared/contract";
 import { ManagementTools, MANAGEMENT_ONLY_TOOLS } from "./management-tools";
 import { streamChat, probeEndpoint, type ChatMessage, type ToolSchema } from "./llm";
-import { SettingsStore, loadApiKey, defaultDataRoot } from "./settings";
+import { SettingsStore, loadApiKey, defaultDataRoot, type StoredModelConfig } from "./settings";
 import { applyPiEnvironment } from "./pi-home";
 import { reapOrphanWorkers } from "./agent-orphans";
 import { McpRegistry, loadMcpConfig, loadMcpConfigAt, type McpServerConfig } from "./mcp";
 import { CheckpointStore } from "./checkpoints";
+import { measureUsage, runCleanup, type Retention } from "./cleanup";
+import { buildZip, collectZipEntries, type ZipEntry } from "./zip";
 import { TrustStore } from "./trust";
-import { ThreadStore } from "./threads";
+import { ThreadStore, type ThreadMeta } from "./threads";
 import { buildTurnAttachments, searchProjectFiles, type TurnAttachments } from "./attachments";
+import { isCaptureHotkey } from "./capture";
 import { PersonaStore, composeSystemPrompt } from "./persona";
 import { MemoryStore, type MemoryKind } from "./memory";
 import { PRESETS, loadProviders, saveProviders, type ProviderEntry } from "./providers";
@@ -34,6 +38,7 @@ import { SchedulerStore, recover as recoverScheduler, type DueItem } from "./sch
 import { KnowledgeStore, watchKnowledge } from "./knowledge";
 import { appendUsage, evaluateBudget, pickModel } from "./budget";
 import { groupOf } from "../shared/task-groups";
+import { avatarById, avatarFor, isAvatarId } from "../shared/avatars";
 import {
   buildInjection,
   discoverSkills,
@@ -55,16 +60,51 @@ import {
   type WorkshopKind,
 } from "./workshop";
 import { isLang, mergeStrings } from "../shared/i18n";
+import { BUILTIN_SKILLS } from "./builtin-skills";
+import {
+  addRoot,
+  emptyRoots,
+  forbiddenRootReason,
+  isDriveRoot,
+  isInside,
+  normalizeRoots,
+  primaryOf,
+  readableRoots,
+  removeRoot,
+  rootDirError,
+  rootsFromLegacy,
+  writableRoots,
+  type RootSet,
+} from "./roots";
 import { BUILTIN_STRINGS } from "../shared/i18n-strings";
 import { TaskStore } from "./task-store";
+import type { DeliverableRef, TaskRecord, TaskWorkspaceRecord } from "./task-store";
 import { TaskCase } from "./task-case";
 import { ContextStore } from "./context-store";
 import { scanUiPlugins } from "./ui-plugins";
 import { PluginHost } from "./plugin-host";
 import { PluginSetStore } from "./plugin-set";
-import { runMemberTask, MEMBER_EXEC_TOOLS, type MemberRunResult } from "./member-runner";
+import { runMemberTask, validateBrief, MEMBER_EXEC_TOOLS, type MemberRunResult } from "./member-runner";
+import { collectHeartbeatFacts, heartbeatSignature, heartbeatIsEmpty, heartbeatPrompt, type HeartbeatFacts } from "./heartbeat";
 import { L1Host } from "./plugin-l1";
-import { AgentHost, type RpcToolSpec } from "./agent-host";
+import { AgentHost, type AgentStats, type RpcToolSpec } from "./agent-host";
+import { PiRpcHost } from "./pi-rpc-host";
+
+/** 两种运行时宿主都要满足的最小面：官方 RPC 为主，旧自建协议仅作一键回退 */
+interface RuntimeHost {
+  isRunning(): boolean;
+  isBusy(): boolean;
+  readonly sessionId: string | undefined;
+  start(): Promise<void>;
+  stop(): Promise<void>;
+  prompt(text: string): Promise<{ disposition?: string }>;
+  steer(text: string): Promise<unknown>;
+  abort(): Promise<unknown>;
+  stats(): Promise<AgentStats | null>;
+  updateSystemPrompt(text: string): void | Promise<void>;
+  request<T>(type: string, data?: Record<string, unknown>): Promise<T>;
+  getStderr(): string;
+}
 
 /**
  * 内核：**Pi 为底座**（§1.3）。
@@ -91,6 +131,8 @@ const DELTA_FRAME_MS = 16;
 const DEFAULT_MAX_PARALLEL_MEMBERS = 4;
 /** 成员多久没有任何动作就标"可能卡住"（蓝本 tether-ai 是 120s） */
 const MEMBER_STALL_MS = 120_000;
+/** 这类卡片是"重复事件"（权限拦截 / 外呼审计）：同一张单反复出现就聚合计数，不逐条刷屏 */
+const AGGREGATED_BADGES = new Set(["已拦截", "出站"]);
 
 const TOOL_JSON: ToolSchema[] = [
   {
@@ -98,11 +140,11 @@ const TOOL_JSON: ToolSchema[] = [
     function: {
       name: "create_team",
       description:
-        "建一个团队（不需要先有团队）。只需给一个人类可读的名字，团队 ID 由系统生成并返回给你——绝不要向用户索要 ID。",
+        "建一个团队（不需要先有团队）。只需给一个人类可读的名字，团队 ID 由系统生成并返回给你——绝不要向用户索要 ID。团队名跟任务走：用任务主题命名（如「Q3订单数据核对」），不要起花哨代号。",
       parameters: {
         type: "object",
         properties: {
-          name: { type: "string", description: "团队名（人类可读，例如「超星学霸」）；省略则用系统默认名" },
+          name: { type: "string", description: "团队名（人类可读，以任务主题命名，例如「Q3订单数据核对」）；省略则用任务标题" },
         },
       },
     },
@@ -121,7 +163,7 @@ const TOOL_JSON: ToolSchema[] = [
           teamName: { type: "string", description: "需要自动建队时用的团队名（可选）" },
           name: { type: "string" },
           role: { type: "string" },
-          goal: { type: "string", description: "单一目标，行为收敛的关键" },
+          goal: { type: "string", description: "单一职责：这个岗位对什么产出负责（写「负责什么结果」，不写「会做什么」）" },
           boundaries: { type: "array", items: { type: "string" } },
           tools: {
             type: "array",
@@ -131,6 +173,7 @@ const TOOL_JSON: ToolSchema[] = [
           },
           deliverable: { type: "string" },
           acceptance: { type: "array", items: { type: "string" } },
+          avatarId: { type: "string", description: "头像库 id（a01…a12，可省略：系统按名字自动挑一张本队没用过的）" },
           justification: { type: "string", description: "超过 6 人编制时必填" },
         },
       },
@@ -141,19 +184,35 @@ const TOOL_JSON: ToolSchema[] = [
     function: {
       name: "assign_task",
       description:
-        "向成员派单。成员只拿到简报包（任务+完成标准+时限），看不到你们的对话。**一条任务线一支团队**：不传 teamId 时，新会话会新建团队（不会塞进上一条任务的班底）；要沿用旧班底必须显式传 teamId 并说明理由。多个任务并行时一任务一团队可以，但要先把任务清单（各派给谁、多久）告诉用户。",
+        "向成员派单。成员只拿到简报包，看不到你们的对话，所以简报必须自足：按四段写【目标】【完成标准】【材料与位置】【限制】，缺了会被代码层退回重写。委托目标或材料位置不明确时先用 ask_user 问清用户，不要猜着派单。**一条任务线一支团队**：不传 teamId 时，新会话会新建团队（不会塞进上一条任务的班底）；要沿用旧班底必须显式传 teamId 并说明理由。多个任务并行时一任务一团队可以，但要先把任务清单（各派给谁、多久）告诉用户。",
       parameters: {
         type: "object",
         required: ["taskId", "member", "brief", "deadline"],
         properties: {
           teamId: { type: "string", description: TEAM_HINT },
-          teamName: { type: "string", description: "需要自动建队时用的团队名（可选）" },
+          teamName: { type: "string", description: "需要自动建队时用的团队名（可选；以任务主题命名，不要花哨代号）" },
           taskId: { type: "string" },
           member: { type: "string" },
-          brief: { type: "string" },
-          deadline: { type: "string" },
+          brief: {
+            type: "string",
+            description:
+              "简报包（四段，缺会被退回）：【目标】产出什么；【完成标准】可验证的验收点；【材料与位置】输入材料的完整路径（关键内容能贴进简报就贴，别让成员去猜）；【限制】不许做什么、范围与口径",
+          },
+          deadline: { type: "string", description: "具体时间（如「2026-11-10 18:00」「2小时后」），不要写「尽快」" },
           tools: { type: "array", items: { type: "string" }, description: "本次分配工具集，必须 ⊆ 岗位白名单" },
-          acceptance: { type: "array", items: { type: "string" }, description: "验收标准（写进任务契约，用户点开始后生效）" },
+          acceptance: { type: "array", items: { type: "string" }, description: "验收标准（可验证；写进任务契约，用户点开始后生效）" },
+          workspace: {
+            type: "string",
+            description:
+              "成员的读写工作目录（可选，须是已存在的目录）。缺省 = 当前会话的项目目录。用户会在契约卡上看到并批准",
+          },
+          readRoots: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "成员需要**只读**访问的目录清单（可选，须是已存在的目录）。材料在工作区外时填这个申请授权——用户在契约卡上批准后才生效，你不能自己扩权",
+          },
+          maxTurns: { type: "number", description: "轮次上限覆盖（可选，1–40；缺省用岗位档案上限）。任务量大就给足，别让成员中途被掐断" },
           template: {
             type: "string",
             description: "复用哪套编制模板（省略则按任务标题自动匹配；没有再自动新建一支空队，不会失败）",
@@ -302,6 +361,42 @@ const TOOL_JSON: ToolSchema[] = [
   {
     type: "function",
     function: {
+      name: "save_memory",
+      description:
+        "沉淀记忆（M2-05）：把一条事实/决定/坑/做事方法写进助理记忆（跨会话都在你的系统提示词里）。完成任务后的经验教训、用户偏好、项目的关键路径都该沉淀。scope=user 表示写「用户记忆」（偏好/背景，永远保留）。",
+      parameters: {
+        type: "object",
+        required: ["entry"],
+        properties: {
+          entry: { type: "string", description: "一条具体的事实（一句话，含上下文；不要写流水账）" },
+          scope: { type: "string", enum: ["memory", "user"], description: "缺省=助理记忆；user=用户记忆（偏好/背景）" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "create_plugin_draft",
+      description:
+        "开一张插件工坊草稿（M3-07）：当你发现某类任务会重复出现、值得沉淀成插件时，先用这个开草稿，再派插件工程师（workspace 填返回的草稿目录）把产物写进草稿区，最后 ship_plugin 走准入审查。档位选型：能用 L0（纯声明：主题/文案/静态卡槽）不写代码，能用 MCP 不进进程。开发与验收标准见 plugin-dev 技能。",
+      parameters: {
+        type: "object",
+        required: ["title", "kind", "spec"],
+        properties: {
+          title: { type: "string", description: "插件名（人类可读，如「周报图表卡」）" },
+          kind: { type: "string", enum: ["L0", "L1", "L2"], description: "档位：L0 纯声明零代码；L1 进程内 TS 扩展；L2 外挂 MCP server" },
+          spec: {
+            type: "string",
+            description: "规格：解决什么、输入输出、边界（不许做什么）、最小权限集、验收用例。成员只能看到规格，要写全",
+          },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "ship_plugin",
       description:
         "把通过准入审查的工坊草稿启用（M3-07 插件工坊）。只允许 L0 技能插件自启用——每次启用记审计并在汇报里告知用户；L1/L2 一律拒绝：必须由用户在插件面板点启用（她不得给自己的产物提权，Q6 定稿 C）。",
@@ -331,6 +426,12 @@ interface PendingPlan {
   brief: string;
   deadline: string;
   tools?: string[];
+  /** 用户在契约卡上批准的成员读写工作区（缺省 = 会话项目目录） */
+  workspace?: string;
+  /** 派单时申请、用户点开始才生效的只读授权目录 */
+  readRoots?: string[];
+  /** 轮次上限覆盖（1–40） */
+  maxTurns?: number;
   /** M3-07：插件工坊草稿 id——成员工作区即草稿区（产物只能写进草稿） */
   draftId?: string;
 }
@@ -447,6 +548,12 @@ export class Kernel {
   private supervisorTimer: NodeJS.Timeout | null = null;
   private lastSupervisorAt = 0;
   private supervisorNoted = new Map<string, number>();
+  /** 本轮技能注入文本（当轮消息尾部拼接；不进 system prompt —— 保前缀缓存稳定） */
+  private pendingSkillText = "";
+  /** 心跳巡检（M3-01）：定时器、节流与同批事实去重 */
+  private heartbeatTimer: NodeJS.Timeout | null = null;
+  private lastHeartbeatAt = Date.now(); // init 后先静默一个间隔，不抢启动窗口
+  private heartbeatNoted = new Map<string, number>();
   /** 成员本轮累计 token（`teamId::成员` → tokens）：编制表的预算读数不再是硬编码 0 */
   private memberUsage = new Map<string, number>();
   /** 每张单的中止器（用户点「停」）：没有它就只能解散全队来止损 */
@@ -458,7 +565,7 @@ export class Kernel {
   /** Pi RPC worker 可用（M0-03：壳与运行时分进程） */
   private piReady = false;
   /** 子进程宿主；懒启动，配置/工具面变化时重建 */
-  private host: AgentHost | null = null;
+  private host: RuntimeHost | null = null;
   private hostStamp = "";
   /** 流式中的她：runChat 里增量 patch */
   private liveCard: FeedCard | null = null;
@@ -467,6 +574,8 @@ export class Kernel {
    * 合并交给渲染层 rAF（蓝本 tether-ai 的做法），主进程只做去抖，不做降帧。
    */
   private lastDeltaEmit = 0;
+  /** 本轮是否已就模型错误落过卡（Pi 重试时可能连发多条 message_end，别刷屏） */
+  private turnErrorReported = false;
 
   /** 回合状态（唯一真相源，渲染层只读） */
   private turn: TurnState = { phase: "idle", busy: false, pending: 0 };
@@ -476,8 +585,12 @@ export class Kernel {
     turnOut: 0,
     sessionIn: 0,
     sessionOut: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    cost: 0,
     contextTokens: 0,
     contextWindow: 128_000,
+    contextPercent: null,
   };
   /** 排队输入（生成中打字） */
   private queue: QueuedInput[] = [];
@@ -493,14 +606,28 @@ export class Kernel {
   private pendingApprovals = new Map<string, { resolve: (ok: boolean) => void; kind?: "tool" | "delete" }>();
   /** L2 MCP 工具（mcp__server__tool） */
   private mcp = new McpRegistry();
+  /** 盯 mcp.json 的 watcher：保存即重连，不用重启应用 */
+  private mcpWatchers: fs.FSWatcher[] = [];
+  private mcpReloadTimer: NodeJS.Timeout | null = null;
+  /** 串行化重载：两次 stopAll/startAll 交错会把客户端表搅乱 */
+  private mcpReloadChain: Promise<void> = Promise.resolve();
   /** 逐轮文件检查点（M1-12） */
   private checkpoints!: CheckpointStore;
   /** 项目信任（M1-13）：决定项目级 mcp.json 能不能注入工具 */
   private trust!: TrustStore;
-  private projectRoot!: string;
+  /**
+   * 当前会话的主根镜像（可写）。空串 = 这次会话没有主根（临时任务，产出落任务卷宗）。
+   * 真正的真相是 `roots`；保留这个字段是为了少改调用点，新增代码请用 roots。
+   */
+  private projectRoot = "";
+  /** 当前会话的根集合（2026-11-10）：主根 + 附加只读/可写根 */
+  private roots: RootSet = emptyRoots();
+  /** 默认工作区：设置 > LYNN_PROJECT_DIR > 平台默认（GUI 没有 cwd 可依） */
+  private defaultWorkspace = "";
   /** 多会话线程（M1-14）：列表/状态持久化 + 当前线程 id */
   private threads!: ThreadStore;
-  private currentThreadId!: string;
+  /** 当前会话 id；空串 = 一条会话都没有（用户把最后一条也删了），空场是合法状态 */
+  private currentThreadId = "";
   /** persona.md（M1-17）：语气人设可编辑 + 版本化 */
   private persona!: PersonaStore;
   /** 会话记忆两层（M2-05）：USER.md 永远保留；MEMORY.md 可 diff/回滚 */
@@ -543,9 +670,7 @@ export class Kernel {
     this.contextStore = new ContextStore(dataRoot);
     this.checkpoints = new CheckpointStore(path.join(dataRoot, "checkpoints"));
     this.trust = new TrustStore(dataRoot);
-    this.projectRoot = process.env.LYNN_PROJECT_DIR
-      ? path.resolve(process.env.LYNN_PROJECT_DIR)
-      : path.join(dataRoot, "project");
+    this.defaultWorkspace = this.resolveDefaultWorkspace();
     this.mcp = new McpRegistry();
     this.pluginHost = new PluginHost(dataRoot);
     this.pluginSet = new PluginSetStore(dataRoot);
@@ -570,10 +695,18 @@ export class Kernel {
     this.knowledge.reindex();
     this.officeHealth = { found: false, kind: "none", detail: "尚未探测" };
     this.reloadSkills();
+    this.migrateThreadRoots();
     const list = this.threads.list();
-    const current = list[0] ?? this.threads.create("新会话");
-    this.currentThreadId = current.id;
-    const st = this.threads.loadState(current.id);
+    // 全新安装（还没有会话索引）给一条默认会话；索引存在但为空 = 用户把会话删光了，
+    // 必须保持空场，不能重启一次就偷偷补回一条同名的「新会话」。
+    const indexFile = path.join(dataRoot, "threads", "index.json");
+    const defaultRoots: RootSet = { primary: this.defaultWorkspace, extras: [] };
+    const current = list[0] ?? (fs.existsSync(indexFile) ? null : this.threads.create("新会话", defaultRoots));
+    this.currentThreadId = current?.id ?? "";
+    this.ensureDefaultWorkspace();
+    this.applyRoots(this.rootsForThread(current));
+    this.reloadSkills();
+    const st = this.currentThreadId ? this.threads.loadState(this.currentThreadId) : { feed: [], history: [] };
     if (st.feed.length || st.history.length) {
       this.feed = [];
       this.cardSeq = 0;
@@ -672,6 +805,13 @@ export class Kernel {
   }
 
   private card(c: Omit<FeedCard, "id" | "createdAt">): FeedCard {
+    // 同一张单反复出同一种事件（权限拦截 / 外呼审计）：聚合成一张卡计数，不再一屏刷 N 条
+    if (AGGREGATED_BADGES.has(c.badge ?? "") && this.feed.length > 0) {
+      const last = this.feed[this.feed.length - 1];
+      if (last.badge === c.badge && last.jobId === c.jobId) {
+        return this.bumpBlocked(last, c);
+      }
+    }
     const full: FeedCard = {
       ...c,
       id: `c-${++this.cardSeq}`,
@@ -681,6 +821,16 @@ export class Kernel {
     this.notify({ type: "card", card: full });
     this.persistThreadSoon();
     return full;
+  }
+
+  /** 拦截聚合：计数 +1，原因/命令换成最近一次（用户要看的是"现在为什么还被拦"） */
+  private bumpBlocked(last: FeedCard, c: Omit<FeedCard, "id" | "createdAt">): FeedCard {
+    this.patchCard(last, {
+      count: (last.count ?? 1) + 1,
+      body: c.body,
+      createdAt: new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }),
+    });
+    return last;
   }
 
   /** 更新一张已有卡片（流式文本 / 状态变化），并通知渲染层 upsert */
@@ -696,10 +846,25 @@ export class Kernel {
    * 绝不 push 进当前 feed——否则新会话会被旧任务的回报刷屏、旧会话反而缺卡。
    */
   private cardTo(threadId: string, c: Omit<FeedCard, "id" | "createdAt">): FeedCard {
-    if (!threadId || threadId === this.currentThreadId) {
+    // 会话已被删（删会话会级联清工单，后台成员回报可能随后才到）：
+    // 再 saveState 会把 <threadId>.json 重新造出来，变成 index 里没有、界面永远看不见的孤儿文件。
+    // 退回当前会话，至少这条信息不丢。
+    if (!threadId || threadId === this.currentThreadId || !this.threadExists(threadId)) {
       return this.card(c);
     }
     const st = this.threads.loadState(threadId);
+    // 跨会话同样聚合：别让某一栏被同一种事件刷成几十行
+    if (AGGREGATED_BADGES.has(c.badge ?? "") && st.feed.length > 0) {
+      const last = st.feed[st.feed.length - 1];
+      if (last.badge === c.badge && last.jobId === c.jobId) {
+        last.count = (last.count ?? 1) + 1;
+        last.body = c.body;
+        last.createdAt = new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
+        this.threads.saveState(threadId, { feed: st.feed.slice(-200), history: st.history });
+        this.notify({ type: "thread", threadId });
+        return last;
+      }
+    }
     const seq =
       st.feed.reduce((n, x) => Math.max(n, Number(/^c-(\d+)$/.exec(x.id)?.[1] ?? 0)), 0) + 1;
     const full: FeedCard = {
@@ -713,9 +878,14 @@ export class Kernel {
     return full;
   }
 
+  /** 会话索引里还有没有这个 id（写卡前的存活判定，防止给已删会话重建文件） */
+  private threadExists(id: string): boolean {
+    return this.threads.list().some((t) => t.id === id);
+  }
+
   /** 同一张卡在别的会话里的状态更新（成员开工卡 → 回报/未完成） */
   private patchCardTo(threadId: string, card: FeedCard, patch: Partial<FeedCard>): void {
-    if (!threadId || threadId === this.currentThreadId) {
+    if (!threadId || threadId === this.currentThreadId || !this.threadExists(threadId)) {
       this.patchCard(card, patch);
       return;
     }
@@ -741,22 +911,40 @@ export class Kernel {
 
   private threadSaveTimer: NodeJS.Timeout | null = null;
 
-  /** system prompt（M1-17/M2-05/M2-10）：固定头 + persona + 记忆两层 + 技能注入 + 安全尾段；每轮现取 */
+  /**
+   * system prompt（M1-17/M2-05）：固定头 + persona + 记忆两层 + 安全尾段；每轮现取。
+   * 技能注入**不再拼在这里**（原来按当轮输入重算，命中集一变整段 system prompt + 全部历史
+   * 的前缀缓存就废）；改为当轮消息尾部注入（见 pendingSkillText / activateSkillsFor），
+   * 前缀保持稳定，技能抖动只影响尾部。
+   */
   private systemPrompt(): string {
-    return composeSystemPrompt(this.persona.load()) + this.memory.systemPromptSection() + this.skillSection();
+    return composeSystemPrompt(this.persona.load()) + this.memory.systemPromptSection();
   }
 
-  /** 激活技能的注入文本（submitTurn 时已算好；预算降级如实标注） */
-  private skillSection(): string {
-    if (!this.activeSkills.length) return "";
-    const inj = buildInjection(this.activeSkills);
-    return `\n${inj.text}\n`;
+  // ---------- 当前生效模型（每对话覆盖 > 全局默认） ----------
+
+  private decryptBlob(blob: Buffer): string {
+    return this.decryptor ? this.decryptor(blob) : blob.toString("utf-8");
   }
 
-  /** 壳层读偏好（托盘/通知开关，M1-18）：壳不直接碰 SettingsStore */
-  getPrefs(): { autoStart: boolean; trayOnClose: boolean; notify: boolean } {
+  /** 线程单独指定过模型就优先用；删掉的模型会自动回落到全局默认 */
+  private activeModelId(): string | undefined {
+    const id = this.threads.get(this.currentThreadId)?.modelId;
+    return id && this.settings.getModels().some((e) => e.id === id) ? id : undefined;
+  }
+
+  private activeModelConfig(): StoredModelConfig | null {
+    return this.settings.getModel(this.activeModelId());
+  }
+
+  private activeApiKey(): string | null {
+    return loadApiKey(this.settings, (b) => this.decryptBlob(b), this.activeModelId());
+  }
+
+  /** 壳层读偏好（托盘/通知开关 M1-18、截图快捷键）：壳不直接碰 SettingsStore */
+  getPrefs(): { autoStart: boolean; trayOnClose: boolean; notify: boolean; captureHotkey: string } {
     const p = this.settings.getPrefs();
-    return { autoStart: p.autoStart, trayOnClose: p.trayOnClose, notify: p.notify };
+    return { autoStart: p.autoStart, trayOnClose: p.trayOnClose, notify: p.notify, captureHotkey: p.captureHotkey };
   }
 
   private assertMemoryKind(kind: string): asserts kind is MemoryKind {
@@ -803,15 +991,18 @@ export class Kernel {
 
   /** 发现技能（M2-10）：用户级 ~/.lynn/skills + 项目级 .lynn/skills（需信任）+ 插件携带；就近优先 */
   private reloadSkills(): void {
-    const trusted = this.trust?.isTrusted(this.projectRoot) ?? false;
+    const hasProject = Boolean(this.projectRoot);
+    const trusted = hasProject && (this.trust?.isTrusted(this.projectRoot) ?? false);
     const allRoots: { dir: string; level: SkillEntry["level"] }[] = [
       { dir: path.join(this.dataRoot, "skills"), level: "user" },
-      { dir: path.join(this.projectRoot, ".lynn", "skills"), level: "project" },
+      ...(hasProject ? [{ dir: path.join(this.projectRoot, ".lynn", "skills"), level: "project" as const }] : []),
       { dir: path.join(this.dataRoot, "plugins"), level: "plugin" },
     ];
     const roots = allRoots.filter((r) => r.level !== "project" || trusted);
     const { entries, errors } = discoverSkills(roots);
-    this.skillEntries = entries;
+    // 停用清单（用户在设置里关的技能）：不参与激活与 allowed-tools 强制
+    const disabled = this.settings.getPrefs().disabledSkills ?? [];
+    this.skillEntries = entries.filter((e) => !disabled.includes(e.name));
     for (const e of errors.slice(0, 5)) this.log("skill_error", { error: e });
     for (const e of entries) {
       for (const w of e.warnings.slice(0, 3)) this.log("skill_warning", { skill: e.name, warning: w });
@@ -819,11 +1010,13 @@ export class Kernel {
     this.log("skills_ready", { count: entries.length, projectTrusted: trusted });
   }
 
-  /** 命中技能 → 本轮生效：注入预算内内容 + allowed-tools 强制子集 */
+  /** 命中技能 → 本轮生效：注入预算内内容（拼在当轮消息尾部）+ allowed-tools 强制子集 */
   private activateSkillsFor(text: string): void {
     this.activeSkills = matchSkills(text, this.skillEntries);
+    this.pendingSkillText = "";
     if (this.activeSkills.length) {
       const inj = buildInjection(this.activeSkills);
+      if (inj.text) this.pendingSkillText = `【本轮技能（按需加载）】\n${inj.text}`;
       this.card({
         kind: "system",
         badge: "工具",
@@ -862,8 +1055,7 @@ export class Kernel {
   /** persona/记忆变更后热同步到 Pi worker；失败如实落卡（下一轮 prompt 前仍会用启动时的旧词） */
   private hotSyncSystemPrompt(): boolean {
     if (!this.host?.isRunning()) return false;
-    void this.host
-      .updateSystemPrompt(this.systemPrompt())
+    void Promise.resolve(this.host.updateSystemPrompt(this.systemPrompt()))
       .catch((err) => {
         this.card({
           kind: "system",
@@ -874,17 +1066,200 @@ export class Kernel {
   }
 
   /**
-   * 换工作区：改 projectRoot、重建 Pi 会话（cwd 跟着走）、重载项目级 MCP/技能。
+   * 默认工作区（2026-11-10）：独立 GUI 没有 cwd 可依，必须显式给一个。
+   * 优先级：设置 > 环境变量（兼容旧用法）> 平台默认。
+   * 测试/隔离环境（LYNN_HOME）落到数据根内，绝不写用户的 home。
+   */
+  private resolveDefaultWorkspace(): string {
+    const pref = this.settings.getPrefs().defaultWorkspace?.trim();
+    if (pref) return path.resolve(pref);
+    if (process.env.LYNN_PROJECT_DIR) return path.resolve(process.env.LYNN_PROJECT_DIR);
+    // 隔离环境（单测传临时 dataRoot / LYNN_HOME）：默认工作区落在数据根内，
+    // 绝不能因为跑一次测试就往用户 home 里建目录。
+    const platformDefault = path.join(os.homedir(), ".lynn");
+    if (path.resolve(this.dataRoot) !== path.resolve(platformDefault)) {
+      return path.join(this.dataRoot, "workspace");
+    }
+    return path.join(os.homedir(), "LynnWorkspace");
+  }
+
+  /** 首次启动把默认工作区建出来并落进设置（之后不再推导，避免 home 变化后漂移） */
+  private ensureDefaultWorkspace(): void {
+    try {
+      fs.mkdirSync(this.defaultWorkspace, { recursive: true });
+    } catch {
+      /* 建不出来不阻塞启动；用到时会如实报错 */
+    }
+    if (!this.settings.getPrefs().defaultWorkspace?.trim()) {
+      try {
+        this.settings.savePrefs({ defaultWorkspace: this.defaultWorkspace });
+      } catch {
+        /* 设置写不进去也不影响本次会话 */
+      }
+    }
+  }
+
+  /** 旧数据迁移：projectRoot → roots.primary（一次性，失败不阻塞启动） */
+  private migrateThreadRoots(): void {
+    for (const t of this.threads.list()) {
+      if (t.roots) continue;
+      const roots = rootsFromLegacy({ projectRoot: t.projectRoot });
+      if (!roots) continue;
+      try {
+        this.threads.setRoots(t.id, roots);
+      } catch {
+        /* 索引写不进去就下次再试 */
+      }
+    }
+  }
+
+  /**
+   * 这个会话用哪套根：显式 roots > 旧 projectRoot > 默认工作区。
+   * 注意：**不再沿用上一个会话的目录**——那是旧实现的串目录根因。
+   */
+  private rootsForThread(meta: ThreadMeta | null | undefined): RootSet {
+    const roots = rootsFromLegacy({ roots: meta?.roots, projectRoot: meta?.projectRoot });
+    if (roots) return roots;
+    return { primary: this.defaultWorkspace, extras: [] };
+  }
+
+  /** 只改内存里的当前根（projectRoot 是主根镜像） */
+  private applyRoots(roots: RootSet): void {
+    this.roots = normalizeRoots(roots) ?? emptyRoots();
+    this.projectRoot = primaryOf(this.roots);
+  }
+
+  /**
+   * 换当前会话的根集合：落会话、重建 Pi（cwd 跟着走）、重载项目级 MCP/技能。
    * 目录存不存在由调用方校验（切会话恢复历史路径时不强校验——用户可能只是临时移走了）。
    */
-  private applyProjectRoot(root: string): void {
-    const abs = path.resolve(root);
-    if (abs === this.projectRoot) return;
-    this.projectRoot = abs;
+  private setSessionRoots(next: RootSet): void {
+    const normalized = normalizeRoots(next) ?? emptyRoots();
+    this.applyRoots(normalized);
+    if (this.currentThreadId) {
+      try {
+        this.threads.setRoots(this.currentThreadId, normalized);
+      } catch {
+        /* 索引写失败不影响本次会话 */
+      }
+    }
     this.createFreshSession = true;
     void this.resetAgentHost();
     void this.reloadMcp();
-    this.log("project_root", { root: abs, trusted: this.trust.isTrusted(abs) });
+    this.reloadSkills();
+    this.watchMcpConfig();
+    this.log("session_roots", {
+      primary: this.projectRoot,
+      extras: normalized.extras.map((r) => `${r.mode}:${r.path}`),
+      trusted: this.projectRoot ? this.trust.isTrusted(this.projectRoot) : false,
+    });
+  }
+
+  /**
+   * 任务工作区形态（2026-11-10）：
+   *  - 根在 tasks/<id>/ 下 → sandbox（不碰用户项目）
+   *  - 否则 → project（就地改代码/文档，生成物进 deliverables）
+   * scratch 永远在数据根内，可被 TTL 清理。
+   */
+  private workspaceRecordFor(taskId: string, root: string): TaskWorkspaceRecord {
+    const taskDir = path.join(this.dataRoot, "tasks", taskId);
+    const abs = path.resolve(root);
+    const sandbox = isInside(taskDir, abs) || isInside(path.join(this.dataRoot, "tasks"), abs);
+    return {
+      mode: sandbox ? "sandbox" : "project",
+      root: abs,
+      deliverablesDir: sandbox ? path.join(abs, "deliverables") : path.join(abs, "deliverables", taskId),
+      scratchDir: path.join(taskDir, "scratch"),
+    };
+  }
+
+  /**
+   * 成员可读根（只读并集）：会话附加根 ∪ 团队附加根 ∪ 任务权（readRoots / workspace.roots）。
+   * 成员的写仍然只走工作区；这里只决定"能看哪儿"。
+   */
+  private effectiveReadRoots(taskId: string, teamId?: string): string[] {
+    const out: string[] = [];
+    const seen = new Set<string>();
+    const add = (p?: string) => {
+      const s = String(p ?? "").trim();
+      if (!s) return;
+      const abs = path.resolve(s);
+      if (seen.has(abs.toLowerCase())) return;
+      seen.add(abs.toLowerCase());
+      out.push(abs);
+    };
+    // L0 全局常用只读根（设置里长期授权）
+    for (const r of this.settings.getPrefs().knownReadRoots ?? []) add(r);
+    // L1 会话附加根
+    for (const r of this.roots.extras) add(r.path);
+    // L2 团队附加根
+    if (teamId) {
+      try {
+        for (const r of this.teamStore.readTeam(teamId).roots?.extras ?? []) add(r.path);
+      } catch {
+        /* 团队记录读不到就只算会话与任务 */
+      }
+    }
+    const rec = this.taskStore.get(taskId);
+    for (const r of rec?.readRoots ?? []) add(r);
+    for (const r of rec?.workspace?.roots ?? []) add(r.path);
+    return out;
+  }
+
+  /** 成员交来的路径：工作区优先，其次只读根；绝对路径原样。找不到就原样交回校验 */
+  private resolveMemberPath(rel: string, workdir: string, readRoots: string[]): string {
+    if (/^https?:\/\//i.test(rel) || path.isAbsolute(rel)) return rel;
+    const ws = path.resolve(workdir, rel);
+    if (isInside(workdir, ws) && fs.existsSync(ws)) return ws;
+    for (const r of readRoots) {
+      const p = path.resolve(r, rel);
+      if (isInside(r, p) && fs.existsSync(p)) return p;
+    }
+    return rel;
+  }
+
+  /**
+   * 交付物固化（2026-11-10）：工作区内的交付物复制进卷宗 artifacts（≤10MB）；
+   * 只读根/超大文件只登记引用。清单写进 task.json.deliverables，永久保留。
+   */
+  private solidifyDeliverables(taskId: string, paths: string[], workdir: string, threadId: string): void {
+    const items: DeliverableRef[] = [];
+    const LIMIT = 10 * 1024 * 1024;
+    for (const p of paths) {
+      const abs = path.isAbsolute(p) ? p : path.resolve(workdir, p);
+      let bytes = 0;
+      try {
+        const st = fs.statSync(abs);
+        if (!st.isFile()) continue;
+        bytes = st.size;
+      } catch {
+        continue;
+      }
+      let ref = abs;
+      if (bytes <= LIMIT && isInside(workdir, abs)) {
+        try {
+          ref = this.taskCase.importArtifact(taskId, abs).ref;
+        } catch {
+          ref = abs;
+        }
+      }
+      items.push({ path: p, ref, bytes, at: new Date().toISOString() });
+    }
+    if (!items.length) return;
+    try {
+      this.taskStore.setDeliverables(taskId, items);
+      this.taskCase.append(taskId, {
+        kind: "artifact",
+        text: `交付物 ${items.length} 件：${items.map((i) => i.path).join("、")}`,
+      });
+    } catch {
+      /* 工单写失败不阻塞回报 */
+    }
+    this.cardTo(threadId, {
+      kind: "system",
+      jobId: taskId,
+      text: `收到 ${items.length} 件交付物（验收后永久保留）：${items.map((i) => i.path).join("、")}`,
+    });
   }
 
   private persistThread(): void {
@@ -897,7 +1272,14 @@ export class Kernel {
           .map((m) => ({ role: m.role as "user" | "assistant", content: m.content as string }))
           .slice(-200),
         // C4：会话累计用量按线程落盘，切回来读数还对得上
-        usage: { sessionIn: this.usage.sessionIn, sessionOut: this.usage.sessionOut, tokensUsed: this.tokensUsed },
+        usage: {
+          sessionIn: this.usage.sessionIn,
+          sessionOut: this.usage.sessionOut,
+          cacheRead: this.usage.cacheRead,
+          cacheWrite: this.usage.cacheWrite,
+          cost: this.usage.cost,
+          tokensUsed: this.tokensUsed,
+        },
       });
     } catch {
       /* 落盘失败不影响对话 */
@@ -932,7 +1314,11 @@ export class Kernel {
       turnOut: 0,
       sessionIn: st.usage?.sessionIn ?? 0,
       sessionOut: st.usage?.sessionOut ?? 0,
+      cacheRead: st.usage?.cacheRead ?? 0,
+      cacheWrite: st.usage?.cacheWrite ?? 0,
+      cost: st.usage?.cost ?? 0,
       contextTokens: 0,
+      contextPercent: null,
     };
     for (const c of st.feed) {
       this.feed.push(c);
@@ -941,14 +1327,55 @@ export class Kernel {
     }
     this.history = st.history;
     this.liveCard = null;
-    // 会话各带一个工作区：切回来要回到它自己的目录（不同项目的 @ 检索与 Pi cwd 不能串）
-    if (meta.projectRoot && path.resolve(meta.projectRoot) !== this.projectRoot) {
-      this.applyProjectRoot(meta.projectRoot);
+    // 会话各带一套根：切回来要回到它自己的目录（不同项目的 @ 检索与 Pi cwd 不能串）。
+    // 没有显式根的旧会话走默认工作区，绝不"沿用上一个会话"。
+    const prevRoot = this.projectRoot;
+    this.applyRoots(this.rootsForThread(meta));
+    if (this.projectRoot !== prevRoot) {
+      this.reloadSkills();
+      void this.reloadMcp();
+      this.watchMcpConfig();
     }
     this.createFreshSession = true;
     void this.resetAgentHost();
     this.checkpoints.discard();
     this.setTurn({ phase: "idle", busy: false, pending: 0, taskId: undefined, startedAt: undefined, canUndo: false, changedFiles: [] });
+  }
+
+  /**
+   * 进入空场：最后一条会话被删掉后的状态。
+   * 不是"新建一条空会话"，而是真的什么都没有——界面据此给空场，
+   * 用户说第一句话时再由 submitTurn 就地开一条（见那里的注释）。
+   */
+  private enterEmptySession(): void {
+    this.currentThreadId = "";
+    // 空场回到默认工作区：不让"上一条会话的目录"残留在内存里变成隐式继承
+    this.applyRoots({ primary: this.defaultWorkspace, extras: [] });
+    this.feed = [];
+    this.history = [];
+    this.cardSeq = 0;
+    this.liveCard = null;
+    this.tokensUsed = 0;
+    this.usage = { ...this.usage, turnIn: 0, turnOut: 0, sessionIn: 0, sessionOut: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, contextPercent: null };
+    this.createFreshSession = true;
+    void this.resetAgentHost();
+    this.checkpoints.discard();
+    this.setTurn({ phase: "idle", busy: false, pending: 0, taskId: undefined, startedAt: undefined, canUndo: false, changedFiles: [] });
+  }
+
+  /**
+   * 要"这单/这轮属于哪条会话"时统一走这里：一条会话都没有就地开一条。
+   * 不这么兜的话，删光会话后派的单会记成无主单（台账里点哪都删不掉）。
+   */
+  private ensureThreadId(): string {
+    if (!this.currentThreadId) {
+      const meta = this.threads.create("新会话", this.roots);
+      // 不走 switchThread：它会清空 feed，把这一轮已经生成的心跳卡/工具卡一起抹掉。
+      // 这里是"给内存里已有的内容补一个归属"，不是"切到另一条会话"。
+      this.currentThreadId = meta.id;
+      this.persistThread();
+    }
+    return this.currentThreadId;
   }
 
   /** 本轮写过文件就把撤销入口亮出来（M1-12） */
@@ -963,9 +1390,24 @@ export class Kernel {
 
   // ---------- Pi RPC 初始化（M0-03：独立进程；不可用则降级直连） ----------
 
-  /** RPC worker 入口（agent/pi-rpc-entry.mjs）。打包时需作为 extraResources，见 §4.6 */
+  /** Pi 官方 RPC 入口（基座原样，不 patch / 不 fork）；风铃逻辑全在 --extension 插件里 */
   private get rpcEntryPath(): string {
+    return path.join(
+      __dirname, "..", "..", "node_modules", "@earendil-works", "pi-coding-agent", "dist", "bundle", "rpc-entry.js",
+    );
+  }
+
+  private get piExtensionPath(): string {
+    return path.join(__dirname, "..", "..", "agent", "extensions", "lynn-bridge.mjs");
+  }
+
+  /** 旧自建协议：只作为一键回退（LYNN_USE_LEGACY_RPC=1），不再默认使用 */
+  private get legacyEntryPath(): string {
     return path.join(__dirname, "..", "..", "agent", "pi-rpc-entry.mjs");
+  }
+
+  private get useOfficialRpc(): boolean {
+    return process.env.LYNN_USE_LEGACY_RPC !== "1";
   }
 
   /**
@@ -999,15 +1441,28 @@ export class Kernel {
       (): EngineHealth => ({ found: false, kind: "none", detail: "引擎探测失败（不影响 CSV）" }),
     );
     // 只做「能不能用」的静态判定；真正的子进程在首轮对话时懒启动（启动失败会自动降级直连）
-    const entry = this.rpcEntryPath;
+    const entry = this.useOfficialRpc ? this.rpcEntryPath : this.legacyEntryPath;
     const piPkg = path.join(__dirname, "..", "..", "node_modules", "@earendil-works", "pi-coding-agent");
-    this.piReady = fs.existsSync(entry) && fs.existsSync(piPkg);
+    const extensionOk = !this.useOfficialRpc || fs.existsSync(this.piExtensionPath);
+    // 单测（node --test 会给每个测试文件设 NODE_TEST_CONTEXT）不走 Pi worker：
+    // 否则每个内核测试都要冷启动一个子进程，并发跑时直接超时（2026-11-10 实测）。
+    // 需要真链路的测试（pi-rpc-smoke）直接用 AgentHost，不经过这里。
+    const inTest = Boolean(process.env.NODE_TEST_CONTEXT) && process.env.LYNN_PI_RPC !== "1";
+    this.piReady = !inTest && fs.existsSync(entry) && fs.existsSync(piPkg) && extensionOk;
     if (!this.piReady) {
-      console.warn(`[kernel] Pi RPC 不可用（entry=${fs.existsSync(entry)} / sdk=${fs.existsSync(piPkg)}），降级直连模式`);
+      console.warn(`[kernel] Pi RPC 不可用（entry=${fs.existsSync(entry)} / sdk=${fs.existsSync(piPkg)} / extension=${extensionOk}），降级直连模式`);
     } else {
       // 上次异常退出可能留下还在跑的 worker：启动时按标记清掉（单实例锁保证没有别人在用）
       const reaped = reapOrphanWorkers(path.join(this.dataRoot, "runtime", "workers"), { entry });
       if (reaped.length) this.log("orphans_reaped", { pids: reaped });
+    }
+    // 内置技能种子（M3-01）：缺才写入（用户改过不覆盖；删除后下次启动还原）
+    this.seedBuiltinSkills();
+    // 过程文件清理（P2-1）：只碰 scratch/检查点/旧日志，失败不影响启动
+    try {
+      runCleanup(this.dataRoot, this.settings.getPrefs().retention);
+    } catch {
+      /* 清理失败不阻塞启动 */
     }
     // 本地日历提醒扫描（M2-01）：分钟级
     this.reminderTimer = setInterval(() => this.scanReminders(), 60_000);
@@ -1022,6 +1477,10 @@ export class Kernel {
     // 不再"派完就睡、等用户来问"。判定与节流见 supervisorTick / supervisorCase。
     this.supervisorTimer = setInterval(() => this.supervisorTick(), 60_000);
     this.supervisorTimer.unref?.();
+    // 心跳巡检（M3-01）：机械层聚合"待审查/停滞工单/定时任务异常"，没事零 token，
+    // 有事才起一轮由风铃自主处置（停/催/捡/问/汇报），间隔与去重见 heartbeatTick。
+    this.heartbeatTimer = setInterval(() => this.heartbeatTick(), 60_000);
+    this.heartbeatTimer.unref?.();
     // 知识库增量索引（M2-09）：文件变更去抖 800ms 后增量重索引
     this.kbWatch = watchKnowledge(this.knowledge.dir, () => this.knowledge.reindex(), {
       onChange: (r) => {
@@ -1035,37 +1494,41 @@ export class Kernel {
 
     // L2 MCP（M0-07）：全局配置 + 已信任项目的项目级配置
     await this.reloadMcp();
+    // 实时生效：盯住两处 mcp.json，保存即重连（不用重启应用）
+    this.watchMcpConfig();
   }
 
   /**
    * 重新连 MCP（M0-07 + M1-13）：全局 `mcp.json` 永远加载；项目级 `.lynn/mcp.json`
    * 只有在项目被信任时才加载——陌生仓库不能靠一个文件把工具塞进她的工具面。
    */
-  private async reloadMcp(): Promise<void> {
+  private async reloadMcp(opts: { quiet?: boolean } = {}): Promise<void> {
     await this.mcp.stopAll();
     const merged = new Map<string, McpServerConfig>();
     const global = loadMcpConfig(this.dataRoot);
     if (global.error) {
       this.log("mcp_config_error", { error: global.error });
-      this.card({ kind: "system", text: global.error });
+      if (!opts.quiet) this.card({ kind: "system", text: global.error });
     }
     for (const s of global.servers) merged.set(s.id, s);
 
-    const projectFile = path.join(this.projectRoot, ".lynn", "mcp.json");
-    if (fs.existsSync(projectFile)) {
+    const projectFile = this.projectRoot ? path.join(this.projectRoot, ".lynn", "mcp.json") : "";
+    if (projectFile && fs.existsSync(projectFile)) {
       if (this.trust.isTrusted(this.projectRoot)) {
         const p = loadMcpConfigAt(projectFile);
         if (p.error) {
           this.log("mcp_project_config_error", { error: p.error });
-          this.card({ kind: "system", text: `项目级 MCP 配置有问题：${p.error}` });
+          if (!opts.quiet) this.card({ kind: "system", text: `项目级 MCP 配置有问题：${p.error}` });
         }
         for (const s of p.servers) merged.set(s.id, s);
       } else {
         this.log("mcp_project_untrusted", { root: this.projectRoot });
-        this.card({
-          kind: "system",
-          text: `发现项目级 MCP 配置（${projectFile}），这个项目还没被信任，暂不加载。到「设置 → 权限与安全」信任后再试。`,
-        });
+        if (!opts.quiet) {
+          this.card({
+            kind: "system",
+            text: `发现项目级 MCP 配置（${projectFile}），这个项目还没被信任，暂不加载。到「设置 → 权限与安全」信任后再试。`,
+          });
+        }
       }
     }
 
@@ -1074,16 +1537,110 @@ export class Kernel {
     await this.mcp.startAll(servers);
     for (const e of this.mcp.lastErrors()) {
       this.log("mcp_server_error", e);
-      this.card({ kind: "system", text: `MCP 服务器「${e.id}」没连上：${e.message}` });
+      if (!opts.quiet) this.card({ kind: "system", text: `MCP 服务器「${e.id}」没连上：${e.message}` });
     }
-    this.log("mcp_ready", { tools: this.mcp.size(), fingerprint: this.mcp.fingerprint(), projectTrusted: this.trust.isTrusted(this.projectRoot) });
+    this.log("mcp_ready", {
+      tools: this.mcp.size(),
+      fingerprint: this.mcp.fingerprint(),
+      projectTrusted: this.projectRoot ? this.trust.isTrusted(this.projectRoot) : false,
+    });
+  }
+
+  /**
+   * 实时重载：串行执行（避免两次 stopAll/startAll 交错），
+   * 完成后指纹变化 → 下一轮 ensureHost 自动带着新工具面重建 worker，不用重启应用。
+   */
+  private async reloadMcpLive(reason: "manual" | "config-changed"): Promise<void> {
+    const run = async () => {
+      await this.reloadMcp({ quiet: true });
+      const connected = this.mcp.status().filter((s) => s.connected).length;
+      this.card({
+        kind: "system",
+        text: `MCP 已重新加载（${reason === "manual" ? "手动" : "检测到配置变更"}）：${this.mcp.size()} 个工具，${connected} 台已连接；下一条消息起生效。`,
+      });
+    };
+    this.mcpReloadChain = this.mcpReloadChain.then(run, run);
+    return this.mcpReloadChain;
+  }
+
+  /** 盯住两处 mcp.json：改完保存即重连（编辑器多为原子替换，所以监听目录而不是文件） */
+  private watchMcpConfig(): void {
+    for (const w of this.mcpWatchers) {
+      try {
+        w.close();
+      } catch {
+        /* 关不掉也无妨 */
+      }
+    }
+    this.mcpWatchers = [];
+    const targets: { dir: string; name: string }[] = [
+      { dir: this.dataRoot, name: "mcp.json" },
+      ...(this.projectRoot ? [{ dir: path.join(this.projectRoot, ".lynn"), name: "mcp.json" }] : []),
+    ];
+    for (const t of targets) {
+      if (!fs.existsSync(t.dir)) continue;
+      try {
+        const w = fs.watch(t.dir, (_ev, file) => {
+          if (!file || String(file) !== t.name) return;
+          this.scheduleMcpReload();
+        });
+        w.on("error", () => undefined);
+        this.mcpWatchers.push(w);
+      } catch {
+        /* 监听不上就退回"手动重新加载"按钮，不假装实时 */
+      }
+    }
+  }
+
+  private scheduleMcpReload(): void {
+    if (this.mcpReloadTimer) clearTimeout(this.mcpReloadTimer);
+    this.mcpReloadTimer = setTimeout(() => {
+      this.mcpReloadTimer = null;
+      void this.reloadMcpLive("config-changed").catch(() => undefined);
+    }, 300);
+    this.mcpReloadTimer.unref?.();
+  }
+
+  /** mcp.status / mcp.reload 共用：配置文件里有什么 + 实际连上没连上 */
+  private mcpStatusPayload(): {
+    servers: { id: string; command: string; enabled: boolean; lazy: boolean; connected: boolean; tools: number; error?: string }[];
+    globalFile: string;
+    projectFile: string;
+    projectTrusted: boolean;
+    errors?: string[];
+  } {
+    const globalFile = path.join(this.dataRoot, "mcp.json");
+    const projectFile = this.projectRoot ? path.join(this.projectRoot, ".lynn", "mcp.json") : "";
+    const projectTrusted = this.projectRoot ? this.trust.isTrusted(this.projectRoot) : false;
+    const global = loadMcpConfig(this.dataRoot);
+    const project: { servers: McpServerConfig[]; error?: string } = projectTrusted && projectFile
+      ? loadMcpConfigAt(projectFile)
+      : { servers: [] };
+    const live = new Map(this.mcp.status().map((s) => [s.id, s]));
+    const seen = new Set<string>();
+    const servers = [...global.servers, ...project.servers]
+      .filter((c) => {
+        if (seen.has(c.id)) return false;
+        seen.add(c.id);
+        return true;
+      })
+      .map((c) => {
+        const st = live.get(c.id);
+        return {
+          id: c.id,
+          command: [c.command, ...(c.args ?? [])].join(" "),
+          enabled: c.enabled !== false,
+          lazy: c.lazy === true,
+          connected: st?.connected ?? false,
+          tools: st?.tools ?? 0,
+          ...(st?.error ? { error: st.error } : {}),
+        };
+      });
+    const errors = [global.error, project.error].filter(Boolean) as string[];
+    return { servers, globalFile, projectFile, projectTrusted, ...(errors.length ? { errors } : {}) };
   }
 
   // ---------- 工具执行（Pi execute 与直连 tool_calls 共用） ----------
-
-  private teamColor(i: number): string {
-    return ["#6396BC", "#E8B04B", "#5FBF77", "#C05687", "#8DA0AB", "#C44A35"][i % 6];
-  }
 
   /**
    * 成员回报登记（风铃 review_result 与成员后台回报共用；§4.10.5 证据原则的执行点）。
@@ -1099,6 +1656,11 @@ export class Kernel {
     threadId: string = this.currentThreadId,
     /** 证据在界面上的显示名（成员交的是相对工作区的路径，ref 会被解析成绝对路径） */
     displayNames?: string[],
+    /**
+     * 只有落在这个根里的证据才复制进 artifacts；
+     * 只读根里的文件只登记引用（不把用户项目整份拷走，2026-11-10）。
+     */
+    copyRoot?: string,
   ): string {
     this.tools.reviewResult(teamId, taskId, { member, text, evidence, sessionId: sessionId ?? this.host?.sessionId });
     this.taskCase.append(taskId, { kind: "report", member, text, meta: { evidence } });
@@ -1121,11 +1683,19 @@ export class Kernel {
       let ref = e;
       let ok = this.taskCase.verifyRef(taskId, e);
       if (ok && !/^https?:\/\//i.test(e) && !e.startsWith("artifacts/")) {
-        try {
-          ref = this.taskCase.importArtifact(taskId, e).ref;
-          ok = true;
-        } catch {
-          ok = this.taskCase.verifyRef(taskId, ref);
+        const abs = path.resolve(e);
+        const copiable = copyRoot ? isInside(copyRoot, abs) : true;
+        if (copiable) {
+          try {
+            ref = this.taskCase.importArtifact(taskId, e).ref;
+            ok = true;
+          } catch {
+            ok = this.taskCase.verifyRef(taskId, ref);
+          }
+        } else {
+          // 只读根里的文件：只登记引用（绝对路径），不复制
+          ref = abs;
+          ok = fs.existsSync(abs);
         }
       }
       if (ok) verified += 1;
@@ -1140,10 +1710,12 @@ export class Kernel {
     let moved = false;
     try {
       this.taskStore.transition(taskId, "in_review", { member });
+      /* 成员交的活归风铃验：她 accept 即归档，不弹给用户（用户只审风铃的最终汇报） */
+      this.taskStore.setReviewer(taskId, "lynn");
       moved = true;
       this.setTurn({ phase: "review", taskId });
-      this.taskCase.append(taskId, { kind: "transition", member, text: "→ in_review" });
-      this.taskCase.appendSummary(taskId, `进入待审查（已验证证据 ${verified} 项）`);
+      this.taskCase.append(taskId, { kind: "transition", member, text: "→ in_review（待风铃验）" });
+      this.taskCase.appendSummary(taskId, `进入待风铃验收（已验证证据 ${verified} 项）`);
     } catch (err) {
       // 证据不足 → 停在执行中，如实告知；状态已就位 → 忽略
       if (!(err instanceof Error) || !/不允许的迁移/.test(err.message)) {
@@ -1250,19 +1822,21 @@ export class Kernel {
     try {
       const existing = this.taskStore.get(p.taskId);
       if (!existing) {
+        const wsRoot = p.workspace ?? (this.projectRoot || path.join(this.dataRoot, "tasks", p.taskId, "workspace"));
         this.taskStore.create({
           id: p.taskId,
           title: (p.brief.split("\n").map((l) => l.trim()).find((l) => l.length > 0) ?? "").slice(0, 40) || p.taskId,
           teamId: p.teamId,
           member: p.member,
           // 记下"这单从哪个会话派出"：换会话后旧工单的往来还能读回来
-          threadId: this.currentThreadId,
-          // 成员的读写工作区 = 这个会话的项目目录（开发类任务要能真改代码）
-          workspaceRoot: this.projectRoot,
+          threadId: this.ensureThreadId(),
+          // 成员的读写工作区 = 契约上批准的目录（缺省 = 会话主根）
+          workspaceRoot: wsRoot,
+          workspace: this.workspaceRecordFor(p.taskId, wsRoot),
         });
         this.taskStore.transition(p.taskId, "todo");
       } else if (existing.status === "backlog" || existing.status === "blocked") {
-        this.taskStore.transition(p.taskId, "todo", { threadId: this.currentThreadId });
+        this.taskStore.transition(p.taskId, "todo", { threadId: this.ensureThreadId() });
       }
       // 其余状态（todo / in_progress / canceled / done）不动；缺失的 threadId 由成员回报时补记
     } catch {
@@ -1275,7 +1849,13 @@ export class Kernel {
       meta: { deadline: p.deadline, tools: p.tools },
     });
     this.taskCase.appendSummary(p.taskId, `派给 ${p.member}（截止 ${p.deadline}）`);
-    const kickoff = this.dispatchMember(p.teamId, p.taskId, p.member, p.brief, p.deadline, p.tools, p.draftId);
+    // 用户点「开始」= 批准契约卡上的只读授权申请：此刻落权（写仍限工作区，模型不能自我扩权）
+    if (p.readRoots?.length) {
+      const prev = this.taskStore.get(p.taskId)?.readRoots ?? [];
+      this.taskStore.setReadRoots(p.taskId, [...new Set([...prev, ...p.readRoots])]);
+      this.taskCase.append(p.taskId, { kind: "note", text: `用户批准只读授权：${p.readRoots.join("、")}（写仍限工作区）` });
+    }
+    const kickoff = this.dispatchMember(p.teamId, p.taskId, p.member, p.brief, p.deadline, p.tools, p.draftId, p.maxTurns);
     if (kickoff.ok) {
       try {
         this.taskStore.transition(p.taskId, "in_progress", { member: p.member, threadId: this.currentThreadId });
@@ -1304,11 +1884,10 @@ export class Kernel {
     deadline: string,
     toolsArg?: string[],
     draftId?: string,
+    maxTurns?: number,
   ): { ok: boolean; message: string } {
-    const cfg = this.settings.getModel();
-    const apiKey = cfg
-      ? loadApiKey(this.settings, (b) => (this.decryptor ? this.decryptor(b) : b.toString("utf-8")))
-      : null;
+    const cfg = this.activeModelConfig();
+    const apiKey = this.activeApiKey();
     if (!cfg || !apiKey) {
       return { ok: false, message: "模型未配置（或 Key 无法解密）：派单已记录，但成员无法开工。请先在设置里配置模型。" };
     }
@@ -1346,17 +1925,27 @@ export class Kernel {
     if (!draftId) {
       const rec = this.taskStore.get(taskId);
       if (rec && !rec.workspaceRoot) {
+        // 老单补记：没有会话主根就落任务沙箱，绝不拿数据根冒充用户项目
+        const fallback = this.projectRoot || path.join(this.dataRoot, "tasks", taskId, "workspace");
         try {
-          this.taskStore.setWorkspaceRoot(taskId, this.projectRoot);
+          this.taskStore.setWorkspace(taskId, this.workspaceRecordFor(taskId, fallback));
         } catch {
           /* 写不进去就退回默认任务工作区 */
         }
       }
     }
+    const recForWork = this.taskStore.get(taskId);
     const workdir = draftId
       ? path.join(draftsDir(this.dataRoot), draftId)
-      : this.taskStore.get(taskId)?.workspaceRoot ?? path.join(this.dataRoot, "tasks", taskId, "workspace");
+      : recForWork?.workspace?.root ?? recForWork?.workspaceRoot ?? path.join(this.dataRoot, "tasks", taskId, "workspace");
     fs.mkdirSync(workdir, { recursive: true });
+    // 过程文件目录：永远在数据根内（可被 TTL 清理），不污染用户项目
+    const scratchDir = recForWork?.workspace?.scratchDir ?? path.join(this.dataRoot, "tasks", taskId, "scratch");
+    try {
+      fs.mkdirSync(scratchDir, { recursive: true });
+    } catch {
+      /* 建不出来时成员写临时文件会落系统 temp，不影响主流程 */
+    }
     // 简报放任务目录（别往用户项目里塞文件）
     const briefFile = path.join(this.dataRoot, "tasks", taskId, "_brief.md");
     fs.mkdirSync(path.dirname(briefFile), { recursive: true });
@@ -1423,12 +2012,20 @@ export class Kernel {
       brief,
       deadline,
       tools: allowed,
+      maxTurns,
       signal: controller.signal,
       workdir,
+      scratchDir,
       model: { baseUrl: cfg.baseUrl, apiKey, model: cfg.model },
       chatFn: this.memberChatFn,
-      // 用户授予的只读目录（写仍然只能在工作区）；用函数现取，跑到一半授权也立刻生效
-      readRoots: () => this.taskStore.get(taskId)?.readRoots ?? [],
+      // 成员可见只读根 = 会话 ∪ 团队 ∪ 任务（只读并集）；写仍限工作区。
+      // 用函数现取：跑到一半用户补授权，下一轮立刻生效。
+      readRoots: () => this.effectiveReadRoots(taskId, teamId),
+      // 可写附加根：只给 run_command 的 cwd 用（跨项目跑构建/测试），文件写入仍限工作区
+      writableRoots: () => [
+        ...this.roots.extras.filter((r) => r.mode === "rw").map((r) => r.path),
+        ...(this.taskStore.get(taskId)?.workspace?.roots ?? []).filter((r) => r.mode === "rw").map((r) => r.path),
+      ],
       // 删除类命令必须用户点头：挂一张审批卡，超时按拒绝
       onBeforeCommand: (cmd) => this.awaitCommandApproval(member, taskId, cmd),
       // 收件箱：风铃/巡检中途补的指示，成员每轮开头取（催办不杀进程、不重派）
@@ -1473,15 +2070,19 @@ export class Kernel {
         if (result.status === "reported" && result.evidence.length > 0) {
           // 成员交的证据是相对**工作区**的（"report.md"），卷宗校验只认卷宗目录 / cwd / dataRoot；
           // 不先解析到工作区，真文件也会被判成"验不了"，工单停在执行中（C1 实机验暴露的真 bug）。
-          const evidence = result.evidence.map((e) => {
-            if (/^https?:\/\//i.test(e) || path.isAbsolute(e)) return e;
-            const abs = path.resolve(workdir, e);
-            const rel = path.relative(workdir, abs);
-            if (rel.startsWith("..") || path.isAbsolute(rel)) return e; // 越界不替换，交给校验如实判否
-            return fs.existsSync(abs) ? abs : e;
-          });
+          const rootsForEvidence = this.effectiveReadRoots(taskId, teamId);
+          const evidence = result.evidence.map((e) => this.resolveMemberPath(e, workdir, rootsForEvidence));
           // 只有真交了证据才登记；空回报进登记通道会抛错，原来那条路直接变成"崩溃"卡
-          this.registerReport(teamId, taskId, member, result.report, evidence, undefined, runThreadId, result.evidence);
+          this.registerReport(teamId, taskId, member, result.report, evidence, undefined, runThreadId, result.evidence, workdir);
+          // 交付物与证据分开：交付物永久固化，过程证据只登记
+          if (result.deliverables.length) {
+            this.solidifyDeliverables(
+              taskId,
+              result.deliverables.map((e) => this.resolveMemberPath(e, workdir, rootsForEvidence)),
+              workdir,
+              runThreadId,
+            );
+          }
           this.patchCardTo(runThreadId, live, {
             badge: "回报",
             title: `${member} 回报 · ${taskId}`,
@@ -1573,42 +2174,53 @@ export class Kernel {
   }
 
   /**
-   * 用户授予"这张单可以只读访问某目录"（写仍只能在工作区）。
+   * 用户授予"这张单可以只读访问这些目录"（写仍只能在工作区）。
    * 只由界面入口调用；模型没有拿到这个能力，所以不存在自我扩权。
+   * 2026-11-10：支持一次多个目录；整盘只读需要用户显式确认（allowDriveRoot）。
    */
-  grantReadRoot(taskId: string, dir: string): { ok: boolean; roots?: string[]; error?: string } {
+  grantReadRoots(
+    taskId: string,
+    dirs: string[],
+    opts: { allowDriveRoot?: boolean } = {},
+  ): { ok: boolean; roots?: string[]; error?: string } {
     const rec = this.taskStore.get(taskId);
     if (!rec) return { ok: false, error: `工单不存在：${taskId}` };
-    let abs: string;
-    try {
-      abs = path.resolve(dir);
-    } catch {
-      return { ok: false, error: `路径不合法：${dir}` };
+    const wanted = [...new Set(dirs.map((d) => String(d ?? "").trim()).filter(Boolean))];
+    if (!wanted.length) return { ok: false, error: "没有选中目录" };
+    const accepted: string[] = [];
+    for (const dir of wanted) {
+      const abs = path.resolve(dir);
+      const dirErr = rootDirError(abs);
+      if (dirErr) return { ok: false, error: dirErr };
+      if (isDriveRoot(abs) && !opts.allowDriveRoot) {
+        return { ok: false, error: `${abs} 是整盘：只读授权整盘需要二次确认（手输盘符或勾选确认）。` };
+      }
+      const forbid = forbiddenRootReason(abs, this.dataRoot);
+      if (forbid) return { ok: false, error: forbid };
+      accepted.push(abs);
     }
-    if (path.parse(abs).root === abs) return { ok: false, error: "不能把整个盘符授权出去：请选具体的项目目录。" };
-    const dataRoot = path.resolve(this.dataRoot);
-    if (abs === dataRoot || abs.startsWith(dataRoot + path.sep)) {
-      return { ok: false, error: "不能授权风铃自己的数据目录（里面是凭据、会话与团队档案）。" };
-    }
-    try {
-      if (!fs.statSync(abs).isDirectory()) return { ok: false, error: `${abs} 不是目录。` };
-    } catch {
-      return { ok: false, error: `目录不存在：${abs}` };
-    }
-    const roots = [...new Set([...(rec.readRoots ?? []), abs])];
+    const roots = [...new Set([...(rec.readRoots ?? []), ...accepted])];
     this.taskStore.setReadRoots(taskId, roots);
-    this.taskCase.append(taskId, { kind: "note", text: `用户授予只读访问：${abs}（写仍限工作区）` });
+    this.taskCase.append(taskId, { kind: "note", text: `用户授予只读访问：${accepted.join("、")}（写仍限工作区）` });
     const owner = rec.threadId ?? this.currentThreadId;
     this.cardTo(owner, {
       kind: "system",
       jobId: taskId,
-      text: `已授权 ${taskId} 只读访问 ${abs}：成员可以读这里的文件，但写仍然只能在工作区。`,
+      text: `已授权 ${taskId} 只读访问 ${accepted.join("、")}：成员可以读这里的文件，但写仍然只能在工作区。`,
     });
     // 正在跑的成员要立刻知道，否则它会继续撞墙
     if (this.memberRuns.has(taskId)) {
-      this.nudgeMember(taskId, `用户已授权你只读访问 ${abs}（用绝对路径 read_file / list_dir）。写入仍然只能在工作区；别再反复试被拦的路径。`);
+      this.nudgeMember(
+        taskId,
+        `用户已授权你只读访问 ${accepted.join("、")}（用绝对路径 read_file / list_dir）。写入仍然只能在工作区；别再反复试被拦的路径。`,
+      );
     }
     return { ok: true, roots };
+  }
+
+  /** 单目录兼容入口 */
+  grantReadRoot(taskId: string, dir: string): { ok: boolean; roots?: string[]; error?: string } {
+    return this.grantReadRoots(taskId, [dir]);
   }
 
   revokeReadRoot(taskId: string, dir?: string): { ok: boolean; roots?: string[]; error?: string } {
@@ -1693,32 +2305,218 @@ export class Kernel {
     return { ok: true };
   }
 
-  /** 彻底删除一张单（tasks/<id>/ 整目录）：不可恢复，界面必须二次确认 */
-  removeTask(taskId: string): { ok: boolean; error?: string } {
-    if (this.memberRuns.has(taskId)) return { ok: false, error: `${taskId} 还在跑：先停成员再删` };
-    const rec = this.taskStore.get(taskId);
-    if (!rec) return { ok: false, error: `工单不存在：${taskId}` };
-    try {
-      this.taskStore.remove(taskId);
-    } catch (err) {
-      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  /**
+   * 单张单的物理清理：停成员 → 执行中的先置 canceled → 删目录/派单账本 → 清运行时痕迹。
+   * 不写任何提示卡（删会话级联时那些卡已经没有落点了），提示由调用方给。
+   * 运行时痕迹必须一起清：memberActive 里留着已删的 taskId，快照就会继续把成员挂在
+   * 一张不存在的单上——界面看着「工单删了动态还在」，就是这个残留。
+   */
+  private purgeTask(rec: TaskRecord): void {
+    if (this.memberRuns.has(rec.id)) this.cancelMemberTask(rec.id);
+    const cur = this.taskStore.get(rec.id) ?? rec;
+    if (cur.status === "in_progress") {
+      try {
+        this.taskStore.transition(rec.id, "canceled", { member: cur.member });
+      } catch {
+        /* 已不在可迁移范围（比如刚被停成 blocked）：直接进删除 */
+      }
     }
+    this.taskStore.remove(rec.id);
     // 派单账本也是台账的兜底来源：不删它，删完工单还会从 assignments 里"复活"一条
     try {
-      fs.rmSync(path.join(this.dataRoot, "team", rec.teamId, "assignments", `${taskId}.jsonl`), { force: true });
+      fs.rmSync(path.join(this.dataRoot, "team", rec.teamId, "assignments", `${rec.id}.jsonl`), { force: true });
     } catch {
       /* 没有账本文件是常态 */
     }
-    this.memberProgress.delete(rec.member ?? "");
+    if (rec.member) {
+      const memberKey = `${rec.teamId}::${rec.member}`;
+      this.memberProgress.delete(rec.member);
+      this.memberLastStep.delete(memberKey);
+      if (this.memberActive.get(memberKey) === rec.id) this.memberActive.delete(memberKey);
+    }
+    this.memberInbox.delete(rec.id);
+    this.memberStepAt.delete(rec.id);
+    this.memberBlocked.delete(rec.id);
+    this.supervisorNoted.delete(rec.id);
     // 指向这张单的挂起裁决/契约一并撤掉，避免点开已删的工单
-    if (this.decisions.some((d) => d.jobId === taskId)) {
-      this.decisions = this.decisions.filter((d) => d.jobId !== taskId);
+    if (this.decisions.some((d) => d.jobId === rec.id)) {
+      this.decisions = this.decisions.filter((d) => d.jobId !== rec.id);
       this.setTurn({});
     }
-    const text = `已删除 ${taskId}：工单、卷宗与工作区一并移除（不可恢复）。`;
+  }
+
+  /**
+   * 删会话时连带撤掉挂在它名下的工单。
+   * 会话在用户心里就是"任务容器"：只删对话记录、把工单留在台账里，
+   * 结果就是「会话删了工单还在、值台动态区还在动」——两套存储两套真身，界面没法解释。
+   */
+  private purgeThreadTasks(threadId: string): { removed: number; kept: number } {
+    const mine = this.taskStore.list().filter((t) => t.threadId === threadId);
+    let removed = 0;
+    let kept = 0;
+    for (const t of mine) {
+      try {
+        this.purgeTask(t);
+        removed += 1;
+      } catch {
+        // 目录被占用之类：留在台账里，至少别把删会话整个搞失败
+        kept += 1;
+      }
+    }
+    return { removed, kept };
+  }
+
+  /** 无主单：threadId 指向已删会话（老版本删会话只删对话记录留下的） */
+  private orphanTasks(): TaskRecord[] {
+    const live = new Set(this.threads.list().map((t) => t.id));
+    return this.taskStore.list().filter((t) => t.threadId && !live.has(t.threadId));
+  }
+
+  /** 清掉无主单：给用户一个出口，否则这些单永远挂在台账里点哪都删不掉 */
+  purgeOrphanTasks(): { removed: number; kept: number } {
+    let removed = 0;
+    let kept = 0;
+    for (const t of this.orphanTasks()) {
+      try {
+        this.purgeTask(t);
+        removed += 1;
+      } catch {
+        kept += 1;
+      }
+    }
+    if (removed) {
+      this.card({ kind: "system", text: `清掉 ${removed} 张无主单（所属会话已被删除）。` });
+    }
+    return { removed, kept };
+  }
+
+  /**
+   * 彻底删除一张单（tasks/<id>/ 整目录）：不可恢复，界面必须二次确认。
+   * 2026-11-10：数据根外的文件（用户项目）**一律不动**，返回值如实分开"删了什么/没动什么"。
+   */
+  removeTask(taskId: string): { ok: boolean; error?: string; removed?: string[]; kept?: string[] } {
+    if (this.memberRuns.has(taskId)) return { ok: false, error: `${taskId} 还在跑：先停成员再删` };
+    const rec = this.taskStore.get(taskId);
+    if (!rec) return { ok: false, error: `工单不存在：${taskId}` };
+    const taskDir = path.join(this.dataRoot, "tasks", taskId);
+    const wsRoot = rec.workspace?.root ?? rec.workspaceRoot ?? "";
+    try {
+      this.purgeTask(rec);
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+    const removed = [taskDir];
+    // 工作区只要不在这张单的目录里，就不归这张单所有（可能是共享默认工作区或用户项目）——一律不动
+    const kept = wsRoot && !isInside(taskDir, wsRoot) ? [wsRoot] : [];
+    const shared = kept.length > 0 && isInside(this.dataRoot, kept[0]);
+    const text = kept.length
+      ? shared
+        ? `已删除 ${taskId}：工单、卷宗与临时文件已移除；共享工作区 ${kept.join("、")} 未改动。`
+        : `已删除 ${taskId}：工单、卷宗与临时文件已移除；用户项目目录 ${kept.join("、")} 未改动。`
+      : `已删除 ${taskId}：工单、卷宗与工作区一并移除（不可恢复）。`;
     if (rec.threadId) this.cardTo(rec.threadId, { kind: "system", text });
     else this.card({ kind: "system", text });
-    return { ok: true };
+    return { ok: true, removed, kept };
+  }
+
+  /**
+   * 审查快照（P2-4）：把这张单现在的工作区复制进任务沙箱，之后在副本里跑构建/测试。
+   * 只读根不放开执行——复制一份再跑，原项目一个字节都不动。
+   */
+  snapshotProject(taskId: string): { ok: boolean; error?: string; root?: string } {
+    const rec = this.taskStore.get(taskId);
+    if (!rec) return { ok: false, error: `工单不存在：${taskId}` };
+    if (this.memberRuns.has(taskId)) return { ok: false, error: `${taskId} 还在跑：先停成员再做快照` };
+    const src = rec.workspace?.root ?? rec.workspaceRoot;
+    if (!src) return { ok: false, error: "这张单没有工作区可复制" };
+    const absSrc = path.resolve(src);
+    try {
+      if (!fs.statSync(absSrc).isDirectory()) return { ok: false, error: `${absSrc} 不是目录` };
+    } catch {
+      return { ok: false, error: `工作区不存在：${absSrc}` };
+    }
+    const dest = path.join(this.dataRoot, "tasks", taskId, "workspace");
+    if (path.resolve(dest) === absSrc || isInside(dest, absSrc)) {
+      return { ok: true, root: absSrc };
+    }
+    if (fs.existsSync(dest) && fs.readdirSync(dest).length > 0) {
+      return { ok: false, error: `任务沙箱里已经有内容（${dest}），先清掉再复制，免得两份混在一起` };
+    }
+    const skip = new Set(["node_modules", "dist", "build", ".git", ".next", "coverage", ".cache", "__pycache__"]);
+    try {
+      fs.cpSync(absSrc, dest, {
+        recursive: true,
+        force: false,
+        errorOnExist: false,
+        filter: (p) => {
+          if (skip.has(path.basename(p))) return false;
+          try {
+            const st = fs.statSync(p);
+            if (st.isFile() && st.size > 50 * 1024 * 1024) return false; // 超大文件不复制，避免把沙箱撑爆
+          } catch {
+            /* 读不到就按可复制处理，copy 自己会报错 */
+          }
+          return true;
+        },
+      });
+    } catch (err) {
+      try {
+        fs.rmSync(dest, { recursive: true, force: true });
+      } catch {
+        /* 清不掉也如实报错 */
+      }
+      return { ok: false, error: `复制失败：${err instanceof Error ? err.message : String(err)}` };
+    }
+    const ws = this.workspaceRecordFor(taskId, dest);
+    this.taskStore.setWorkspace(taskId, ws);
+    const owner = rec.threadId ?? this.currentThreadId;
+    this.taskCase.append(taskId, { kind: "note", text: `用户做了审查快照：${absSrc} → ${dest}（原项目不动）` });
+    this.cardTo(owner, {
+      kind: "system",
+      jobId: taskId,
+      text: `已把工作区复制进任务沙箱：${dest}（排除了 node_modules / .git / dist 等大目录）。要跑测试就让成员重新开工，命令在副本里跑。`,
+    });
+    return { ok: true, root: dest };
+  }
+
+  /**
+   * 导出任务卷宗 zip（P2-3）：给用户一个能带走的包。
+   * 只收卷宗内的东西（task.json / timeline / summary / artifacts / 交付清单），
+   * 不打包 sandbox 整个工作树（可能很大），也不碰用户项目。
+   */
+  exportTask(taskId: string): { ok: boolean; error?: string; path?: string } {
+    const rec = this.taskStore.get(taskId);
+    if (!rec) return { ok: false, error: `工单不存在：${taskId}` };
+    const dir = path.join(this.dataRoot, "tasks", taskId);
+    if (!fs.existsSync(dir)) return { ok: false, error: `卷宗目录不存在：${dir}` };
+    const entries: ZipEntry[] = [];
+    for (const name of ["task.json", "timeline.jsonl", "summary.md", "_brief.md"]) {
+      const p = path.join(dir, name);
+      if (!fs.existsSync(p)) continue;
+      try {
+        entries.push({ name, data: fs.readFileSync(p), mtime: fs.statSync(p).mtime });
+      } catch {
+        /* 单个文件读不到就跳过 */
+      }
+    }
+    entries.push(...collectZipEntries(path.join(dir, "artifacts"), "artifacts"));
+    if (rec.deliverables?.length) {
+      entries.push({
+        name: "deliverables.json",
+        data: Buffer.from(JSON.stringify(rec.deliverables, null, 2), "utf-8"),
+      });
+    }
+    const exportsDir = path.join(this.dataRoot, "exports");
+    fs.mkdirSync(exportsDir, { recursive: true });
+    const stamp = new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14);
+    const target = path.join(exportsDir, `${taskId}-${stamp}.zip`);
+    try {
+      fs.writeFileSync(target, buildZip(entries));
+    } catch (err) {
+      return { ok: false, error: `导出失败：${err instanceof Error ? err.message : String(err)}` };
+    }
+    this.log("task_exported", { taskId, path: target, entries: entries.length });
+    return { ok: true, path: target };
   }
 
   /**
@@ -1777,6 +2575,65 @@ export class Kernel {
     );
   }
 
+  /**
+   * 心跳巡检（M3-01）：机械层每分钟看一眼，聚合三类机器事实——待审查的回报、
+   * 停滞工单（backlog/blocked/todo 且没人跟、不在等用户拍板）、定时任务异常。
+   * 纪律：没事零 token；忙时跳过（事实持续存在，下个窗口再看，不排队防堆积）；
+   * 同一批事实 30 分钟内不重复注入；间隔由 prefs.heartbeatMinutes 控制（0/关 = 不巡检）。
+   * 注入后判断与处置完全由风铃做主——代码只把该看的事摆到她面前，不写死动作。
+   */
+  /** 内置技能种子：缺才写入 dataRoot/skills（用户改过不覆盖；删除后下次启动还原） */
+  private seedBuiltinSkills(): void {
+    for (const [dir, content] of Object.entries(BUILTIN_SKILLS)) {
+      const full = path.join(this.dataRoot, "skills", dir);
+      if (fs.existsSync(full)) continue;
+      try {
+        fs.mkdirSync(path.dirname(full), { recursive: true });
+        fs.writeFileSync(full, content, "utf-8");
+        this.log("builtin_skill_seeded", { dir });
+      } catch (err) {
+        console.warn(`[kernel] 内置技能写入失败（${dir}）：`, err instanceof Error ? err.message : err);
+      }
+    }
+  }
+
+  private heartbeatTick(): void {
+    const prefs = this.settings.getPrefs();
+    if (!prefs.heartbeat) return;
+    if (this.busy) return;
+    const now = Date.now();
+    const minutes = Math.max(1, Math.round(prefs.heartbeatMinutes || 5));
+    if (now - this.lastHeartbeatAt < minutes * 60_000) return;
+    const facts: HeartbeatFacts = collectHeartbeatFacts({
+      tasks: this.taskStore.list(),
+      runningTaskIds: [...this.memberRuns.keys()],
+      pendingPlanTaskIds: [...this.pendingPlans.values()].map((p) => p.taskId),
+      schedules: this.scheduler.list(),
+    });
+    if (heartbeatIsEmpty(facts)) return;
+    const sig = heartbeatSignature(facts);
+    const notedAt = this.heartbeatNoted.get(sig);
+    if (notedAt !== undefined && now - notedAt < 30 * 60_000) return;
+    // 去重表瘦身：2 小时前的记录清掉，防长驻增长
+    for (const [k, at] of this.heartbeatNoted) {
+      if (now - at > 2 * 60 * 60_000) this.heartbeatNoted.delete(k);
+    }
+    this.heartbeatNoted.set(sig, now);
+    this.lastHeartbeatAt = now;
+    const brief = [
+      ...facts.awaitingReview.map((t) => `待审查 ${t.taskId}「${t.title}」`),
+      ...facts.stalledTasks.map((t) => `停滞 ${t.taskId}「${t.title}」（${t.status}）`),
+      ...facts.scheduleIssues.map((s) => `定时任务异常 ${s.name}（${s.lastStatus}）`),
+    ].join("；");
+    this.card({ kind: "system", badge: "心跳", text: `心跳巡检（${brief}）。机器事实已摆到桌面上，由风铃判断处置：停/催/捡/问/汇报。` });
+    this.submitTurn(heartbeatPrompt(facts), undefined, { internal: true });
+    this.log("heartbeat_fired", {
+      awaitingReview: facts.awaitingReview.length,
+      stalled: facts.stalledTasks.length,
+      schedules: facts.scheduleIssues.length,
+    });
+  }
+
   /** 在跑的成员单（taskId 列表）：界面据此显示「停」按钮，而不是让用户去猜 */
   runningTaskIds(): string[] {
     return [...this.memberRuns.keys()];
@@ -1827,15 +2684,18 @@ export class Kernel {
             },
             escalateWhen: String(args.escalateWhen ?? "需要新依赖/越权/卡住"),
             body: `岗位由风铃在任务中招募。目标：${args.goal}`,
+            ...(isAvatarId(args.avatarId) ? { avatarId: args.avatarId } : {}),
           },
           args.justification as string | undefined,
         );
+        const hired = this.teamStore.readMember(teamId, String(args.name));
+        const face = avatarById(hired.avatarId) ?? avatarFor(hired.name);
         this.emit({
           type: "tool",
           badge: "组队",
           title: `招募 ${args.name} · ${args.role}`,
           body: `目标：${args.goal}\n边界：${((args.boundaries as string[]) ?? []).join("；") || "（未写）"}`,
-          members: [{ name: String(args.name), role: String(args.role), color: this.teamColor(0) }],
+          members: [{ name: String(args.name), role: String(args.role), color: face.color, avatarId: face.id }],
         });
         return `已招募 ${args.name}（岗位档案已落盘，用户可读可改）。团队 ID：${teamId}（**同一条任务线**的后续派单可省略 teamId；换新任务请显式给新团队，不要复用这条任务线的班底）。`;
       }
@@ -1849,6 +2709,42 @@ export class Kernel {
         const draftId = args.draftId ? String(args.draftId) : undefined;
         if (draftId && !listDrafts(this.dataRoot).some((d) => d.draftId === draftId)) {
           return `草稿 ${draftId} 不存在。先用 workshop.create 开草稿，再派单给插件工程师。`;
+        }
+        // 简报质量闸（代码层把关，不靠提示词自觉）：目标/完成标准/材料位置/限制缺一退回
+        const briefRejection = validateBrief(brief, args.acceptance as string[] | undefined);
+        if (briefRejection) return briefRejection;
+        // 工作区：默认会话项目目录；给了就必须是已存在目录（用户会在契约卡上看到并批准）
+        let workspace: string | undefined;
+        if (args.workspace !== undefined && String(args.workspace).trim()) {
+          const ws = path.resolve(String(args.workspace).trim());
+          if (!path.isAbsolute(ws)) {
+            return `workspace 必须是绝对路径（收到：${String(args.workspace)}）。不确定就先 ask_user 问用户材料在哪。`;
+          }
+          if (!fs.existsSync(ws) || !fs.statSync(ws).isDirectory()) {
+            return `workspace 目录不存在：${ws}。先 ask_user 向用户确认工作目录，不要猜路径。`;
+          }
+          if (ws === path.resolve(this.dataRoot) || ws.length <= 3) {
+            return `workspace 不能是数据目录或盘符根（${ws}）：成员会拿到整棵树的写权限。选一个具体的项目/任务子目录。`;
+          }
+          workspace = ws;
+        }
+        // 只读授权申请：只登记不生效——用户在契约卡上点「开始」才落权（模型不能自我扩权）
+        let readRoots: string[] | undefined;
+        if (Array.isArray(args.readRoots) && args.readRoots.length > 0) {
+          const roots = (args.readRoots as unknown[]).map((r) => path.resolve(String(r).trim())).filter(Boolean);
+          const bad = roots.filter((r) => !path.isAbsolute(r) || !fs.existsSync(r) || !fs.statSync(r).isDirectory());
+          if (bad.length) {
+            return `readRoots 里这些目录不存在或不是目录：${bad.join("、")}。先 ask_user 向用户确认材料位置。`;
+          }
+          readRoots = roots;
+        }
+        let maxTurns: number | undefined;
+        if (args.maxTurns !== undefined) {
+          const n = Number(args.maxTurns);
+          if (!Number.isFinite(n) || n < 1) {
+            return `maxTurns 必须是 ≥1 的数字（收到：${String(args.maxTurns)}）。`;
+          }
+          maxTurns = Math.min(Math.round(n), 40);
         }
         // 标题取简报里最像"任务名"的一行：跳过【背景】这类段落标记，取第一个正行；
         // 全是标记行时去掉标记再看（原来直接把"【背景】用户要审查……"摆上台账，读不出任务是什么）
@@ -1904,17 +2800,40 @@ export class Kernel {
           budgetTokens: 300_000,
           deadline,
         };
-        const ctx: PendingPlan = { teamId, taskId, member, brief, deadline, tools, draftId };
+        // 工作区三态（2026-11-10）：显式目录 / "sandbox" / 省略=继承会话主根。
+        // 没有主根时落任务沙箱，绝不拿应用数据根冒充用户项目。
+        // 继承链：显式目录 > 团队根 > 会话主根 > 任务沙箱
+        const inheritedRoot = this.teamStore.workspaceOf(teamId) || this.projectRoot;
+        const wsFinal =
+          workspace && workspace !== "sandbox"
+            ? path.resolve(workspace)
+            : workspace === "sandbox" || !inheritedRoot
+              ? path.join(this.dataRoot, "tasks", taskId, "workspace")
+              : inheritedRoot;
+        const wsRec = this.workspaceRecordFor(taskId, wsFinal);
+        const ctx: PendingPlan = {
+          teamId,
+          taskId,
+          member,
+          brief,
+          deadline,
+          tools,
+          draftId,
+          workspace: wsFinal,
+          readRoots,
+          maxTurns,
+        };
         // 还没开工：工单只落 todo，不能谎报"执行中"（七态见 §4.10.4）
         if (!this.taskStore.get(taskId)) {
-          // 建单时就钉住会话与工作区：任务线判定、往来归属、成员在哪儿改代码都靠它
+          // 建单时就钉住会话与工作区：任务线判定、往来归属、成员在哪儿干活都靠它
           this.taskStore.create({
             id: taskId,
             title,
             teamId,
             member,
-            threadId: this.currentThreadId,
-            workspaceRoot: this.projectRoot,
+            threadId: this.ensureThreadId(),
+            workspaceRoot: wsFinal,
+            workspace: wsRec,
           });
           this.taskStore.transition(taskId, "todo");
         }
@@ -1923,11 +2842,12 @@ export class Kernel {
         }
         const decisionId = `plan-${taskId}-${Date.now().toString(36)}`;
         this.pendingPlans.set(decisionId, { ...ctx, decisionId });
+        const permNote = readRoots?.length ? `\n\n只读授权申请（点「开始」即批准）：${readRoots.join("、")}` : "";
         this.decisions.push({
           id: decisionId,
           from: "计划",
           title: `任务契约 · ${title}`,
-          detail: brief,
+          detail: `${brief}\n\n工作区（可读写）：${wsFinal}${permNote}`,
           kind: "plan",
           jobId: taskId,
           at: new Date().toISOString(),
@@ -1941,7 +2861,7 @@ export class Kernel {
           badge: "需要你拍板",
           title: `待你确认 · ${taskId}`,
           meta: `${member} · 截止 ${deadline}`,
-          body: `${brief}\n\n验收：${plan.acceptance.join("；")}`,
+          body: `${brief}\n\n验收：${plan.acceptance.join("；")}\n工作区（可读写）：${wsFinal}${permNote}`,
         });
         return "任务契约已呈给用户，等你确认后才开工。不要重复派单，也不要自己模拟成员执行。";
       }
@@ -2035,6 +2955,27 @@ export class Kernel {
             // 工单不在 in_review（例如旧记录）：只记派单卷宗
           }
         }
+        /**
+         * 验收通过＝归档。成员交的活归风铃管，她点头就算结案，不再让用户逐单盖章；
+         * 用户只在风铃交出最终结果时拍一次板（§4.10.5 改成只对最终交付生效）。
+         */
+        let archived = false;
+        let whyNot = "";
+        if (args.verdict === "accept" && !r.escalated) {
+          try {
+            this.taskStore.approve(String(args.taskId), "lynn", `风铃代验：${String(args.member)} 的证据齐全且可复跑`);
+            this.taskStore.transition(String(args.taskId), "done", { member: String(args.member) });
+            this.taskCase.append(String(args.taskId), {
+              kind: "approve",
+              member: "风铃",
+              text: "代验归档（成员单由风铃验收，不经用户）",
+            });
+            this.taskCase.appendSummary(String(args.taskId), "风铃代验通过 → 已归档");
+            archived = true;
+          } catch (err) {
+            whyNot = err instanceof Error ? err.message : String(err);
+          }
+        }
         this.emit({
           type: "tool",
           badge: "审查",
@@ -2047,7 +2988,9 @@ export class Kernel {
         return r.escalated
           ? "打回轮数已达上限，已自动升级问用户，等待其决定。"
           : args.verdict === "accept"
-            ? "验收结论已记录。归档需要用户在印章区点「验收归档」——用户显式拍板才算完成（§4.10.5）。"
+            ? archived
+              ? "已代验归档：这张单结案，不再占用用户。整件事做完后用 report_to_user 把最终结果汇报给她，她只对那一份拍板。"
+              : `验收结论已记录，但没能归档（${whyNot}）。先补齐可说清的证据，或确认这张单确实在待验状态。`
             : "已打回，并写清了改什么、期望什么、时限。";
       }
       case "report_to_user": {
@@ -2061,6 +3004,16 @@ export class Kernel {
             unfinished: (args.unfinished as string[]) ?? [],
             decisionsNeeded: (args.decisionsNeeded as string[]) ?? [],
           });
+        }
+        /* 她交出最终结果：这张单改由用户拍板，并推进到待审（没验证过证据就推不动，只呈汇报） */
+        try {
+          const rec = this.taskStore.get(String(args.taskId));
+          if (rec) {
+            this.taskStore.setReviewer(rec.id, "user");
+            if (rec.status === "in_progress") this.taskStore.transition(rec.id, "in_review");
+          }
+        } catch {
+          // 没有权威工单（临时派活）：汇报照常呈上，不弹章
         }
         this.emit({
           type: "tool",
@@ -2111,12 +3064,59 @@ export class Kernel {
       }
       case "dissolve_team": {
         const r = this.tools.dissolveTeam(String(args.teamId), Boolean(args.keep));
+        // 解散即停：在跑的成员单跟着停，别让一支不存在的队继续烧预算
+        for (const [key, taskId] of [...this.memberActive.entries()]) {
+          if (key.startsWith(`${args.teamId}::`)) void this.cancelMemberTask(taskId);
+        }
         this.emit({
           type: "tool",
           badge: "工具",
           title: r === "kept" ? `保留编制 · ${args.teamId}` : `已解散 · ${args.teamId}`,
         });
-        return r === "kept" ? "编制已保留，下次同类任务可直接调用。" : "团队已解散（档案保留供复盘）。";
+        return r === "kept" ? "编制已保留，下次同类任务可直接调用。" : "团队已解散（档案保留供复盘，在跑的单已停）。";
+      }
+      case "save_memory": {
+        const entry = String(args.entry ?? "").trim();
+        if (!entry) return "entry 不能为空：一条事实/决定/坑，写具体（含上下文），不写流水账。";
+        const kind: MemoryKind = args.scope === "user" ? "user" : "memory";
+        const label = kind === "user" ? "用户记忆" : "助理记忆";
+        const current = this.memory.load(kind).replace(/\s+$/, "");
+        const stamp = new Date().toISOString().slice(0, 16).replace("T", " ");
+        this.memory.save(kind, `${current}\n- ${stamp} ${entry}\n`);
+        const hot = this.hotSyncSystemPrompt();
+        this.card({ kind: "system", badge: "记忆", text: `已沉淀到${label}：${entry.slice(0, 120)}` });
+        this.log("memory_saved_by_agent", { kind, chars: entry.length, hot });
+        return `已写入${label}并热更新到你的系统提示词（hot=${hot}）。同类任务再遇到时你会直接想起来。`;
+      }
+      case "create_plugin_draft": {
+        const title = String(args.title ?? "").trim();
+        const kind = String(args.kind ?? "L0") as WorkshopKind;
+        const spec = String(args.spec ?? "").trim();
+        if (!title || !spec) {
+          return "title 与 spec 都必填。spec 按四段写：解决什么 / 输入输出 / 边界（不许做什么）/ 验收用例——成员只能看到规格，要写全。";
+        }
+        let meta;
+        try {
+          meta = createDraft(this.dataRoot, { title, kind, spec });
+        } catch (err) {
+          return `草稿创建失败：${err instanceof Error ? err.message : String(err)}`;
+        }
+        const draftDir = path.join(draftsDir(this.dataRoot), meta.draftId);
+        this.card({
+          kind: "system",
+          text: `插件草稿 ${meta.draftId} 已开：${title}（${kind}）。接下来派插件工程师开发，产物只能写进草稿区。`,
+        });
+        this.log("draft_created_by_agent", { draftId: meta.draftId, kind });
+        return JSON.stringify({
+          draftId: meta.draftId,
+          draftDir,
+          next: [
+            `1) create_member 招插件工程师（L0 用 write_file 就够；L1 要会 TS）`,
+            `2) assign_task 派单，workspace 填 "${draftDir}"（绝对路径，产物只能写进草稿区）`,
+            `3) 成员做完后 ship_plugin 走准入审查：L0 过审可自启用；L1/L2 过审后请用户在插件面板启用`,
+            `开发与验收标准见 plugin-dev 技能；用户的原始需求一并写进简报，别只传规格原文`,
+          ].join("\n"),
+        });
       }
       default:
         return `未知工具: ${name}`;
@@ -2125,14 +3125,15 @@ export class Kernel {
 
   // ---------- Pi RPC 会话（M0-03：模型循环在子进程，工具与权限留在壳） ----------
 
-  /** 起/复用 RPC worker；模型或工具面变化时重建（子进程崩溃不影响壳） */
-  private async ensureHost(): Promise<AgentHost> {
-    const cfg = this.settings.getModel();
-    const apiKey = cfg
-      ? loadApiKey(this.settings, (b) => (this.decryptor ? this.decryptor(b) : b.toString("utf-8")))
-      : null;
+  /** 起/复用运行时；模型或工具面变化时重建（子进程崩溃不影响壳） */
+  private async ensureHost(): Promise<RuntimeHost> {
+    const cfg = this.activeModelConfig();
+    const apiKey = this.activeApiKey();
     if (!cfg || !apiKey) throw new Error("no-model-config");
-    const stamp = `${cfg.baseUrl}@${cfg.model}@${cfg.updatedAt}@${this.l1.fingerprint()}@${this.mcp.fingerprint()}`;
+    const official = this.useOfficialRpc;
+    // 带上模型 id：两条配置可能只差 Key（同端点同模型），不换 worker 就会用错凭据
+    // 根指纹必须进指纹：Pi 的 cwd 只在 spawn 时传入，指纹不含根就会"界面一个目录、命令另一个目录"
+    const stamp = `${official ? "official" : "legacy"}@${this.activeModelId() ?? this.settings.getDefaultModelId() ?? "single"}@${cfg.baseUrl}@${cfg.model}@${cfg.updatedAt}@${this.l1.fingerprint()}@${this.mcp.fingerprint()}@root:${this.projectRoot}`;
     if (this.host && this.hostStamp === stamp) return this.host;
     await this.resetAgentHost();
     const tools: RpcToolSpec[] = this.allTools().map((t) => ({
@@ -2140,12 +3141,11 @@ export class Kernel {
       description: t.function.description,
       parameters: t.function.parameters,
     }));
-    const host = new AgentHost({
-      entryPath: this.rpcEntryPath,
+    const common = {
       model: { baseUrl: cfg.baseUrl, apiKey, model: cfg.model, provider: cfg.provider },
       tools,
       systemPrompt: this.systemPrompt(),
-      onToolCall: async (name, args) => {
+      onToolCall: async (name: string, args: Record<string, unknown>) => {
         try {
           // 三类来源同一道门禁（§4.7）：先过权限，再执行
           const denial = await this.gateTool(name, args);
@@ -2162,22 +3162,29 @@ export class Kernel {
         }
       },
       markerDir: path.join(this.dataRoot, "runtime", "workers"),
-      // 只有「这次壳里已经有对话记录」才续上次会话：全新安装/新对话不翻出旧档，
-      // 也避免测试环境里续到别的用例留下的会话。
       resume:
         !this.createFreshSession &&
-        (fs.existsSync(this.timelineFile) || this.threads.loadState(this.currentThreadId).history.length > 0),
-      sessionDir: this.threads.piDir(this.currentThreadId),
-      // 把用户的项目根交给 worker 当 Pi 的 cwd（此前是 worker 脚本所在目录，
-      // 导致 Pi 顺祖先目录捡到 F:\spiker\AGENTS.md 那个别的项目的开发指南）
-      projectRoot: this.projectRoot,
-      onEvent: (ev) => this.onAgentEvent(ev),
-      onError: (message) => {
+        (fs.existsSync(this.timelineFile) ||
+          (!!this.currentThreadId && this.threads.loadState(this.currentThreadId).history.length > 0)),
+      sessionDir: this.currentThreadId ? this.threads.piDir(this.currentThreadId) : path.join(this.dataRoot, "session", "pi"),
+      // 无主根的会话：不传 cwd（Pi 用 entry 所在目录），成员命令仍各自钉在工作区
+      projectRoot: this.projectRoot || undefined,
+      onEvent: (ev: { type: string; [k: string]: unknown }) => this.onAgentEvent(ev),
+      onError: (message: string) => {
         // 运行时错误必须进对话流：只发事件的话界面会一片空白（用户只看到自己那半句）
         this.card({ kind: "system", text: `运行时错误：${message}` });
         this.emit({ type: "error", message });
       },
-    });
+    };
+    const host: RuntimeHost = official
+      ? new PiRpcHost({
+        ...common,
+        entryPath: this.rpcEntryPath,
+        extensionPath: this.piExtensionPath,
+        agentDir: path.join(this.dataRoot, "kernel", "agent"),
+        personaFile: path.join(this.dataRoot, "kernel", "persona-live.md"),
+      })
+      : new AgentHost({ ...common, entryPath: this.legacyEntryPath });
     await host.start();
     this.createFreshSession = false;
     this.host = host;
@@ -2203,8 +3210,24 @@ export class Kernel {
       clearInterval(this.supervisorTimer);
       this.supervisorTimer = null;
     }
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
     this.kbWatch?.close();
     this.kbWatch = null;
+    for (const w of this.mcpWatchers) {
+      try {
+        w.close();
+      } catch {
+        /* 已关就跳过 */
+      }
+    }
+    this.mcpWatchers = [];
+    if (this.mcpReloadTimer) {
+      clearTimeout(this.mcpReloadTimer);
+      this.mcpReloadTimer = null;
+    }
     this.persistThread();
     await this.resetAgentHost().catch(() => undefined);
     await this.mcp.stopAll().catch(() => undefined);
@@ -2218,14 +3241,64 @@ export class Kernel {
     if (host) await host.stop().catch(() => undefined);
   }
 
+  /** 本轮最后一次模型错误（官方 message_end 带 stopReason=error / errorMessage） */
+  private lastModelError: string | null = null;
+
   private onAgentEvent(ev: { type: string; [k: string]: unknown }): void {
-    if (ev.type === "text_delta" && typeof ev.text === "string" && this.liveCard) {
-      this.liveCard.text = (this.liveCard.text ?? "") + ev.text;
+    // 官方 RPC 的流式事件是 message_update + assistantMessageEvent.text_delta（字段名 delta）；
+    // 旧回退 worker 用的是顶层 text_delta（字段名 text）。两种都收，不做事件白名单裁剪。
+    const nested = ev.assistantMessageEvent as { type?: string; delta?: string } | undefined;
+    const delta =
+      ev.type === "message_update" && nested?.type === "text_delta" ? nested.delta
+        : ev.type === "text_delta" && typeof ev.text === "string" ? ev.text
+          : undefined;
+    if (typeof delta === "string" && delta && this.liveCard) {
+      this.liveCard.text = (this.liveCard.text ?? "") + delta;
       // 节流到 ~80ms：渲染层按 cardId 就地更新，不拉全量快照
       const now = Date.now();
       if (now - this.lastDeltaEmit >= 80) {
         this.lastDeltaEmit = now;
-        this.notify({ type: "delta", text: this.liveCard.text, cardId: this.liveCard.id });
+        this.notify({
+          type: "delta",
+          text: this.liveCard.text,
+          thinking: this.liveCard.thinking,
+          cardId: this.liveCard.id,
+        });
+      }
+    }
+    // 思考（reasoning 模型才有）单独收：正文只装 text_delta，两段在界面上必须分得开
+    const thinkingDelta =
+      ev.type === "message_update" && nested?.type === "thinking_delta" ? nested.delta : undefined;
+    if (typeof thinkingDelta === "string" && thinkingDelta && this.liveCard) {
+      this.liveCard.thinking = (this.liveCard.thinking ?? "") + thinkingDelta;
+      const now = Date.now();
+      if (now - this.lastDeltaEmit >= 80) {
+        this.lastDeltaEmit = now;
+        this.notify({
+          type: "delta",
+          text: this.liveCard.text,
+          thinking: this.liveCard.thinking,
+          cardId: this.liveCard.id,
+        });
+      }
+    }
+    // 模型错误由 Pi 写进最终消息；只记录，等本轮结束再决定要不要落卡（重试中别抢先判失败）
+    if (ev.type === "message_end") {
+      const m = ev.message as { role?: string; stopReason?: string; errorMessage?: string } | undefined;
+      if (m?.role === "assistant" && m.stopReason === "error" && m.errorMessage) {
+        this.lastModelError = m.errorMessage;
+      }
+    }
+    // 重试状态走状态行；中文「周限额」话术 Pi 内置词表认不出，用官方 abort_retry 立刻止损
+    if (ev.type === "auto_retry_start") {
+      const attempt = typeof ev.attempt === "number" ? ev.attempt : 1;
+      const max = typeof ev.maxAttempts === "number" ? ev.maxAttempts : 3;
+      const detail = typeof ev.errorMessage === "string" ? ev.errorMessage : "";
+      this.setTurn({ activity: "model", activityName: `自动重试 ${attempt}/${max}`, activityAt: Date.now() });
+      if (/用量上限|额度不足|配额已用|购买积分|请升级|Token Plan|周限额/i.test(detail) && !this.turnErrorReported) {
+        this.turnErrorReported = true;
+        void this.host?.request("abort_retry").catch(() => undefined);
+        this.card({ kind: "system", text: "端点提示额度/配额已用尽，已停止自动重试。换模型或等额度恢复后再发。" });
       }
     }
     // 压缩：Pi 内置自动压缩，界面必须给交代（否则"上下文突然变短"像丢数据）
@@ -2253,9 +3326,15 @@ export class Kernel {
    * 工具执行唯一入口（RPC 回壳与直连降级共用）：
    * 权限门禁 → L1 → 管理型 8 件套；失败转成可读文本，不把异常抛回模型循环。
    */
-  /** 完整工具面：管理型 8 件 + L1 插件 + L2 MCP（同一道门禁，只是来源不同） */
+  /**
+   * 完整工具面：管理型 8 件 + L1 插件 + L2 MCP（同一道门禁，只是来源不同）。
+   * L1/MCP 来自 Map 遍历（加载完成先后不定）——按名字排序，保证工具段前缀稳定（缓存友好）。
+   */
   private allTools(): ToolSchema[] {
-    return [...TOOL_JSON, ...this.l1.toolSchemas(), ...this.mcp.schemas()];
+    const extra = [...this.l1.toolSchemas(), ...this.mcp.schemas()].sort((a, b) =>
+      a.function.name.localeCompare(b.function.name),
+    );
+    return [...TOOL_JSON, ...extra];
   }
 
   /** 工具面里实际有哪些名字（诊断/测试用） */
@@ -2296,9 +3375,23 @@ export class Kernel {
     const machine = requested && /^[A-Za-z0-9._-]+$/.test(requested) ? requested : undefined;
     const id = machine ?? generateTeamId(prettyName, (c) => this.teamStore.teamExists(c));
     const reused = this.tools.ensureTeamFromTemplate(id, hint.title ?? prettyName, template);
-    if (reused) return { id, name: reused.name, reused };
+    if (reused) {
+      this.snapshotTeamRoots(id);
+      return { id, name: reused.name, reused };
+    }
     const created = this.tools.createTeam(prettyName, id, !machine);
+    this.snapshotTeamRoots(created.id);
     return { id: created.id, name: created.name, reused: null };
+  }
+
+  /** 建队时快照会话根；已记过的团队不覆盖（用户的显式修改优先） */
+  private snapshotTeamRoots(teamId: string): void {
+    try {
+      if (this.teamStore.readTeam(teamId).roots) return;
+      this.teamStore.setRoots(teamId, this.roots);
+    } catch {
+      /* 团队记录写不进去不阻塞建队 */
+    }
   }
 
   /**
@@ -2346,17 +3439,30 @@ export class Kernel {
   private async runChatRpc(userText: string): Promise<void> {
     const live = this.card({ kind: "lynn", text: "", streaming: true });
     this.liveCard = live;
+    this.lastModelError = null;
+    this.turnErrorReported = false;
     const beforeIn = this.usage.sessionIn;
     const beforeOut = this.usage.sessionOut;
     // 从收到指令那一刻就开始计时：避免冷启动/首 token 期间界面完全静默
     this.setTurn({ activity: "model", activityName: undefined, activityAt: Date.now() });
     try {
       const host = await this.ensureHost();
+      // 人设/记忆/技能注入每轮现取：官方扩展在 before_agent_start 重读文件，天然热更新
+      await host.updateSystemPrompt(this.systemPrompt());
       this.setTurn({ phase: "accepted", busy: true });
-      const promptResult = await host.request<{ disposition?: string }>("prompt", { text: userText });
+      // 官方 prompt 的响应只代表被接受；PiRpcHost.prompt() 会等到官方 agent_settled
+      const promptResult = await host.prompt(userText);
       this.log("prompt_ok", { disposition: promptResult?.disposition ?? "started" });
       if (this.abortRequested) {
         this.card({ kind: "system", text: "已停止（已产出的内容保留）。" });
+      }
+      // 模型报错但一个字都没产出时，必须给错误卡，不能留下空气泡当作"不回复"
+      // （错误由 onAgentEvent 写入，TS 不跨方法追踪属性 narrowing，这里显式收成局部变量）
+      const modelError = this.lastModelError as string | null;
+      if (modelError && !(live.text ?? "").trim()) {
+        const fail = this.classifyError(new Error(modelError));
+        this.failTurn(fail.code, `${fail.message}（端点原文：${modelError.slice(0, 160)}）`, fail.action);
+        return;
       }
       this.settleAssistant(live, live.text ?? "");
       // 用量以 Pi 的 session stats 为准（含缓存与上下文占比），不自估
@@ -2367,9 +3473,24 @@ export class Kernel {
           sessionOut: stats.tokens.output,
           turnIn: Math.max(0, stats.tokens.input - beforeIn),
           turnOut: Math.max(0, stats.tokens.output - beforeOut),
+          cacheRead: stats.tokens.cacheRead ?? 0,
+          cacheWrite: stats.tokens.cacheWrite ?? 0,
+          cost: stats.cost ?? 0,
           contextTokens: stats.contextTokens,
           contextWindow: stats.contextWindow,
+          contextPercent: stats.contextPercent ?? null,
         });
+        // 缓存命中可观测：按轮落一行（agent.log），命中率掉时能回查到哪一轮、哪次变更之后
+        {
+          const prompt = stats.tokens.input + (stats.tokens.cacheRead ?? 0) + (stats.tokens.cacheWrite ?? 0);
+          this.log("usage_round", {
+            in: stats.tokens.input,
+            out: stats.tokens.output,
+            cacheRead: stats.tokens.cacheRead ?? 0,
+            cacheWrite: stats.tokens.cacheWrite ?? 0,
+            hitRate: prompt > 0 ? Math.round(((stats.tokens.cacheRead ?? 0) / prompt) * 1000) / 10 : null,
+          });
+        }
         // 工单追溯：这一段是哪个 Pi session 跑的
         const taskId = this.turn.taskId;
         if (taskId && stats.sessionId) {
@@ -2411,6 +3532,15 @@ export class Kernel {
       }
     };
     const messages: ChatMessage[] = [{ role: "system", content: this.systemPrompt() }, ...this.history];
+    // 技能注入只改当轮 user 消息（尾部）：system prompt 与历史前缀原样，缓存命中不被技能抖动打穿
+    if (this.pendingSkillText) {
+      for (let i = messages.length - 1; i >= 0; i -= 1) {
+        if (messages[i].role === "user") {
+          messages[i] = { role: "user", content: `${this.pendingSkillText}\n\n${messages[i].content}` };
+          break;
+        }
+      }
+    }
     try {
       for (let round = 0; round < 8; round++) {
         let roundText = "";
@@ -2419,22 +3549,37 @@ export class Kernel {
           apiKey,
           model: usedModel,
           messages,
-          tools: [...TOOL_JSON, ...this.l1.toolSchemas(), ...this.mcp.schemas()],
+          tools: this.allTools(),
           onDelta: (t) => {
             roundText += t;
             patchLive(roundText, true);
           },
         });
         this.tokensUsed += result.promptTokens + result.completionTokens;
+        // 口径与 Pi 路径一致：sessionIn = 未命中缓存的输入；命中/写入单独累计（端点没报就是 0）
+        const hit = Math.max(0, result.cacheRead);
+        const write = Math.max(0, result.cacheWrite);
+        const unhit = Math.max(0, result.promptTokens - hit);
         this.setUsage({
           turnIn: result.promptTokens,
           turnOut: result.completionTokens,
-          sessionIn: this.usage.sessionIn + result.promptTokens,
+          sessionIn: this.usage.sessionIn + unhit,
           sessionOut: this.usage.sessionOut + result.completionTokens,
+          cacheRead: this.usage.cacheRead + hit,
+          cacheWrite: this.usage.cacheWrite + write,
           contextTokens: this.usage.contextTokens + result.promptTokens + result.completionTokens,
         });
+        this.log("usage_direct", { in: result.promptTokens, out: result.completionTokens, cacheRead: hit, cacheWrite: write });
         // 按次记账（M2-11）+ 软上限检查（达限提示/可切备用模型；不静默停机）
-        appendUsage(this.dataRoot, { at: new Date().toISOString(), kind: "turn", in: result.promptTokens, out: result.completionTokens, model: usedModel });
+        appendUsage(this.dataRoot, {
+          at: new Date().toISOString(),
+          kind: "turn",
+          in: result.promptTokens,
+          out: result.completionTokens,
+          model: usedModel,
+          cacheRead: hit,
+          cacheWrite: write,
+        });
         this.checkBudget();
         if (result.toolCalls.length > 0) {
           messages.push({
@@ -2477,6 +3622,8 @@ export class Kernel {
    * `internal`：巡检回合——不进「你」的声音、不改会话标题，用户看到的是那张「开始跟进」卡。
    */
   private submitTurn(text: string, att?: TurnAttachments, opts?: { internal?: boolean }): void {
+    // 会话可以一条不剩：这时候开口说话，就地开一条再写，不用先点「新建会话」
+    this.ensureThreadId();
     // 技能激活（M2-10）：每轮按输入重算，命中后 allowed-tools 强制到工具门禁
     this.activateSkillsFor(text);
     // 本轮随附（M1-16）：文件注入 + 图片落盘；带不上的如实出卡，不静默丢
@@ -2484,7 +3631,12 @@ export class Kernel {
     if (opts?.internal) {
       fullText = text;
     } else if (att && (att.files?.length || att.images?.length)) {
-      const built = buildTurnAttachments(this.projectRoot, this.dataRoot, text, att);
+      if (!this.projectRoot && att.files?.length) {
+        // 无主根会话：文件无法相对工作区解析，如实说，不拿进程 cwd 冒充（图片仍可带）
+        this.card({ kind: "system", text: "当前会话没有工作区，文件随附带不上；先在顶部选一个工作区，或直接把内容贴进消息。" });
+      }
+      const effective = this.projectRoot ? att : { images: att.images };
+      const built = buildTurnAttachments(this.projectRoot || this.dataRoot, this.dataRoot, text, effective);
       if (built.errors.length) {
         this.card({ kind: "system", text: `这些随附没带上：${built.errors.join("；")}。` });
       }
@@ -2502,7 +3654,7 @@ export class Kernel {
     this.busy = true;
     this.l1.setBusy(true);
     this.abortRequested = false;
-    this.log("turn_start", { chars: text.length, model: this.settings.getModel()?.model ?? "", threadId: this.currentThreadId, internal: !!opts?.internal });
+    this.log("turn_start", { chars: text.length, model: this.activeModelConfig()?.model ?? "", modelId: this.activeModelId() ?? "default", threadId: this.currentThreadId, internal: !!opts?.internal });
     if (!opts?.internal) this.threads.autoTitle(this.currentThreadId, text);
     this.checkpoints.begin(`turn-${Date.now()}`);
     this.setTurn({ phase: "accepted", busy: true, startedAt: new Date().toISOString(), canUndo: false, changedFiles: [] });
@@ -2535,7 +3687,7 @@ export class Kernel {
       return;
     }
     try {
-      await this.host.request("prompt", { text, streamingBehavior: "steer" });
+      await this.host.steer(text);
       this.setTurn({ phase: "working" });
     } catch (err) {
       this.card({
@@ -2576,10 +3728,8 @@ export class Kernel {
   }
 
   private async runChat(userText: string): Promise<void> {
-    const cfg = this.settings.getModel();
-    const apiKey = cfg
-      ? loadApiKey(this.settings, (b) => (this.decryptor ? this.decryptor(b) : b.toString("utf-8")))
-      : null;
+    const cfg = this.activeModelConfig();
+    const apiKey = this.activeApiKey();
     if (!cfg || !apiKey) {
       this.failTurn(
         "no_model",
@@ -2680,7 +3830,8 @@ export class Kernel {
       const allTasks = this.taskStore.list();
       const members = this.teamStore
         .listMembers(entry.name)
-        .map((p, i) => {
+        .map((p) => {
+          const face = avatarById(p.avatarId) ?? avatarFor(p.name);
           const key = `${entry.name}::${p.name}`;
           const runningTask = this.memberActive.get(key);
           const mine = allTasks
@@ -2721,7 +3872,8 @@ export class Kernel {
             rejectionLimit: activeTask?.rejectLimit ?? 3,
             toolWhitelist: p.tools,
             effectiveTools,
-            color: this.teamColor(i),
+            color: face.color,
+            avatarId: face.id,
             model: p.model,
             turnLimit: p.limits.maxTurns,
           };
@@ -2781,7 +3933,9 @@ export class Kernel {
             version: task.version,
             parentId: task.parentId ?? undefined,
             rejectRounds: task.rejectRounds,
+            reviewer: task.reviewer ?? "user",
             evidence: task.evidence.map((e) => ({ label: e.label, ref: e.ref ?? "", verified: e.verified, at: e.at })),
+            deliverables: task.deliverables?.map((d) => ({ path: d.path, ref: d.ref, bytes: d.bytes })),
             rejectDraft,
           });
           continue;
@@ -2829,7 +3983,9 @@ export class Kernel {
         version: task.version,
         parentId: task.parentId ?? undefined,
         rejectRounds: task.rejectRounds,
+        reviewer: task.reviewer ?? "user",
         evidence: task.evidence.map((e) => ({ label: e.label, ref: e.ref ?? "", verified: e.verified, at: e.at })),
+        deliverables: task.deliverables?.map((d) => ({ path: d.path, ref: d.ref, bytes: d.bytes })),
       });
     }
     return track.reverse();
@@ -2887,14 +4043,24 @@ export class Kernel {
       }
 
       case "session.snapshot": {
-        const cfg = this.settings.getModel();
+        const cfg = this.activeModelConfig();
         // C3：会话 → 工单归属计数（按 task.threadId 汇总；老单没记 threadId 就不归到任何会话，不猜）
         const threadCounts = countTasksByThread(this.taskStore.list());
         const snap: RpcContracts["session.snapshot"]["result"] = {
-          workspace: { project: path.basename(this.projectRoot), subdir: "指挥台" },
+          // 项目名只作显示；没有主根时如实说「临时」，不拿数据根目录名冒充
+          workspace: {
+            project: this.projectRoot ? path.basename(this.projectRoot) : "临时",
+            subdir: this.roots.extras.length ? `可读 ${this.roots.extras.length}` : "工作区",
+            ...(this.projectRoot ? { primary: this.projectRoot } : {}),
+            extras: this.roots.extras.map((r) => ({
+              path: r.path,
+              mode: r.mode,
+              ...(r.label ? { label: r.label } : {}),
+            })),
+          },
           thread: {
             id: this.currentThreadId,
-            title: this.threads.get(this.currentThreadId)?.title ?? "新会话",
+            title: this.currentThreadId ? (this.threads.get(this.currentThreadId)?.title ?? "新会话") : "",
             projectRoot: this.threads.get(this.currentThreadId)?.projectRoot,
           },
           threads: this.threads
@@ -2902,10 +4068,12 @@ export class Kernel {
             .map((t) => ({ id: t.id, title: t.title, updatedAt: t.updatedAt, counts: threadCounts.get(t.id) })),
           // 真在跑的成员单：台账"进行中"不等于在跑（卡住/停机也会留在 in_progress 历史里）
           running: this.runningTaskIds(),
+          // 无主单计数：会话删了单还在（老版本不级联）。界面据此给一键清理出口
+          orphans: this.orphanTasks().length,
           project: {
             root: this.projectRoot,
-            trusted: this.trust.isTrusted(this.projectRoot),
-            hasMcp: fs.existsSync(path.join(this.projectRoot, ".lynn", "mcp.json")),
+            trusted: this.projectRoot ? this.trust.isTrusted(this.projectRoot) : false,
+            hasMcp: this.projectRoot ? fs.existsSync(path.join(this.projectRoot, ".lynn", "mcp.json")) : false,
           },
           permission: this.permission,
           model: {
@@ -2953,7 +4121,8 @@ export class Kernel {
             let steerText = trimmed;
             let meta = "插话";
             if (hasAtt) {
-              const built = buildTurnAttachments(this.projectRoot, this.dataRoot, trimmed, attachments!);
+              const effective = this.projectRoot ? attachments! : { images: attachments!.images };
+              const built = buildTurnAttachments(this.projectRoot || this.dataRoot, this.dataRoot, trimmed, effective);
               if (built.errors.length) {
                 this.card({ kind: "system", text: `这些随附没带上：${built.errors.join("；")}。` });
               }
@@ -2983,6 +4152,7 @@ export class Kernel {
 
       case "files.search": {
         const { q = "", limit = 20 } = params as { q?: string; limit?: number };
+        if (!this.projectRoot) return { files: [] } as RpcContracts[M]["result"];
         return { files: searchProjectFiles(this.projectRoot, q, limit) } as RpcContracts[M]["result"];
       }
 
@@ -3044,6 +4214,43 @@ export class Kernel {
         const text = this.memory.rollback(kind, versionId);
         const hot = this.hotSyncSystemPrompt();
         return { ok: true, text, hot } as RpcContracts[M]["result"];
+      }
+
+      // 技能管理（M2-10）：列表含停用标记；启停落 prefs.disabledSkills 并即时重发现
+      case "skills.list": {
+        const trusted = this.trust?.isTrusted(this.projectRoot) ?? false;
+        const roots = [
+          { dir: path.join(this.dataRoot, "skills"), level: "user" as const },
+          { dir: path.join(this.projectRoot, ".lynn", "skills"), level: "project" as const },
+          { dir: path.join(this.dataRoot, "plugins"), level: "plugin" as const },
+        ].filter((r) => r.level !== "project" || trusted);
+        const disabled = this.settings.getPrefs().disabledSkills ?? [];
+        const { entries, errors } = discoverSkills(roots);
+        return {
+          skills: entries.map((e) => ({
+            name: e.name,
+            description: e.description,
+            allowedTools: e.allowedTools,
+            level: e.level,
+            dir: e.dir,
+            disabled: disabled.includes(e.name),
+            warnings: e.warnings,
+          })),
+          errors,
+        } as RpcContracts[M]["result"];
+      }
+
+      case "skills.toggle": {
+        const p = params as { name: string; enabled: boolean };
+        if (!String(p.name).trim()) {
+          return { ok: false, error: "技能名不能为空" } as RpcContracts[M]["result"];
+        }
+        const cur = this.settings.getPrefs().disabledSkills ?? [];
+        const next = p.enabled ? cur.filter((n) => n !== p.name) : [...new Set([...cur, p.name])];
+        this.settings.savePrefs({ disabledSkills: next });
+        this.reloadSkills();
+        this.log("skill_toggled", { skill: p.name, enabled: p.enabled });
+        return { ok: true, enabled: p.enabled } as RpcContracts[M]["result"];
       }
 
       case "providers.presets": {
@@ -3197,6 +4404,20 @@ export class Kernel {
         return { ...this.officeHealth, csv: true, xlsx: this.officeHealth.found } as RpcContracts[M]["result"];
       }
 
+      // MCP 实况：配置文件里写了几台 + 实际连上几台 + 各带几个工具（不推断、不美化）
+      case "mcp.status": {
+        return this.mcpStatusPayload() as RpcContracts[M]["result"];
+      }
+
+      // 手动重连：改完 mcp.json 立刻生效。重连是异步的（要拉起子进程），
+      // 先回执"重连前的实况"，完成后落一张卡；界面随后轮询 mcp.status 刷新。
+      case "mcp.reload": {
+        void this.reloadMcpLive("manual").catch((err) =>
+          this.card({ kind: "system", text: `MCP 重连失败：${err instanceof Error ? err.message : String(err)}` }),
+        );
+        return { ok: true, ...this.mcpStatusPayload() } as RpcContracts[M]["result"];
+      }
+
       case "task.cancel": {
         const { taskId } = params as { taskId: string };
         return this.cancelMemberTask(String(taskId)) as RpcContracts[M]["result"];
@@ -3213,8 +4434,14 @@ export class Kernel {
       }
 
       case "task.grantRead": {
-        const { taskId, dir } = params as { taskId: string; dir: string };
-        return this.grantReadRoot(String(taskId), String(dir)) as RpcContracts[M]["result"];
+        const { taskId, dir, dirs, allowDriveRoot } = params as {
+          taskId: string;
+          dir?: string;
+          dirs?: string[];
+          allowDriveRoot?: boolean;
+        };
+        const list = dirs?.length ? dirs : dir ? [dir] : [];
+        return this.grantReadRoots(String(taskId), list, { allowDriveRoot }) as RpcContracts[M]["result"];
       }
 
       case "task.revokeRead": {
@@ -3227,9 +4454,24 @@ export class Kernel {
         return this.dismissTask(String(taskId)) as RpcContracts[M]["result"];
       }
 
+      case "task.snapshotProject": {
+        const { taskId } = params as { taskId: string };
+        return this.snapshotProject(String(taskId)) as RpcContracts[M]["result"];
+      }
+
+      case "task.export": {
+        const { taskId } = params as { taskId: string };
+        return this.exportTask(String(taskId)) as RpcContracts[M]["result"];
+      }
+
       case "task.remove": {
         const { taskId } = params as { taskId: string };
         return this.removeTask(String(taskId)) as RpcContracts[M]["result"];
+      }
+
+      case "task.purgeOrphans": {
+        const r = this.purgeOrphanTasks();
+        return { ok: true, removed: r.removed, kept: r.kept } as RpcContracts[M]["result"];
       }
 
       // 建团队（§4.10.3 修正）：界面上给名字就够，ID 由系统生成
@@ -3237,8 +4479,115 @@ export class Kernel {
         const { name } = params as { name?: string };
         try {
           const created = this.tools.createTeam(name ? String(name) : undefined);
+          this.snapshotTeamRoots(created.id);
           this.card({ kind: "system", text: `已建团队「${created.name}」（ID ${created.id}）。` });
           return { ok: true, id: created.id, name: created.name } as RpcContracts[M]["result"];
+        } catch (err) {
+          return { ok: false, error: err instanceof Error ? err.message : String(err) } as RpcContracts[M]["result"];
+        }
+      }
+
+      // 编制管理（用户手动）：列 / 改岗位 / 删成员 / 解散
+      case "team.list": {
+        try {
+          const teams = this.teamStore.listTeams().map((t) => ({
+            id: t.id,
+            name: t.name,
+            status: t.status,
+            createdAt: t.createdAt,
+            members: this.teamStore.listMembers(t.id).map((p) => ({
+              name: p.name,
+              role: p.role,
+              goal: p.goal,
+              body: p.body,
+              tools: p.tools,
+              model: p.model,
+              avatarId: (avatarById(p.avatarId) ?? avatarFor(p.name)).id,
+            })),
+          }));
+          return { teams } as RpcContracts[M]["result"];
+        } catch (err) {
+          return { teams: [], error: err instanceof Error ? err.message : String(err) } as RpcContracts[M]["result"];
+        }
+      }
+
+      case "team.member.save": {
+        const { teamId, name, role, goal, body, avatarId } = params as {
+          teamId: string;
+          name: string;
+          role?: string;
+          goal?: string;
+          body?: string;
+          avatarId?: string;
+        };
+        try {
+          const team = this.teamStore.readTeam(String(teamId));
+          if (team.status !== "active") {
+            return { ok: false, error: `团队「${team.name}」已解散，岗位只能读` } as RpcContracts[M]["result"];
+          }
+          if (avatarId !== undefined && !isAvatarId(avatarId)) {
+            return { ok: false, error: `未知头像 id：${avatarId}` } as RpcContracts[M]["result"];
+          }
+          const updated = this.teamStore.updateMember(String(teamId), String(name), {
+            ...(role !== undefined ? { role: String(role) } : {}),
+            ...(goal !== undefined ? { goal: String(goal) } : {}),
+            ...(body !== undefined ? { body: String(body) } : {}),
+            ...(avatarId !== undefined ? { avatarId } : {}),
+          });
+          this.card({ kind: "system", text: `已更新成员「${updated.name}」的岗位（${updated.role}）：下一单按新说明执行。` });
+          return { ok: true } as RpcContracts[M]["result"];
+        } catch (err) {
+          return { ok: false, error: err instanceof Error ? err.message : String(err) } as RpcContracts[M]["result"];
+        }
+      }
+
+      case "team.member.remove": {
+        const { teamId, name } = params as { teamId: string; name: string };
+        const busy = this.memberActive.get(`${teamId}::${name}`);
+        if (busy) {
+          return { ok: false, error: `「${name}」手上还有在跑的单（${busy}）：先停单再删` } as RpcContracts[M]["result"];
+        }
+        const open = this.taskStore
+          .list()
+          .find((t) => t.teamId === teamId && t.member === name && t.status !== "done" && t.status !== "canceled");
+        if (open) {
+          return {
+            ok: false,
+            error: `「${name}」名下还有未收的单（${open.id} · ${open.status}）：先验收或取消再删`,
+          } as RpcContracts[M]["result"];
+        }
+        try {
+          this.teamStore.removeMember(String(teamId), String(name));
+          this.card({ kind: "system", text: `已把「${name}」移出编制（岗位档案已删，历史派单记录保留）。` });
+          return { ok: true } as RpcContracts[M]["result"];
+        } catch (err) {
+          return { ok: false, error: err instanceof Error ? err.message : String(err) } as RpcContracts[M]["result"];
+        }
+      }
+
+      case "team.dissolve": {
+        const { teamId } = params as { teamId: string };
+        const running = [...this.memberActive.entries()]
+          .filter(([key]) => key.startsWith(`${teamId}::`))
+          .map(([, id]) => id);
+        if (running.length) {
+          return {
+            ok: false,
+            error: `还有 ${running.length} 张单在跑（${running.join("、")}）：先停单再解散`,
+          } as RpcContracts[M]["result"];
+        }
+        const open = this.taskStore.list().filter((t) => t.teamId === teamId && t.status !== "done" && t.status !== "canceled");
+        if (open.length) {
+          return {
+            ok: false,
+            error: `还有 ${open.length} 张未收的单（${open.map((t) => t.id).join("、")}）：先验收或取消再解散`,
+          } as RpcContracts[M]["result"];
+        }
+        try {
+          const rec = this.teamStore.readTeam(String(teamId));
+          this.teamStore.dissolveTeam(String(teamId));
+          this.card({ kind: "system", text: `已解散团队「${rec.name}」：档案保留为资产，不能再派活。` });
+          return { ok: true } as RpcContracts[M]["result"];
         } catch (err) {
           return { ok: false, error: err instanceof Error ? err.message : String(err) } as RpcContracts[M]["result"];
         }
@@ -3269,7 +4618,7 @@ export class Kernel {
         const aborted = Boolean(this.host?.isRunning());
         if (aborted) {
           // 不等 RPC 回执：停止要立刻可见；失败由看门狗对账兜住
-          void this.host!.request("abort").catch(() => undefined);
+          void this.host!.abort().catch(() => undefined);
         }
         if (this.liveCard) {
           this.liveCard.streaming = false;
@@ -3369,10 +4718,19 @@ export class Kernel {
       case "task.decide": {
         const p = params as {
           taskId: string;
-          action: "approve" | "reject";
+          action: "approve" | "reject" | "reopen";
           reason?: { what: string; expect: string; deadline: string };
         };
         try {
+          /* 重开：风铃代验可能判错，锁死的归档单得留一条只有用户能走的路 */
+          if (p.action === "reopen") {
+            const rec = this.taskStore.transition(p.taskId, "in_progress");
+            this.taskStore.setReviewer(p.taskId, "user");
+            this.taskCase.append(p.taskId, { kind: "transition", member: "user", text: "用户重开已归档单" });
+            this.taskCase.appendSummary(p.taskId, "用户重开：从归档拉回执行中");
+            this.card({ kind: "system", text: `已重开 · ${p.taskId}，回到执行中。要她接着干就用底栏下令派回去。` });
+            return { ok: true, status: rec.status } as RpcContracts[M]["result"];
+          }
           if (p.action === "approve") {
             this.taskStore.approve(p.taskId, "user", "印章区验收");
             const rec = this.taskStore.transition(p.taskId, "done");
@@ -3462,6 +4820,21 @@ export class Kernel {
         return this.pluginSet.rollback(p.file) as RpcContracts[M]["result"];
       }
 
+      case "plugins.safeMode": {
+        const p = params as { on: boolean };
+        // 进安全模式是自动的（连续崩溃），出安全模式只能是人点的这一下
+        this.pluginSet.setSafeMode(p.on, p.on ? "用户手动开启" : "");
+        if (!p.on) {
+          this.emit({
+            type: "tool",
+            badge: "工具",
+            title: "已退出安全模式",
+            body: "插件按启用状态重新加载；下次变更会重新拍快照。",
+          });
+        }
+        return { ok: true } as RpcContracts[M]["result"];
+      }
+
       // ---------- M3-07 插件工坊（§4.11）：草稿 → 准入 → 启用 ----------
       case "workshop.create": {
         const p = params as { title: string; kind: WorkshopKind; spec: string; taskId?: string };
@@ -3530,7 +4903,7 @@ export class Kernel {
       }
 
       case "config.get": {
-        const cfg = this.settings.getModel();
+        const cfg = this.activeModelConfig();
         return {
           configured: !!cfg,
           provider: cfg?.provider ?? "",
@@ -3542,14 +4915,19 @@ export class Kernel {
 
       case "config.save": {
         const p = params as { provider: string; baseUrl: string; model: string; apiKey?: string };
-        this.settings.saveModel({
-          provider: p.provider,
-          baseUrl: p.baseUrl,
-          model: p.model,
-          apiKey: p.apiKey,
-          previous: this.settings.getModel(),
-        });
-        return { ok: true } as RpcContracts[M]["result"];
+        try {
+          this.settings.saveModel({
+            provider: p.provider,
+            baseUrl: p.baseUrl,
+            model: p.model,
+            apiKey: p.apiKey,
+            previous: this.settings.getModel(),
+          });
+          return { ok: true } as RpcContracts[M]["result"];
+        } catch (err) {
+          // 主进程的 ipcMain.handle 会把 throw 吞成 {error}，渲染层不会抛；这里显式回 ok:false
+          return { ok: false, error: err instanceof Error ? err.message : String(err) } as RpcContracts[M]["result"];
+        }
       }
 
       case "config.test": {
@@ -3557,21 +4935,125 @@ export class Kernel {
         // 输入框留空 = 用已保存的 Key 测（渲染层拿不到明文，由主进程解密）
         let apiKey = p.apiKey?.trim() ?? "";
         if (!apiKey) {
-          const stored = this.settings.getModel();
+          const stored = this.activeModelConfig();
           if (!stored) {
             return { ok: false, error: "还没有保存过 Key，先填一个再测。" } as RpcContracts[M]["result"];
           }
-          apiKey =
-            loadApiKey(this.settings, (b) => (this.decryptor ? this.decryptor(b) : b.toString("utf-8"))) ?? "";
+          apiKey = this.activeApiKey() ?? "";
         }
         if (!apiKey) return { ok: false, error: "Key 无法解密，请重新填一次。" } as RpcContracts[M]["result"];
         return probeEndpoint({ ...p, apiKey }) as unknown as RpcContracts[M]["result"];
       }
 
+      // ---------- 模型库：多条配置 / 全局默认 / 每对话覆盖 ----------
+
+      case "model.list": {
+        const entries = this.settings.getModels();
+        const defaultId = this.settings.getDefaultModelId();
+        const threadId = this.threads.get(this.currentThreadId)?.modelId ?? null;
+        const activeId = this.activeModelId() ?? defaultId ?? entries[0]?.id ?? null;
+        return {
+          models: entries.map((e) => ({
+            id: e.id,
+            label: e.label,
+            provider: e.provider,
+            baseUrl: e.baseUrl,
+            model: e.model,
+            apiKeySet: !!e.apiKey?.data,
+            isDefault: e.id === defaultId,
+            isThreadModel: !!threadId && e.id === threadId,
+            updatedAt: e.updatedAt,
+          })),
+          defaultModelId: defaultId,
+          threadModelId: threadId,
+          activeModelId: activeId,
+          threadTitle: this.threads.get(this.currentThreadId)?.title ?? "新会话",
+        } as RpcContracts[M]["result"];
+      }
+
+      case "model.save": {
+        const p = params as { id?: string; label: string; provider: string; baseUrl: string; model: string; apiKey?: string };
+        if (!p.baseUrl?.trim() || !p.model?.trim()) {
+          return { ok: false, error: "Base URL 和模型都要填。" } as RpcContracts[M]["result"];
+        }
+        try {
+          const entry = this.settings.upsertModel({
+            id: p.id,
+            label: p.label,
+            provider: p.provider,
+            baseUrl: p.baseUrl,
+            model: p.model,
+            apiKey: p.apiKey,
+          });
+          return { ok: true, id: entry.id } as RpcContracts[M]["result"];
+        } catch (err) {
+          return { ok: false, error: err instanceof Error ? err.message : String(err) } as RpcContracts[M]["result"];
+        }
+      }
+
+      case "model.remove": {
+        const p = params as { id: string };
+        const r = this.settings.removeModel(String(p.id));
+        if (!r.ok) return { ok: false, error: r.error ?? "删除失败" } as RpcContracts[M]["result"];
+        // 清理所有指向它的对话覆盖，避免留悬空 id
+        for (const t of this.threads.list()) {
+          if (t.modelId === p.id) this.threads.setModel(t.id, null);
+        }
+        void this.resetAgentHost();
+        return { ok: true, defaultModelId: r.defaultModelId } as RpcContracts[M]["result"];
+      }
+
+      case "model.setDefault": {
+        const p = params as { id: string };
+        try {
+          this.settings.setDefaultModel(String(p.id));
+          void this.resetAgentHost();
+          return { ok: true } as RpcContracts[M]["result"];
+        } catch (err) {
+          return { ok: false, error: err instanceof Error ? err.message : String(err) } as RpcContracts[M]["result"];
+        }
+      }
+
+      case "model.setThread": {
+        const p = params as { id: string | null };
+        const id = p.id === null || p.id === "" ? null : String(p.id);
+        if (id && !this.settings.getModels().some((e) => e.id === id)) {
+          return { ok: false, error: "模型不存在" } as RpcContracts[M]["result"];
+        }
+        try {
+          this.threads.setModel(this.currentThreadId, id);
+          // 换模型必须换 Pi 运行时（--provider/--model 是启动参数），下一条消息重建
+          void this.resetAgentHost();
+          return { ok: true } as RpcContracts[M]["result"];
+        } catch (err) {
+          return { ok: false, error: err instanceof Error ? err.message : String(err) } as RpcContracts[M]["result"];
+        }
+      }
+
+      case "model.test": {
+        const p = params as { id?: string; baseUrl?: string; apiKey?: string; model?: string };
+        let baseUrl = p.baseUrl?.trim() ?? "";
+        let model = p.model?.trim() ?? "";
+        let apiKey = p.apiKey?.trim() ?? "";
+        if (p.id) {
+          const cfg = this.settings.getModel(p.id);
+          if (!cfg) return { ok: false, error: "模型不存在" } as RpcContracts[M]["result"];
+          baseUrl = baseUrl || cfg.baseUrl;
+          model = model || cfg.model;
+          if (!apiKey) apiKey = loadApiKey(this.settings, (b) => this.decryptBlob(b), p.id) ?? "";
+        }
+        if (!baseUrl || !model) return { ok: false, error: "Base URL 和模型都要填。" } as RpcContracts[M]["result"];
+        if (!apiKey) return { ok: false, error: "请先填写 API Key（新配置不能借用别的模型 Key）。" } as RpcContracts[M]["result"];
+        return probeEndpoint({ baseUrl, apiKey, model }) as unknown as RpcContracts[M]["result"];
+      }
+
       case "config.prefs": {
-        const p = params as { autoStart: boolean; trayOnClose?: boolean; notify?: boolean; softBudgetTokens?: number; fallbackModel?: string; lang?: "zh" | "en" };
+        const p = params as { autoStart: boolean; trayOnClose?: boolean; notify?: boolean; softBudgetTokens?: number; fallbackModel?: string; lang?: "zh" | "en"; captureHotkey?: string; heartbeat?: boolean };
         if (p.lang !== undefined && !isLang(p.lang)) {
           return { ok: false, error: `未知语言：${String(p.lang)}（只支持 zh / en）` } as unknown as RpcContracts[M]["result"];
+        }
+        if (p.captureHotkey !== undefined && !isCaptureHotkey(p.captureHotkey)) {
+          return { ok: false, error: `截图快捷键格式不对：${String(p.captureHotkey)}（要像 Alt+Shift+S）` } as unknown as RpcContracts[M]["result"];
         }
         const saved = this.settings.savePrefs({
           autoStart: Boolean(p.autoStart),
@@ -3580,6 +5062,8 @@ export class Kernel {
           ...(p.softBudgetTokens !== undefined ? { softBudgetTokens: Math.max(0, Number(p.softBudgetTokens) || 0) } : {}),
           ...(p.fallbackModel !== undefined ? { fallbackModel: String(p.fallbackModel).trim() } : {}),
           ...(p.lang !== undefined ? { lang: p.lang } : {}),
+          ...(p.captureHotkey !== undefined ? { captureHotkey: String(p.captureHotkey).trim() } : {}),
+          ...(p.heartbeat !== undefined ? { heartbeat: Boolean(p.heartbeat) } : {}),
         });
         return {
           ok: true,
@@ -3589,6 +5073,8 @@ export class Kernel {
           softBudgetTokens: saved.softBudgetTokens,
           fallbackModel: saved.fallbackModel,
           lang: saved.lang,
+          captureHotkey: saved.captureHotkey,
+          heartbeat: saved.heartbeat,
         } as RpcContracts[M]["result"];
       }
 
@@ -3660,8 +5146,12 @@ export class Kernel {
 
       case "trust.set": {
         const { trusted } = params as { trusted: boolean };
+        if (!this.projectRoot) {
+          return { ok: false, error: "当前会话没有工作区：先选一个目录再设信任。" } as RpcContracts[M]["result"];
+        }
         this.trust.setTrusted(this.projectRoot, Boolean(trusted));
         // 重新连 MCP 是异步的：先回执，再在后台完成并落一张卡
+        this.watchMcpConfig();
         void this.reloadMcp().then(() =>
           this.card({
             kind: "system",
@@ -3713,12 +5203,26 @@ export class Kernel {
 
       case "thread.remove": {
         const p = params as { id: string };
-        if (p.id === this.currentThreadId) {
-          const meta = this.threads.create("新会话");
-          this.switchThread(meta.id);
-        }
+        const wasCurrent = p.id === this.currentThreadId;
+        // 先把当前会话落盘，再删——顺序反了会把刚删的会话又写回来
+        if (wasCurrent) this.persistThread();
+        // 会话 = 任务容器：删会话必须连带撤掉它名下的工单（在跑的先停）。
+        // 只删对话记录会把工单留成"无主单"——台账照列、动态区照动，用户看不懂。
+        const purged = this.purgeThreadTasks(p.id);
         this.threads.remove(p.id);
-        return { ok: true } as RpcContracts[M]["result"];
+        if (wasCurrent) {
+          // 断开旧会话再切：否则 switchThread 的落盘会把已删的会话写成孤儿文件
+          this.currentThreadId = "";
+          const rest = this.threads.list();
+          if (rest.length) this.switchThread(rest[0].id);
+          else this.enterEmptySession();
+        }
+        return {
+          ok: true,
+          removedTasks: purged.removed,
+          keptTasks: purged.kept,
+          threadsLeft: this.threads.list().length,
+        } as RpcContracts[M]["result"];
       }
 
       case "thread.search": {
@@ -3746,17 +5250,26 @@ export class Kernel {
 
       case "project.setRoot": {
         const { root } = params as { root: string };
-        const abs = path.resolve(String(root));
-        try {
-          if (!fs.statSync(abs).isDirectory()) {
-            return { ok: false, error: `${abs} 不是目录` } as RpcContracts[M]["result"];
-          }
-        } catch {
-          return { ok: false, error: `目录不存在：${abs}` } as RpcContracts[M]["result"];
+        const raw = String(root ?? "").trim();
+        if (!raw) return { ok: false, error: "工作区不能为空" } as RpcContracts[M]["result"];
+        // 支持 `cd 子目录`、`~/xxx`：相对路径基于当前根解析，绝对路径原样
+        const expanded = raw === "~" || raw.startsWith("~/") || raw.startsWith("~\\")
+          ? path.join(os.homedir(), raw.slice(1))
+          : raw;
+        const abs = path.isAbsolute(expanded)
+          ? path.resolve(expanded)
+          : this.projectRoot
+            ? path.resolve(this.projectRoot, expanded)
+            : path.resolve(expanded);
+        const dirErr = rootDirError(abs);
+        if (dirErr) return { ok: false, error: dirErr } as RpcContracts[M]["result"];
+        if (isDriveRoot(abs)) {
+          return { ok: false, error: "不能把整个盘作为可写工作区：请选具体项目目录（整盘只能作为只读根）。" } as RpcContracts[M]["result"];
         }
-        const from = this.projectRoot;
-        this.applyProjectRoot(abs);
-        if (this.currentThreadId) this.threads.setProject(this.currentThreadId, abs);
+        const forbid = forbiddenRootReason(abs, this.dataRoot);
+        if (forbid) return { ok: false, error: forbid } as RpcContracts[M]["result"];
+        const from = this.projectRoot || "（无）";
+        this.setSessionRoots({ ...this.roots, primary: abs });
         this.card({
           kind: "system",
           text: `工作区已换成 ${abs}（原 ${from}）。@ 文件检索、附件与 Pi 的 cwd 都跟着走；项目级插件/MCP 只有该目录被信任时才加载。`,
@@ -3764,11 +5277,154 @@ export class Kernel {
         return { ok: true, root: abs, trusted: this.trust.isTrusted(abs) } as RpcContracts[M]["result"];
       }
 
+      case "project.clearRoot": {
+        this.setSessionRoots(emptyRoots());
+        this.card({
+          kind: "system",
+          text: "这个会话先不用工作区：接下来的任务产出会落在任务卷宗里（~/.lynn/tasks/<id>/workspace）。随时可以在顶栏再选一个。",
+        });
+        return { ok: true } as RpcContracts[M]["result"];
+      }
+
+      case "workspace.prefs": {
+        const prefs = this.settings.getPrefs();
+        return {
+          ...(prefs.defaultWorkspace ? { defaultWorkspace: prefs.defaultWorkspace } : {}),
+          knownReadRoots: prefs.knownReadRoots ?? [],
+        } as RpcContracts[M]["result"];
+      }
+
+      case "workspace.savePrefs": {
+        const p = params as { defaultWorkspace?: string | null; knownReadRoots?: string[] };
+        let defaultWorkspace: string | undefined;
+        if (p.defaultWorkspace !== undefined) {
+          const raw = String(p.defaultWorkspace ?? "").trim();
+          if (!raw) {
+            defaultWorkspace = "";
+          } else {
+            const abs = path.resolve(raw);
+            const dirErr = rootDirError(abs) ?? forbiddenRootReason(abs, this.dataRoot);
+            if (dirErr) return { ok: false, error: dirErr } as RpcContracts[M]["result"];
+            if (isDriveRoot(abs)) {
+              return { ok: false, error: "默认工作区不能是整盘：请选具体目录。" } as RpcContracts[M]["result"];
+            }
+            defaultWorkspace = abs;
+          }
+        }
+        let knownReadRoots: string[] | undefined;
+        if (p.knownReadRoots !== undefined) {
+          const out: string[] = [];
+          for (const raw of p.knownReadRoots) {
+            const abs = path.resolve(String(raw));
+            const err = rootDirError(abs) ?? forbiddenRootReason(abs, this.dataRoot);
+            if (err) return { ok: false, error: err } as RpcContracts[M]["result"];
+            out.push(abs);
+          }
+          knownReadRoots = [...new Set(out)];
+        }
+        const saved = this.settings.savePrefs({
+          ...(defaultWorkspace !== undefined ? { defaultWorkspace } : {}),
+          ...(knownReadRoots !== undefined ? { knownReadRoots } : {}),
+        });
+        return {
+          ok: true,
+          ...(saved.defaultWorkspace ? { defaultWorkspace: saved.defaultWorkspace } : {}),
+          knownReadRoots: saved.knownReadRoots ?? [],
+        } as RpcContracts[M]["result"];
+      }
+
+      case "data.usage": {
+        const prefs = this.settings.getPrefs();
+        return {
+          usage: measureUsage(this.dataRoot),
+          retention: prefs.retention,
+        } as RpcContracts[M]["result"];
+      }
+
+      case "data.cleanup": {
+        const p = params as { retention?: { scratchDays?: number; checkpointDays?: number; logDays?: number } };
+        const base = this.settings.getPrefs().retention;
+        const clamp = (v: unknown, fallback: number) => {
+          const n = Number(v);
+          return Number.isFinite(n) ? Math.min(365, Math.max(0, Math.floor(n))) : fallback;
+        };
+        const retention: Retention = {
+          scratchDays: clamp(p?.retention?.scratchDays, base.scratchDays),
+          checkpointDays: clamp(p?.retention?.checkpointDays, base.checkpointDays),
+          logDays: clamp(p?.retention?.logDays, base.logDays),
+        };
+        if (p?.retention) this.settings.savePrefs({ retention });
+        const r = runCleanup(this.dataRoot, retention);
+        this.log("data_cleanup", { freedBytes: r.freedBytes, removed: r.removed.length });
+        if (r.removed.length) {
+          this.card({
+            kind: "system",
+            text: `已清理 ${r.removed.length} 项过程文件，释放 ${Math.round(r.freedBytes / 1024)} KB（交付物与证据没动）。`,
+          });
+        }
+        return { ok: true, freedBytes: r.freedBytes, removed: r.removed.length } as RpcContracts[M]["result"];
+      }
+
+      case "workspace.get": {
+        return {
+          ...(this.projectRoot ? { primary: this.projectRoot } : {}),
+          extras: this.roots.extras.map((r) => ({
+            path: r.path,
+            mode: r.mode,
+            scope: r.scope,
+            ...(r.label ? { label: r.label } : {}),
+          })),
+          readable: readableRoots(this.roots),
+          writable: writableRoots(this.roots),
+        } as RpcContracts[M]["result"];
+      }
+
+      case "workspace.addRoot": {
+        const p = params as {
+          path: string;
+          mode?: "rw" | "ro";
+          scope?: "session" | "team" | "task";
+          label?: string;
+          allowDriveRoot?: boolean;
+        };
+        const abs = path.resolve(String(p.path));
+        const dirErr = rootDirError(abs);
+        if (dirErr) return { ok: false, error: dirErr } as RpcContracts[M]["result"];
+        if (isDriveRoot(abs) && p.mode === "rw") {
+          return { ok: false, error: "整盘不能设为可写：请选具体目录（整盘只能只读）。" } as RpcContracts[M]["result"];
+        }
+        if (isDriveRoot(abs) && !p.allowDriveRoot) {
+          return { ok: false, error: `${abs} 是整盘：只读授权整盘需要二次确认。` } as RpcContracts[M]["result"];
+        }
+        const forbid = forbiddenRootReason(abs, this.dataRoot);
+        if (forbid) return { ok: false, error: forbid } as RpcContracts[M]["result"];
+        const next = addRoot(this.roots, {
+          path: abs,
+          mode: p.mode === "rw" ? "rw" : "ro",
+          scope: p.scope ?? "session",
+          label: p.label,
+          addedBy: "user",
+        });
+        this.setSessionRoots(next);
+        return { ok: true, roots: readableRoots(next) } as RpcContracts[M]["result"];
+      }
+
+      case "workspace.removeRoot": {
+        const { path: target } = params as { path: string };
+        const next = removeRoot(this.roots, String(target));
+        this.setSessionRoots(next);
+        return { ok: true, roots: readableRoots(next) } as RpcContracts[M]["result"];
+      }
+
       case "session.new": {
-        // 新对话 = 新线程：旧会话留在磁盘上可切回，不再清空历史
+        // 新对话 = 新线程：旧会话留在磁盘上可切回，不再清空历史。
+        // 不弹框（2026-11-10）：默认继承当前会话的根；显式传 projectRoot 才换。
         const { projectRoot } = (params ?? {}) as { projectRoot?: string };
         this.persistThread();
-        const meta = this.threads.create("新会话", projectRoot ? String(projectRoot) : undefined);
+        const inherited: RootSet = projectRoot
+          ? { primary: path.resolve(String(projectRoot)), extras: this.roots.extras }
+          : this.roots;
+        const meta = this.threads.create("新会话", inherited);
         // C4：切走前把还在跑的单记下来——用户以为"从头开始"，后台其实还在烧预算、还可能弹审批
         const running = [...this.memberRuns.keys()];
         this.switchThread(meta.id);

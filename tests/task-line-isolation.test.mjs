@@ -46,7 +46,13 @@ function setup() {
 }
 
 const assign = (kernel, taskId, member = "小丹", extra = {}) =>
-  kernel.runTool("assign_task", { taskId, member, brief: `做 ${taskId}`, deadline: "30 分钟", ...extra });
+  kernel.runTool("assign_task", {
+    taskId,
+    member,
+    brief: `【目标】完成工单 ${taskId} 的材料整理\n【完成标准】产出整理结果文件，内容与源材料核对一致\n【材料与位置】材料文件在工作区\n【限制】只处理本单 ${taskId}，不要动其他工单`,
+    deadline: "30 分钟",
+    ...extra,
+  });
 
 test("同一条任务线复用同团队；切到新会话后不复用上一条任务线的班底", async () => {
   const { kernel, teams } = setup();

@@ -1,4 +1,11 @@
 /**
+ * 【已退役 · 仅作一键回退】自建 JSONL worker，不再是默认运行时。
+ *
+ * 2026-11-08 起主路径是 Pi 官方 `--mode rpc`（dist/bundle/rpc-entry.js）+ 官方扩展
+ * `agent/extensions/lynn-bridge.mjs`，见 src/main/pi-rpc-host.ts。
+ * 本文件只在 LYNN_USE_LEGACY_RPC=1 时启用；**不要往这里加新功能**——
+ * 新功能一律用 Pi 官方扩展 API 插件式接入，基座完整不变。
+ *
  * Pi RPC worker（§4.1 / §4.11.4 崩溃半径）：**独立进程**里的 Agent 运行时。
  *
  * 分工（与 tether-ai 同一形状，但工具留在壳里）：

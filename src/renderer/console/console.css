@@ -1,0 +1,2446 @@
+/* ============================================================
+   沉浸控制台（stage.console 卡槽 · view = console）
+   版式照 2026-11-08 原型：52 / 三列 308·1fr·288 / 64，左「来令+战局」，
+   中「态势球+流水」，右「风铃+产出」，底「权限档+下令」。
+   纪律：零描边（层靠明度差与 inset 阴影）、字号一律 --fs-*、
+   分隔线用 inset 阴影、颜色只走 Token。
+   ============================================================ */
+
+/* 值台 → 控制台的常驻入口。
+   必须 fixed：它挂在 Desk 根节点之后，值台占满 100vh，
+   留在文档流里会整块掉到视口外（这就是"看不到入口"的真因）。
+   窗口无边框，按钮一律 no-drag。 */
+.cs-viewswitch {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 5px 5px 12px;
+  border-radius: var(--r-l);
+  background: var(--sheet-3);
+  box-shadow: 0 8px 26px rgba(0, 0, 0, 0.22), inset 0 0 0 1px var(--rule);
+  -webkit-app-region: no-drag;
+}
+.cs-vs-cur {
+  font-size: var(--fs-label);
+  color: var(--ink-3);
+}
+.cs-viewswitch button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 11px;
+  border-radius: var(--r-m);
+  font-size: var(--fs-label);
+  color: var(--blue);
+  background: var(--blue-wash);
+  -webkit-app-region: no-drag;
+  transition: background var(--dur) var(--ease-out);
+}
+.cs-viewswitch button:hover {
+  background: var(--blue-line);
+}
+/* 右栏给入口胶囊让位：动的是行高不是内边距，滚不滚到底都不会压住内容 */
+.right:not(.cs-col) {
+  padding-bottom: 44px;
+}
+
+.cs-shell {
+  height: 100%;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: 52px minmax(0, 1fr) 64px;
+  background: var(--desk);
+  color: var(--ink);
+  font-family: var(--f-cjk);
+  overflow: hidden;
+}
+
+/* ---------------- 顶栏 ---------------- */
+.cs-top {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 16px;
+  padding: 0 18px;
+  background: var(--desk-2);
+  box-shadow: inset 0 -1px 0 var(--rule);
+  /* 自绘标题栏（frame:false）：整条可拖，交互控件必须显式 no-drag */
+  -webkit-app-region: drag;
+  user-select: none;
+}
+.cs-top button,
+.cs-top input,
+.cs-top .win-ctl {
+  -webkit-app-region: no-drag;
+}
+.cs-top-r .win-ctl {
+  margin-left: 2px;
+}
+.cs-top-l {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+.cs-brand {
+  font-family: var(--f-mono);
+  font-size: var(--fs-label);
+  letter-spacing: .1em;
+  color: var(--blue);
+  flex: none;
+}
+.cs-div {
+  width: 1px;
+  height: 14px;
+  background: var(--rule);
+  flex: none;
+}
+.cs-thread {
+  font-size: var(--fs-meta);
+  color: var(--ink-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.cs-live {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-label);
+  color: var(--ink-3);
+  flex: none;
+}
+.cs-live i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--ink-4);
+}
+.cs-live.on i {
+  background: var(--blue);
+  box-shadow: 0 0 8px 1px var(--blue-wash);
+  animation: cs-blink 2.2s ease-in-out infinite;
+}
+.cs-top-r {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.cs-readout {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  font-size: var(--fs-label);
+  color: var(--ink-3);
+  flex: none;
+}
+.cs-readout b {
+  font-family: var(--f-mono);
+  font-size: var(--fs-body-lg);
+  font-weight: 500;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+.cs-readout.hot.on b {
+  color: var(--seal);
+}
+.cs-tool {
+  font-family: var(--f-mono);
+  font-size: var(--fs-label);
+  color: var(--ink-2);
+  background: var(--desk-3);
+  border-radius: var(--r-s);
+  padding: 5px 9px;
+  flex: none;
+  white-space: nowrap;
+  transition: color var(--dur) var(--ease-out), box-shadow var(--dur) var(--ease-out);
+}
+.cs-tool:hover {
+  color: var(--blue);
+  box-shadow: inset 0 0 0 1px var(--blue-line);
+}
+.cs-tool.on {
+  color: var(--blue);
+  box-shadow: inset 0 0 0 1px var(--blue-line);
+}
+/* 档案里有事待处理（无主单）：一个点就够，不写数字也不加边框 */
+.cs-tool.alert {
+  color: var(--brass);
+}
+.cs-tool-dot {
+  display: inline-block;
+  width: 4px;
+  height: 4px;
+  margin-left: 5px;
+  border-radius: 50%;
+  background: var(--brass);
+  vertical-align: 1px;
+}
+/* 回值台的出口：比工具按钮亮一档，别跟时钟糊成一行 */
+.cs-tool.back {
+  color: var(--ink);
+  margin-left: 2px;
+  padding: 5px 10px 5px 8px;
+  box-shadow: inset 0 0 0 1px var(--rule);
+}
+.cs-tool.back span {
+  color: var(--blue);
+  margin-right: 2px;
+}
+.cs-clock {
+  font-size: var(--fs-label);
+  color: var(--ink-2);
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+/* 顶栏军印缩写：宽窗右栏已有完整军印，这里只在窄窗出现 */
+.cs-seal-mini {
+  display: none;
+  font-family: var(--f-mono);
+  font-size: var(--fs-label);
+  color: var(--blue);
+  background: var(--desk-3);
+  border-radius: 2px;
+  padding: 4px 8px;
+  box-shadow: inset 0 0 0 1px var(--rule), inset 0 0 0 2px var(--desk-3), inset 0 0 0 3px var(--blue-line);
+  white-space: nowrap;
+  flex: none;
+}
+.cs-seal-mini.hot {
+  color: var(--seal);
+  box-shadow: inset 0 0 0 1px var(--rule), inset 0 0 0 2px var(--desk-3), inset 0 0 0 3px var(--seal-wash);
+  animation: cs-blink 1.8s ease-in-out infinite;
+}
+
+/* ---------------- 三列 ---------------- */
+.cs-cols {
+  display: grid;
+  grid-template-columns: 308px minmax(0, 1fr) 288px;
+  min-height: 0;
+}
+.cs-col {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--desk-2);
+}
+/**
+ * 值台的右栏抽屉也叫 `.right`（width:404px、窄屏 position:fixed + translateX(100%)），
+ * 会连坐控制台的第三列与右侧数据流。用子选择器把位置钉回来，不靠加载顺序赌。
+ */
+.cs-cols > .cs-col {
+  width: auto;
+  min-width: 0;
+  position: relative;
+  inset: auto;
+  transform: none;
+}
+.cs-col.left {
+  box-shadow: inset -1px 0 0 var(--rule);
+}
+.cs-col.center {
+  background: var(--desk);
+  position: relative;
+  overflow: hidden;
+  box-shadow: inset -1px 0 0 var(--rule);
+}
+.cs-col.right {
+  background: var(--desk-2);
+}
+
+.cs-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+.cs-panel + .cs-panel {
+  box-shadow: inset 0 1px 0 var(--rule);
+}
+.cs-panel.grow {
+  flex: 1;
+  min-height: 0;
+}
+/* 来令定高 200px：原型就是定高，池子再多也不挤掉下面的战局 */
+.cs-panel.intel {
+  flex: 0 0 200px;
+  min-height: 0;
+}
+.cs-panel-h {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 14px 8px;
+  flex: none;
+  box-shadow: inset 0 -1px 0 var(--rule);
+}
+/* 标题章：等宽小字 + 凹刻（全屏只此一种标题样式） */
+.cs-panel-h h2,
+.cs-map-head h2,
+.cs-stream-h h3,
+.cs-cap {
+  margin: 0;
+  font-family: var(--f-mono);
+  font-size: var(--fs-label);
+  font-weight: 400;
+  letter-spacing: .02em;
+  color: var(--ink-2);
+  background: var(--desk-3);
+  border-radius: 2px;
+  padding: 3px 8px;
+  line-height: 1.5;
+  display: inline-block;
+  white-space: nowrap;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, .38), inset 0 0 0 1px var(--rule);
+}
+.cs-panel-h .sub {
+  font-size: var(--fs-label);
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+}
+.cs-panel-b {
+  overflow-y: auto;
+  min-height: 0;
+  padding: 8px 12px 12px;
+  overscroll-behavior: contain;
+}
+.cs-panel-foot {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 7px 14px;
+  font-size: var(--fs-label);
+  color: var(--ink-3);
+  box-shadow: inset 0 1px 0 var(--rule);
+}
+.cs-panel-foot b {
+  color: var(--ink-2);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------------- 空态：雷达 ---------------- */
+.cs-idle {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 3px;
+  height: 100%;
+  min-height: 116px;
+  padding-bottom: 8px;
+  overflow: hidden;
+}
+.cs-idle.small {
+  min-height: 88px;
+  justify-content: center;
+}
+.cs-radar {
+  position: absolute;
+  left: 50%;
+  top: 0;
+  width: 68px;
+  height: 68px;
+  margin-left: -34px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px var(--rule), inset 0 0 18px var(--blue-wash);
+}
+.cs-radar::before,
+.cs-radar::after {
+  content: '';
+  position: absolute;
+  inset: 14px;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 1px var(--rule);
+}
+.cs-radar::after {
+  inset: 27px;
+  background: var(--blue);
+  opacity: .45;
+  animation: cs-breathe 2.4s ease-in-out infinite;
+}
+.cs-radar .sweep {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  animation: cs-spin 4.2s linear infinite;
+}
+.cs-radar .sweep::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 2px;
+  width: 1px;
+  height: 31px;
+  background: var(--blue);
+  opacity: .5;
+}
+.cs-idle-t {
+  position: relative;
+  font-family: var(--f-mono);
+  font-size: var(--fs-label);
+  color: var(--ink-2);
+}
+.cs-idle-t b {
+  color: var(--blue);
+  letter-spacing: 2px;
+  animation: cs-blink 1.4s steps(1, end) infinite;
+}
+.cs-idle-s {
+  position: relative;
+  margin-top: 3px;
+  font-size: var(--fs-label);
+  color: var(--ink-3);
+}
+
+/* ---------------- 来令（待捞池） ---------------- */
+.cs-order {
+  position: relative;
+  padding: 9px 2px 9px 8px;
+  box-shadow: inset 0 -1px 0 var(--rule);
+  animation: cs-q-in .5s var(--ease-out);
+}
+.cs-order-r1 {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.cs-cid {
+  font-size: var(--fs-label);
+  color: var(--brass);
+  letter-spacing: .04em;
+}
+.cs-ctime {
+  margin-left: auto;
+  font-size: var(--fs-label);
+  color: var(--ink-3);
+}
+.cs-order-t {
+  margin: 4px 0 6px;
+  font-size: var(--fs-meta);
+  line-height: 1.5;
+  color: var(--ink);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.cs-order-r2 {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: var(--fs-label);
+  color: var(--ink-3);
+}
+.cs-order-r2 i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--brass);
+  animation: cs-blink 1.3s ease-in-out infinite;
+  flex: none;
+}
+
+/* ---------------- 战局：拆解条 + 任务卡 ---------------- */
+.cs-analyzing {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-bottom: 8px;
+  padding: 9px 10px;
+  overflow: hidden;
+  border-radius: var(--r-s);
+  background: var(--desk-3);
+  box-shadow: inset 0 0 0 1px var(--seal-wash);
+}
+.cs-analyzing::after {
+  content: '';
+  position: absolute;
+  left: -40%;
+  top: 0;
+  bottom: 0;
+  width: 40%;
+  background: var(--seal-wash);
+  animation: cs-scan-x 1.3s linear infinite;
+}
+.cs-analyzing i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--seal);
+  box-shadow: 0 0 8px 2px var(--seal-wash);
+  animation: cs-blink .8s ease-in-out infinite;
+  flex: none;
+}
+.cs-analyzing span {
+  font-size: var(--fs-label);
+  color: var(--ink-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cs-analyzing .mono {
+  margin-left: auto;
+  color: var(--seal);
+  flex: none;
+}
+
+.cs-task {
+  position: relative;
+  display: block;
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+  margin-bottom: 9px;
+  padding: 11px 10px 9px 20px;
+  background: var(--desk-3);
+  border-radius: var(--r-s);
+  animation: cs-t-in .55s var(--ease-out);
+  transition: box-shadow var(--dur) var(--ease-out);
+  box-shadow: inset 0 0 0 1px var(--rule);
+}
+.cs-task:hover {
+  box-shadow: inset 0 0 0 1px var(--blue-line);
+}
+.cs-task.on {
+  box-shadow: inset 0 0 0 1px var(--blue-line), inset 3px 0 0 var(--blue);
+}
+.cs-task.alert {
+  box-shadow: inset 0 0 0 1px var(--seal-wash), inset 3px 0 0 var(--seal);
+}
+/* 主干轨 + 节点圆点：命令支线从这条轨上分出去 */
+.cs-task::before {
+  content: '';
+  position: absolute;
+  left: 11px;
+  top: 32px;
+  bottom: 14px;
+  width: 1px;
+  background: var(--blue-line);
+}
+.cs-task::after {
+  content: '';
+  position: absolute;
+  left: 9px;
+  top: 26px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--desk-3);
+  box-shadow: inset 0 0 0 1px var(--blue);
+}
+.cs-t-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.cs-t-id {
+  font-size: var(--fs-label);
+  color: var(--blue);
+  letter-spacing: .04em;
+  flex: none;
+}
+.cs-t-title {
+  font-size: var(--fs-meta);
+  font-weight: 500;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.cs-t-state {
+  font-size: var(--fs-label);
+  color: var(--ink-3);
+  white-space: nowrap;
+  flex: none;
+}
+.cs-t-state.blocked {
+  color: var(--seal);
+}
+.cs-t-state.done {
+  color: var(--blue);
+}
+.cs-arc-wrap {
+  position: relative;
+  width: 34px;
+  height: 34px;
+  flex: none;
+}
+.cs-arc {
+  width: 34px;
+  height: 34px;
+  transform: rotate(-90deg);
+}
+.cs-arc circle {
+  fill: none;
+  stroke: var(--rule);
+  stroke-width: 2;
+}
+.cs-arc circle.f {
+  stroke: var(--blue);
+  transition: stroke-dashoffset .8s var(--ease-out);
+}
+.cs-pct {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--fs-label);
+  color: var(--blue);
+}
+.cs-t-goal {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  margin: 5px 0 7px;
+  font-size: var(--fs-label);
+  color: var(--ink-3);
+  line-height: 1.45;
+  min-width: 0;
+}
+.cs-t-note {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.cs-t-cmds {
+  min-width: 0;
+}
+.cs-cmd-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 0 4px 12px;
+  min-width: 0;
+}
+.cs-cmd-row::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: 10px;
+  height: 1px;
+  background: var(--rule);
+}
+.cs-cmd-row::after {
+  content: '';
+  position: absolute;
+  left: -2px;
+  top: calc(50% - 2px);
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--rule);
+}
+.cs-cmd-row.on::after {
+  background: var(--blue);
+}
+.cs-cmd-row.hot::after {
+  background: var(--seal);
+}
+.cs-cr-id {
+  font-size: var(--fs-label);
+  color: var(--ink-3);
+  flex: none;
+}
+.cs-cr-txt {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--fs-label);
+  color: var(--ink-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cs-ticks {
+  display: flex;
+  gap: 2px;
+  flex: none;
+}
+.cs-ticks i {
+  width: 5px;
+  height: 9px;
+  background: var(--desk);
+  box-shadow: inset 0 0 0 1px var(--rule);
+}
+.cs-ticks i.on {
+  background: var(--blue);
+  box-shadow: none;
+}
+.cs-ticks i.live {
+  background: var(--brass);
+  box-shadow: none;
+  animation: cs-blink 1s ease-in-out infinite;
+}
+.cs-stamp {
+  flex: none;
+  font-size: var(--fs-label);
+  padding: 1px 4px;
+  border-radius: 1px;
+  transform: rotate(-5deg);
+  white-space: nowrap;
+}
+.cs-stamp.ok {
+  color: var(--blue);
+  box-shadow: inset 0 0 0 1px var(--blue-line);
+}
+.cs-stamp.bad {
+  color: var(--seal);
+  box-shadow: inset 0 0 0 1px var(--seal-wash);
+}
+.cs-t-foot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 7px;
+  font-size: var(--fs-label);
+  color: var(--ink-3);
+}
+.cs-t-foot .mini {
+  display: flex;
+  gap: 3px;
+  margin-left: auto;
+}
+.cs-t-foot .mini i {
+  width: 9px;
+  height: 11px;
+  background: var(--desk);
+  box-shadow: inset 0 0 0 1px var(--rule);
+}
+.cs-t-foot .mini i.on {
+  background: var(--blue);
+  box-shadow: none;
+}
+
+/* 归并刻度：N 条命令怎么并成 M 张单，一格一条命令 */
+.cs-ms {
+  margin: 12px 0 2px;
+  padding: 9px 2px 6px;
+  box-shadow: inset 0 1px 0 var(--rule);
+}
+.cs-ms-h {
+  margin-bottom: 8px;
+  font-size: var(--fs-label);
+  color: var(--ink-3);
+}
+.cs-ms-track {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.cs-ms-seg {
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  background: var(--rule-soft);
+}
+.cs-ms-seg i {
+  width: 7px;
+  height: 12px;
+  background: var(--blue);
+  opacity: 0.38;
+}
+.cs-ms-seg i.live {
+  opacity: 1;
+  animation: cs-blink 1.3s ease-in-out infinite;
+}
+.cs-ms-seg i.bad {
+  background: var(--seal);
+  opacity: 1;
+}
+.cs-ms-seg i.off {
+  background: var(--ink-3);
+  opacity: 0.26;
+}
+
+/* 归档条：战局尾部，点开进档案抽屉 */
+.cs-arc-strip {
+  margin-top: 10px;
+  padding-top: 2px;
+  box-shadow: inset 0 1px 0 var(--rule);
+}
+.cs-arc-h {
+  padding: 8px 2px 4px;
+  font-size: var(--fs-label);
+  color: var(--ink-3);
+}
+.cs-ar-row {
+  display: grid;
+  grid-template-columns: 54px minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  width: 100%;
+  padding: 9px 2px;
+  text-align: left;
+  box-shadow: inset 0 -1px 0 var(--rule);
+}
+.cs-ar-row:hover {
+  background: var(--blue-wash);
+}
+.cs-ar-row.static {
+  cursor: default;
+}
+.cs-ar-id {
+  font-size: var(--fs-label);
+  color: var(--blue);
+}
+.cs-ar-t {
+  font-size: var(--fs-meta);
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cs-ar-m {
+  font-size: var(--fs-label);
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+
+/* ---------------- 中列：态势球 ---------------- */
+.cs-map-wrap {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--desk);
+}
+.cs-map {
+  position: absolute;
+  inset: 0;
+}
+.cs-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.cs-map-head {
+  position: absolute;
+  left: 18px;
+  top: 14px;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  pointer-events: none;
+}
+.cs-map-head .cs-linkbtn {
+  pointer-events: auto;
+}
+.cs-linkbtn {
+  font-size: var(--fs-label);
+  color: var(--ink-3);
+  padding-bottom: 1px;
+  box-shadow: inset 0 -1px 0 var(--rule);
+  transition: color var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out);
+  white-space: nowrap;
+}
+.cs-linkbtn:hover {
+  color: var(--ink);
+  box-shadow: inset 0 -1px 0 var(--blue);
+}
+.cs-linkbtn:disabled {
+  color: var(--ink-4);
+  opacity: .5;
+  cursor: default;
+  box-shadow: inset 0 -1px 0 var(--rule);
+}
+.cs-linkbtn.on {
+  color: var(--blue);
+  box-shadow: inset 0 -1px 0 var(--blue);
+}
+.cs-map-legend {
+  position: absolute;
+  left: 18px;
+  bottom: 14px;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  font-family: var(--f-mono);
+  font-size: var(--fs-label);
+  color: var(--ink-3);
+  pointer-events: none;
+  transition: opacity var(--dur) var(--ease-out);
+}
+.cs-map-legend span {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+.cs-map-legend .lg {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: none;
+}
+.lg.done {
+  background: var(--blue);
+  box-shadow: 0 0 7px 1px var(--blue-wash);
+}
+.lg.live {
+  background: var(--brass);
+}
+.lg.alert {
+  background: var(--seal);
+}
+.lg.idle {
+  box-shadow: inset 0 0 0 1px var(--ink-3);
+}
+.cs-map-sig {
+  position: absolute;
+  right: 18px;
+  bottom: 14px;
+  z-index: 6;
+  font-size: var(--fs-label);
+  color: var(--ink-3);
+  text-align: right;
+  line-height: 1.7;
+  pointer-events: none;
+}
+.cs-map-sig b {
+  color: var(--blue);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+.cs-map-hint {
+  position: absolute;
+  right: 18px;
+  top: 14px;
+  z-index: 6;
+  font-size: var(--fs-label);
+  color: var(--ink-3);
+  pointer-events: none;
+}
+.cs-map-hint kbd {
+  font-family: var(--f-mono);
+  font-size: var(--fs-label);
+  padding: 1px 4px;
+  margin: 0 2px;
+  border-radius: 2px;
+  box-shadow: inset 0 0 0 1px var(--rule);
+}
+
+/* ---------------- 两侧数据流（终端语汇） ---------------- */
+.cs-flow {
+  position: absolute;
+  top: 44px;
+  bottom: 52px;
+  width: 176px;
+  z-index: 5;
+  pointer-events: none;
+  font-family: var(--f-mono);
+  font-size: var(--fs-label);
+  color: var(--ink-3);
+}
+/**
+ * 上面那行 `.cs-flow` 会被值台的 `.right` 规则连坐（宽 404 / fixed / translateX）。
+ * 这里用子选择器把定位与表面一次性钉死，不依赖样式表加载顺序。
+ * 注意：数据流挂在 `.cs-map-wrap` 里（原型也是球面内浮层），两个父级都覆盖。
+ */
+.cs-col.center > .cs-flow,
+.cs-map-wrap > .cs-flow {
+  position: absolute;
+  inset: auto;
+  top: 44px;
+  bottom: 52px;
+  transform: none;
+  background: none;
+  box-shadow: none;
+  z-index: 5;
+}
+.cs-col.center > .cs-flow.left,
+.cs-map-wrap > .cs-flow.left {
+  left: 12px;
+  right: auto;
+}
+.cs-col.center > .cs-flow.right,
+.cs-map-wrap > .cs-flow.right {
+  right: 12px;
+  left: auto;
+  width: 188px;
+}
+.cs-flow-body {
+  position: relative;
+  margin-top: 4px;
+  height: calc(100% - 26px);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  /* 顶部渐变淡出：新的在下面，旧的往上化掉（行级 opacity 的等效做法） */
+  mask-image: linear-gradient(to bottom, transparent 0, rgba(0, 0, 0, .35) 22%, #000 62%);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, rgba(0, 0, 0, .35) 22%, #000 62%);
+}
+.cs-flow-cap {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  height: 22px;
+  width: auto;
+  background: none;
+  box-shadow: none;
+  font-size: var(--fs-label);
+  letter-spacing: .04em;
+  color: var(--blue);
+  white-space: nowrap;
+  flex: none;
+}
+.cs-flow-cap i {
+  width: 4px;
+  height: 4px;
+  flex: none;
+  background: var(--blue);
+  box-shadow: 0 0 6px var(--blue-wash);
+  animation: cs-blink 2.4s ease-in-out infinite;
+}
+.cs-flow-cap::after {
+  content: '';
+  width: 5px;
+  height: 9px;
+  flex: none;
+  background: var(--blue);
+  animation: cs-blink 1s steps(1, end) infinite;
+}
+.cs-flow-cap .mono {
+  margin-left: auto;
+  color: var(--ink-3);
+}
+.cs-map-wrap > .cs-flow .cs-flow-cap {
+  position: static;
+  inset: auto;
+  z-index: auto;
+  transform: none;
+  width: auto;
+  background: none;
+  box-shadow: none;
+  flex-direction: row;
+  transform: none;
+}
+.cs-map-wrap > .cs-flow .cs-flow-body {
+  position: relative;
+  inset: auto;
+  transform: none;
+  width: auto;
+  background: none;
+  box-shadow: none;
+}
+.cs-fl-item {
+  position: relative;
+  flex: none;
+  padding: 4px 2px;
+  pointer-events: auto;
+  cursor: default;
+  animation: cs-fl-in .3s var(--ease-out);
+}
+.cs-fl-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  line-height: 1.2;
+}
+.cs-fl-meta::before {
+  content: '>';
+  color: var(--blue);
+  flex: none;
+}
+.cs-fl-ts {
+  color: var(--ink-4);
+  flex: none;
+}
+.cs-fl-kind {
+  color: var(--blue);
+  flex: none;
+}
+.cs-fl-item.hot .cs-fl-kind {
+  color: var(--seal);
+}
+.cs-fl-who {
+  margin-left: auto;
+  color: var(--ink-4);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cs-fl-text {
+  margin-top: 3px;
+  font-family: var(--f-mono);
+  font-size: var(--fs-label);
+  line-height: 1.5;
+  color: var(--ink-2);
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.cs-fl-text.typing::after {
+  content: '';
+  display: inline-block;
+  width: 5px;
+  height: 9px;
+  margin-left: 2px;
+  vertical-align: -1px;
+  background: var(--blue);
+  animation: cs-blink .7s steps(1, end) infinite;
+}
+
+/* ---------------- 球心 ALERT（需介入） ---------------- */
+.cs-alert {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 306px;
+  z-index: 8;
+  padding: 12px 14px 11px;
+  border-radius: var(--r-m);
+  background: var(--sheet);
+  color: var(--ink);
+  transform: translate(-50%, -50%);
+  box-shadow: 0 0 0 4px var(--desk), 0 0 20px var(--seal-wash), inset 0 0 0 1px var(--seal);
+  animation: cs-ah-in .4s var(--ease-out), cs-ah-pulse 1.6s ease-in-out .4s infinite;
+}
+/* 四角制图语法：只在告警上用，属制图标记不是描边 */
+.cs-alert::before,
+.cs-alert::after {
+  content: '';
+  position: absolute;
+  width: 9px;
+  height: 9px;
+  pointer-events: none;
+  box-shadow: inset 0 0 0 2px var(--seal);
+}
+.cs-alert::before {
+  left: -2px;
+  top: -2px;
+  clip-path: polygon(0 0, 100% 0, 100% 22%, 22% 22%, 22% 100%, 0 100%);
+}
+.cs-alert::after {
+  right: -2px;
+  bottom: -2px;
+  clip-path: polygon(100% 100%, 0 100%, 0 78%, 78% 78%, 78% 0, 100% 0);
+}
+.cs-alert-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-bottom: 8px;
+  font-family: var(--f-mono);
+  font-size: var(--fs-label);
+  color: var(--seal);
+  letter-spacing: .06em;
+  box-shadow: inset 0 -1px 0 var(--seal-wash);
+}
+.cs-alert-led {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  background: var(--seal);
+  box-shadow: 0 0 10px 2px var(--seal-wash);
+  animation: cs-blink 1s steps(1, end) infinite;
+}
+.cs-alert-top .n {
+  margin-left: auto;
+  color: var(--ink-2);
+}
+.cs-alert-t {
+  margin: 9px 0 3px;
+  font-size: var(--fs-meta);
+  line-height: 1.5;
+  font-weight: 500;
+}
+.cs-alert-d {
+  font-size: var(--fs-label);
+  line-height: 1.6;
+  color: var(--ink-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cs-alert-acts {
+  display: flex;
+  gap: 8px;
+  margin-top: 11px;
+}
+.cs-alert-acts button {
+  flex: 1;
+  font-size: var(--fs-label);
+  padding: 7px 0;
+  border-radius: var(--r-s);
+  color: var(--seal);
+  box-shadow: inset 0 0 0 1px var(--seal);
+  transition: background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+}
+.cs-alert-acts button:hover {
+  background: var(--seal);
+  color: var(--desk);
+}
+.cs-alert-acts button.ghost {
+  color: var(--ink-2);
+  box-shadow: inset 0 0 0 1px var(--rule);
+}
+.cs-alert-acts button.ghost:hover {
+  background: transparent;
+  color: var(--ink);
+  box-shadow: inset 0 0 0 1px var(--ink-3);
+}
+
+/* ---------------- 锁定卡（贴在点中的节点旁） ---------------- */
+.cs-focus {
+  position: absolute;
+  width: 272px;
+  z-index: 7;
+  padding: 0 0 2px;
+  border-radius: var(--r-s);
+  background: var(--sheet);
+  transform: scale(.98);
+  animation: cs-focus-in .22s var(--ease-out) forwards;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, .42), inset 0 0 0 1px var(--rule);
+}
+.cs-focus-h {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 10px 12px 8px;
+  box-shadow: inset 0 -1px 0 var(--rule);
+}
+.cs-focus-h .mono {
+  font-size: var(--fs-label);
+  color: var(--blue);
+  letter-spacing: .08em;
+}
+.cs-focus-tag {
+  margin-left: auto;
+  font-size: var(--fs-label);
+  color: var(--ink-3);
+}
+.cs-focus-t {
+  padding: 10px 12px 8px;
+  font-size: var(--fs-body);
+  line-height: 1.4;
+  font-weight: 500;
+}
+.cs-focus-grid {
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr);
+  gap: 5px 10px;
+  margin: 0;
+  padding: 0 12px 10px;
+  font-size: var(--fs-label);
+  line-height: 1.5;
+}
+.cs-focus-grid dt {
+  color: var(--ink-3);
+}
+.cs-focus-grid dd {
+  margin: 0;
+  color: var(--ink-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cs-focus-note {
+  margin: 0 12px 10px;
+  padding: 8px 10px;
+  border-radius: var(--r-s);
+  background: var(--desk-3);
+  font-size: var(--fs-label);
+  line-height: 1.6;
+  color: var(--ink-2);
+}
+.cs-focus-acts {
+  display: flex;
+  gap: 8px;
+  padding: 9px 12px 11px;
+  box-shadow: inset 0 1px 0 var(--rule);
+}
+
+/* ---------------- 中列流水栏（顶栏「流水」切换） ---------------- */
+.cs-stream {
+  flex: none;
+  height: 146px;
+  display: flex;
+  flex-direction: column;
+  background: var(--desk-2);
+  box-shadow: inset 0 1px 0 var(--rule);
+}
+.cs-stream-h {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px 7px;
+  flex: none;
+  box-shadow: inset 0 -1px 0 var(--rule);
+}
+.cs-stream-h .loc {
+  font-size: var(--fs-label);
+  color: var(--blue);
+  letter-spacing: .04em;
+}
+.cs-stream-lines {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  padding: 5px 16px 7px;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+}
+.cs-line {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex: none;
+  height: 22px;
+  font-size: var(--fs-label);
+  color: var(--ink-2);
+  white-space: nowrap;
+  overflow: hidden;
+  animation: cs-line-in .38s var(--ease-out);
+}
+.cs-line-ts {
+  font-size: var(--fs-label);
+  color: var(--ink-3);
+  flex: none;
+}
+.cs-line-tx {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cs-line.lv-hot .cs-line-tx {
+  color: var(--seal);
+}
+.cs-line.lv-ok .cs-line-tx {
+  color: var(--blue);
+}
+.cs-line.empty {
+  color: var(--ink-3);
+  height: auto;
+  white-space: normal;
+}
+.cs-stream-lines.is-empty {
+  justify-content: center;
+  align-items: center;
+}
+
+/* ---------------- 右栏：风铃 ---------------- */
+.cs-panel.lynn-panel {
+  flex: none;
+  padding: 10px 16px 10px;
+}
+.cs-lynn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 172px;
+}
+.cs-stage {
+  position: relative;
+  width: 160px;
+  height: 160px;
+  --core-c: var(--ink-3);
+  --ring-c: var(--rule);
+  --glow-c: var(--blue-wash);
+}
+.cs-stage[data-mode="pick"] {
+  --core-c: var(--brass);
+  --ring-c: var(--brass);
+  --glow-c: var(--brass-wash);
+}
+.cs-stage[data-mode="analyze"] {
+  --core-c: var(--seal);
+  --ring-c: var(--seal);
+  --glow-c: var(--seal-wash);
+}
+.cs-stage[data-mode="dispatch"] {
+  --core-c: var(--blue);
+  --ring-c: var(--blue);
+  --glow-c: var(--blue-wash);
+}
+.cs-stage[data-mode="decide"] {
+  --core-c: var(--brass);
+  --ring-c: var(--brass);
+  --glow-c: var(--brass-wash);
+}
+.cs-stage[data-mode="intervene"] {
+  --core-c: var(--seal);
+  --ring-c: var(--seal);
+  --glow-c: var(--seal-wash);
+}
+.cs-stage[data-mode="done"] {
+  --core-c: var(--blue);
+  --ring-c: var(--blue);
+  --glow-c: var(--blue-wash);
+}
+.cs-halo {
+  position: absolute;
+  inset: 24px;
+  border-radius: 50%;
+  box-shadow: 0 0 20px 5px var(--glow-c), 0 0 60px 20px var(--glow-c);
+  opacity: .55;
+  transition: box-shadow .5s var(--ease-out);
+}
+.cs-ring {
+  position: absolute;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 1px var(--rule);
+}
+.cs-ring.o {
+  inset: 0;
+  animation: cs-spin 30s linear infinite;
+}
+.cs-ring.o::after {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  border-radius: 50%;
+  background: repeating-conic-gradient(var(--rule) 0 3deg, transparent 3deg 12deg);
+  -webkit-mask: radial-gradient(circle, transparent 0 78px, #000 78px);
+  mask: radial-gradient(circle, transparent 0 78px, #000 78px);
+}
+.cs-ring.m {
+  inset: 22px;
+  box-shadow: inset 0 0 0 1px var(--ring-c), inset 0 6px 10px -8px var(--ring-c);
+  animation: cs-spin 9s linear infinite;
+  opacity: .55;
+  transition: box-shadow .4s var(--ease-out), opacity .4s var(--ease-out);
+}
+.cs-ring.i {
+  inset: 44px;
+  animation: cs-spin 18s linear infinite reverse;
+}
+.cs-scan {
+  position: absolute;
+  inset: 20px;
+  border-radius: 50%;
+  clip-path: polygon(50% 50%, 100% 0, 100% 58%);
+  background: var(--glow-c);
+  opacity: 0;
+  animation: cs-spin 2.2s linear infinite;
+  transition: opacity .3s var(--ease-out);
+}
+.cs-stage[data-mode="analyze"] .cs-scan,
+.cs-stage[data-mode="intervene"] .cs-scan {
+  opacity: 1;
+}
+.cs-core {
+  position: absolute;
+  inset: 66px;
+  border-radius: 50%;
+  background: var(--core-c);
+  box-shadow: 0 0 14px 3px var(--glow-c), 0 0 44px 14px var(--glow-c);
+  animation: cs-breathe 3.4s ease-in-out infinite;
+  transition: background .4s var(--ease-out), box-shadow .4s var(--ease-out);
+}
+.cs-stage[data-mode="analyze"] .cs-core {
+  animation-duration: 1s;
+}
+.cs-stage[data-mode="intervene"] .cs-core {
+  animation-duration: .8s;
+}
+.cs-stage[data-mode="pick"] .cs-ring.m,
+.cs-stage[data-mode="decide"] .cs-ring.m {
+  animation-duration: 3.4s;
+}
+.cs-stage[data-mode="intervene"] .cs-ring.m {
+  animation-duration: 1.6s;
+}
+.cs-mark {
+  position: absolute;
+  inset: 62px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ink);
+  pointer-events: none;
+}
+.cs-mark svg {
+  width: 36px;
+  height: 36px;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.cs-ray {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 76px;
+  height: 1px;
+  transform-origin: 0 50%;
+  background: var(--blue);
+  opacity: 0;
+}
+.cs-ray.r1 {
+  transform: rotate(-45deg);
+}
+.cs-ray.r2 {
+  transform: rotate(45deg);
+}
+.cs-ray.r3 {
+  transform: rotate(135deg);
+}
+.cs-ray.r4 {
+  transform: rotate(225deg);
+}
+.cs-stage[data-mode="dispatch"] .cs-ray {
+  animation: cs-ray-flow 1s var(--ease-out) infinite;
+}
+
+/* 军印：116×40，正盖在核心下沿 */
+.cs-seal {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 116px;
+  height: 40px;
+  z-index: 4;
+  transform: translate(-50%, 32px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  background: var(--desk-2);
+  color: var(--blue);
+  border-radius: 1px;
+  box-shadow: 0 0 0 3px var(--desk-2), 0 0 0 4px currentColor, 0 0 20px var(--glow-c, var(--blue-wash));
+  transition: color var(--dur) var(--ease-out), box-shadow var(--dur) var(--ease-out);
+}
+.cs-seal:hover {
+  box-shadow: 0 0 0 3px var(--desk-2), 0 0 0 4px currentColor, 0 0 28px 3px var(--glow-c, var(--blue-wash));
+}
+.cs-seal.tone-brass {
+  color: var(--brass);
+}
+.cs-seal.tone-seal {
+  color: var(--seal);
+  animation: cs-seal-alert 1.6s ease-in-out infinite;
+}
+.cs-seal.tone-quiet {
+  color: var(--ink-3);
+}
+.cs-seal .s-cn {
+  font-size: var(--fs-meta);
+  font-weight: 500;
+  letter-spacing: .14em;
+  line-height: 1;
+  color: currentColor;
+}
+.cs-seal .s-en {
+  font-family: var(--f-mono);
+  font-size: var(--fs-label);
+  letter-spacing: .1em;
+  line-height: 1;
+  color: currentColor;
+  opacity: .74;
+}
+.cs-lynn-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-top: 8px;
+}
+.cs-lynn-state {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--fs-label);
+  color: var(--ink-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cs-lynn-state b {
+  color: var(--ink);
+  font-weight: 500;
+}
+.cs-beat {
+  display: inline-flex;
+  gap: 3px;
+  margin-left: 8px;
+  vertical-align: middle;
+}
+.cs-beat i {
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: var(--blue);
+  animation: cs-blink 1.3s ease-in-out infinite;
+}
+.cs-beat i:nth-child(2) {
+  animation-delay: .18s;
+}
+.cs-beat i:nth-child(3) {
+  animation-delay: .36s;
+}
+
+/* ---------------- 产出柜 ---------------- */
+.cs-out-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  align-content: start;
+}
+.cs-out {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 7px;
+  border-radius: var(--r-s);
+  background: var(--desk-3);
+  box-shadow: inset 0 0 0 1px var(--rule);
+  transition: box-shadow var(--dur) var(--ease-out), transform var(--dur) var(--ease-out);
+}
+.cs-out:hover {
+  transform: translateY(-2px);
+  box-shadow: inset 0 0 0 1px var(--blue-line), 0 0 14px var(--blue-wash);
+}
+.cs-thumb {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  height: 50px;
+  padding: 6px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: var(--desk);
+  box-shadow: inset 0 0 0 1px var(--rule);
+}
+.cs-thumb i {
+  display: block;
+  height: 2px;
+  background: var(--rule);
+  border-radius: 1px;
+}
+.cs-thumb.code i:nth-child(odd) {
+  background: var(--ink-3);
+}
+.cs-thumb.code i:nth-child(3n) {
+  margin-left: 12px;
+  width: 55%;
+}
+.cs-thumb.code i:nth-child(2) {
+  width: 80%;
+}
+.cs-thumb.sheet {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  grid-template-rows: repeat(4, 1fr);
+  gap: 2px;
+  padding: 5px;
+}
+.cs-thumb.sheet i {
+  width: auto;
+  height: auto;
+  border-radius: 0;
+  background: var(--rule);
+}
+.cs-thumb.sheet i:nth-child(4n + 1) {
+  background: var(--ink-3);
+}
+.cs-thumb.image {
+  flex-direction: row;
+  align-items: flex-end;
+  gap: 4px;
+}
+.cs-thumb.image i {
+  flex: 1;
+  width: auto;
+  height: 40%;
+  border-radius: 0;
+  background: var(--rule);
+}
+.cs-thumb.image i:nth-child(2) {
+  height: 72%;
+  background: var(--seal);
+}
+.cs-thumb.image i:nth-child(3) {
+  height: 54%;
+}
+.cs-thumb.image i:nth-child(4) {
+  height: 88%;
+}
+.cs-thumb.slides {
+  flex-direction: row;
+  align-items: stretch;
+  gap: 4px;
+}
+.cs-thumb.slides i {
+  flex: 1;
+  width: auto;
+  height: auto;
+  border-radius: 0;
+  background: var(--rule);
+}
+.cs-thumb.slides i:first-child {
+  flex: 1.5;
+  background: var(--seal);
+}
+.cs-thumb.link {
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+}
+.cs-thumb.link i {
+  width: 24px;
+  height: 8px;
+  background: transparent;
+  border-radius: 5px;
+  box-shadow: inset 0 0 0 1px var(--ink-3);
+}
+.cs-thumb.link i + i {
+  margin-left: -8px;
+}
+.cs-oname {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  margin-top: 6px;
+  font-size: var(--fs-label);
+  line-height: 1.35;
+  color: var(--ink);
+}
+.cs-ometa {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 4px;
+}
+.cs-otype {
+  font-size: var(--fs-label);
+  color: var(--ink-3);
+  letter-spacing: .04em;
+}
+.cs-osrc {
+  margin-left: auto;
+  font-size: var(--fs-label);
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+
+/* ---------------- 底栏：权限档 + 下令 ---------------- */
+.cs-bottom {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  padding: 0 20px;
+  background: var(--desk-2);
+  box-shadow: inset 0 1px 0 var(--rule);
+}
+.cs-modes {
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  border-radius: var(--r-s);
+  background: var(--desk);
+  box-shadow: inset 0 0 0 1px var(--edge);
+}
+.cs-modes button {
+  font-family: var(--f-mono);
+  font-size: var(--fs-label);
+  padding: 6px 9px;
+  border-radius: 2px;
+  color: var(--ink-3);
+  transition: background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+}
+.cs-modes button:hover {
+  color: var(--ink-2);
+}
+.cs-modes button[aria-pressed="true"] {
+  background: var(--desk-3);
+  color: var(--blue);
+  box-shadow: inset 0 0 0 1px var(--blue-line);
+}
+.cs-cmdline {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+/*
+ * 原生 input 自带凹陷边框，不清零就会变成一个方框（原型是一条下划线）。
+ * 零描边纪律：下划线用 inset 阴影画，不用 border-bottom。
+ */
+.cs-cmdline input {
+  flex: 1;
+  min-width: 0;
+  appearance: none;
+  border: 0;
+  padding: 9px 2px;
+  font-size: var(--fs-label);
+  color: var(--ink);
+  background: transparent;
+  outline: none;
+  /* 原型那条线是青瓷绿淡线，不是中性灰 */
+  box-shadow: inset 0 -1px 0 var(--blue-line);
+  transition: box-shadow var(--dur) var(--ease-out);
+}
+.cs-cmdline input::placeholder {
+  color: var(--ink-3);
+}
+.cs-cmdline input:focus {
+  box-shadow: inset 0 -1px 0 var(--blue);
+}
+.cs-keycap {
+  font-size: var(--fs-label);
+  color: var(--ink-3);
+  padding: 2px 5px;
+  border-radius: 2px;
+  box-shadow: inset 0 0 0 1px var(--edge);
+  flex: none;
+}
+.cs-cdmsg {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-label);
+  color: var(--ink-3);
+}
+.cs-send {
+  min-width: 92px;
+  padding: 9px 18px;
+  font-size: var(--fs-label);
+  color: var(--desk);
+  background: var(--blue);
+  border-radius: 2px;
+  transition: box-shadow var(--dur) var(--ease-out), transform var(--dur-fast) var(--ease-out);
+}
+.cs-send:hover {
+  box-shadow: 0 0 18px var(--blue-wash);
+}
+.cs-send:active {
+  transform: scale(.97);
+}
+/* 派出一律实心（原型就这枚最亮），不做灰化禁用态；空命令点了只把焦点送回输入框 */
+.cs-send.stop {
+  color: var(--seal);
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--seal);
+}
+.cs-send.stop:hover {
+  background: var(--seal);
+  color: var(--desk);
+}
+
+/* ---------------- 抽屉 ---------------- */
+.cs-scrim {
+  position: fixed;
+  inset: 52px 0 64px 0;
+  z-index: 40;
+  background: rgba(0, 0, 0, .42);
+  animation: cs-fade .2s var(--ease-out);
+}
+.cs-drawer {
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: min(520px, 92vw);
+  display: flex;
+  flex-direction: column;
+  background: var(--sheet);
+  box-shadow: -24px 0 60px rgba(0, 0, 0, .44), inset 1px 0 0 var(--rule);
+  animation: cs-drawer-in .3s var(--ease-out);
+}
+.cs-drawer-h {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 16px 12px;
+  flex: none;
+  min-width: 0;
+  box-shadow: inset 0 -1px 0 var(--rule);
+}
+.cs-drawer-h h2 {
+  margin: 0;
+  font-size: var(--fs-body);
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.cs-x {
+  margin-left: auto;
+  flex: none;
+  font-size: var(--fs-label);
+  color: var(--ink-3);
+  padding: 5px 9px;
+  border-radius: 2px;
+  box-shadow: inset 0 0 0 1px var(--rule);
+}
+.cs-x:hover {
+  color: var(--ink);
+  box-shadow: inset 0 0 0 1px var(--blue-line);
+}
+.cs-drawer-b {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px;
+  overscroll-behavior: contain;
+}
+.cs-cap {
+  flex: none;
+}
+
+/* 抽屉内容 */
+.cs-lead {
+  padding: 14px;
+  margin-bottom: 14px;
+  border-radius: var(--r-s);
+  background: var(--desk-3);
+  box-shadow: inset 0 0 0 1px var(--rule);
+}
+.cs-lead-k {
+  font-size: var(--fs-label);
+  color: var(--ink-3);
+}
+.cs-lead-v {
+  margin-top: 7px;
+  font-size: var(--fs-body);
+  line-height: 1.65;
+  color: var(--ink);
+}
+.cs-cells {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.cs-cell {
+  padding: 10px;
+  border-radius: var(--r-s);
+  background: var(--desk-3);
+  box-shadow: inset 0 0 0 1px var(--rule);
+}
+.cs-cell b {
+  display: block;
+  font-family: var(--f-mono);
+  font-size: var(--fs-title);
+  font-weight: 400;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+.cs-cell span {
+  font-size: var(--fs-label);
+  color: var(--ink-3);
+}
+.cs-sec {
+  margin: 16px 0 8px;
+  padding-bottom: 6px;
+  font-size: var(--fs-label);
+  color: var(--ink-3);
+  box-shadow: inset 0 -1px 0 var(--rule);
+}
+.cs-doc {
+  font-size: var(--fs-meta);
+  line-height: 1.85;
+  color: var(--ink-2);
+}
+.cs-doc p {
+  margin: 0 0 10px;
+}
+.cs-doc b {
+  color: var(--ink);
+  font-weight: 500;
+}
+.cs-note {
+  margin-top: 12px;
+  padding: 10px;
+  border-radius: var(--r-s);
+  background: var(--desk-3);
+  font-size: var(--fs-label);
+  line-height: 1.7;
+  color: var(--ink-3);
+  box-shadow: inset 0 0 0 1px var(--rule);
+}
+
+/* 产物清单：一件一行，点开哪件就把哪件点亮 */
+.cs-evs {
+  border-radius: var(--r-s);
+  background: var(--desk-3);
+  overflow: hidden;
+}
+.cs-ev-row {
+  display: grid;
+  grid-template-columns: 5px minmax(0, 1fr) auto;
+  align-items: baseline;
+  column-gap: 8px;
+  row-gap: 2px;
+  padding: 8px 10px;
+  font-size: var(--fs-meta);
+  color: var(--ink);
+}
+.cs-ev-row + .cs-ev-row {
+  box-shadow: inset 0 1px 0 var(--rule);
+}
+.cs-ev-row.on {
+  background: var(--blue-wash);
+}
+.cs-ev-d {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--brass);
+  align-self: center;
+}
+.cs-ev-d.ok {
+  background: var(--blue);
+}
+.cs-ev-n {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cs-ev-t {
+  font-size: var(--fs-label);
+  color: var(--ink-3);
+}
+.cs-ev-p {
+  grid-column: 2 / -1;
+  font-size: var(--fs-label);
+  color: var(--ink-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 抽屉底部的就地动作：能一键办完的别逼用户退出去找 */
+.cs-res-acts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 14px;
+}
+
+/* 汇总抽屉里的一段战报：单号+标题走正文色，避免和上面的 .cs-sec 看成重复标题 */
+.cs-rep + .cs-rep {
+  margin-top: 14px;
+}
+.cs-rep-t {
+  margin-bottom: 6px;
+  font-size: var(--fs-meta);
+  color: var(--ink);
+}
+.cs-rep-t .mono {
+  color: var(--ink-3);
+}
+.cs-usage-bar {
+  height: 6px;
+  margin: 6px 0 14px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--desk-3);
+  box-shadow: inset 0 0 0 1px var(--rule);
+}
+.cs-usage-bar i {
+  display: block;
+  height: 100%;
+  background: var(--blue);
+  transition: width .5s var(--ease-out);
+}
+.cs-usage-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 8px 0;
+  font-size: var(--fs-label);
+  color: var(--ink-2);
+  box-shadow: inset 0 -1px 0 var(--rule);
+}
+.cs-usage-row b {
+  font-family: var(--f-mono);
+  font-weight: 400;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+.cs-kv {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  gap: 8px 14px;
+  margin: 0 0 16px;
+  font-size: var(--fs-label);
+  line-height: 1.6;
+}
+.cs-kv dt {
+  color: var(--ink-3);
+}
+.cs-kv dd {
+  margin: 0;
+  color: var(--ink-2);
+  overflow-wrap: anywhere;
+}
+.cs-archive {
+  display: flex;
+  flex-direction: column;
+}
+
+/* 无主单：所属会话已被删除。不是报错，是留了一条出口——一句说明 + 一个动作 */
+.cs-orphan {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px 11px;
+  margin-bottom: 10px;
+  border-radius: var(--r-s);
+  background: var(--desk-3);
+  box-shadow: inset 3px 0 0 var(--brass);
+}
+.cs-orphan-t {
+  font-size: var(--fs-body);
+  color: var(--ink-2);
+}
+.cs-orphan-t b {
+  font-family: var(--f-mono);
+  color: var(--brass);
+  font-weight: 400;
+}
+.cs-orphan-s {
+  font-size: var(--fs-meta);
+  color: var(--ink-4);
+}
+.cs-orphan .cs-act {
+  align-self: flex-start;
+  margin-top: 4px;
+}
+
+/* 待判卡 */
+.cs-dec {
+  padding: 11px 12px 12px;
+  margin-bottom: 9px;
+  border-radius: var(--r-s);
+  background: var(--desk-3);
+  box-shadow: inset 0 0 0 1px var(--rule), inset 3px 0 0 var(--brass);
+}
+.cs-dec.kind-approval {
+  box-shadow: inset 0 0 0 1px var(--rule), inset 3px 0 0 var(--seal);
+}
+.cs-dec-top {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.cs-dec-who {
+  font-size: var(--fs-label);
+  color: var(--ink-2);
+}
+.cs-dec-at {
+  margin-left: auto;
+  font-size: var(--fs-label);
+  color: var(--ink-3);
+}
+.cs-dec-q {
+  margin: 7px 0 8px;
+  font-size: var(--fs-meta);
+  line-height: 1.55;
+  color: var(--ink);
+}
+.cs-dec-checks {
+  list-style: none;
+  margin: 0 0 10px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.cs-dec-checks li {
+  display: flex;
+  gap: 6px;
+  font-size: var(--fs-label);
+  line-height: 1.5;
+  color: var(--ink-2);
+}
+.cs-dec-checks li::before {
+  content: '·';
+  color: var(--ink-3);
+  flex: none;
+}
+.cs-dec-checks li.ok::before {
+  content: '✓';
+  color: var(--blue);
+}
+.cs-dec-checks li.bad::before {
+  content: '×';
+  color: var(--seal);
+}
+.cs-dec-acts {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.cs-act {
+  font-size: var(--fs-label);
+  color: var(--ink-2);
+  padding: 7px 14px;
+  border-radius: var(--r-s);
+  box-shadow: inset 0 0 0 1px var(--rule);
+  transition: color var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out);
+}
+.cs-act:hover {
+  color: var(--ink);
+  box-shadow: inset 0 0 0 1px var(--blue-line);
+}
+.cs-act.primary {
+  color: var(--blue);
+  box-shadow: inset 0 0 0 1px var(--blue-line);
+}
+.cs-act.primary:hover {
+  color: var(--desk);
+  background: var(--blue);
+}
+/* 正向（验收 / 发回去）与止损（停掉 / 删除）：一个青瓷一个朱砂，不混用 */
+.cs-act.ok {
+  color: var(--blue);
+  box-shadow: inset 0 0 0 1px var(--blue-line);
+}
+.cs-act.ok:hover {
+  color: var(--desk);
+  background: var(--blue);
+}
+.cs-act.bad {
+  color: var(--seal);
+  box-shadow: inset 0 0 0 1px var(--seal-wash);
+}
+.cs-act.bad:hover {
+  color: var(--desk);
+  background: var(--seal);
+}
+.cs-act:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* 卡片内的动作条：常驻但降噪，贴在证据行下面 */
+.cs-t-acts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.cs-task .cs-act {
+  padding: 5px 10px;
+}
+
+/* 卡住多久：过 30 分钟转朱砂，别让人以为它还在干活 */
+.cs-t-stale {
+  font-size: var(--fs-label);
+  color: var(--ink-3);
+  white-space: nowrap;
+  flex: none;
+}
+.cs-t-stale.hot {
+  color: var(--seal);
+}
+
+/* 打回三要素：窄列里一行一个问题，纵向排 */
+.cs-reject {
+  display: grid;
+  gap: 7px;
+  margin-top: 8px;
+  padding-top: 9px;
+  box-shadow: inset 0 1px 0 var(--rule);
+}
+.cs-rj-row {
+  display: grid;
+  gap: 3px;
+}
+.cs-rj-row > span {
+  font-size: var(--fs-label);
+  color: var(--ink-3);
+}
+.cs-rj-row > input {
+  width: 100%;
+  padding: 5px 7px;
+  font-size: var(--fs-label);
+  color: var(--ink);
+  background: var(--desk);
+  border: 0;
+  border-radius: var(--r-s);
+  outline: none;
+  box-shadow: inset 0 0 0 1px var(--rule);
+}
+.cs-rj-row > input:focus {
+  box-shadow: inset 0 0 0 1px var(--blue-line);
+}
+.cs-rj-acts {
+  display: flex;
+  gap: 6px;
+  margin-top: 2px;
+}
+.cs-task .cs-rj-acts .cs-act {
+  flex: 1;
+  justify-content: center;
+}
+
+/* 抽屉里能直接拍板的单 */
+.cs-dj {
+  padding: 12px 0;
+  box-shadow: inset 0 -1px 0 var(--rule);
+}
+.cs-dj-h {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+.cs-dj-t {
+  font-size: var(--fs-body);
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.cs-dj-m {
+  margin-left: auto;
+  flex: none;
+  font-size: var(--fs-label);
+  color: var(--ink-3);
+}
+.cs-dj-note {
+  margin-top: 4px;
+  font-size: var(--fs-label);
+  line-height: 1.6;
+  color: var(--ink-3);
+}
+.cs-dj-acts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+.cs-inline {
+  flex: 1;
+  min-width: 120px;
+  padding: 6px 8px;
+  font-size: var(--fs-label);
+  color: var(--ink);
+  background: var(--desk);
+  border-radius: var(--r-s);
+  outline: none;
+  box-shadow: inset 0 0 0 1px var(--rule);
+}
+.cs-inline:focus {
+  box-shadow: inset 0 0 0 1px var(--blue-line);
+}
+
+/* ---------------- 动效 ---------------- */
+@keyframes cs-spin {
+  to { transform: rotate(360deg); }
+}
+@keyframes cs-breathe {
+  0%, 100% { transform: scale(1); opacity: .9; }
+  50% { transform: scale(1.18); opacity: 1; }
+}
+@keyframes cs-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: .3; }
+}
+@keyframes cs-ray-flow {
+  0% { opacity: 0; }
+  50% { opacity: .9; }
+  100% { opacity: 0; }
+}
+@keyframes cs-q-in {
+  from { opacity: 0; transform: translateX(-16px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+@keyframes cs-scan-x {
+  from { left: -40%; }
+  to { left: 120%; }
+}
+@keyframes cs-t-in {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes cs-fl-in {
+  from { opacity: 0; transform: translateX(-8px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+@keyframes cs-line-in {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes cs-ah-in {
+  0% { opacity: 0; transform: translate(-50%, -50%) scale(1.14); }
+  60% { opacity: 1; transform: translate(-50%, -50%) scale(.98); }
+  100% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+}
+@keyframes cs-ah-pulse {
+  0%, 100% { box-shadow: 0 0 0 4px var(--desk), 0 0 18px var(--seal-wash), inset 0 0 0 1px var(--seal); }
+  50% { box-shadow: 0 0 0 4px var(--desk), 0 0 40px 6px var(--seal-wash), inset 0 0 0 1px var(--seal); }
+}
+@keyframes cs-seal-alert {
+  0%, 100% { box-shadow: 0 0 0 3px var(--desk-2), 0 0 0 4px currentColor, 0 0 12px var(--seal-wash); }
+  50% { box-shadow: 0 0 0 3px var(--desk-2), 0 0 0 4px currentColor, 0 0 30px 5px var(--seal-wash); }
+}
+@keyframes cs-focus-in {
+  from { opacity: 0; transform: scale(.96) translateY(4px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+@keyframes cs-drawer-in {
+  from { transform: translateX(102%); }
+  to { transform: translateX(0); }
+}
+@keyframes cs-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* ---------------- 窄屏 ---------------- */
+@media (max-width: 1240px) {
+  .cs-cols { grid-template-columns: 278px minmax(0, 1fr) 258px; }
+  .cs-top-r { gap: 12px; }
+  .cs-flow { width: 142px; }
+  .cs-col.center > .cs-flow.right,
+  .cs-map-wrap > .cs-flow.right { width: 152px; }
+}
+@media (max-width: 1140px) {
+  .cs-top-r { gap: 8px; }
+}
+@media (max-width: 1080px) {
+  .cs-seal-mini { display: inline-block; }
+  .cs-thread { max-width: 180px; }
+}
+@media (max-width: 1000px) {
+  .cs-cols { grid-template-columns: minmax(0, 1fr); overflow-y: auto; }
+  .cs-col.left, .cs-col.right { display: none; }
+  .cs-col.center { min-height: 480px; }
+  .cs-flow { display: none; }
+  .cs-readout { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cs-shell * {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+  }
+}

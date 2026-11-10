@@ -1,0 +1,89 @@
+{
+  "note": "Pi 基座基线；升级版本用 node scripts/check-pi-base.mjs --update 生成并 review diff",
+  "packages": {
+    "@earendil-works/pi-agent-core": {
+      "version": "1.4.0",
+      "integrity": "sha512-PoKY84SKUwnt7S5QBZaGUqfNO1kjP3KHpHUA9QpFTj4cOjaVWMYIcBPJ6FDRCdE8Zen9OSECQUd0uUfVgtSmgA==",
+      "files": 6,
+      "digest": "99f74ed94ae9360a3f52cb61e80aa3310a903a9be277a04dd3f64e1e4b12fc26",
+      "groups": {
+        "dist": "99f74ed94ae9360a3f52cb61e80aa3310a903a9be277a04dd3f64e1e4b12fc26"
+      }
+    },
+    "@earendil-works/pi-ai": {
+      "version": "1.4.0",
+      "integrity": "sha512-hQM/C4+1w8rHYACzDDf+0vQMnEnpzIop1tptIERVgR3ZeT/hHSzBNG8PaWPgxWQjqSeKCyBZSyp8uTT6eKK1pQ==",
+      "files": 200,
+      "digest": "a306c6e77407a201ed5b1caa73e1a8122a181f9e8387942333bf22689a177a77",
+      "groups": {
+        "dist/api": "11e0248f85813e198d131aa806513476b02aacf2e9a3dfcb96d89d006e164f12",
+        "dist/auth": "da1cb1c03bd36b4d847cd57a2d0b6807dd8d465052eb7b78e48fd8087348569f",
+        "dist": "ff8c9d8854e8daf61570bd263409bb6167a8010bdc0eb916bd4e994f2fde1682",
+        "dist/compat": "491e843c4562377f41acd6a5ac10ba6da614985a640d1dad01459266196ad5e6",
+        "dist/providers": "f43acc25a678b4a2f0e5e41bfb8a31d7463d88bed6d2079f7a070fa2c135e804",
+        "dist/utils": "7471393bf4218c299fda35a1e59f453fa05a312e25d52afcc78cf7737e3ae7a4"
+      }
+    },
+    "@earendil-works/pi-codemode": {
+      "version": "1.4.0",
+      "integrity": "sha512-23CNAXpS9DuLzPMyYuvrXVVio46x4YhffCgCqaWmF7F5H8PooqjrQvX4ucF6M0BhUd+x2tV6r1J0dv8cCME4Cg==",
+      "files": 16,
+      "digest": "48ae1c1d03c6e0155a224bc84f9551852c947e61a63d74e1157dc42c50e24133",
+      "groups": {
+        "dist": "e605f635bad3ebc65bdf13d1d0e994249b2ea725b86f9fa1ce26f316397c5b25",
+        "dist/runtime": "b51ed95232e6c572b98235c1027a41118ffd9d049d83ae80a1161d0332072d1b"
+      }
+    },
+    "@earendil-works/pi-coding-agent": {
+      "version": "1.4.0",
+      "integrity": "sha512-Z41LpZ3yYHSC/UUps6Mr39UMFPwH8elhJBG9DY1P7kuzsE5qSK/6eMj2EHzO5evJRQWLbKSqUMw+4nCNtIyiQg==",
+      "files": 337,
+      "digest": "8c63f0ea35f7fb0ef68af0ad1e1c5e5880294254b5b1290c003a85e3acaff070",
+      "groups": {
+        "dist/bun": "c2fb003a4368c1dee6b6c4ace24ac7cce0e57d7d1478273dafe06ae5e501e60b",
+        "dist/bundle": "ee855a8b2a3f5c1f14ee944dfaaaaefb1365fa561c225cf8a7e765718d6a235e",
+        "dist": "54b51a7c42d365f5c4f71d2568015f077888544b28a516a81a321defcd21ca71",
+        "dist/cli": "1978c0094838c9f25109a6d2cfe6431c576b29049dcd3ddf132549cf158591b6",
+        "dist/core": "152249d6a35beba30551e3fc839e1671757f0a243686c8edad8c52fccd8026a4",
+        "dist/extensions": "bccc28e035109c5be2bf125d491aacfd296088db918afc3fda8def8c2a5d4a74",
+        "dist/modes": "aa6b3c6b30c0628df6ebabb169f0f5e42ab664e6d46262c85821966e227ff291",
+        "dist/utils": "bda180fb8286861459c9bf2cfa4349dedc0e44f0c2f4a68fae3e393eb109b284",
+        "examples/extensions": "493485f67575f920f1510d12a8a38aaa5d6120a3b15e2aab19808a615727110d"
+      }
+    },
+    "@earendil-works/pi-mcp": {
+      "version": "1.4.0",
+      "integrity": "sha512-92aZmmGsUpHHknYuKXZHRINQfahntw5hU9If0I0ZM49GojOaFHpkl5/GF3/aatqpt7v7GjZbBfpfSygGKW+pnw==",
+      "files": 18,
+      "digest": "70bc49660e7241772883b6f3e2bab476d0c5e2700a6ef57c58c1a78de86439a3",
+      "groups": {
+        "dist": "fac23a238344bba3e32607a12aad01a5ad6045e4e4377ae7ee4d2d5afc021f40",
+        "dist/oauth": "042f2395fc0e599ec059ab4c8d03bf64a078a8a9174c6d93bb1c9234fcce452d",
+        "dist/protocol": "595167073610dd45718b0acbca49f402138fbe2075ad36a9e103dc250877508e",
+        "dist/testing": "58cafc3df166b201e653795a8521107ea39c099fd319f47014255f4bb6c22873",
+        "dist/transports": "e767c60fec461d1b387486c5005e59f084e63cd838528b6db4595972456e9f7d"
+      }
+    },
+    "@earendil-works/pi-telemetry": {
+      "version": "1.4.0",
+      "integrity": "sha512-MLIfowwUYIY65jSjMX82paZOrX/NTvLk6D08h+3Jq42a99RzUOewzuCR0zOlPul3D6UBfddat76VT6LvsHEs1w==",
+      "files": 8,
+      "digest": "319d82b979ccf34bb90b31139c112c15231b5d344f10234225c69868e3a88764",
+      "groups": {
+        "dist": "edd1f31e71c029bda0d7f567f7fba877ae2a561ebc9ea011cd4819d7740486a7",
+        "dist/testing": "50bd65633e888067188fb30213e466c4a70bac3861e86b9e0826b7a8986d0eb0"
+      }
+    },
+    "@earendil-works/pi-tui": {
+      "version": "1.4.0",
+      "integrity": "sha512-4obPOjgOD7g4mGSlngIvxyujC1UPdmyI9zdVthbr8GufacFEX+Ce0+scPgHg++k2xj5+QjESM2d5TxvIuzCVmg==",
+      "files": 47,
+      "digest": "a1e04b56a0a7619bb77322a6e0720011c02052f8e0321caa1074259914bd4644",
+      "groups": {
+        "dist": "4d23b68da9c8d4b15553dc0ad00084bd38bf107776de4a9732b3041b95bdacd6",
+        "dist/components": "4f69d53f979c2831f14329260566398aa62321148acaa3a52171f297480add48",
+        "native/win32": "1b5f7986c0b438dcceba123d06b765bcbe7e6291c622cccac9807c7527e2ab77"
+      }
+    }
+  }
+}

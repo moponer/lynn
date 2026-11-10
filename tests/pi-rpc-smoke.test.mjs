@@ -1,8 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
+import * as fs from "node:fs";
+import * as os from "node:os";
 import path from "node:path";
 import { AgentHost } from "../dist/main/agent-host.js";
+import { PiRpcHost } from "../dist/main/pi-rpc-host.js";
 
 /**
  * 真链路冒烟（M0-03）：真 Pi SDK 跑在**独立子进程**里，模型走本地 mock 端点，
@@ -12,11 +15,13 @@ import { AgentHost } from "../dist/main/agent-host.js";
 function startMockModel() {
   let calls = 0;
   const firstMessages = [];
+  const seen = [];
   const server = http.createServer((req, res) => {
     let body = "";
     req.on("data", (c) => (body += c));
     req.on("end", () => {
       const parsed = JSON.parse(body);
+      seen.push(parsed);
       if (firstMessages.length === 0) firstMessages.push(...parsed.messages);
       const hasToolResult = parsed.messages.some((m) => m.role === "toolResult" || m.role === "tool");
       calls += 1;
@@ -49,11 +54,11 @@ function startMockModel() {
     });
   });
   return new Promise((resolve) =>
-    server.listen(0, "127.0.0.1", () => resolve({ server, calls: () => calls, firstMessages })),
+    server.listen(0, "127.0.0.1", () => resolve({ server, calls: () => calls, firstMessages, seen })),
   );
 }
 
-test("M0-03 真链路：Pi 在子进程里跑，工具回壳执行，流式文本回传", { timeout: 90_000 }, async () => {
+test("M0-03 真链路：Pi 在子进程里跑，工具回壳执行，流式文本回传", { timeout: 180_000 }, async () => {
   const { server, firstMessages } = await startMockModel();
   const port = server.address().port;
   const entry = path.resolve(import.meta.dirname, "../agent/pi-rpc-entry.mjs");
@@ -62,6 +67,8 @@ test("M0-03 真链路：Pi 在子进程里跑，工具回壳执行，流式文�
   const toolCalls = [];
   const host = new AgentHost({
     entryPath: entry,
+    // 高载机器上 Pi SDK 冷启动可能超过 20s 默认窗口（实机 2026-11-09 必现），放宽到 60s
+    readyTimeoutMs: 60_000,
     model: { baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: "test-key", model: "mock-chat" },
     tools: [
       {
@@ -101,5 +108,76 @@ test("M0-03 真链路：Pi 在子进程里跑，工具回壳执行，流式文�
   } finally {
     await host.stop();
     server.close();
+  }
+});
+
+/**
+ * 官方 Pi RPC 真链路（架构红线）：起 Pi 自带 rpc-entry.js，风铃逻辑用 --extension 插件接入，
+ * 工具经官方 extension_ui 子协议回壳。与上面的回退链路放在同一文件，测试运行时串行，
+ * 避免两个真 Pi 子进程并发抢冷启动窗口（Windows 上会偶发 20s 启动超时）。
+ */
+test("官方 Pi RPC + 风铃扩展：模型流式、工具回壳、官方事件全链路", { timeout: 120_000 }, async () => {
+  const { server, seen } = await startMockModel();
+  const port = server.address().port;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lynn-official-rpc-"));
+  const entry = path.resolve(import.meta.dirname, "../node_modules/@earendil-works/pi-coding-agent/dist/bundle/rpc-entry.js");
+  const extension = path.resolve(import.meta.dirname, "../agent/extensions/lynn-bridge.mjs");
+  if (!fs.existsSync(entry)) {
+    server.close();
+    throw new Error("找不到 Pi 官方 rpc-entry.js，请先 npm ci");
+  }
+
+  const events = [];
+  const errors = [];
+  const toolCalls = [];
+  const host = new PiRpcHost({
+    entryPath: entry,
+    extensionPath: extension,
+    agentDir: path.join(dir, "agent"),
+    sessionDir: path.join(dir, "sessions"),
+    projectRoot: dir,
+    personaFile: path.join(dir, "persona.md"),
+    systemPrompt: "你是风铃（Lynn），一个指挥者。请用简体中文回答。",
+    model: { baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: "test-key", model: "mock-chat", provider: "测试端点" },
+    tools: [{
+      name: "test_echo",
+      description: "把 message 参数原样返回。",
+      parameters: { type: "object", properties: { message: { type: "string" } }, required: ["message"] },
+    }],
+    onToolCall: async (name, args) => {
+      toolCalls.push({ name, args });
+      return `echo: ${args.message}`;
+    },
+    onEvent: (ev) => events.push(ev),
+    onError: (m) => errors.push(m),
+    watchdogMs: 2000,
+  });
+
+  try {
+    await host.start();
+    await host.prompt("请调用 test_echo，message 填 pi-ok，然后把结果告诉我。");
+
+    const text = events
+      .filter((e) => e.type === "message_update" && e.assistantMessageEvent?.type === "text_delta")
+      .map((e) => e.assistantMessageEvent.delta)
+      .join("");
+    console.log("[OFFICIAL RPC] 事件类型：", [...new Set(events.map((e) => e.type))].join(","));
+    console.log("[OFFICIAL RPC] 工具回壳：", JSON.stringify(toolCalls));
+
+    assert.deepEqual(toolCalls, [{ name: "test_echo", args: { message: "pi-ok" } }], "工具必须回壳执行");
+    assert.ok(text.includes("echo: pi-ok"), `流式文本应含工具结果，实际：${text}`);
+    assert.ok(events.some((e) => e.type === "agent_start"));
+    assert.ok(events.some((e) => e.type === "agent_settled"));
+    assert.ok(events.some((e) => e.type === "extension_ui_request"), "工具桥应走官方 UI 子协议");
+    assert.ok(events.some((e) => e.type === "tool_execution_end"), "官方工具执行事件应透传");
+    assert.equal(errors.filter((m) => /Extension|扩展|failed/i.test(m)).length, 0, JSON.stringify(errors));
+    // 人设由扩展的 before_agent_start 注入，必须真的进模型请求
+    const sys = seen[0]?.messages?.find((m) => m.role === "system");
+    assert.ok(sys, "模型请求里应有 system 消息");
+    assert.ok(String(sys.content).includes("风铃"), `system 消息应含人设：${String(sys.content).slice(0, 120)}`);
+  } finally {
+    await host.stop();
+    server.close();
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 });

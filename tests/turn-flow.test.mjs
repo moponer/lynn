@@ -95,7 +95,8 @@ test("工具执行唯一入口：两条路径共用（计划档拒绝 / 自动�
     teamId: "t1",
     taskTitle: "整理周报",
     member: "林工",
-    brief: "读 csv 出第 3 节",
+    brief: "【目标】把 9 月订单表整理成周报\n【完成标准】产出周报-09.md，数字与源表核对一致\n【材料与位置】材料文件在工作区 orders.csv\n【限制】只做 9 月，不要改源表口径",
+    deadline: "30 分钟",
   });
   assert.equal(typeof started, "string");
   assert.ok(!started.includes("工具执行失败"), started);

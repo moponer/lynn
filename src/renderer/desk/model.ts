@@ -11,7 +11,6 @@ import type {
 } from "../../shared/contract";
 import { actionOf, groupOf, type JobAction, type JobGroup } from "../../shared/task-groups";
 import {
-  MEMBER_STATE_KEY,
   MEMBER_STATE_LABEL,
   PHASE_STAGE,
   STAGE_KEYS,
@@ -25,7 +24,6 @@ import {
 
 // 词表只在 shared/lexicon.ts 定义一次；这里转出，渲染层继续从 model 取
 export { PHASE_STAGE, STAGE_KEYS, STAGE_OF, STAGES, STATUS_KEY, STATUS_LABEL };
-export { MEMBER_STATE_KEY as MEMBER_STATUS_KEY };
 
 export interface DeskEvidence {
   level: "ok" | "warn" | "pending";
@@ -67,6 +65,8 @@ export interface DeskJob {
   group: JobGroup;
   /** 这张单需要你做什么：accept / unblock / none */
   action: JobAction;
+  /** 验收人：lynn = 风铃自己验（不弹给你），user = 你拍板（缺省按 user） */
+  reviewer?: "lynn" | "user";
   stage: number;
   member?: string;
   memberRole?: string;
@@ -74,6 +74,8 @@ export interface DeskJob {
   statusNote: string;
   evidenceCount: number;
   evidence: DeskEvidence[];
+  /** 交付物（用户要带走的东西；与证据分开，验收后永久保留） */
+  deliverables?: { path: string; ref: string; bytes?: number }[];
   artifact?: DeskArtifact;
   diff?: DeskDiff;
   version: number;
@@ -100,6 +102,10 @@ export interface DeskMember {
   teamName?: string;
   role: string;
   model: string;
+  /** 岗位档案里选中的头像库 id（没存的老档案按名字兜底） */
+  avatarId?: string;
+  /** 岗位识别色：成员头像/节点共用一个色，不按状态换色 */
+  color?: string;
   status: "running" | "delivered" | "idle" | "stuck";
   statusLabel: string;
   jobId?: string;
@@ -130,6 +136,10 @@ export interface DeskDecision {
 export interface Desk {
   project: string;
   subdir: string;
+  /** 会话主根（空 = 这次不用工作区） */
+  workspacePrimary?: string;
+  /** 会话附加根（只读/可写） */
+  workspaceExtras: { path: string; mode: "rw" | "ro"; label?: string }[];
   jobs: DeskJob[];
   archived: { id: string; title: string; status?: TaskStatus }[];
   members: DeskMember[];
@@ -140,6 +150,8 @@ export interface Desk {
   tokensUsed: number;
   /** 真在跑的成员单（后端 memberRuns；不是 status=in_progress 的近似） */
   running: string[];
+  /** 无主单：所属会话已被删除（老版本删会话不级联留下的），>0 时界面给一键清理 */
+  orphans: number;
   /** D3：会话级软预算（只在真的配了上限时存在；黄铜 chip 不显示假数据） */
   budget?: { spent: number; soft: number };
   /** 真实对话流（频道 + 每个工单的往来） */
@@ -192,8 +204,8 @@ function toJob(job: TaskTrackItem, teamName?: string, member?: Member, feed: Fee
     title: job.title,
     status: job.status,
     statusLabel: STATUS_LABEL[job.status] ?? job.status,
-    group: groupOf(job.status),
-    action: actionOf(job.status),
+    group: groupOf(job.status, job.reviewer),
+    action: actionOf(job.status, job.reviewer),
     stage: onThisTask ?? STAGE_OF[job.status] ?? 0,
     member: job.member,
     memberRole: member?.role,
@@ -201,6 +213,8 @@ function toJob(job: TaskTrackItem, teamName?: string, member?: Member, feed: Fee
     statusNote: job.statusNote,
     evidenceCount: job.evidenceCount ?? 0,
     evidence: evidenceOf(job),
+    deliverables: job.deliverables,
+    reviewer: job.reviewer ?? "user",
     version: job.version ?? 1,
     rejections: job.rejectRounds ?? 0,
     rejectLimit: 3,
@@ -254,6 +268,8 @@ export function deskFromSnapshot(snap: SessionSnapshot): Desk {
           teamName: t.name,
           role: m.role,
           model: m.model ?? "未指定",
+          color: m.color,
+          avatarId: m.avatarId,
           status: m.status,
           statusLabel: MEMBER_STATE_LABEL[m.status] ?? m.status,
           jobId: job?.id,
@@ -287,15 +303,23 @@ export function deskFromSnapshot(snap: SessionSnapshot): Desk {
   return {
     project: snap.workspace.project,
     subdir: snap.workspace.subdir,
+    workspacePrimary: snap.workspace.primary,
+    workspaceExtras: snap.workspace.extras ?? [],
     jobs,
     archived: jobs
       .filter((j) => j.status === "done" || j.status === "canceled")
       .map((j) => ({ id: j.id, title: j.title, status: j.status })),
     members,
     teamCount: board.teams.filter((t) => t.status !== "dissolved").length,
-    decisions: board.decisions.map(toDecision),
+    // 解散的团队不再出现在任何"等你拍板"里：印章只对在职的队伍生效
+    decisions: board.decisions.filter((d) => {
+      const teamId = board.track.find((t) => t.id === d.jobId)?.teamId;
+      const team = board.teams.find((t) => t.id === teamId);
+      return !team || team.status !== "dissolved";
+    }).map(toDecision),
     tokensUsed: board.tokensUsed,
     running: snap.running ?? [],
+    orphans: snap.orphans ?? 0,
     budget: soft > 0 ? { spent: snap.usage.sessionIn + snap.usage.sessionOut, soft } : undefined,
     feed: snap.feed,
     turn: snap.turn,

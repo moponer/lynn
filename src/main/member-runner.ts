@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import { streamChat, type ChatMessage, type ToolSchema } from "./llm";
 import type { MemberProfile } from "./team-store";
-import { Toolkit, TOOLKIT_SCHEMAS, resolveWithin, type ToolkitOptions } from "./toolkit";
+import { Toolkit, TOOLKIT_SCHEMAS, resolveReadable, resolveWithin, type ToolkitOptions } from "./toolkit";
 
 /**
  * 成员运行时（M0-09：单层派单真实执行）。
@@ -35,16 +35,62 @@ export const MEMBER_EXEC_TOOLS = [
 
 export type MemberChatFn = typeof streamChat;
 
+/**
+ * 简报质量闸（纯函数）：风铃派单前代码层把关，不靠提示词自觉。
+ * 合格简报必须能让一个看不到对话的成员独立开工：目标 / 完成标准 / 材料位置 / 限制。
+ * 返回 null = 合格；否则返回给风铃的退回说明（含重写模板，一轮就能改对）。
+ */
+export function validateBrief(brief: string, acceptance?: string[]): string | null {
+  const text = (brief ?? "").trim();
+  const hasAcceptance = Array.isArray(acceptance) && acceptance.filter((a) => String(a).trim()).length > 0;
+  const missing: string[] = [];
+  if (text.length < 30) {
+    return [
+      "简报太薄（不足 30 字），已退回，没有派单。成员看不到你们的对话，只看得到简报包，按下面模板重写后再 assign_task：",
+      "",
+      "【目标】一句话说清要产出什么（写什么文件/改什么/核对什么）",
+      "【完成标准】可验证的验收点（文件存在/数值正确/格式要求），同时填 acceptance 数组",
+      "【材料与位置】输入材料的完整路径；不在工作区就写明并传 readRoots 申请只读授权",
+      "【限制】不许做什么、范围边界、格式与口径要求",
+    ].join("\n");
+  }
+  if (!hasAcceptance && !/完成标准|验收|产出|交付|输出|核对/.test(text)) {
+    missing.push("完成标准（怎么算做完了？给可验证的验收点，或直接填 acceptance）");
+  }
+  if (!/限制|不许|不得|禁止|不要|只能|边界|注意|范围/.test(text)) {
+    missing.push("限制（不许做什么 / 范围边界 / 口径要求——没有限制成员就会自由发挥）");
+  }
+  if (!/【材料|材料|位置|路径|文件|来源/.test(text)) {
+    missing.push("材料与位置（输入材料在哪？给完整路径；不在工作区就传 readRoots 申请只读授权）");
+  }
+  if (missing.length === 0) return null;
+  return [
+    "简报不合格，已退回，没有派单。缺：" + missing.join("；") + "。",
+    "",
+    "按四段模板重写后再 assign_task：",
+    "【目标】…",
+    "【完成标准】…（可验证；同时填 acceptance）",
+    "【材料与位置】…（完整路径）",
+    "【限制】…",
+  ].join("\n");
+}
+
 export interface MemberRunInput {
   profile: MemberProfile;
   brief: string;
   deadline: string;
   /** 本次分配的工具集（调用方已按「只能收窄」校验过与岗位白名单的包含关系） */
   tools: string[];
+  /** 轮次上限覆盖（派单时指定）；缺省用岗位档案 limits.maxTurns */
+  maxTurns?: number;
   /** 任务工作区：成员一切文件活动的边界（绝对路径） */
   workdir: string;
+  /** 过程文件目录（永远在数据根内，可被清理）；缺省不提示 */
+  scratchDir?: string;
   /** 用户授权的只读目录：读可以进，写仍然只能在工作区（函数 = 每次现取，跑到一半授权也生效） */
   readRoots?: string[] | (() => string[]);
+  /** 用户授权的可写附加根：只影响命令 cwd；文件写入仍只走工作区 */
+  writableRoots?: string[] | (() => string[]);
   /** 删除类命令的审批闸：成员能改代码，但删除必须用户点头 */
   onBeforeCommand?: (command: string) => Promise<{ ok: boolean; reason?: string }>;
   model: { baseUrl: string; apiKey: string; model: string };
@@ -75,6 +121,8 @@ export interface MemberRunResult {
   status: "reported" | "turn_limit" | "aborted" | "error";
   report: string;
   evidence: string[];
+  /** 交付物（与证据分开；验收后固化进卷宗，永久保留） */
+  deliverables: string[];
   turns: number;
   promptTokens: number;
   completionTokens: number;
@@ -94,12 +142,17 @@ const SUBMIT_REPORT_SCHEMA: ToolSchema = {
   function: {
     name: "submit_report",
     description:
-      "把这一单的结论交回给风铃：text 写结论与未完成项，evidence 列工作区内真实存在的文件路径（至少 1 个，没有证据不收）。",
+      "把这一单的结论交回给风铃：text 开头标状态（【完成】/【完成有保留】/【受阻】/【缺上下文】），写结论与未完成项；evidence 列真实存在的证据文件（至少 1 个，没有证据不收）；deliverables 列用户要带走的交付物（会永久保留）。",
     parameters: {
       type: "object",
       properties: {
         text: { type: "string", description: "结论 / 未完成 / 需要升级的说明" },
-        evidence: { type: "array", items: { type: "string" }, description: "工作区内相对路径，至少 1 个" },
+        evidence: { type: "array", items: { type: "string" }, description: "工作区或只读根里的真实文件路径，至少 1 个" },
+        deliverables: {
+          type: "array",
+          items: { type: "string" },
+          description: "交付物路径（用户要带走的东西：报告/表格/图片）；与证据分开，验收后永久保留",
+        },
       },
       required: ["text", "evidence"],
     },
@@ -115,25 +168,42 @@ export function memberToolSchemas(allowed: string[]): ToolSchema[] {
 export function memberSystemPrompt(input: MemberRunInput): string {
   const p = input.profile;
   const readRoots = (typeof input.readRoots === "function" ? input.readRoots() : input.readRoots) ?? [];
+  const writableRoots = (typeof input.writableRoots === "function" ? input.writableRoots() : input.writableRoots) ?? [];
   return [
     `你是「${p.name}」，岗位：${p.role}。你只对风铃（Lynn）负责，不直接面对用户。`,
     `你的单一目标：${p.goal}`,
     "",
     "【边界（违反即失职）】",
     ...(p.boundaries.length ? p.boundaries.map((b) => `- ${b}`) : ["- （档案未写边界；保守行事，只做简报里明确要求的事）"]),
+    ...(p.escalateWhen.trim() ? ["", `【何时必须停手升级】${p.escalateWhen.trim()}——命中就立刻回报，不要硬扛。`] : []),
+    ...(p.body.trim()
+      ? [
+          "",
+          "【岗位工作方式（档案正文）】",
+          p.body.trim(),
+        ]
+      : []),
     "",
     "【你的工具】",
     `- 执行工具：${input.tools.filter((t) => (MEMBER_EXEC_TOOLS as readonly string[]).includes(t)).join("、") || "（本次未分配执行工具，只能靠推理完成）"}`,
     "- submit_report：回报通道（终局）。**剩最后 2 轮时必须停手交回**，哪怕没做完也要交：写清做到哪一步、卡在哪、需要什么。不交 = 这张单白跑。",
     "- 你没有 ask_user，不能问用户；口径拿不准就选一种并写明理由。需要升级时在回报正文里标 ESCALATE: 并说明。",
     "",
-    "【工作区】",
-    `工作区：${input.workdir}（**可读可写**，就是用户的项目目录）。写文件用工作区内相对路径。`,
+    "【工作区与文件去向】",
+    `工作区：${input.workdir}（**可读可写**）。写文件用工作区内相对路径。`,
+    ...(input.scratchDir
+      ? [`过程文件（下载/解压/测试输出/缓存）写到：${input.scratchDir}；交付物（用户要带走的报告/表格/图）写到工作区里的 deliverables/ 或简报指定位置。`]
+      : []),
     "- 不能写 `.git/` 与 `.lynn/`（项目元数据与风铃配置，工具层直接拒）。",
     "- **删除类命令（del / rm / rmdir / move / 改名 / git clean / git reset --hard）必须用户点头**：会被挂起等批准，被拒就别换写法绕，改成可撤销的覆盖写，或在回报里说明。",
     ...(readRoots.length
       ? [
           `只读授权（用户已批准）：${readRoots.join("、")}。这些目录里的文件可以 read_file / list_dir / office_read_table 读，**写入仍然只能在工作区**；读时用绝对路径。`,
+        ]
+      : []),
+    ...(writableRoots.length
+      ? [
+          `可写根（用户已批准，仅用于跑命令）：${writableRoots.join("、")}。run_command 可以用 cwd 指到这些目录里跑构建/测试；write_file / edit_file 仍然只能写工作区。`,
         ]
       : []),
     "",
@@ -142,11 +212,15 @@ export function memberSystemPrompt(input: MemberRunInput): string {
     "",
     "【产出契约】",
     `- 交付物：${p.outputContract.deliverable}`,
+    "- 交付物在 submit_report 的 deliverables 里列出来（与 evidence 分开）：用户要带走的东西会永久保留；只写进证据不算交付。",
     ...p.outputContract.evidence.map((e) => `- 证据要求：${e}`),
     ...p.outputContract.acceptance.map((a) => `- 验收标准：${a}`),
     "",
     "【回报纪律（§4.10.5 证据原则）】",
     "- 完成后必须调用 submit_report；evidence 至少 1 项，且必须是你真实写进工作区的文件路径——空口不算完成。",
+    "- 回报开头标状态，四选一：【完成】做好了且核对过；【完成有保留】做完了但有疑虑，写明疑虑；【受阻】卡住了，写清卡在哪、缺什么；【缺上下文】简报信息不够，写清缺什么——风铃会补了重派。",
+    "- 缺关键材料、目标互相矛盾、工具不够用：**第一轮就停手回报**，不要猜着做、不要自行脑补——烂交付不如不交付，停下不会怪你。",
+    "- 交回报前自审三问：①简报里的完成标准逐条过了吗？②evidence 里的文件真的存在且是本次产出的吗？③有没有「我觉得应该没问题」但没验证的地方？有就改成【完成有保留】并写明。",
     "- 没做完也要回报：写清楚做到了哪一步、卡在哪里。不要为了好看而虚报。",
   ].join("\n");
 }
@@ -162,13 +236,19 @@ export async function runMemberTask(input: MemberRunInput): Promise<MemberRunRes
     browser: input.browser,
     kb: input.kb,
     readRoots: input.readRoots,
+    writableRoots: input.writableRoots,
     onBeforeCommand: input.onBeforeCommand,
   });
-  const maxTurns = Math.max(1, Math.min(input.profile.limits?.maxTurns ?? 12, 40));
+  const maxTurns = Math.max(1, Math.min(input.maxTurns ?? input.profile.limits?.maxTurns ?? 12, 40));
   const tools = memberToolSchemas(input.tools);
   const messages: ChatMessage[] = [
     { role: "system", content: memberSystemPrompt(input) },
-    { role: "user", content: `任务开始。简报如系统提示所述，截止 ${input.deadline}。完成后 submit_report。` },
+    {
+      role: "user",
+      content:
+        `任务开始，截止 ${input.deadline}。先读一遍简报，用 list_dir/read_file 核对材料是否真的在；` +
+        "缺关键材料或目标不清就立刻 submit_report 标【缺上下文】，不要硬做。材料齐了就开工，完成后 submit_report。",
+    },
   ];
 
   let turns = 0;
@@ -176,6 +256,7 @@ export async function runMemberTask(input: MemberRunInput): Promise<MemberRunRes
   let completionTokens = 0;
   let finalReport: string | null = null;
   let finalEvidence: string[] = [];
+  let finalDeliverables: string[] = [];
 
   const execTool = async (name: string, rawArgs: string): Promise<string> => {
     let args: Record<string, unknown> = {};
@@ -188,16 +269,37 @@ export async function runMemberTask(input: MemberRunInput): Promise<MemberRunRes
       const text = String(args.text ?? "").trim();
       const evidence = (Array.isArray(args.evidence) ? args.evidence : []).map(String).filter(Boolean);
       if (!text) return "回报正文不能为空。";
-      // 证据必须在工作区真实存在（成员侧前置执行证据原则）
-      const missing = evidence.filter((e) => !fs.existsSync(resolveWithin(input.workdir, e)));
+      // 证据必须在「工作区 ∪ 用户授权的只读根」里真实存在。
+      // 审查类任务的材料本来就在只读根里，不能因为不在工作区就判"没证据"（2026-11-10 修）。
+      const roots = typeof input.readRoots === "function" ? input.readRoots() : input.readRoots ?? [];
+      const missing = evidence.filter((e) => {
+        try {
+          return !fs.existsSync(resolveReadable(input.workdir, roots, e).full);
+        } catch {
+          return true;
+        }
+      });
       if (missing.length) {
-        return `以下证据文件在工作区不存在，不能提交：${missing.join("、")}。先落盘再回报（证据原则 §4.10.5）。`;
+        return `以下证据文件既不在工作区、也不在已授权的只读目录里，不能提交：${missing.join("、")}。先落盘再回报（证据原则 §4.10.5）。`;
       }
       if (!evidence.length) {
         return "evidence 不能为空：至少给 1 个真实文件路径作为证据（§4.10.5）。";
       }
+      // 交付物同样要真实存在；证据与交付物分开记，验收时只固化交付物
+      const deliverables = (Array.isArray(args.deliverables) ? args.deliverables : []).map(String).filter(Boolean);
+      const missingDeliverables = deliverables.filter((e) => {
+        try {
+          return !fs.existsSync(resolveReadable(input.workdir, roots, e).full);
+        } catch {
+          return true;
+        }
+      });
+      if (missingDeliverables.length) {
+        return `以下交付物不存在，不能提交：${missingDeliverables.join("、")}。先落盘再回报。`;
+      }
       finalReport = text;
       finalEvidence = evidence;
+      finalDeliverables = deliverables;
       return "回报已收下，本轮执行结束。";
     }
     if (!(MEMBER_EXEC_TOOLS as readonly string[]).includes(name)) {
@@ -289,6 +391,7 @@ export async function runMemberTask(input: MemberRunInput): Promise<MemberRunRes
             status: "reported",
             report: finalReport,
             evidence: finalEvidence,
+            deliverables: finalDeliverables,
             turns,
             promptTokens,
             completionTokens,
@@ -302,6 +405,7 @@ export async function runMemberTask(input: MemberRunInput): Promise<MemberRunRes
         status: "aborted",
         report: "已被停止（用户中止）。已写出的文件留在工作区，未提交汇报。",
         evidence: [],
+        deliverables: [],
         turns,
         promptTokens,
         completionTokens,
@@ -311,6 +415,7 @@ export async function runMemberTask(input: MemberRunInput): Promise<MemberRunRes
       status: "turn_limit",
       report: `成员在 ${maxTurns} 个工具轮次内没有提交回报（可能任务过大或卡住）。最后动作见卷宗。`,
       evidence: [],
+      deliverables: [],
       turns,
       promptTokens,
       completionTokens,
@@ -321,6 +426,7 @@ export async function runMemberTask(input: MemberRunInput): Promise<MemberRunRes
       status: "error",
       report: `成员执行出错：${err instanceof Error ? err.message : String(err)}`,
       evidence: [],
+      deliverables: [],
       turns,
       promptTokens,
       completionTokens,

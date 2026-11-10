@@ -4,7 +4,7 @@
 
 本地优先、插件化的桌面 AI 个人助理——**她是指挥者，不是执行者**：她组队、派单、盯进度、审查证据、向你汇报。基于 [earendil-works/pi](https://github.com/earendil-works/pi) 生态，薄壳 + 三档插件 + MCP 能力外挂。
 
-> 当前状态：**M4 发布准备**（M0–M3 主体完成）。已有：Pi RPC 独立进程 + 薄壳、管理工具 10 件套（真实执行、落盘、审计、硬约束）、七态工单实体 + 卷宗 + 证据链、三档插件加载器（L0/L1/L2）+ U 档 iframe 沙箱 + 准入流水线 + 安全模式/回滚/指纹、**插件工坊（规格→草稿区→准入→分档启用）**、六大执行域（日历/cron/知识库/office/浏览器/消息平台合规路径）、技能体系（allowed-tools 强制）、成本软上限、多会话/撤销/托盘/更新器、**中英 i18n（语言包即 L0 插件）**、265 条 `node --test` 用例、CI（typecheck + lint:design + test）。
+> 当前状态：**M4 发布准备**（M0–M3 主体完成）。已有：Pi RPC 独立进程 + 薄壳、管理工具 10 件套（真实执行、落盘、审计、硬约束）、七态工单实体 + 卷宗 + 证据链、三档插件加载器（L0/L1/L2）+ U 档 iframe 沙箱 + 准入流水线 + 安全模式/回滚/指纹、**插件工坊（规格→草稿区→准入→分档启用）**、六大执行域（日历/cron/知识库/office/浏览器/消息平台合规路径）、技能体系（allowed-tools 强制）、成本软上限、多会话/撤销/托盘/更新器、**中英 i18n（语言包即 L0 插件）**、360 条 `node --test` 用例、CI（typecheck + lint:design + test）。
 > 尚未完成：Windows 代码签名（无证书，如实注明，见[发布说明](./docs/site/zh/release.md)）、消息平台收消息（长连接）、VRM 驱动（暂缓）。
 > 完整任务与验收口径见 [`../docs/开发任务清单.md`](../docs/开发任务清单.md)。**用户文档**：[快速开始](./docs/site/zh/quickstart.md) · [插件开发指南](./docs/site/zh/plugin-guide.md) · [插件索引](./docs/site/zh/plugin-index.md) · [隐私说明](./docs/site/zh/privacy.md) · English docs in `docs/site/en/`。
 
@@ -13,12 +13,27 @@
 ```bash
 npm install
 npm run build   # typecheck + renderer(vite) + main(tsc)
-npm test        # build:main + node --test（113 条）
+npm test        # build:main + node --test（360 条）
 npm run lint:design   # 零描边 / 四功能色 / 无装饰色（CI 会跑）
 npm start       # electron .
 ```
 
 首次启动点右上角 ⚙：填 Base URL / API Key / 模型（Key 用系统 safeStorage 加密存本机，可先「测试连接」再保存）。
+
+## 微信式截图（全局快捷键）
+
+按 `Alt+Shift+S`（或托盘「区域截图」、输入框下方「截图」按钮）→ 冻结光标所在显示器，进入选区窗：
+
+- **自动识别窗口**：鼠标停在哪就高亮哪个窗口，单击截整个窗口；也可以拖动自由框选。
+- **选区可调整**：拖动内部整体移动，八个控制点缩放；尺寸实时显示；放大镜跟随光标取色。
+- **标注**：矩形 / 椭圆 / 箭头 / 画笔 / 马赛克（从原图取样，撤销可完全还原）/ 文字 / 序号，四色三档粗细，`Ctrl+Z` 撤销。
+- **完成动作**：`Enter` / 双击 / 工具栏「完成」= 进输入框**本轮随附**并复制到剪贴板；「复制」只复制；「保存」另存为 PNG；`Esc` / 右键 / 「取消」退出。随附条里发送前可见、可逐片移除，不自动发送。
+
+引擎：[`node-screenshots`](https://github.com/nashaofu/node-screenshots)（Rust XCap + N-API，Apache-2.0，各平台预编译二进制）。Windows 走 DXGI 直取帧缓冲，本机实测 1920×1080 全屏捕获 87ms；`Window.all()` 提供窗口边界；比 `desktopCapturer` 快且不需要 macOS 屏幕录制授权。标注在选区窗 Canvas 上合成，主进程会核对 PNG 尺寸与选区一致后才复制 / 落盘，不引入第二个图像依赖。
+
+Windows 上无边框窗口盖不住任务栏，所以冻结帧会先裁到 `workArea`（任务栏那几十像素不在选区窗里），视口尺寸由主进程下发，避免 Canvas 被压缩后选区与导出图差几个像素。
+
+快捷键可在「我的风铃 → 外观」改；被占用或原生二进制缺失时如实显示「没注册上 / 引擎不可用」，不假装成功。实现：`src/shared/capture-geometry.ts`（共享几何）、`src/main/capture-host.ts`（冻结帧 / 窗口枚举 / 剪贴板与落盘）、`src/renderer/capture/`（Canvas 标注与交互）。原生二进制已列入 `electron-builder.yml` 白名单（`asar:false`）。
 
 ## 结构
 

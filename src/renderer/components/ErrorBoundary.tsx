@@ -28,7 +28,7 @@ export class ErrorBoundary extends Component<{ children: ReactNode }, { error: E
     if (!this.state.error) return this.props.children;
     return (
       <div style={{ padding: 32, fontFamily: "var(--mono, monospace)", color: "var(--ink, #dfe6ee)", lineHeight: 1.7 }}>
-        <h1 style={{ fontSize: 18, marginBottom: 8 }}>界面崩了（已记录到 logs/renderer.log）</h1>
+        <h1 style={{ fontSize: "var(--fs-brand)", marginBottom: 8 }}>界面崩了（已记录到 logs/renderer.log）</h1>
         <p style={{ color: "var(--ink-2, #9aa7b4)", marginBottom: 16 }}>
           数据没有丢：会话、工单、团队档案都在磁盘上。点下面的按钮重新载入即可；反复出现请把这段文字发我。
         </p>
@@ -39,7 +39,7 @@ export class ErrorBoundary extends Component<{ children: ReactNode }, { error: E
             borderRadius: 8,
             whiteSpace: "pre-wrap",
             wordBreak: "break-word",
-            fontSize: 12,
+            fontSize: "var(--fs-meta)",
             maxHeight: "50vh",
             overflow: "auto",
           }}

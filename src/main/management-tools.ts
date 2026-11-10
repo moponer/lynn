@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { generateTeamId, type TeamStore, type MemberProfile } from "./team-store";
+import { avatarFor, isAvatarId } from "../shared/avatars";
 import { MEMBER_EXEC_TOOLS } from "./member-runner";
 
 /**
@@ -73,6 +74,9 @@ export const MANAGEMENT_ONLY_TOOLS = [
   // 指挥者的两只手：催办在跑的成员、停掉明显做不到的单
   "nudge_member",
   "stop_task",
+  // 主动工作闭环：沉淀记忆（M2-05 记忆进系统提示词）、自开插件草稿（M3-07 工坊）
+  "save_memory",
+  "create_plugin_draft",
 ] as const;
 
 export class ManagementTools {
@@ -148,11 +152,22 @@ export class ManagementTools {
         `未知工具：${unknown.join("、")}。成员可用执行工具只有：${MEMBER_EXEC_TOOLS.join("、")}（请按这些名字重写白名单）`,
       );
     }
-    const file = this.store.writeMember(teamId, profile);
+    // 招募即入像：没指定就从头像库挑一张本队还没用的（同一名字永远稳定），
+    // 指定但 id 不认识就当场拒，别让界面渲染出一张谁都对不上的脸。
+    if (profile.avatarId && !isAvatarId(profile.avatarId)) {
+      throw new Error(`未知头像 id：${profile.avatarId}`);
+    }
+    const used = this.store
+      .listMembers(teamId)
+      .map((m) => m.avatarId)
+      .filter((x): x is string => typeof x === "string");
+    const picked: MemberProfile = { ...profile, avatarId: profile.avatarId ?? avatarFor(profile.name, used).id };
+    const file = this.store.writeMember(teamId, picked);
     this.audit("create_member", {
       teamId,
-      member: profile.name,
-      tools: profile.tools.length,
+      member: picked.name,
+      avatarId: picked.avatarId,
+      tools: picked.tools.length,
       justified: existing >= MEMBER_CAP,
     });
     return file;

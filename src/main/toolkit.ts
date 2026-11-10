@@ -49,6 +49,11 @@ export interface ToolkitOptions {
    */
   readRoots?: string[] | (() => string[]);
   /**
+   * 用户显式授予的可写附加根（默认没有）：命令可以把 cwd 指到这些目录里；
+   * 文件写入仍然只走工作区（这条是"跨项目跑构建/测试"的口子，不是放开写）。
+   */
+  writableRoots?: string[] | (() => string[]);
+  /**
    * 删除类命令的审批闸：成员可以改文件，但不能悄悄删。
    * 返回 ok=false 时命令不执行；未注入时一律拒绝（宁可做不了，也不给无审批的删除）。
    */
@@ -186,8 +191,9 @@ const HOME_VARS = /(%USERPROFILE%|\$env:USERPROFILE|\$HOME|(^|[\s"'=])~[\\/])/i;
  * 找出命令里第一处越出 root 的路径。返回人话原因；没有越界返回 null。
  * 纯函数（不碰文件系统），可单测。
  */
-export function findPathEscape(command: string, root: string): string | null {
+export function findPathEscape(command: string, root: string, extraRoots: string[] = []): string | null {
   const rootAbs = path.resolve(root);
+  const allowed = [rootAbs, ...extraRoots.map((r) => path.resolve(r))];
   if (HOME_VARS.test(command)) return "引用了用户主目录（%USERPROFILE% / $HOME / ~）";
   const targets: string[] = [];
   for (const re of [ABS_WIN, ABS_UNC, ABS_POSIX]) {
@@ -206,8 +212,11 @@ export function findPathEscape(command: string, root: string): string | null {
     } catch {
       continue;
     }
-    const rel = path.relative(rootAbs, abs);
-    if (rel.startsWith("..") || path.isAbsolute(rel)) return `越出工作区的路径：${clean}`;
+    const inside = allowed.some((b) => {
+      const rel = path.relative(b, abs);
+      return !rel.startsWith("..") && !path.isAbsolute(rel);
+    });
+    if (!inside) return `越出工作区与已授权根的路径：${clean}`;
   }
   // `..` 段：相对路径也能上跳
   if (/(^|[\s"'=()`;,|&])\.\.[\\/]/.test(command)) return "包含 .. 上跳路径";
@@ -226,6 +235,7 @@ export class Toolkit {
   private readonly browser?: ToolkitOptions["browser"];
   private readonly kb?: ToolkitOptions["kb"];
   private readonly readRootsSource: () => string[];
+  private readonly writableRootsSource: () => string[];
   private readonly onBeforeCommand?: ToolkitOptions["onBeforeCommand"];
 
   constructor(root: string, opts: ToolkitOptions = {}) {
@@ -240,12 +250,41 @@ export class Toolkit {
     this.kb = opts.kb;
     const src = opts.readRoots;
     this.readRootsSource = typeof src === "function" ? src : () => src ?? [];
+    const wsrc = opts.writableRoots;
+    this.writableRootsSource = typeof wsrc === "function" ? wsrc : () => wsrc ?? [];
     this.onBeforeCommand = opts.onBeforeCommand;
   }
 
   /** 本单授权的只读目录（界面/提示词要如实说明"能读哪儿"） */
   getReadRoots(): string[] {
     return this.readRootsSource().map((r) => path.resolve(r));
+  }
+
+  /** 用户授予的可写附加根（命令 cwd 可以进去；文件写入仍只走工作区） */
+  getWritableRoots(): string[] {
+    return this.writableRootsSource()
+      .map((r) => path.resolve(r))
+      .filter((r) => r !== this.root);
+  }
+
+  /** 命令 cwd：默认工作区；显式传 cwd 时必须落在工作区或可写附加根里 */
+  private resolveCommandCwd(raw: unknown): string {
+    if (raw === undefined || raw === "" || raw === null) return this.root;
+    const full = path.resolve(this.root, String(raw));
+    const allowed = [this.root, ...this.getWritableRoots()];
+    const ok = allowed.some((b) => {
+      const rel = path.relative(b, full);
+      return !rel.startsWith("..") && !path.isAbsolute(rel);
+    });
+    if (!ok) throw new Error(`cwd 越界：${String(raw)} 不在工作区或已授权的可写根里`);
+    let st: fs.Stats;
+    try {
+      st = fs.statSync(full);
+    } catch {
+      throw new Error(`cwd 不存在：${String(raw)}`);
+    }
+    if (!st.isDirectory()) throw new Error(`cwd 不是目录：${String(raw)}`);
+    return full;
   }
 
   /**
@@ -446,10 +485,16 @@ export class Toolkit {
   async runCommand(args: Record<string, unknown>): Promise<string> {
     const command = String(args.command ?? "").trim();
     if (!command) return "命令为空。";
+    let cwd: string;
+    try {
+      cwd = this.resolveCommandCwd(args.cwd);
+    } catch (err) {
+      return err instanceof Error ? err.message : String(err);
+    }
     // 1) 明确破坏性的先硬拒（不给"审批放行"的机会）
     for (const d of DANGEROUS) {
       if (d.re.test(command)) {
-        this.onAudit?.({ kind: "cmd_blocked", command, why: d.why, cwd: this.root });
+        this.onAudit?.({ kind: "cmd_blocked", command, why: d.why, cwd });
         return `已拒绝执行：${d.why}。这类命令不会自动执行（纵深防御规则，不是 OS 沙箱）。`;
       }
     }
@@ -457,31 +502,31 @@ export class Toolkit {
     const destructive = destructiveReason(command);
     if (destructive) {
       if (!this.onBeforeCommand) {
-        this.onAudit?.({ kind: "cmd_blocked", command, why: `删除需要用户点头（${destructive}），当前没有审批通道`, cwd: this.root });
+        this.onAudit?.({ kind: "cmd_blocked", command, why: `删除需要用户点头（${destructive}），当前没有审批通道`, cwd });
         return `已拒绝：删除类命令（${destructive}）需要用户点头，这次没有审批通道。请改成可撤销的写法（write_file 覆盖），或在回报里说明为什么必须删。`;
       }
       const verdict = await this.onBeforeCommand(command);
       if (!verdict.ok) {
-        this.onAudit?.({ kind: "cmd_blocked", command, why: `用户拒绝删除：${verdict.reason ?? destructive}`, cwd: this.root });
+        this.onAudit?.({ kind: "cmd_blocked", command, why: `用户拒绝删除：${verdict.reason ?? destructive}`, cwd });
         return `用户拒绝了这次删除（${destructive}）：${verdict.reason ?? "这个目录里的文件不能删"}。改用可撤销的写法（write_file 覆盖），或先交回报让用户决定。`;
       }
     }
     // 路径逃逸：文件工具钉在工作区，命令却能随手读全盘——这是"探针摸进你别的仓库"的直接原因
-    const escape = findPathEscape(command, this.root);
+    const escape = findPathEscape(command, this.root, this.getWritableRoots());
     if (escape) {
-      this.onAudit?.({ kind: "cmd_blocked", command, why: escape, cwd: this.root });
+      this.onAudit?.({ kind: "cmd_blocked", command, why: escape, cwd });
       return Promise.resolve(
         `已拒绝执行：${escape}。命令只能用任务工作区内的路径（工作区：${this.root}）。` +
           `需要工作区外的数据时，在回报里写 ESCALATE 说明，由人决定。`,
       );
     }
-    if (OUTBOUND.test(command)) this.onAudit?.({ kind: "cmd_net", command, cwd: this.root });
-    this.onAudit?.({ kind: "cmd_run", command, cwd: this.root });
+    if (OUTBOUND.test(command)) this.onAudit?.({ kind: "cmd_net", command, cwd });
+    this.onAudit?.({ kind: "cmd_run", command, cwd });
     const cap = this.outputCap;
     return new Promise((resolve) => {
       exec(
         command,
-        { cwd: this.root, timeout: this.commandTimeoutMs, maxBuffer: 4 * 1024 * 1024, windowsHide: true, env: { ...process.env } },
+        { cwd, timeout: this.commandTimeoutMs, maxBuffer: 4 * 1024 * 1024, windowsHide: true, env: { ...process.env } },
         (err, stdout, stderr) => {
           const cut = (s: string) => ((s ?? "").length > cap ? (s ?? "").slice(0, cap) + `…（截断，共 ${(s ?? "").length} 字符）` : (s ?? ""));
           if (err && !stdout && !stderr) {
@@ -746,8 +791,16 @@ export const TOOLKIT_SCHEMAS = [
     type: "function" as const,
     function: {
       name: "run_command",
-      description: "在工作区内执行一条命令（120s 超时，输出截断 8K；明显破坏性命令会被拒绝）。",
-      parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] },
+      description:
+        "在工作区内执行一条命令（120s 超时，输出截断 8K；明显破坏性命令会被拒绝）。cwd 仅可指向工作区或用户已授权的可写根。",
+      parameters: {
+        type: "object",
+        properties: {
+          command: { type: "string" },
+          cwd: { type: "string", description: "可选：命令在哪个目录跑（必须在工作区或已授权的可写根里）" },
+        },
+        required: ["command"],
+      },
     },
   },
 ];

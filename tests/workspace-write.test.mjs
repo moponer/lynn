@@ -98,7 +98,13 @@ test("派单：成员工作区 = 会话项目目录（可写），简报不污�
       { toolCalls: [tc("2", "submit_report", { text: "改好了", evidence: ["src/new.ts"] })] },
     ]);
 
-    kernel.runTool("assign_task", { teamId: "t1", taskId: "task-1", member: "阿黎", brief: "在 src 下加一个文件", deadline: "10 分钟" });
+    kernel.runTool("assign_task", {
+      teamId: "t1",
+      taskId: "task-1",
+      member: "阿黎",
+      brief: "【目标】在 src 下新增 new.ts 导出常量 x\n【完成标准】src/new.ts 存在且内容可编译\n【材料与位置】参考 src/a.ts 的写法（文件在工作区）\n【限制】只加文件，不要改既有代码",
+      deadline: "10 分钟",
+    });
     const plan = kernel.handle("session.snapshot").board.decisions.find((d) => d.kind === "plan" && d.jobId === "task-1");
     kernel.handle("decision.resolve", { id: plan.id, action: "start" });
 

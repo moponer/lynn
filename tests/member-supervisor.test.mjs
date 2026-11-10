@@ -71,7 +71,7 @@ async function until(fn, ms = 6000, label = "条件") {
 }
 
 function start(kernel, taskId = "task-1") {
-  kernel.runTool("assign_task", { teamId: "t1", taskId, member: "林工", brief: `做 ${taskId}`, deadline: "30 分钟" });
+  kernel.runTool("assign_task", { teamId: "t1", taskId, member: "林工", brief: `【目标】完成工单 ${taskId}\n【完成标准】产出结果文件，内容与源材料核对一致\n【材料与位置】材料文件在工作区\n【限制】只处理本单，不要动其他工单`, deadline: "30 分钟" });
   const plan = kernel.handle("session.snapshot").board.decisions.find((d) => d.kind === "plan" && d.jobId === taskId);
   kernel.handle("decision.resolve", { id: plan.id, action: "start" });
 }

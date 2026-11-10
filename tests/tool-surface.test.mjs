@@ -23,12 +23,14 @@ const LYNN_TOOLS = [
   "check_progress",
   "check_roster",
   "create_member",
+  "create_plugin_draft",
   "create_team",
   "dissolve_team",
   // 2026-11-04：指挥者要能"管"——催办在跑的成员、停掉明显做不到的单
   "nudge_member",
   "report_to_user",
   "review_result",
+  "save_memory",
   "ship_plugin",
   "stop_task",
 ];
@@ -64,7 +66,7 @@ const member = (over = {}) => ({
   ...over,
 });
 
-test("风铃的工具面恰好是 13 件管理工具", () => {
+test("风铃的工具面恰好是 15 件管理工具", () => {
   assert.deepEqual([...AGENT_TOOL_NAMES].sort(), LYNN_TOOLS);
 });
 

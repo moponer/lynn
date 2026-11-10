@@ -21,6 +21,20 @@
 | `status.bar` | 状态区读数 |
 | `composer.action` | 指令台动作按钮 |
 
+## 内置视图卡槽（v1 新增，仅官方）
+
+| 卡槽 | 语义 | 声明要求 |
+|---|---|---|
+| `stage.console` | 控制台主视图（整屏舞台） | 只许 `source: "official"`；必须声明 `contributes.view`（内置注册表里的 id）；`sandbox` 必须为 `false` |
+
+**为什么不给第三方**：这个卡槽要读会话快照、订阅内核事件、画 Canvas——全在宿主进程里，
+iframe 沙箱（U 档）拿不到 `window.lynn`。所以卡槽只开「选一个内置视图」，组件永远来自
+`src/renderer/console/registry.ts`，插件代码一行都不执行。第三方声明本卡槽会被 manifest
+校验直接拒（`contributes.slots: "stage.console" 只许官方插件声明`），不是靠自觉。
+
+L0 插件占本卡槽时**不读 entry、不下发 html**，只把 `view` 这个名字传给渲染层；
+禁用插件 → `<Slot>` 渲染空 → 自动回落值台，不需要在本地记「当前是不是大屏」。
+
 ## manifest 必填字段（v1）
 
 `id`（反向域名 `lynn.<作者>.<插件名>`）、`name`、`version`、`apiVersion`（=1）、`tier`（L0/L1/L2/U）、`engines.kernel`（版本闸门，不满足则禁用并提示）。

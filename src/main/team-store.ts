@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { normalizeRoots, primaryOf, type RootSet } from "./roots";
 
 /**
  * 团队存储（§4.10.7）—— 成员 = 书面岗位（Markdown + YAML frontmatter）。
@@ -42,6 +43,8 @@ export interface MemberProfile {
   };
   /** 何时必须升级问风铃（进而问你） */
   escalateWhen: string;
+  /** 头像库 id（见 shared/avatars）：用户可在设置→团队里改，招募时自动分配 */
+  avatarId?: string;
   /** 正文：这个岗位怎么做事的说明（由风铃写，可迭代） */
   body: string;
 }
@@ -69,6 +72,7 @@ export function serializeMemberProfile(p: MemberProfile): string {
     `  acceptance:`,
     yamlList(p.outputContract.acceptance, "    "),
     `escalate_when: ${JSON.stringify(p.escalateWhen)}`,
+    ...(p.avatarId ? [`avatar_id: ${JSON.stringify(p.avatarId)}`] : []),
   ].join("\n");
   return `---\n${fm}\n---\n\n${p.body.trim()}\n`;
 }
@@ -153,6 +157,9 @@ export function parseMemberProfile(md: string): MemberProfile {
       acceptance: nestedList("output_contract", "acceptance"),
     },
     escalateWhen: str("escalate_when"),
+    ...(lines.some((l) => l.startsWith("avatar_id:"))
+      ? { avatarId: JSON.parse(lines.find((l) => l.startsWith("avatar_id:"))!.slice(10).trim()) as string }
+      : {}),
     body: body.trim(),
   };
 }
@@ -205,6 +212,11 @@ export interface TeamRecord {
   /** 在职 | 暂停 | 已解散 */
   status: "active" | "paused" | "dissolved";
   budgetTokens: number;
+  /**
+   * 团队默认根（建队时从会话快照）：后续任务省略 workspace 时继承它。
+   * 模板不带根——模板复用的是"人"，不是某个项目的路径。
+   */
+  roots?: RootSet;
 }
 
 export interface TeamTemplate {
@@ -302,6 +314,24 @@ export class TeamStore {
     return JSON.parse(fs.readFileSync(file, "utf-8")) as TeamRecord;
   }
 
+  /** 记团队默认根（建队时从会话快照；任务省略 workspace 时继承） */
+  setRoots(teamId: string, roots: RootSet): TeamRecord {
+    const rec = this.readTeam(teamId);
+    const normalized = normalizeRoots(roots) ?? { extras: [] };
+    rec.roots = normalized;
+    fs.writeFileSync(path.join(this.teamDir(teamId), "team.json"), JSON.stringify(rec, null, 2));
+    return rec;
+  }
+
+  /** 团队默认主根（没记过 = 空串，由调用方回退到会话/默认工作区） */
+  workspaceOf(teamId: string): string {
+    try {
+      return primaryOf(this.readTeam(teamId).roots);
+    } catch {
+      return "";
+    }
+  }
+
   /** 在职团队（自动建队/隐式绑定只看这些；解散的队留着当资产，不能派活） */
   activeTeams(): TeamRecord[] {
     return this.listTeams().filter((t) => t.status === "active");
@@ -326,6 +356,39 @@ export class TeamStore {
       .readdirSync(dir)
       .filter((f) => f.endsWith(".md"))
       .map((f) => parseMemberProfile(fs.readFileSync(path.join(dir, f), "utf-8")));
+  }
+
+  /**
+   * 用户手动改岗位：只放行"角色 / 单一目标 / 岗位说明正文"三段。
+   * 工具白名单不在这里改——扩权必须走模板导入的收窄校验，避免界面变成提权入口。
+   */
+  updateMember(
+    teamId: string,
+    name: string,
+    patch: { role?: string; goal?: string; body?: string; avatarId?: string },
+  ): MemberProfile {
+    const p = this.readMember(teamId, name);
+    const next: MemberProfile = {
+      ...p,
+      ...(patch.role !== undefined ? { role: patch.role.trim() } : {}),
+      ...(patch.goal !== undefined ? { goal: patch.goal.trim() } : {}),
+      ...(patch.body !== undefined ? { body: patch.body } : {}),
+      ...(patch.avatarId !== undefined ? { avatarId: patch.avatarId } : {}),
+    };
+    if (!next.role) throw new Error("角色不能为空（这一列是成员卡上显示的身份）");
+    if (!next.goal) throw new Error("单一目标不能为空（成员据此收敛行为）");
+    this.writeMember(teamId, next);
+    return next;
+  }
+
+  /** 删成员：只删岗位档案；派单/回报记录留在 assignments 里当审计资产 */
+  removeMember(teamId: string, name: string): void {
+    const file = path.join(this.teamDir(teamId), "members", memberFileName(name));
+    if (!fs.existsSync(file)) throw new Error(`团队 ${teamId} 里没有成员「${name}」`);
+    const rest = this.listMembers(teamId).filter((p) => p.name !== name);
+    // 空编制 = 既派不了活又占着"在职团队"：要清空请直接解散，别留半截状态
+    if (rest.length === 0) throw new Error("这是团队最后一名成员：要清空编制请直接解散团队");
+    fs.unlinkSync(file);
   }
 
   /** 派单/回报/打回/验收记录：追加写，永不改写（§4.10.7） */
