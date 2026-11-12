@@ -616,6 +616,8 @@ app.whenReady().then(async () => {
       groupTags: [...document.querySelectorAll('.tg-tag')].map((x) => x.textContent.trim()),
       othersLabel: document.querySelector('.tgroup-others-h')?.textContent.trim() ?? null,
       othersTeams: document.querySelectorAll('.tgroup-others .tgroup-card').length,
+      gnotice: document.querySelector('.gnotice-t')?.textContent.trim().slice(0, 30) ?? null,
+      gnoticeHead: document.querySelector('.gnotice-h .k')?.textContent.trim() ?? null,
     }))()`);
     console.log("GROUPP1", JSON.stringify(info));
     // 右键一个成员卡 → 菜单

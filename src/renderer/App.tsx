@@ -853,6 +853,13 @@ export default function App() {
             .then(() => refresh())
             .catch((err) => setNotice(`置顶失败：${err instanceof Error ? err.message : String(err)}`));
         }}
+        onAnnounce={(text) => {
+          setNotice(null);
+          const id = desk.thread.id;
+          void rpc("thread.announcement", { id, text })
+            .then(() => refresh())
+            .catch((err) => setNotice(`群公告没存上：${err instanceof Error ? err.message : String(err)}`));
+        }}
         onThreadRemove={(id) => {
           setNotice(null);
           void rpc("thread.remove", { id })

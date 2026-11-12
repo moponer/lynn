@@ -220,6 +220,35 @@ test("右键菜单的数据源：成员档案 / 工单详情 / 催办", async ()
   }
 });
 
+test("群公告（全局段）：写进去 → 风铃每轮都看得见", async () => {
+  const { kernel } = setup();
+  try {
+    await kernel.init();
+    const id = kernel.handle("session.snapshot").thread.id;
+    const text = [
+      "整体：核 Q3 订单",
+      "林工：清洗源表，出 clean.csv",
+      "小林：对账并出差异表",
+      "接缝：林工的清洗结果交给小林，别两边各做一半",
+      "共享写入点：q3/ 目录归小林，其他人只读",
+    ].join("\n");
+    const r = kernel.handle("thread.announcement", { id, text });
+    assert.equal(r.ok, true);
+    assert.match(r.text, /接缝/);
+
+    // 风铃每轮都看得见它（system prompt 的本群上下文）
+    const prompt = kernel.systemPrompt();
+    assert.match(prompt, /本群公告/);
+    assert.match(prompt, /接缝：林工的清洗结果交给小林/);
+
+    // 快照带上（渲染层要显示）
+    const snap = kernel.handle("session.snapshot");
+    assert.match(snap.threads.find((t) => t.id === id)?.announcement ?? "", /共享写入点/);
+  } finally {
+    await kernel.dispose();
+  }
+});
+
 test("群列表未读：别群有动静 → 红点 +1；切进去清零", async () => {
   const { kernel } = setup();
   try {

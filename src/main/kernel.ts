@@ -1385,7 +1385,30 @@ export class Kernel {
    * 前缀保持稳定，技能抖动只影响尾部。
    */
   private systemPrompt(): string {
-    return composeSystemPrompt(this.persona.load()) + this.memory.systemPromptSection();
+    return composeSystemPrompt(this.persona.load()) + this.memory.systemPromptSection() + this.groupContext();
+  }
+
+  /**
+   * 本群上下文（群聊模式）：群公告（全局段）+ 本群成员名单。
+   * 切群本来就换 Pi 会话（前缀缓存本就要重置），所以放 system prompt 是安全的——
+   * 而且群公告必须在每轮都在：风铃派单前得先知道"谁管哪段、接缝在哪"。
+   */
+  private groupContext(): string {
+    if (!this.currentThreadId) return "";
+    const parts: string[] = [];
+    const ann = this.threads.get(this.currentThreadId)?.announcement?.trim();
+    if (ann) {
+      parts.push(`【本群公告（全局段：整体干什么 / 谁管哪段 / 接缝在哪 / 共享写入点归谁）】\n${ann}`);
+    }
+    const members = this.groupMembers();
+    if (members.length) {
+      parts.push(
+        `【本群成员（${members.length} 人）】\n` +
+          members.map((m) => `- ${m.name}${m.role ? `（${m.role}）` : ""}`).join("\n") +
+          "\n（@ 只对群里的人有意义；要对某个人说话就 @ 他；派单按公告里的分工与接缝来。）",
+      );
+    }
+    return parts.length ? `\n\n${parts.join("\n\n")}` : "";
   }
 
   // ---------- 当前生效模型（每对话覆盖 > 全局默认） ----------
@@ -5671,6 +5694,7 @@ export class Kernel {
               lastPreview: t.lastPreview,
               lastAt: t.lastAt,
               unread: t.unread ?? 0,
+              announcement: t.announcement,
             })),
           // 真在跑的成员单：台账"进行中"不等于在跑（卡住/停机也会留在 in_progress 历史里）
           running: this.runningTaskIds(),
@@ -6983,6 +7007,22 @@ export class Kernel {
           return { ok: true, pinned: Boolean(t.pinned) } as RpcContracts[M]["result"];
         } catch (err) {
           return { ok: false, pinned: false } as RpcContracts[M]["result"];
+        }
+      }
+
+      /**
+       * 群公告（全局段）：整体干什么 / 谁管哪段 / 接缝在哪 / 共享写入点归谁。
+       * 用户或风铃都能写；风铃每轮都看得见它（groupContext 进 system prompt）。
+       */
+      case "thread.announcement": {
+        const p = params as { id: string; text: string };
+        const id = String(p.id ?? "");
+        try {
+          this.threads.setAnnouncement(id, String(p.text ?? ""));
+          const t = this.threads.get(id);
+          return { ok: true, text: t?.announcement ?? "" } as RpcContracts[M]["result"];
+        } catch {
+          return { ok: false, text: "" } as RpcContracts[M]["result"];
         }
       }
 

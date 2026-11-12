@@ -190,6 +190,8 @@ export interface Desk {
     lastAt?: string;
     /** 未读（微信式群列表红点） */
     unread?: number;
+    /** 群公告（全局段：整体 / 分工 / 接缝） */
+    announcement?: string;
   }[];
 }
 

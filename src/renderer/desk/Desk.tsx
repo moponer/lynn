@@ -1685,6 +1685,7 @@ function Roster({
   onThread,
   /** @某人：把名字插进输入框（群聊模式） */
   onAt,
+  onAnnounce,
   open,
   onClose,
 }: {
@@ -1711,6 +1712,8 @@ function Roster({
   onManageTeam?: () => void;
   /** @某人：把名字插进输入框（群聊模式） */
   onAt?: (name: string) => void;
+  /** 写群公告（全局段）：保存后风铃下一轮就看得见 */
+  onAnnounce?: (text: string) => void;
 }) {
   const t = useT();
   // 成员状态由成员卡自己表达（排序 + 状态色），标题栏不再报两套互相打架的总数
@@ -1907,6 +1910,12 @@ function Roster({
     <aside className={`right${open ? " open" : ""}`}>
       <div className="right-scroll">
         {detail && <MemberDetail data={detail} onClose={() => setDetail(null)} />}
+        {onAnnounce && (
+          <GroupNotice
+            text={desk.threads.find((x) => x.id === desk.thread.id)?.announcement}
+            onSave={(text) => onAnnounce(text)}
+          />
+        )}
         {rosterNote && (
           <p className="roster-note" onClick={() => setRosterNote(null)}>
             {rosterNote}
@@ -2770,6 +2779,58 @@ function MemberDetail({ data, onClose }: { data: MemberDetailState; onClose: () 
         </div>
       ) : (
         <p className="mdetail-empty">没有读到这张单。</p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * 群公告 = 这个群的全局段（整体干什么 / 谁管哪段 / 接缝在哪 / 共享写入点归谁）。
+ * leader 那句「接缝没人接是头号事故」——所以接缝得是群级可见、能改的事实。
+ */
+function GroupNotice({ text, onSave }: { text?: string; onSave: (t: string) => void }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(text ?? "");
+  useEffect(() => {
+    setDraft(text ?? "");
+  }, [text]);
+  return (
+    <div className="gnotice">
+      <div className="gnotice-h">
+        <span className="k">群公告</span>
+        <button type="button" className="gnotice-toggle" onClick={() => setEditing((v) => !v)}>
+          {editing ? "收起" : text ? "改" : "写"}
+        </button>
+      </div>
+      {editing ? (
+        <>
+          <textarea
+            className="gnotice-in"
+            value={draft}
+            placeholder="整体干什么 · 谁管哪段 · 接缝在哪 · 共享写入点归谁"
+            onChange={(e) => setDraft(e.target.value)}
+          />
+          <div className="gnotice-acts">
+            <button type="button" className="ghost-btn" onClick={() => setEditing(false)}>
+              取消
+            </button>
+            <button
+              type="button"
+              className="ghost-btn"
+              onClick={() => {
+                onSave(draft);
+                setEditing(false);
+              }}
+            >
+              保存
+            </button>
+          </div>
+        </>
+      ) : (
+        <p className="gnotice-t">
+          {text ||
+            "还没写：这个群整体干什么、谁管哪段、接缝在哪——写一句，风铃派单就会照着它分工（它每轮都看得见）。"}
+        </p>
       )}
     </div>
   );
@@ -3724,6 +3785,7 @@ export function DeskView({
   onThreadRename,
   onThreadRemove,
   onThreadPin,
+  onAnnounce,
   onTaskFeed,
   onCreateTeam,
   onManageTeam,
@@ -3770,6 +3832,8 @@ export function DeskView({
   onThreadRemove?: (id: string) => void;
   /** 置顶 / 取消置顶（群列表微信式） */
   onThreadPin?: (id: string, pinned: boolean) => void;
+  /** 写群公告（全局段） */
+  onAnnounce?: (text: string) => void;
   /** 工单往来（跨会话追溯）：工单出发会话 ≠ 当前会话时按 threadId 回读 */
   onTaskFeed?: (taskId: string) => Promise<{ cards: FeedCard[]; threadId?: string; threadTitle?: string }>;
   /** 建团队（§4.10.3 修正）：用户只给名字，ID 由系统生成 */
@@ -3978,6 +4042,7 @@ export function DeskView({
           onCreateTeam={onCreateTeam}
           onManageTeam={onManageTeam}
           onAt={(name) => setAtTarget({ name, nonce: Date.now() })}
+          onAnnounce={(text) => onAnnounce?.(text)}
           onThread={(id) => {
             setRightOpen(false);
             onThread?.(id);

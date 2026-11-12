@@ -477,6 +477,8 @@ const snapshot = {
           pinned: true,
           lastPreview: "顾明：第 3 节已写完，条数从 1284 对到 1284，无缺口。",
           lastAt: "2026-11-02T14:32:00.000Z",
+          announcement:
+            "整体：把 issues_0914.csv 整理成周报第 3 节\n顾明：清洗源表并出 clean.csv\n周禾：对账并出差异表\n接缝：顾明的清洗结果交给周禾，别两边各做一半\n共享写入点：q3/ 目录归周禾，其他人只读",
         },
         {
           id: "t-2",

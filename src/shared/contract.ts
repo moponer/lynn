@@ -531,6 +531,8 @@ export interface SessionSnapshot {
     lastAt?: string;
     /** 未读：没看的这段时间这个群又发生了多少事（切进去即清零） */
     unread?: number;
+    /** 群公告（全局段） */
+    announcement?: string;
   }[];
   /** 真在跑的成员单（不只 status=in_progress：卡住但没在跑的不能算） */
   running?: string[];
@@ -1056,6 +1058,14 @@ export interface RpcContracts {
   "thread.pin": {
     params: { id: string; pinned: boolean };
     result: { ok: boolean; pinned: boolean };
+  };
+  /**
+   * 群公告 = 这个群的全局段（整体干什么 / 谁管哪段 / 接缝在哪 / 共享写入点归谁）。
+   * 风铃每轮都能看见它——接缝没人接是并行协作的头号事故。
+   */
+  "thread.announcement": {
+    params: { id: string; text: string };
+    result: { ok: boolean; text: string };
   };
   /**
    * 成员档案全量（群聊模式：右键成员看"他是谁"）。

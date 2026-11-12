@@ -36,6 +36,13 @@ export interface ThreadMeta {
    * 切进该群即清零。
    */
   unread?: number;
+  /**
+   * 群公告 = 这个群的「全局段」（2026-11-12 借 leader 的多 agent 并行段）：
+   * 整体干什么、谁管哪段、接缝在哪、共享写入点归谁。
+   * leader 那句「接缝没人接是头号事故」——接缝得有人认领，所以它得是群级可见的事实，
+   * 而不是藏在某一张单的简报里。
+   */
+  announcement?: string;
 }
 
 export interface ThreadState {
@@ -189,6 +196,18 @@ export class ThreadStore {
     const t = threads.find((x) => x.id === id);
     if (!t || !t.unread) return;
     t.unread = 0;
+    this.writeIndex(threads);
+  }
+
+  /** 群公告（全局段）：写空串 = 清空 */
+  setAnnouncement(id: string, text: string): void {
+    const threads = this.list();
+    const t = threads.find((x) => x.id === id);
+    if (!t) throw new Error(`会话不存在：${id}`);
+    const value = text.trim().slice(0, 2000);
+    if (value) t.announcement = value;
+    else delete t.announcement;
+    t.updatedAt = new Date().toISOString();
     this.writeIndex(threads);
   }
 
