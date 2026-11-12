@@ -8,23 +8,42 @@ import {
   viewOfYaw,
   yawForView,
 } from "../../shared/avatar";
+import { POSE_IMG, WALK_ANIM, BLINK_ANIM, type PoseName } from "./pet-assets";
 
 /**
- * 形象舞台（计划书 §2.5）。
+ * 形象舞台（计划书 §2.5 / 规范 §7）。
  *
- * 位置纪律：**不常驻主界面**，只出现在「我的风铃」与桌宠模式（设计规范 §7）。
- * 驱动契约是 U 插件位 `avatar.driver`：内置驱动用分层 SVG + CSS 3D 做三视图，
- * VRM 驱动（three-vrm）之后按同一接口替换，界面不用改。
+ * 渲染契约（U 插件位 `avatar.driver`）：内置驱动把**生成的短发女生 PNG** 当精灵渲染，
+ * 按运行态切姿态；VRM 驱动之后按同一接口替换，界面不用改。
+ *
+ * 姿态来源：assets/pet-dafeiyu（19 静帧 + walk/blink 两段 webp 循环），见 pet-assets.ts。
+ * - idle / 眨眼：播 BLINK_ANIM（自带呼吸感）
+ * - running：播 WALK_ANIM（在跑 = 走动）
+ * - thinking/success/failed/waiting/standby：静态姿态 + 克制 CSS 状态表达
+ * - mood 直接指定任一 19 姿态（演示 / 之后运行时表情系统用），优先于 state
+ *
+ * 三视图：素材目前只有正面；侧/背沿用 `rotateY` 3D 占位（转到侧面时精灵自然变薄片），
+ * 真·侧背图之后随 VRM 或三视图姿态包补齐。
  */
 
-export interface AvatarDriver {
-  load(model: string): Promise<void>;
-  play(state: AvatarState): void;
-  setMood(mood: string): void;
-  dispose(): void;
-}
-
 const VIEW_LABEL: Record<AvatarView, string> = { front: "正", side: "侧", back: "背" };
+
+/** 运行态 → 主姿态（静止帧） */
+const POSE_BY_STATE: Record<AvatarState, PoseName> = {
+  idle: "idle",
+  thinking: "think",
+  running: "talk", // 在跑：嘴在动，表达"正在干活"
+  success: "happy",
+  failed: "sad",
+  waiting_confirm: "surprise", // 等你确认：意外/等待的表情更传神
+  standby: "sleep",
+};
+
+/** 哪些态用 webp 循环动画（指定后优先于静态帧） */
+const ANIM_BY_STATE: Partial<Record<AvatarState, string>> = {
+  idle: BLINK_ANIM, // idle 自带眨眼循环
+  running: WALK_ANIM, // 在跑 = 走动
+};
 
 export function AvatarStage({
   state,
@@ -32,6 +51,7 @@ export function AvatarStage({
   bubble,
   height = 220,
   minimal = false,
+  mood,
 }: {
   state: AvatarState;
   /** 演示用：允许在面板里手动切状态（真实运行时由 Agent 事件流驱动） */
@@ -40,10 +60,15 @@ export function AvatarStage({
   height?: number;
   /** 桌宠模式：只留形象，不要机位按钮/状态按钮 */
   minimal?: boolean;
+  /** 直接指定任一 19 姿态（优先于 state） */
+  mood?: PoseName;
 }) {
   const [yaw, setYaw] = useState(0);
   const drag = useRef<{ x: number; yaw: number } | null>(null);
   const view = viewOfYaw(yaw);
+
+  const pose: PoseName = mood ?? POSE_BY_STATE[state];
+  const animUrl = !mood ? ANIM_BY_STATE[state] : undefined;
 
   const onDown = (e: React.PointerEvent) => {
     drag.current = { x: e.clientX, yaw };
@@ -58,8 +83,7 @@ export function AvatarStage({
     drag.current = null;
   };
 
-  const face = Math.max(0, 1 - Math.abs(clampYaw(yaw)) / 80);
-  const back = Math.min(1, Math.abs(clampYaw(yaw)) / 180);
+  const cls = `av-sprite${mood ? " mood-on" : ""}${animUrl ? " av-anim" : ""}`;
 
   return (
     <div className="av">
@@ -73,50 +97,23 @@ export function AvatarStage({
         title="拖动旋转 · 三视图"
       >
         <div className="av-rotor" style={{ transform: `rotateY(${yaw}deg)` }}>
-          <svg
-            className="av-figure"
-            data-state={state}
-            viewBox="0 0 200 240"
-            preserveAspectRatio="xMidYMid meet"
-            style={{ width: Math.round((height - 12) * (200 / 240)), height: height - 12 }}
-            aria-label={`风铃 · ${AVATAR_STATE_LABEL[state]}`}
-          >
-            <ellipse className="av-shadow" cx="100" cy="226" rx="46" ry="8" />
-
-            {/* 后层：背发（转到背面时露出来） */}
-            <path
-              className="av-hair-back"
-              d="M56 96c-6-44 20-72 44-72s50 28 44 72c-2 20-8 34-8 52 0 16 4 30 4 30H60s4-14 4-30c0-18-6-32-8-52z"
-              style={{ opacity: 0.35 + back * 0.65 }}
+          {animUrl ? (
+            <img
+              className={cls}
+              src={animUrl}
+              alt={`风铃 · ${AVATAR_STATE_LABEL[state]}`}
+              draggable={false}
             />
-
-            {/* 身体：蓝白裙裾 + 腰带 */}
-            <path className="av-dress" d="M74 148h52l16 66c-14 8-30 12-42 12s-28-4-42-12z" />
-            <path className="av-dress-2" d="M84 150h32l8 30H76z" />
-            <rect className="av-belt" x="78" y="146" width="44" height="6" rx="3" />
-
-            {/* 头 */}
-            <circle className="av-face" cx="100" cy="100" r="30" />
-            <path className="av-bangs" d="M68 98c0-26 14-42 32-42s32 16 32 42c-8-14-18-18-32-18s-24 4-32 18z" />
-
-            {/* 五官（正/背渐隐） */}
-            <g style={{ opacity: face }}>
-              <circle className="av-eye" cx="88" cy="104" r="2.6" />
-              <circle className="av-eye" cx="112" cy="104" r="2.6" />
-              <path className="av-mouth" d="M94 114q6 5 12 0" />
-              <circle className="av-blush" cx="80" cy="112" r="3" />
-              <circle className="av-blush" cx="120" cy="112" r="3" />
-            </g>
-
-            {/* 侧视时的一点鼻梁，避免纯平面 */}
-            <path className="av-nose" d="M126 104l6 4-6 3z" style={{ opacity: view === "side" ? 0.5 : 0 }} />
-
-            {/* 发间小铃铛 */}
-            <g className="av-bell" style={{ transformOrigin: "146px 78px" }}>
-              <circle cx="146" cy="78" r="6" />
-              <path d="M143 84h6" />
-            </g>
-          </svg>
+          ) : (
+            <img
+              className={cls}
+              data-pose={pose}
+              data-state={state}
+              src={POSE_IMG[pose]}
+              alt={`风铃 · ${AVATAR_STATE_LABEL[state]}`}
+              draggable={false}
+            />
+          )}
         </div>
 
         {bubble && <div className="av-bubble">{bubble}</div>}

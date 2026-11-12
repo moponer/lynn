@@ -529,6 +529,8 @@ export interface SessionSnapshot {
     lastPreview?: string;
     /** 最近一次有消息的时刻 */
     lastAt?: string;
+    /** 未读：没看的这段时间这个群又发生了多少事（切进去即清零） */
+    unread?: number;
   }[];
   /** 真在跑的成员单（不只 status=in_progress：卡住但没在跑的不能算） */
   running?: string[];

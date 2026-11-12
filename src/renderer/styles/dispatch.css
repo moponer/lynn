@@ -1287,25 +1287,25 @@ input, textarea { font: inherit; }
   transform-style: preserve-3d;
   transition: transform .18s ease-out;
 }
-.av-figure { width: 100%; height: 100%; overflow: visible; }
-.av-shadow { fill: rgba(0, 0, 0, .35); }
-.av-hair-back { fill: var(--blue-2); opacity: .8; }
-.av-dress { fill: var(--blue); opacity: .9; }
-.av-dress-2 { fill: var(--sheet-3); opacity: .9; }
-.av-belt { fill: var(--brass); }
-.av-face { fill: #f1d8c4; }
-.av-bangs { fill: var(--blue-2); }
-.av-eye { fill: #22303a; }
-.av-mouth { stroke: #c4756b; stroke-width: 1.6; fill: none; stroke-linecap: round; }
-.av-blush { fill: rgba(196, 117, 107, .5); }
-.av-nose { fill: #e2c2aa; }
-.av-bell circle { fill: var(--brass); }
-.av-bell path { stroke: var(--brass); stroke-width: 1.6; }
+.av-sprite {
+  width: 100%; height: 100%;
+  object-fit: contain;
+  object-position: center bottom;
+  overflow: visible;
+  filter: drop-shadow(0 6px 10px rgba(0, 0, 0, .22));
+  will-change: transform;
+}
+/* 状态表达：一切动效都表达状态，不做纯装饰循环（reduced-motion 下全停） */
+.av-sprite[data-state="idle"] { animation: av-breathe 4.2s ease-in-out infinite; transform-origin: 50% 92%; }
+.av-sprite[data-state="thinking"] { animation: av-float 2.6s ease-in-out infinite; }
+.av-sprite[data-state="failed"] { transform: rotate(-4deg); transform-origin: 50% 100%; }
+.av-sprite[data-state="standby"] { opacity: .5; filter: brightness(.82) drop-shadow(0 6px 10px rgba(0, 0, 0, .22)); }
+/* 手动指定心情（mood）：关掉呼吸，避免与指定动作打架 */
+.av-sprite.mood-on { animation: none; }
+/* drag：被拎起，靠上移营造悬空（图本身不画手） */
+.av-sprite[data-pose="drag"] { transform: translateY(-13%); }
 
-/* 状态动画：一切动效都表达状态，不做纯装饰循环 */
-.av-figure[data-state="idle"] .av-dress { animation: av-breathe 4.2s ease-in-out infinite; transform-origin: 100px 200px; }
-.av-figure[data-state="thinking"] { animation: av-float 2.6s ease-in-out infinite; }
-.av-figure[data-state="thinking"] .av-bell { animation: av-sway 1.6s ease-in-out infinite; }
+/* 状态动画见上方 .av-sprite[data-state=…] 块（idle/thinking/failed/standby 已定义） */
 
 /* 全局"在跑"信号：同一个脉冲复用到工单芯片 / 成员卡 / 进度卡；只表达状态，不动布局 */
 @keyframes live-pulse {
@@ -1322,22 +1322,21 @@ input, textarea { font: inherit; }
   .mcard-live,
   .job[data-running="1"],
   .job[data-running="1"] .job-mark,
-  .live-dot {
+  .live-dot,
+  .av-sprite {
     animation: none;
   }
   .job[data-running="1"] { box-shadow: 0 0 0 1.5px var(--blue); }
   .mcard[data-state="running"] .mcard-avatar { box-shadow: 0 0 0 2px var(--blue); }
 }
-.av-figure[data-state="running"] .av-dress { animation: av-sway-skirt 1.1s ease-in-out infinite; transform-origin: 100px 150px; }
-.av-figure[data-state="success"] .av-bell { animation: av-ring .7s ease-out 2; }
-.av-figure[data-state="failed"] { transform: rotate(-5deg); transform-origin: 100px 220px; }
-.av-figure[data-state="waiting_confirm"] .av-bell { animation: av-ring 1.4s ease-in-out infinite; }
-.av-figure[data-state="standby"] { opacity: .55; }
+/* running 用 WALK_ANIM webp 走动，无需 CSS；success 给一下轻弹，waiting 给轻摇 */
+.av-sprite[data-state="success"] { animation: av-pop .5s ease-out; }
+.av-sprite[data-state="waiting_confirm"] { animation: av-sway 1.4s ease-in-out infinite; transform-origin: 50% 100%; }
 
 @keyframes av-breathe { 50% { transform: scaleY(1.02); } }
 @keyframes av-float { 50% { transform: translateY(-4px); } }
 @keyframes av-sway { 50% { transform: rotate(9deg); } }
-@keyframes av-sway-skirt { 50% { transform: skewX(2.5deg); } }
+@keyframes av-pop { 0%, 100% { transform: scale(1); } 40% { transform: scale(1.06); } }
 @keyframes av-ring { 0%, 100% { transform: rotate(0); } 25% { transform: rotate(-14deg); } 75% { transform: rotate(14deg); } }
 
 .av-bubble {
@@ -1955,7 +1954,7 @@ button.ev:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 /* C3：时间与"在办/归档"分两段，各自截断——挤在一起时两样都读不出来 */
 .thread-meta { display: flex; justify-content: space-between; gap: 8px; }
 .thread-meta > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.thread-counts { color: var(--ink-4); }
+.thread-counts { color: var(--ink-4); font-size: var(--fs-label); flex: none; }
 .thread-row:hover { background: var(--hover-bg); }
 .thread-row.on { background: var(--blue-wash); }
 .thread-row.on .thread-name { color: var(--blue); }
@@ -2457,6 +2456,13 @@ html[data-mode="light"] { color-scheme: light; }
   padding: 1px 6px; background: var(--blue-wash);
 }
 .at-chip .ic { width: 12px; height: 12px; }
+/* 群里被 @ 但还没人接：标出来，别让人干等（纯界面判断，不烧 token） */
+.at-pending {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-family: var(--f-mono); font-size: var(--fs-label); letter-spacing: 0;
+  color: var(--brass); background: var(--brass-wash);
+  border-radius: var(--r-s); padding: 1px 6px;
+}
 /* 右栏编制表（群聊模式）：本群标 + 他群折叠区 + 成员详情 */
 .tg-tag {
   font-family: var(--f-mono); font-size: var(--fs-label); letter-spacing: 0;

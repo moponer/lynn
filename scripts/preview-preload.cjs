@@ -78,6 +78,15 @@ const feed = [
     },
     createdAt: "10-28",
   },
+  // 走查：群里 @ 了成员但风铃还没接住 → 该卡要标「待风铃处理」
+  {
+    id: "c9",
+    kind: "user",
+    createdAt: "14:34",
+    text: "@林工 这张表的第二列按季度重出，别按周。",
+    author: { kind: "user" },
+    mentions: [{ kind: "member", name: "林工", memberId: "林工" }],
+  },
   // 走查：系统总结输出带表格/代码块，验证「不是一坨纯文本」
   {
     id: "c7",

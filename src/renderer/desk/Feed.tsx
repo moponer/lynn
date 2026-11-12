@@ -141,8 +141,9 @@ function Who({
 /**
  * 群里点名：这条消息 @ 了谁。
  * 定向诉求不能只藏在正文里——用户要一眼看见"这话是对谁说的"。
+ * pending = 这条 @ 还没人接（等风铃）：标出来，别让人干等。
  */
-function Mentions({ mentions }: { mentions?: FeedMention[] }) {
+function Mentions({ mentions, pending }: { mentions?: FeedMention[]; pending?: boolean }) {
   if (!mentions || !mentions.length) return null;
   return (
     <div className="feed-at">
@@ -152,6 +153,7 @@ function Mentions({ mentions }: { mentions?: FeedMention[] }) {
           {m.kind === "lynn" ? "风铃" : m.name}
         </span>
       ))}
+      {pending && <span className="at-pending">待风铃处理</span>}
     </div>
   );
 }
@@ -228,6 +230,25 @@ export function FeedView({
     .filter((c) => c.kind === "system" && Boolean(c.code) && Boolean(c.action) && c.action !== "none")
     .slice(-1);
   const visible = pinned.length && !base.some((c) => c.id === pinned[0].id) ? [...pinned, ...base] : base;
+  /**
+   * 群里被 @ 的消息是否还没人接（群聊模式）：
+   * 其后还没有风铃的回应 → 标「待风铃处理」。纯界面判断，不额外烧 token。
+   * 判定与内核 pendingMentions 一致：出错的卡不算回应（模型挂掉的重试提示也是 lynn 卡）。
+   */
+  const awaitingLynn = (() => {
+    const set = new Set<string>();
+    let answered = false;
+    for (let i = visible.length - 1; i >= 0; i -= 1) {
+      const c = visible[i];
+      if (c.code) continue;
+      if (c.author?.kind === "lynn" || (c.kind === "lynn" && (c.text ?? "").trim())) {
+        answered = true;
+        continue;
+      }
+      if (c.kind === "user" && c.mentions?.length && !answered) set.add(c.id);
+    }
+    return set;
+  })();
   if (cards.length === 0) return <div className="feed-empty">{empty ?? "还没有往来。"}</div>;
   return (
     <div className="feed">
@@ -252,7 +273,7 @@ export function FeedView({
           return (
             <div className="feed-item user" key={c.id}>
               <Who icon="user" name="你" tone="user" meta={c.meta || c.createdAt} />
-              <Mentions mentions={c.mentions} />
+              <Mentions mentions={c.mentions} pending={awaitingLynn.has(c.id)} />
               <div className="feed-text md-wrap">
                 <RichText text={c.text ?? ""} />
                 {c.meta && <span className="feed-meta mono">{c.meta}</span>}

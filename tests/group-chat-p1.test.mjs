@@ -89,6 +89,21 @@ async function until(fn, ms = 5000, label = "等待") {
   assert.fail(`等待超时：${label}`);
 }
 
+const tc = (id, name, args) => ({ id, name, arguments: JSON.stringify(args) });
+
+/** 假模型：写文件 → 带证据回报（成员侧） */
+function scriptedChat(script) {
+  let i = 0;
+  return async (input) => {
+    const step = script[Math.min(i++, script.length - 1)];
+    input.messages.push({ role: "assistant", content: step.content ?? null, tool_calls: step.toolCalls ?? [] });
+    for (const call of step.toolCalls ?? []) {
+      input.messages.push({ role: "tool", tool_call_id: call.id, name: call.name, content: "（工具结果占位）" });
+    }
+    return { content: step.content ?? "", toolCalls: step.toolCalls ?? [], promptTokens: 10, completionTokens: 5 };
+  };
+}
+
 test("群绑定：派单建队时把队绑到当前群；本群队伍优先复用", async () => {
   const { kernel, teams } = setup();
   try {
@@ -200,6 +215,41 @@ test("右键菜单的数据源：成员档案 / 工单详情 / 催办", async ()
     const nudge = kernel.handle("task.nudge", { taskId: "task-1" });
     assert.equal(nudge.ok, false);
     assert.match(nudge.error, /没有在跑/);
+  } finally {
+    await kernel.dispose();
+  }
+});
+
+test("群列表未读：别群有动静 → 红点 +1；切进去清零", async () => {
+  const { kernel } = setup();
+  try {
+    await kernel.init();
+    kernel.memberChatFn = scriptedChat([
+      { toolCalls: [tc("1", "write_file", { path: "report.md", content: "# 月报\nGMV 100.00" })] },
+      { toolCalls: [tc("2", "submit_report", { text: "月报完成，数字来自源表", evidence: ["report.md"] })] },
+    ]);
+    const threadA = kernel.handle("session.snapshot").thread.id;
+    assign(kernel, "task-1");
+    start(kernel, "task-1");
+
+    // 切到别的群（= 离开 A）
+    const created = kernel.handle("session.new");
+    assert.notEqual(created.threadId, threadA, "要真的离开 A 才能算未读");
+
+    await until(
+      () => kernel.handle("session.snapshot").board.track.some((t) => t.id === "task-1" && t.status === "in_review"),
+      8000,
+      "成员回报进待审查",
+    );
+
+    const snap = kernel.handle("session.snapshot");
+    const thA = snap.threads.find((t) => t.id === threadA);
+    assert.ok((thA?.unread ?? 0) >= 1, "别群有动静 → 这个群未读 +1");
+
+    // 切进去 = 都看过了 → 清零
+    kernel.handle("thread.switch", { id: threadA });
+    const after = kernel.handle("session.snapshot");
+    assert.equal(after.threads.find((t) => t.id === threadA)?.unread, 0, "切进去未读清零");
   } finally {
     await kernel.dispose();
   }

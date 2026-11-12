@@ -1256,6 +1256,7 @@ export class Kernel {
         last.body = c.body;
         last.createdAt = new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
         this.threads.saveState(threadId, { feed: st.feed.slice(-200), history: st.history });
+        this.threads.bumpUnread(threadId);
         this.notify({ type: "thread", threadId });
         return last;
       }
@@ -1269,6 +1270,8 @@ export class Kernel {
     };
     st.feed.push(full);
     this.threads.saveState(threadId, { feed: st.feed.slice(-200), history: st.history });
+    // 这个群你没在看 → 未读 +1（微信式群列表的红点）
+    this.threads.bumpUnread(threadId);
     this.notify({ type: "thread", threadId });
     return full;
   }
@@ -1774,6 +1777,7 @@ export class Kernel {
     if (!meta) throw new Error(`会话不存在：${id}`);
     this.persistThread();
     this.currentThreadId = id;
+    this.threads.markRead(id); // 切进来 = 都看过了（群列表红点清零）
     const st = this.threads.loadState(id);
     this.feed = [];
     this.history = [];
@@ -5620,6 +5624,7 @@ export class Kernel {
               pinned: t.pinned,
               lastPreview: t.lastPreview,
               lastAt: t.lastAt,
+              unread: t.unread ?? 0,
             })),
           // 真在跑的成员单：台账"进行中"不等于在跑（卡住/停机也会留在 in_progress 历史里）
           running: this.runningTaskIds(),

@@ -188,6 +188,8 @@ export interface Desk {
     lastPreview?: string;
     /** 最近一次有消息的时刻 */
     lastAt?: string;
+    /** 未读（微信式群列表红点） */
+    unread?: number;
   }[];
 }
 

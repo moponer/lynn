@@ -34,9 +34,10 @@ app.whenReady().then(async () => {
   });
   win.webContents.on("render-process-gone", (_e, details) => console.log("RENDER GONE", details));
 
+  const petMood = process.env.LYNN_PET_MOOD;
   await win.loadFile(
     path.join(__dirname, "..", "dist", "renderer", "index.html"),
-    isPet ? { query: { pet: "1" } } : undefined,
+    isPet ? { query: petMood ? { pet: "1", mood: petMood } : { pet: "1" } } : undefined,
   );
   await new Promise((r) => setTimeout(r, 1200));
 
@@ -572,6 +573,7 @@ app.whenReady().then(async () => {
         users: users.length,
         talks: talks.length,
         atChips: document.querySelectorAll('.at-chip').length,
+      atPending: [...document.querySelectorAll('.at-pending')].map((x) => x.textContent.trim()),
         chipText: [...document.querySelectorAll('.at-chip')].map((x) => x.textContent.trim()),
         talkNames: [...document.querySelectorAll('.feed-item.talk .fv-name')].map((x) => x.textContent.trim()),
         talkRoles: [...document.querySelectorAll('.fv-role')].map((x) => x.textContent.trim()),

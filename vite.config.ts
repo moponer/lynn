@@ -29,6 +29,9 @@ export default defineConfig({
   resolve: {
     alias: {
       "@shared": resolve(__dirname, "src/shared"),
+      // 桌宠形象素材（短发 v3，assets/pet-dafeiyu）：静态 import 进前端 bundle，
+      // 走 Vite 资源管线（file:// + 相对路径），不联网、不碰 CSP。
+      "@pet": resolve(__dirname, "assets/pet-dafeiyu"),
     },
   },
 });

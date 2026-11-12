@@ -31,6 +31,11 @@ export interface ThreadMeta {
   lastAt?: string;
   /** 置顶：群列表里排在最前 */
   pinned?: boolean;
+  /**
+   * 未读计数（微信式群列表）：这个群在你没看的时候又发生了多少事。
+   * 切进该群即清零。
+   */
+  unread?: number;
 }
 
 export interface ThreadState {
@@ -164,6 +169,27 @@ export class ThreadStore {
     t.pinned = pinned;
     this.writeIndex(threads);
     return t;
+  }
+
+  /**
+   * 未读 +1（这个群在你没看的时候又有动静了）。
+   * 只给"落在别群"的卡用——用户自己发的消息不算"自己没看"。
+   */
+  bumpUnread(id: string, n = 1): void {
+    const threads = this.list();
+    const t = threads.find((x) => x.id === id);
+    if (!t) return;
+    t.unread = (t.unread ?? 0) + n;
+    this.writeIndex(threads);
+  }
+
+  /** 切进这个群 = 都看过了（未读清零） */
+  markRead(id: string): void {
+    const threads = this.list();
+    const t = threads.find((x) => x.id === id);
+    if (!t || !t.unread) return;
+    t.unread = 0;
+    this.writeIndex(threads);
   }
 
   remove(id: string): void {

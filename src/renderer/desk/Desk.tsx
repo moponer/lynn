@@ -581,8 +581,13 @@ function Ledger({
                             </span>
                             <span className="thread-prev">{th.lastPreview ?? ""}</span>
                           </span>
-                          {th.counts && th.counts.active > 0 && (
-                            <span className="thread-badge">{th.counts.active}</span>
+                          {th.unread ? (
+                            <span className="thread-badge">{th.unread > 99 ? "99+" : th.unread}</span>
+                          ) : (
+                            th.counts &&
+                            th.counts.active > 0 && (
+                              <span className="thread-counts mono">{th.counts.active}</span>
+                            )
                           )}
                         </button>
                         <span className="thread-acts">
