@@ -523,6 +523,12 @@ export interface SessionSnapshot {
     updatedAt: string;
     projectRoot?: string;
     counts?: { active: number; archived: number };
+    /** 置顶（群列表排最前） */
+    pinned?: boolean;
+    /** 最近一条消息摘要（微信式群列表） */
+    lastPreview?: string;
+    /** 最近一次有消息的时刻 */
+    lastAt?: string;
   }[];
   /** 真在跑的成员单（不只 status=in_progress：卡住但没在跑的不能算） */
   running?: string[];
@@ -1043,6 +1049,70 @@ export interface RpcContracts {
   "thread.search": {
     params: { q: string };
     result: { results: { id: string; title: string; hits: string[] }[] };
+  };
+  /** 置顶 / 取消置顶（群列表微信式） */
+  "thread.pin": {
+    params: { id: string; pinned: boolean };
+    result: { ok: boolean; pinned: boolean };
+  };
+  /**
+   * 成员档案全量（群聊模式：右键成员看"他是谁"）。
+   * 岗位说明书 + 战绩 + 手上那张单。
+   */
+  "team.member.detail": {
+    params: { teamId: string; name: string };
+    result: {
+      ok: boolean;
+      error?: string;
+      profile?: {
+        name: string;
+        role: string;
+        goal: string;
+        boundaries: string[];
+        tools: string[];
+        model: string;
+        limits: { maxTurns: number; budgetTokens: number; wallClockMin: number };
+        outputContract: { deliverable: string; evidence: string[]; acceptance: string[] };
+        escalateWhen: string;
+        body: string;
+        avatarId?: string;
+      };
+      record?: { tasks: number; accepted: number; rejected: number; escalations: number };
+      job?: { id: string; title: string; status: string };
+    };
+  };
+  /**
+   * 工单详情（群聊模式：右键成员看"他在做什么"）。
+   * 目标 / 完成标准 / 状态 / 工作区 / 交付物 / 卷宗时间线尾部。
+   */
+  "task.detail": {
+    params: { taskId: string };
+    result: {
+      ok: boolean;
+      error?: string;
+      detail?: {
+        id: string;
+        title: string;
+        member?: string;
+        teamId: string;
+        status: string;
+        statusNote: string;
+        goal?: string;
+        acceptance: string[];
+        brief?: string;
+        workspaceRoot?: string;
+        deliverables: { label: string; ref: string; bytes?: number }[];
+        timeline: { at: string; kind: string; text: string }[];
+      };
+    };
+  };
+  /**
+   * 用户催办（群聊模式：右键成员"催一下"）。
+   * 催办本身不越权：话照转给成员（下一轮生效），由风铃决定要不要返工或改口径。
+   */
+  "task.nudge": {
+    params: { taskId: string; note?: string };
+    result: { ok: boolean; error?: string; member?: string };
   };
   /**
    * 某张工单的往来。工单在 A 会话派出、用户切到 B 会话后，

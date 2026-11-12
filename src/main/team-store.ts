@@ -217,6 +217,12 @@ export interface TeamRecord {
    * 模板不带根——模板复用的是"人"，不是某个项目的路径。
    */
   roots?: RootSet;
+  /**
+   * 这个群（会话）就是这支队的群（2026-11-12 群聊模式）。
+   * 之前靠"最近一张单的 threadId == 当前会话"猜同一条任务线，猜错就把别群的人塞进来；
+   * 显式绑定后："本群成员"= 这支队，"其他团队"= 别的群，两者不再混。
+   */
+  threadId?: string;
 }
 
 export interface TeamTemplate {
@@ -281,7 +287,7 @@ export class TeamStore {
     return path.join(this.dataRoot, "team", assertValidTeamId(teamId));
   }
 
-  createTeam(id: string, name: string, budgetTokens = 1_000_000): TeamRecord {
+  createTeam(id: string, name: string, budgetTokens = 1_000_000, threadId?: string): TeamRecord {
     const safeId = assertValidTeamId(id);
     const rec: TeamRecord = {
       id: safeId,
@@ -289,6 +295,7 @@ export class TeamStore {
       createdAt: new Date().toISOString(),
       status: "active",
       budgetTokens,
+      ...(threadId ? { threadId } : {}),
     };
     const dir = this.teamDir(safeId);
     fs.mkdirSync(path.join(dir, "members"), { recursive: true });
@@ -312,6 +319,18 @@ export class TeamStore {
     const file = path.join(this.teamDir(teamId), "team.json");
     if (!fs.existsSync(file)) throw new Error(`团队不存在: ${teamId}`);
     return JSON.parse(fs.readFileSync(file, "utf-8")) as TeamRecord;
+  }
+
+  /**
+   * 绑定这支队属于哪个群（2026-11-12 群聊模式）。
+   * 只在未绑定或本来就属于这个群时写——不让旧队的归属被别群悄悄改掉。
+   */
+  bindThread(teamId: string, threadId: string): TeamRecord {
+    const rec = this.readTeam(teamId);
+    if (rec.threadId) return rec; // 已绑定（同一群或别的群）都不改
+    rec.threadId = threadId;
+    fs.writeFileSync(path.join(this.teamDir(teamId), "team.json"), JSON.stringify(rec, null, 2), "utf-8");
+    return rec;
   }
 
   /** 记团队默认根（建队时从会话快照；任务省略 workspace 时继承） */

@@ -22,6 +22,15 @@ export interface ThreadMeta {
   projectRoot?: string;
   /** 这个对话单独指定的模型；不设 = 跟随全局默认模型 */
   modelId?: string;
+  /**
+   * 群里最近一条消息的摘要（2026-11-12 群聊模式，左栏微信式群列表用）。
+   * 内核落盘——跨会话也能看见"这个群在聊什么"，不用逐个切进去读。
+   */
+  lastPreview?: string;
+  /** 最近一次有消息的时刻（ISO） */
+  lastAt?: string;
+  /** 置顶：群列表里排在最前 */
+  pinned?: boolean;
 }
 
 export interface ThreadState {
@@ -134,6 +143,27 @@ export class ThreadStore {
     if (!t) return;
     t.updatedAt = new Date().toISOString();
     this.writeIndex(threads);
+  }
+
+  /** 记群里最近一条消息摘要 + 时刻（微信式群列表用） */
+  setPreview(id: string, preview: string, at?: string): void {
+    const threads = this.list();
+    const t = threads.find((x) => x.id === id);
+    if (!t) return;
+    t.lastPreview = preview.slice(0, 120);
+    t.lastAt = at ?? new Date().toISOString();
+    t.updatedAt = new Date().toISOString();
+    this.writeIndex(threads);
+  }
+
+  /** 置顶 / 取消置顶（群列表） */
+  setPinned(id: string, pinned: boolean): ThreadMeta {
+    const threads = this.list();
+    const t = threads.find((x) => x.id === id);
+    if (!t) throw new Error(`会话不存在：${id}`);
+    t.pinned = pinned;
+    this.writeIndex(threads);
+    return t;
   }
 
   remove(id: string): void {

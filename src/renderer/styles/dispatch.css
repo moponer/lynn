@@ -1926,9 +1926,29 @@ button.ev:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 }
 .thread-q:focus { box-shadow: inset 0 0 0 1px var(--edge-focus), 0 0 0 3px var(--blue-wash); }
 .thread-row {
-  display: flex; flex-direction: column; gap: 2px; border: 0; background: none;
+  display: flex; flex-direction: row; align-items: center; gap: 8px; border: 0; background: none;
   color: var(--ink-2); font: inherit; font-size: var(--fs-meta); padding: 6px 8px;
   border-radius: var(--r-s); text-align: left; cursor: pointer;
+}
+/* 微信式群列表：头像块 + 群名/最近一句 + 时间/角标 */
+.thread-av {
+  flex: none; width: 26px; height: 26px; border-radius: var(--r-s);
+  display: grid; place-items: center; background: var(--blue-wash); color: var(--blue);
+  font-size: var(--fs-label);
+}
+.thread-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.thread-row1 { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.thread-row1 .thread-time { margin-left: auto; flex: none; }
+.thread-name {
+  display: flex; align-items: center; gap: 5px; font-size: var(--fs-body); font-weight: 500; color: var(--ink);
+  min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.thread-pin { font-family: var(--f-mono); font-size: var(--fs-label); color: var(--brass); flex: none; }
+.thread-prev { font-size: var(--fs-label); color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.thread-badge {
+  flex: none; min-width: 16px; height: 16px; padding: 0 5px; border-radius: 8px;
+  background: var(--seal-wash); color: var(--seal);
+  font-size: var(--fs-label); display: grid; place-items: center;
 }
 .thread-row b { font-weight: 500; color: var(--ink); font-size: var(--fs-body); }
 .thread-row small { color: var(--ink-3); font-size: var(--fs-label); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1938,7 +1958,7 @@ button.ev:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 .thread-counts { color: var(--ink-4); }
 .thread-row:hover { background: var(--hover-bg); }
 .thread-row.on { background: var(--blue-wash); }
-.thread-row.on b { color: var(--blue); }
+.thread-row.on .thread-name { color: var(--blue); }
 /* C5：会话行 hover 才出改名/删除，常驻会挤压标题；键盘 focus 同样显形 */
 .thread-line { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; }
 .thread-line .thread-row { flex: 1; min-width: 0; }
@@ -2437,6 +2457,32 @@ html[data-mode="light"] { color-scheme: light; }
   padding: 1px 6px; background: var(--blue-wash);
 }
 .at-chip .ic { width: 12px; height: 12px; }
+/* 右栏编制表（群聊模式）：本群标 + 他群折叠区 + 成员详情 */
+.tg-tag {
+  font-family: var(--f-mono); font-size: var(--fs-label); letter-spacing: 0;
+  color: var(--blue); background: var(--blue-wash);
+  border-radius: var(--r-s); padding: 0 5px; margin-left: 6px;
+}
+.tgroup-others { margin-top: 10px; }
+.tgroup-others-h {
+  font-family: var(--f-mono); font-size: var(--fs-label); letter-spacing: 0;
+  color: var(--ink-4); padding: 2px 2px 6px;
+}
+.mdetail { background: var(--sheet-2); border-radius: var(--r-m); padding: 10px 12px; margin-bottom: 10px; }
+.mdetail-h { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.mdetail-name { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.mdetail-name b { font-size: var(--fs-body); color: var(--ink); }
+.mdetail-role { font-size: var(--fs-meta); color: var(--ink-3); }
+.mdetail-h .icon-btn { margin-left: auto; }
+.mdetail-body { display: flex; flex-direction: column; gap: 6px; }
+.mdetail-row { display: grid; grid-template-columns: 56px 1fr; gap: 8px; align-items: start; }
+.mdetail-row .k { font-size: var(--fs-meta); color: var(--ink-4); }
+.mdetail-row .v { font-size: var(--fs-meta); color: var(--ink-2); overflow-wrap: anywhere; }
+.mdetail-empty { font-size: var(--fs-meta); color: var(--ink-3); margin: 0; }
+.roster-note {
+  font-size: var(--fs-meta); color: var(--blue); background: var(--blue-wash);
+  border-radius: var(--r-s); padding: 4px 8px; margin: 0 0 8px; cursor: pointer;
+}
 .feed-item.system .feed-text { font-size: var(--fs-meta); color: var(--ink-3); }
 .feed-item.system .md p { font-size: var(--fs-meta); color: var(--ink-3); }
 .feed-item.user .feed-text, .feed-item.lynn .feed-text { color: var(--ink); }

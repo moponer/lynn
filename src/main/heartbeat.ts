@@ -25,6 +25,16 @@ export interface HeartbeatScheduleFact {
   lastStatus: string;
 }
 
+/** 群里 @ 了人但还没回应的诉求（2026-11-12 群聊模式） */
+export interface HeartbeatMentionFact {
+  /** 被点名的成员 */
+  member: string;
+  /** 用户原话摘要 */
+  text: string;
+  /** 什么时候点的（卡片时刻） */
+  at: string;
+}
+
 export interface HeartbeatFacts {
   /** 待审查：成员已回报等验收 */
   awaitingReview: HeartbeatTaskFact[];
@@ -37,6 +47,11 @@ export interface HeartbeatFacts {
   orphanTasks: HeartbeatTaskFact[];
   /** 定时任务上次执行异常 */
   scheduleIssues: HeartbeatScheduleFact[];
+  /**
+   * 群里 @ 了成员但风铃还没接住（2026-11-12 群聊模式）。
+   * 用户 @某人 = 对这个人的定向诉求；用户已定：走心跳兜底，不强制当轮回应。
+   */
+  unansweredMentions: HeartbeatMentionFact[];
 }
 
 const REVIEWABLE = new Set(["in_review"]);
@@ -53,6 +68,8 @@ export function collectHeartbeatFacts(input: {
   runningTaskIds: readonly string[];
   pendingPlanTaskIds: readonly string[];
   schedules: { id: string; name: string; enabled?: boolean; lastStatus?: string }[];
+  /** 群里 @ 了人但风铃还没回应的（由内核从对话流派生） */
+  pendingMentions?: { member: string; text: string; at: string }[];
 }): HeartbeatFacts {
   const running = new Set(input.runningTaskIds);
   const awaitingPlan = new Set(input.pendingPlanTaskIds);
@@ -83,7 +100,17 @@ export function collectHeartbeatFacts(input: {
   const scheduleIssues = input.schedules
     .filter((s) => s.enabled !== false && SCHEDULE_BAD.has(String(s.lastStatus)))
     .map((s) => ({ id: s.id, name: s.name, lastStatus: String(s.lastStatus) }));
-  return { awaitingReview, stalledTasks, orphanTasks, scheduleIssues };
+  return {
+    awaitingReview,
+    stalledTasks,
+    orphanTasks,
+    scheduleIssues,
+    unansweredMentions: (input.pendingMentions ?? []).map((m) => ({
+      member: m.member,
+      text: m.text,
+      at: m.at,
+    })),
+  };
 }
 
 /** 同一批事实的去重键：内容没变就不重复打扰（30 分钟窗口由调用方控制） */
@@ -98,6 +125,7 @@ export function heartbeatSignature(facts: HeartbeatFacts): string {
     part(facts.orphanTasks),
     part(facts.stalledTasks),
     part(facts.scheduleIssues),
+    facts.unansweredMentions.map((m) => `${m.member}@${m.at}`).sort().join(","),
   ].join("|");
 }
 
@@ -106,7 +134,8 @@ export function heartbeatIsEmpty(facts: HeartbeatFacts): boolean {
     facts.awaitingReview.length === 0 &&
     facts.stalledTasks.length === 0 &&
     facts.orphanTasks.length === 0 &&
-    facts.scheduleIssues.length === 0
+    facts.scheduleIssues.length === 0 &&
+    facts.unansweredMentions.length === 0
   );
 }
 
@@ -124,12 +153,20 @@ export function capHeartbeatFacts(
   const awaitingReview = facts.awaitingReview.slice(0, cap);
   const orphanTasks = facts.orphanTasks.slice(0, Math.max(0, cap - awaitingReview.length));
   const stalledTasks = facts.stalledTasks.slice(0, Math.max(0, cap - awaitingReview.length - orphanTasks.length));
+  const unansweredMentions = facts.unansweredMentions.slice(
+    0,
+    Math.max(0, cap - awaitingReview.length - orphanTasks.length - stalledTasks.length),
+  );
   const dropped =
     facts.awaitingReview.length -
     awaitingReview.length +
     (facts.orphanTasks.length - orphanTasks.length) +
-    (facts.stalledTasks.length - stalledTasks.length);
-  return { facts: { awaitingReview, orphanTasks, stalledTasks, scheduleIssues: facts.scheduleIssues }, dropped };
+    (facts.stalledTasks.length - stalledTasks.length) +
+    (facts.unansweredMentions.length - unansweredMentions.length);
+  return {
+    facts: { awaitingReview, orphanTasks, stalledTasks, scheduleIssues: facts.scheduleIssues, unansweredMentions },
+    dropped,
+  };
 }
 
 /**
@@ -231,9 +268,16 @@ export function heartbeatPrompt(facts: HeartbeatFacts): string {
         facts.scheduleIssues.map((s) => `${s.name}（${s.lastStatus}）`).join("、"),
     );
   }
+  if (facts.unansweredMentions.length) {
+    lines.push(
+      "- 群里有 @ 还没接住（用户点名了某人，这是对他的定向诉求）：" +
+        facts.unansweredMentions.map((m) => `@${m.member}「${m.text}」`).join("、"),
+    );
+  }
   lines.push(
     "",
     "处置参考（不强制，你来判断）：",
+    "- 群里的 @ 还没回应：在跑就 nudge_member 补话（带上用户原话），已交就 assign_task 带 reworkTaskId 返工，没单就 assign_task；并在群里 @他 回一句——别只在别处办；",
     "- 待审查：check_progress 看细节 → review_result 验收或 accept_or_reject 打回；同一张单连续查 3 次没变化就别再查了；",
     "- 同一件事只在一张单上：重做用 assign_task 带 reworkTaskId，关单用 stop_task 带 dismiss=true，都由你决定，不要问用户要不要取消；",
     "- 状态在跑但没人跟：先 check_progress 看有没有回报；有就验收，没有就 assign_task 带 reworkTaskId 在原单重做，做不了就 stop_task 带 dismiss=true 关单；",

@@ -584,6 +584,8 @@ interface PendingPlan {
   maxTurns?: number;
   /** 证据策略：required 才强制；缺省按简报自动判定（2026-11-11 放宽） */
   evidencePolicy?: EvidencePolicy;
+  /** 派单时的完成标准（冻结版；落单时写进 TaskRecord） */
+  acceptance?: string[];
   /** M3-07：插件工坊草稿 id——成员工作区即草稿区（产物只能写进草稿） */
   draftId?: string;
 }
@@ -1101,16 +1103,11 @@ export class Kernel {
    */
   private groupMembers(): FeedAuthor[] {
     const out = new Map<string, FeedAuthor>();
-    const tasks = this.taskStore.list().filter((t) => t.threadId === this.currentThreadId);
-    for (const t of tasks) {
-      if (!t.member || out.has(t.member)) continue;
-      const a = this.memberAuthor(t.teamId, t.member);
-      if (a) out.set(t.member, a);
-    }
-    for (const t of tasks) {
+    // 本群的队（显式绑定 + 本群工单所属）的全部成员——包括还没派单的
+    for (const teamId of this.groupTeamIds()) {
       let list: MemberProfile[] = [];
       try {
-        list = this.teamStore.listMembers(t.teamId);
+        list = this.teamStore.listMembers(teamId);
       } catch {
         list = [];
       }
@@ -1121,11 +1118,17 @@ export class Kernel {
           kind: "member",
           name: p.name,
           memberId: p.name,
-          teamId: t.teamId,
+          teamId,
           role: p.role,
           avatarId: p.avatarId ?? face.id,
         });
       }
+    }
+    // 工单承办人（队伍已解散、档案读不到的那几个）也算本群成员
+    for (const t of this.taskStore.list()) {
+      if (t.threadId !== this.currentThreadId || !t.member || out.has(t.member)) continue;
+      const a = this.memberAuthor(t.teamId, t.member);
+      if (a) out.set(t.member, a);
     }
     return [...out.values()];
   }
@@ -1175,6 +1178,34 @@ export class Kernel {
    * 群内定向说明（拼在当轮消息尾部，不进历史）。
    * @某人 = 只对他一个人的诉求，不是对全队的广播。
    */
+  /**
+   * 群里 @ 了人、但风铃还没接住的需求（2026-11-12 群聊模式，心跳兜底用）。
+   *
+   * 判定：用户卡带 mentions → 其后没有风铃的发言（点名或普通回复都算接住）。
+   * 用户已定：走心跳兜底，不强制风铃当轮回应——延迟由心跳周期（默认 5 分钟）承担。
+   */
+  private pendingMentions(): { member: string; text: string; at: string }[] {
+    const out: { member: string; text: string; at: string }[] = [];
+    const feed = this.feed;
+    for (let i = 0; i < feed.length; i += 1) {
+      const c = feed[i];
+      if (c.kind !== "user" || !c.mentions?.length) continue;
+      // "已回应"= 风铃真的接住了：她点名做了动作，或她开口说了话。
+      // 出错的卡不算（模型挂掉时的重试提示也是 lynn 卡，但它不是回应）。
+      const answered = feed.slice(i + 1).some((later) => {
+        if (later.code) return false;
+        if (later.author?.kind === "lynn") return true;
+        return later.kind === "lynn" && Boolean((later.text ?? "").trim());
+      });
+      if (answered) continue;
+      for (const m of c.mentions) {
+        if (m.kind !== "member") continue;
+        out.push({ member: m.name, text: (c.text ?? "").slice(0, 120), at: c.createdAt });
+      }
+    }
+    return out;
+  }
+
   private groupDirective(mentions: FeedMention[]): string {
     const names = mentions.map((m) => (m.kind === "lynn" ? "风铃" : m.name)).join("、");
     const first = mentions[0];
@@ -1692,8 +1723,38 @@ export class Kernel {
           tokensUsed: this.tokensUsed,
         },
       });
+      this.persistPreview();
     } catch {
       /* 落盘失败不影响对话 */
+    }
+  }
+
+  /**
+   * 群列表摘要（2026-11-12）：把最后一条有正文的消息压成一行，落进会话索引。
+   * 左栏微信式群列表直接读它——不用逐个切进会话才看得到群里在聊什么。
+   */
+  private persistPreview(): void {
+    if (!this.currentThreadId) return;
+    // 摘要取"最后一句对话"，不取系统提示：模型挂掉时的报错不该成为这个群的简介
+    const last =
+      [...this.feed]
+        .reverse()
+        .find((c) => c.kind !== "system" && ((c.text ?? "").trim() || (c.body ?? "").trim())) ??
+      [...this.feed].reverse().find((c) => (c.text ?? "").trim() || (c.body ?? "").trim());
+    if (!last) return;
+    const who =
+      last.author?.kind === "member"
+        ? last.author.name ?? "成员"
+        : last.kind === "user"
+          ? "你"
+          : last.kind === "lynn"
+            ? "风铃"
+            : "";
+    const body = (last.text ?? last.body ?? "").replace(/\s+/g, " ").trim();
+    try {
+      this.threads.setPreview(this.currentThreadId, who ? `${who}：${body}` : body, last.createdAt);
+    } catch {
+      /* 摘要写不进去不影响对话 */
     }
   }
 
@@ -3232,7 +3293,7 @@ export class Kernel {
    * 给在跑的成员补一句指示（风铃催办）：进收件箱，成员下一轮开头就会看到。
    * 不杀进程、不重派，已写出的文件与进度都保留。
    */
-  nudgeMember(taskId: string, note: string): string {
+  nudgeMember(taskId: string, note: string, byUser = false): string {
     const text = note.trim();
     if (!text) return "补充指示不能为空：要它改什么、先交什么，写清楚。";
     if (!this.memberRuns.has(taskId)) {
@@ -3244,7 +3305,12 @@ export class Kernel {
     const rec = this.taskStore.get(taskId);
     const owner = rec?.threadId ?? this.currentThreadId;
     // 催促是风铃对某个成员说的话：走"她的话"而不是系统提示，并点名 @他
-    const at = this.atMember(rec?.member ?? "", `补了一句（下一轮生效）：${text.slice(0, 200)}`);
+    const at = this.atMember(
+      rec?.member ?? "",
+      byUser
+        ? `用户催了：${text.slice(0, 200)}（已转达，下一轮生效）`
+        : `补了一句（下一轮生效）：${text.slice(0, 200)}`,
+    );
     this.cardTo(owner, {
       kind: "lynn",
       jobId: taskId,
@@ -3360,6 +3426,7 @@ export class Kernel {
       runningTaskIds: [...this.memberRuns.keys()],
       pendingPlanTaskIds: [...this.pendingPlans.values()].map((p) => p.taskId),
       schedules: this.scheduler.list(),
+      pendingMentions: this.pendingMentions(),
     });
     if (heartbeatIsEmpty(facts)) return;
     // 堆积闸：堆到 7 张以上说明她已经处理不过来了。整轮跳过会把堆积冻在原处——没人清就
@@ -3469,6 +3536,7 @@ export class Kernel {
         runningTaskIds: [...this.memberRuns.keys()],
         pendingPlanTaskIds: [...this.pendingPlans.values()].map((p) => p.taskId),
         schedules: this.scheduler.list(),
+      pendingMentions: this.pendingMentions(),
       });
     } catch {
       return;
@@ -3800,6 +3868,17 @@ export class Kernel {
               ? path.join(this.dataRoot, "tasks", taskId, "workspace")
               : inheritedRoot;
         const wsRec = this.workspaceRecordFor(taskId, wsFinal);
+        // 群任务纯净性闸（2026-11-12）：本群已有在办的事时，别群的单不许混进来——
+        // 那是另一件事，应该另开一群。群里混着两件，用户看着像一件。
+        const groupTeams = this.groupTeamIds();
+        if (!reworkRec && groupTeams.length && !groupTeams.includes(teamId)) {
+          return (
+            `这是另一条任务线：本群（${groupTeams.join("、")}）已有在办的事，` +
+            "别群的单请让用户另开一群再派（一个群 = 一件事）。要在这件里加人手，用同一个队。"
+          );
+        }
+        // 本群用到的队显式绑到本群（首次绑定）：本群成员、"其他团队折叠"都靠它
+        this.bindGroup(teamId);
         const ctx: PendingPlan = {
           teamId,
           taskId,
@@ -3812,6 +3891,7 @@ export class Kernel {
           readRoots,
           maxTurns,
           evidencePolicy: evPolicy,
+          acceptance: acceptanceList.length ? acceptanceList : undefined,
         };
         // 重做：复用原单，只改状态 + 追加卷宗；新任务才 create。
         // blocked→todo / in_review→in_progress 都是状态机允许的迁移（task-store LEGAL）。
@@ -3834,6 +3914,8 @@ export class Kernel {
             workspaceRoot: wsFinal,
             workspace: wsRec,
             evidencePolicy: evPolicy,
+            brief,
+            ...(acceptanceList.length ? { acceptance: acceptanceList } : {}),
           });
           this.taskStore.transition(taskId, "todo");
         }
@@ -3877,24 +3959,31 @@ export class Kernel {
       }
       case "check_progress": {
         const taskId = String(args.taskId);
-        // 团队归属优先按工单认：resolveTeamId 是「按当前任务线猜」，同时有别的任务线的队时
-        // 会返回 undefined——2026-11-12 实机因此连报三次「本机还没有任何团队」，
-        // 风铃据此误判"成员没在跑"，同一张单被重派了 3 次。
-        let teamId = this.resolveTeamId(args.teamId ? String(args.teamId) : undefined);
-        if (!teamId) {
-          const owner = this.taskStore.get(taskId)?.teamId;
-          if (owner && this.teamStore.teamExists(owner)) teamId = owner;
+        const rec = this.taskStore.get(taskId);
+        let sig: string;
+        if (!rec) {
+          // 单不存在：照实说查不到，但也走同一套轮询计数——
+          // 反复查一张不存在的单同样是刷屏（模型会拿编出来的 ID 试）。
+          sig = `查不到这张单：${taskId}。ID 由系统生成，别自己编；先看台账或 check_roster。`;
+        } else {
+          // 团队归属优先按工单认：resolveTeamId 是「按当前任务线猜」，同时有别的任务线的队时
+          // 会返回 undefined——2026-11-12 实机因此连报三次「本机还没有任何团队」，
+          // 风铃据此误判"成员没在跑"，同一张单被重派了 3 次。
+          let teamId = this.resolveTeamId(args.teamId ? String(args.teamId) : undefined);
+          if (!teamId) {
+            const owner = rec.teamId;
+            if (owner && this.teamStore.teamExists(owner)) teamId = owner;
+          }
+          if (!teamId) {
+            sig = `找不到 ${taskId} 归属的团队（工单记录在，团队可能已被解散）：带上 teamId 再查，或直接 accept_or_reject 结案。`;
+          } else {
+            const p = {
+              ...this.tools.checkProgress(teamId, taskId),
+              running: this.memberRuns.has(taskId),
+            };
+            sig = JSON.stringify(p, null, 2);
+          }
         }
-        if (!teamId) {
-          return this.taskStore.get(taskId)
-            ? `找不到 ${taskId} 归属的团队（工单记录在，团队可能已被解散）：带上 teamId 再查，或直接 accept_or_reject 结案。`
-            : `查不到这张单：${taskId}。ID 由系统生成，别自己编；先看台账或 check_roster。`;
-        }
-        const p = {
-          ...this.tools.checkProgress(teamId, taskId),
-          running: this.memberRuns.has(taskId),
-        };
-        const sig = JSON.stringify(p, null, 2);
         // 只读工具，但模型会把它当"等状态变"的轮询器：2026-11-11 长任务查了 246 次，
         // 同一批工单反复查、不验收也不收尾，直到上下文被撑爆。结果没变就明确叫停。
         const prev = this.progressPolls.get(taskId);
@@ -4576,6 +4665,11 @@ export class Kernel {
   private resolveTeamId(explicit?: string): string | undefined {
     const wanted = (explicit ?? "").trim();
     if (wanted && this.teamStore.teamExists(wanted)) return wanted;
+    // 本群优先（2026-11-12 群聊模式）：一个群 = 一支班底。
+    // 本群已有工单或已绑队时，就用本群的队——否则同一群里会冒出两支队，
+    // 用户在右栏看到"本群"下面挂着两拨人，还以为有两件事在办。
+    const groupTeams = this.groupTeamIds();
+    if (groupTeams.length) return groupTeams[0];
     const active = this.teamStore.activeTeams();
     if (active.length !== 1) return undefined;
     const team = active[0];
@@ -4585,6 +4679,31 @@ export class Kernel {
     const tasks = this.taskStore.list().filter((t) => t.teamId === team.id);
     if (tasks.length === 0) return team.id;
     return tasks[0].threadId && tasks[0].threadId === this.currentThreadId ? team.id : undefined;
+  }
+
+  /**
+   * 本群的队伍 id（显式绑定 + 本群工单所属）。
+   * "本群成员""其他团队折叠"都以它为准——不再靠"最近一张单来自当前会话"猜。
+   */
+  private groupTeamIds(): string[] {
+    const out = new Set<string>();
+    for (const t of this.taskStore.list()) {
+      if (t.threadId === this.currentThreadId && t.teamId) out.add(t.teamId);
+    }
+    for (const team of this.teamStore.activeTeams()) {
+      if (team.threadId && team.threadId === this.currentThreadId) out.add(team.id);
+    }
+    return [...out];
+  }
+
+  /** 把队绑到当前群（建队时顺手做；已绑的不动） */
+  private bindGroup(teamId: string): void {
+    if (!this.currentThreadId) return;
+    try {
+      this.teamStore.bindThread(teamId, this.currentThreadId);
+    } catch {
+      /* 队读不到就跳过：绑定只是锦上添花，不能因此炸掉派单 */
+    }
   }
 
   /**
@@ -4608,6 +4727,7 @@ export class Kernel {
     }
     const created = this.tools.createTeam(prettyName, id, !machine);
     this.snapshotTeamRoots(created.id);
+    this.bindGroup(created.id);
     return { id: created.id, name: created.name, reused: null };
   }
 
@@ -5492,7 +5612,15 @@ export class Kernel {
           },
           threads: this.threads
             .list()
-            .map((t) => ({ id: t.id, title: t.title, updatedAt: t.updatedAt, counts: threadCounts.get(t.id) })),
+            .map((t) => ({
+              id: t.id,
+              title: t.title,
+              updatedAt: t.updatedAt,
+              counts: threadCounts.get(t.id),
+              pinned: t.pinned,
+              lastPreview: t.lastPreview,
+              lastAt: t.lastAt,
+            })),
           // 真在跑的成员单：台账"进行中"不等于在跑（卡住/停机也会留在 in_progress 历史里）
           running: this.runningTaskIds(),
           // 无主单计数：会话删了单还在（老版本不级联）。界面据此给一键清理出口
@@ -5940,6 +6068,104 @@ export class Kernel {
         } catch {
           return { tasks: 0, accepted: 0, rejected: 0, escalations: 0 } as RpcContracts[M]["result"];
         }
+      }
+
+      /**
+       * 成员档案全量（群聊模式：右键成员看"他是谁"）。
+       * 岗位说明书 + 战绩 + 手上那张单——三样都在这里，不必跳去设置页。
+       */
+      case "team.member.detail": {
+        const { teamId, name } = params as { teamId: string; name: string };
+        const member = String(name ?? "").trim();
+        if (!teamId || !member) {
+          return { ok: false, error: "要看谁？给出队与成员名。" } as RpcContracts[M]["result"];
+        }
+        let profile: MemberProfile;
+        try {
+          profile = this.teamStore.readMember(teamId, member);
+        } catch {
+          return { ok: false, error: `没有这个成员：${member}` } as RpcContracts[M]["result"];
+        }
+        let record: { tasks: number; accepted: number; rejected: number; escalations: number } | undefined;
+        try {
+          record = this.teamStore.memberRecord(teamId, member);
+        } catch {
+          record = undefined;
+        }
+        const job = this.taskStore
+          .list()
+          .filter((t) => t.member === member)
+          .sort((a, b) => (b.createdAt ?? "").localeCompare(a.createdAt ?? ""))[0];
+        return {
+          ok: true,
+          profile: {
+            name: profile.name,
+            role: profile.role,
+            goal: profile.goal,
+            boundaries: profile.boundaries,
+            tools: profile.tools,
+            model: profile.model,
+            limits: profile.limits,
+            outputContract: profile.outputContract,
+            escalateWhen: profile.escalateWhen,
+            body: profile.body,
+            ...(profile.avatarId ? { avatarId: profile.avatarId } : {}),
+          },
+          ...(record ? { record } : {}),
+          ...(job ? { job: { id: job.id, title: job.title, status: job.status } } : {}),
+        } as RpcContracts[M]["result"];
+      }
+
+      /**
+       * 工单详情（群聊模式：右键成员看"他在做什么"）。
+       * 目标与完成标准从派单卷宗取——判卷口径派单时就冻结了，看的是当时那版。
+       */
+      case "task.detail": {
+        const { taskId } = params as { taskId: string };
+        const id = String(taskId ?? "").trim();
+        const rec = this.taskStore.get(id);
+        if (!rec) return { ok: false, error: `没有这张单：${id}` } as RpcContracts[M]["result"];
+        const brief = rec.brief ?? "";
+        const acceptance = rec.acceptance ?? [];
+        let timeline: { at: string; kind: string; text: string }[] = [];
+        try {
+          timeline = this.taskCase.readTimeline(id).slice(-20).map((e) => ({ at: e.at, kind: e.kind, text: e.text }));
+        } catch {
+          timeline = [];
+        }
+        return {
+          ok: true,
+          detail: {
+            id: rec.id,
+            title: rec.title,
+            ...(rec.member ? { member: rec.member } : {}),
+            teamId: rec.teamId,
+            status: rec.status,
+            statusNote: rec.statusNote ?? "",
+            ...(brief ? { brief, goal: brief.split("\n")[0]?.replace(/^【目标】/, "").trim() ?? "" } : {}),
+            acceptance,
+            ...(rec.workspaceRoot ? { workspaceRoot: rec.workspaceRoot } : {}),
+            deliverables: (rec.deliverables ?? []).map((d) => ({ label: d.path, ref: d.ref, bytes: d.bytes })),
+            timeline,
+          },
+        } as RpcContracts[M]["result"];
+      }
+
+      /**
+       * 用户催办（群聊模式：右键成员"催一下"）。
+       * 催办不越权：话转给成员（下一轮生效），要不要返工/改口径由风铃定。
+       */
+      case "task.nudge": {
+        const { taskId, note } = params as { taskId: string; note?: string };
+        const id = String(taskId ?? "").trim();
+        const rec = this.taskStore.get(id);
+        if (!rec) return { ok: false, error: `没有这张单：${id}` } as RpcContracts[M]["result"];
+        const text = String(note ?? "").trim() || "用户催了一下进度";
+        const r = this.nudgeMember(id, text, true);
+        if (!r.startsWith("已送达")) {
+          return { ok: false, error: r } as RpcContracts[M]["result"];
+        }
+        return { ok: true, ...(rec.member ? { member: rec.member } : {}) } as RpcContracts[M]["result"];
       }
 
       // 编制管理（用户手动）：列 / 改岗位 / 删成员 / 解散
@@ -6692,6 +6918,17 @@ export class Kernel {
         const p = params as { id: string; title: string };
         const t = this.threads.rename(p.id, p.title);
         return { ok: true, title: t.title } as RpcContracts[M]["result"];
+      }
+
+      /** 置顶 / 取消置顶（群列表微信式） */
+      case "thread.pin": {
+        const p = params as { id: string; pinned: boolean };
+        try {
+          const t = this.threads.setPinned(String(p.id ?? ""), Boolean(p.pinned));
+          return { ok: true, pinned: Boolean(t.pinned) } as RpcContracts[M]["result"];
+        } catch (err) {
+          return { ok: false, pinned: false } as RpcContracts[M]["result"];
+        }
       }
 
       case "thread.remove": {

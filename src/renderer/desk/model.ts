@@ -177,7 +177,18 @@ export interface Desk {
   /** 当前会话线程与列表（M1-14） */
   thread: { id: string; title: string };
   /** C3：会话行带"这个会话里在办 / 已归档的单"计数（后端汇总，前端不猜） */
-  threads: { id: string; title: string; updatedAt: string; counts?: { active: number; archived: number } }[];
+  threads: {
+    id: string;
+    title: string;
+    updatedAt: string;
+    counts?: { active: number; archived: number };
+    /** 置顶（群列表微信式） */
+    pinned?: boolean;
+    /** 最近一条消息摘要 */
+    lastPreview?: string;
+    /** 最近一次有消息的时刻 */
+    lastAt?: string;
+  }[];
 }
 
 function evidenceOf(job: TaskTrackItem): DeskEvidence[] {

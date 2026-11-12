@@ -387,6 +387,7 @@ function Ledger({
   onThreadSearch,
   onThreadRename,
   onThreadRemove,
+  onThreadPin,
   onCancelTask,
   onDismissTask,
   onRemoveTask,
@@ -407,6 +408,8 @@ function Ledger({
   /** 会话改名 / 删除（C5：列表只增不减、按时间找不到人） */
   onThreadRename?: (id: string, title: string) => void;
   onThreadRemove?: (id: string) => void;
+  /** 置顶 / 取消置顶（群列表微信式） */
+  onThreadPin?: (id: string, pinned: boolean) => void;
   /** 停一张在跑的单（此前只能解散全队止损） */
   onCancelTask?: (taskId: string) => void;
   /** 取消一张单（→ 归档带）/ 彻底删除（不可恢复） */
@@ -527,7 +530,14 @@ function Ledger({
                   <small>{h.hits[0]}</small>
                 </button>
               ))
-            : desk.threads.map((th) => {
+            : [...desk.threads]
+                // 微信式群列表：置顶的排最前，其余按最近动的排
+                .sort(
+                  (a, b) =>
+                    Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)) ||
+                    (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""),
+                )
+                .map((th) => {
                 const on = th.id === desk.thread.id;
                 // C5：会话列表要能改名/删除，否则列表只增不减、按时间也找不到人
                 const edit = renaming && renaming.id === th.id ? renaming : null;
@@ -558,17 +568,32 @@ function Ledger({
                           className={`thread-row${on ? " on" : ""}`}
                           onClick={() => onThread?.(th.id)}
                         >
-                          <b>{th.title || t("ledger.untitled")}</b>
-                          <small className="mono thread-meta">
-                            <span>{fmtTime(th.updatedAt)}</span>
-                            {th.counts && th.counts.active + th.counts.archived > 0 && (
-                              <span className="thread-counts">
-                                {t("ledger.threadJobs", { active: th.counts.active, archived: th.counts.archived })}
+                          <span className="thread-av" aria-hidden>
+                            {(th.title || "群").slice(0, 1)}
+                          </span>
+                          <span className="thread-main">
+                            <span className="thread-row1">
+                              <span className="thread-name">
+                                {th.title || t("ledger.untitled")}
+                                {th.pinned && <span className="thread-pin">置顶</span>}
                               </span>
-                            )}
-                          </small>
+                              <span className="thread-time mono">{fmtTime(th.updatedAt)}</span>
+                            </span>
+                            <span className="thread-prev">{th.lastPreview ?? ""}</span>
+                          </span>
+                          {th.counts && th.counts.active > 0 && (
+                            <span className="thread-badge">{th.counts.active}</span>
+                          )}
                         </button>
                         <span className="thread-acts">
+                          <button
+                            type="button"
+                            className="thread-act"
+                            title={th.pinned ? "取消置顶" : "置顶"}
+                            onClick={() => onThreadPin?.(th.id, !th.pinned)}
+                          >
+                            <Icon name="target" size="sm" />
+                          </button>
                           <button
                             type="button"
                             className="thread-act"
@@ -1653,6 +1678,8 @@ function Roster({
   onCreateTeam,
   onManageTeam,
   onThread,
+  /** @某人：把名字插进输入框（群聊模式） */
+  onAt,
   open,
   onClose,
 }: {
@@ -1677,6 +1704,8 @@ function Roster({
   onCreateTeam?: (name: string) => void;
   /** 手动管理编制：改岗位 / 移出成员 / 解散团队 */
   onManageTeam?: () => void;
+  /** @某人：把名字插进输入框（群聊模式） */
+  onAt?: (name: string) => void;
 }) {
   const t = useT();
   // 成员状态由成员卡自己表达（排序 + 状态色），标题栏不再报两套互相打架的总数
@@ -1703,8 +1732,22 @@ function Roster({
   const [teamName, setTeamName] = useState("");
   /** 编制规模上来之后先收敛：按状态筛人、团队卡可折叠、同岗位空闲成员聚合 */
   const [rosterFilter, setRosterFilter] = useState<"all" | "running" | "review" | "idle">("all");
-  const [collapsedTeams, setCollapsedTeams] = useState<Set<string>>(new Set());
   const [openRoles, setOpenRoles] = useState<Set<string>>(new Set());
+  /**
+   * 群聊模式（2026-11-12）：本群的队置顶展开，别群折叠在下面。
+   * 一个群 = 一支班底——右栏第一眼要看到"这个群里有哪些人在干活"。
+   */
+  const [teamOpenOverride, setTeamOpenOverride] = useState<Record<string, boolean>>({});
+  const [memberMenu, setMemberMenu] = useState<{ member: DeskMember; x: number; y: number } | null>(null);
+  const [detail, setDetail] = useState<MemberDetailState | null>(null);
+  const [rosterNote, setRosterNote] = useState<string | null>(null);
+  /** 本群的队伍：本会话工单所属的队（他群折叠在下面） */
+  const groupTeamIds = useMemo(() => {
+    const s = new Set<string>();
+    for (const j of desk.jobs) if (j.threadId === desk.thread.id && j.teamId) s.add(j.teamId);
+    return s;
+  }, [desk.jobs, desk.thread.id]);
+  const isTeamOpen = (teamId: string) => teamOpenOverride[teamId] ?? groupTeamIds.has(teamId);
   const visibleMembers = useMemo(() => {
     if (rosterFilter === "all") return desk.members;
     const want = rosterFilter === "running" ? "running" : rosterFilter === "review" ? "delivered" : "idle";
@@ -1712,10 +1755,7 @@ function Roster({
   }, [desk.members, rosterFilter]);
   /** 多团队分组：团队名 + 未归档单数 + 在跑/待审/空闲人数（先看统计，再决定展开哪队） */
   const memberGroups = useMemo(() => {
-    const map = new Map<
-      string,
-      { teamName: string; active: number; running: number; review: number; idle: number; members: DeskMember[] }
-    >();
+    const map = new Map<string, RosterGroup>();
     for (const m of visibleMembers) {
       const g = map.get(m.teamId) ?? {
         teamName: m.teamName ?? m.teamId,
@@ -1734,12 +1774,7 @@ function Roster({
     return map;
   }, [visibleMembers, desk.jobs]);
   const toggleTeam = (teamId: string) =>
-    setCollapsedTeams((prev) => {
-      const next = new Set(prev);
-      if (next.has(teamId)) next.delete(teamId);
-      else next.add(teamId);
-      return next;
-    });
+    setTeamOpenOverride((prev) => ({ ...prev, [teamId]: !(prev[teamId] ?? groupTeamIds.has(teamId)) }));
   const toggleRole = (key: string) =>
     setOpenRoles((prev) => {
       const next = new Set(prev);
@@ -1758,9 +1793,120 @@ function Roster({
   const memberRank = (m: DeskMember) =>
     decision?.jobId && m.jobId === decision.jobId ? 0 : m.status === "running" ? 1 : m.status === "stuck" ? 2 : m.status === "delivered" ? 3 : 4;
 
+  /** 右键成员：看资料（岗位说明书 + 战绩 + 手上那张单） */
+  const showProfile = async (m: DeskMember) => {
+    try {
+      const r = await window.lynn.rpc("team.member.detail", { teamId: m.teamId, name: m.name });
+      setDetail({ kind: "profile", member: m, profile: r.profile, record: r.record, job: r.job });
+    } catch {
+      setDetail({ kind: "profile", member: m });
+    }
+  };
+  /** 右键成员：任务目标 + 进度（派单时冻结的判卷口径 + 卷宗时间线） */
+  const showJob = async (m: DeskMember) => {
+    if (!m.jobId) return;
+    try {
+      const r = await window.lynn.rpc("task.detail", { taskId: m.jobId });
+      setDetail({ kind: "job", member: m, detail: r.detail });
+    } catch {
+      setDetail({ kind: "job", member: m });
+    }
+  };
+  /** 右键成员：催一下（话转给他，下一轮生效；不越权，返工与否由风铃定） */
+  const nudge = async (m: DeskMember) => {
+    if (!m.jobId) return;
+    try {
+      const r = await window.lynn.rpc("task.nudge", { taskId: m.jobId, note: "用户催了一下进度" });
+      setRosterNote(r.ok ? `已催 ${m.name}：话转过去了，下一轮生效` : r.error ?? "催不动");
+    } catch {
+      setRosterNote("催不动：请求没送到");
+    }
+  };
+
+  /** 一支队的组卡：本群默认展开并标"本群"，他群折叠 */
+  const renderTeamGroup = (teamId: string, g: RosterGroup) => {
+    const collapsed = !isTeamOpen(teamId);
+    const split = splitRoster(g.members);
+    const isGroup = groupTeamIds.has(teamId);
+    return (
+      <section className="tgroup-card" key={teamId}>
+        <div className="tgroup-h">
+          <button
+            type="button"
+            className="tgroup-toggle"
+            aria-expanded={!collapsed}
+            onClick={() => toggleTeam(teamId)}
+            title={collapsed ? "展开这支队" : "收起这支队"}
+          >
+            <span className="tg-caret" aria-hidden>{collapsed ? "▸" : "▾"}</span>
+            <span className="t">{g.teamName}</span>
+            {isGroup && <span className="tg-tag">本群</span>}
+          </button>
+          <span className="tgroup-stat">
+            {g.running > 0 && <span className="s run">在跑 {g.running}</span>}
+            {g.review > 0 && <span className="s review">待审 {g.review}</span>}
+            {g.idle > 0 && <span className="s idle">空闲 {g.idle}</span>}
+          </span>
+        </div>
+        {!collapsed && (
+          <div className="tgroup-list">
+            {[...split.active]
+              .sort((a, b) => memberRank(a) - memberRank(b))
+              .map((m) => (
+                <MemberCard
+                  key={`${m.teamId}:${m.name}`}
+                  m={m}
+                  active={!!decision?.jobId && m.jobId === decision.jobId}
+                  onSelect={onSelectJob}
+                  onManage={onManageTeam}
+                  onMenu={(e) => {
+                    e.preventDefault();
+                    setMemberMenu({ member: m, x: e.clientX, y: e.clientY });
+                  }}
+                />
+              ))}
+            {split.groups.map((rg) => {
+              const key = `${teamId}::${rg.role}`;
+              const opened = openRoles.has(key);
+              return (
+                <div className="role-group" key={key}>
+                  <button type="button" className="role-h" aria-expanded={opened} onClick={() => toggleRole(key)}>
+                    <span className="tg-caret" aria-hidden>{opened ? "▾" : "▸"}</span>
+                    <span className="t">{rg.role}</span>
+                    <span className="n">×{rg.members.length}</span>
+                  </button>
+                  {opened &&
+                    rg.members.map((m) => (
+                      <MemberCard
+                        key={`${m.teamId}:${m.name}`}
+                        m={m}
+                        active={!!decision?.jobId && m.jobId === decision.jobId}
+                        onSelect={onSelectJob}
+                        onManage={onManageTeam}
+                        onMenu={(e) => {
+                          e.preventDefault();
+                          setMemberMenu({ member: m, x: e.clientX, y: e.clientY });
+                        }}
+                      />
+                    ))}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </section>
+    );
+  };
+
   return (
     <aside className={`right${open ? " open" : ""}`}>
       <div className="right-scroll">
+        {detail && <MemberDetail data={detail} onClose={() => setDetail(null)} />}
+        {rosterNote && (
+          <p className="roster-note" onClick={() => setRosterNote(null)}>
+            {rosterNote}
+          </p>
+        )}
         <div className="panel-h">
           <div className="l">
             <span className="t">{t("roster.title")}</span>
@@ -1904,70 +2050,38 @@ function Roster({
         {/* 团队卡组：一队一张分组卡，队内是成员小卡。
             不折叠：折叠箭头会让一队人藏起来，而右栏本来就是为了一眼看清编制。
             也不再单列「动态」区：在跑的排到队内前面，同一个人不画两遍。 */}
-        {[...memberGroups.entries()].map(([teamId, g]) => {
-          const collapsed = collapsedTeams.has(teamId);
-          const split = splitRoster(g.members);
+        {(() => {
+          const groups = [...memberGroups.entries()].sort(
+            (a, b) => Number(groupTeamIds.has(b[0])) - Number(groupTeamIds.has(a[0])),
+          );
+          const mine = groups.filter(([id]) => groupTeamIds.has(id));
+          const others = groups.filter(([id]) => !groupTeamIds.has(id));
           return (
-            <section className="tgroup-card" key={teamId}>
-              <div className="tgroup-h">
-                <button
-                  type="button"
-                  className="tgroup-toggle"
-                  aria-expanded={!collapsed}
-                  onClick={() => toggleTeam(teamId)}
-                  title={collapsed ? "展开这支队" : "收起这支队"}
-                >
-                  <span className="tg-caret" aria-hidden>{collapsed ? "▸" : "▾"}</span>
-                  <span className="t">{g.teamName}</span>
-                </button>
-                <span className="tgroup-stat">
-                  {g.running > 0 && <span className="s run">在跑 {g.running}</span>}
-                  {g.review > 0 && <span className="s review">待审 {g.review}</span>}
-                  {g.idle > 0 && <span className="s idle">空闲 {g.idle}</span>}
-                </span>
-              </div>
-              {!collapsed && (
-                <div className="tgroup-list">
-                  {[...split.active]
-                    .sort((a, b) => memberRank(a) - memberRank(b))
-                    .map((m) => (
-                      <MemberCard
-                        key={`${m.teamId}:${m.name}`}
-                        m={m}
-                        active={!!decision?.jobId && m.jobId === decision.jobId}
-                        onSelect={onSelectJob}
-                        onManage={onManageTeam}
-                      />
-                    ))}
-                  {split.groups.map((rg) => {
-                    const key = `${teamId}::${rg.role}`;
-                    const opened = openRoles.has(key);
-                    return (
-                      <div className="role-group" key={key}>
-                        <button type="button" className="role-h" aria-expanded={opened} onClick={() => toggleRole(key)}>
-                          <span className="tg-caret" aria-hidden>{opened ? "▾" : "▸"}</span>
-                          <span className="t">{rg.role}</span>
-                          <span className="n">×{rg.members.length}</span>
-                        </button>
-                        {opened &&
-                          rg.members.map((m) => (
-                            <MemberCard
-                              key={`${m.teamId}:${m.name}`}
-                              m={m}
-                              active={false}
-                              onSelect={onSelectJob}
-                              onManage={onManageTeam}
-                            />
-                          ))}
-                      </div>
-                    );
-                  })}
+            <>
+              {mine.map(([id, g]) => renderTeamGroup(id, g))}
+              {others.length > 0 && (
+                <div className="tgroup-others">
+                  <div className="tgroup-others-h">其他团队（{others.length}）</div>
+                  {others.map(([id, g]) => renderTeamGroup(id, g))}
                 </div>
               )}
-            </section>
+            </>
           );
-        })}
+        })()}
       </div>
+      {memberMenu && (
+        <MemberMenu
+          member={memberMenu.member}
+          x={memberMenu.x}
+          y={memberMenu.y}
+          onClose={() => setMemberMenu(null)}
+          onProfile={() => void showProfile(memberMenu.member)}
+          onJob={() => void showJob(memberMenu.member)}
+          onProgress={() => void showJob(memberMenu.member)}
+          onAt={() => onAt?.(memberMenu.member.name)}
+          onNudge={() => void nudge(memberMenu.member)}
+        />
+      )}
     </aside>
   );
 }
@@ -2307,11 +2421,14 @@ function MemberCard({
   active,
   onSelect,
   onManage,
+  onMenu,
 }: {
   m: DeskMember;
   active: boolean;
   onSelect?: (jobId: string) => void;
   onManage?: () => void;
+  /** 右键：看资料 / 目标 / 进度 / @他 / 催一下（群聊模式） */
+  onMenu?: (e: React.MouseEvent) => void;
 }) {
   const t = useT();
   const brief = m.jobTitle || m.role;
@@ -2348,6 +2465,7 @@ function MemberCard({
       tabIndex={action ? 0 : undefined}
       title={m.jobId ? t("member.openJob", { id: m.jobId }) : onManage ? "空闲：查看岗位档案" : brief}
       onClick={open}
+      onContextMenu={onMenu}
       onKeyDown={(e) => {
         if (!action) return;
         if (e.key === "Enter" || e.key === " ") {
@@ -2385,6 +2503,269 @@ function MemberCard({
       >
         {showRecord ? "收起" : "战绩"}
       </button>
+    </div>
+  );
+}
+
+/** 成员档案（群聊模式：右键看"他是谁"） */
+interface MemberProfileView {
+  name: string;
+  role: string;
+  goal: string;
+  boundaries: string[];
+  tools: string[];
+  model: string;
+  limits: { maxTurns: number; budgetTokens: number; wallClockMin: number };
+  outputContract: { deliverable: string; evidence: string[]; acceptance: string[] };
+  escalateWhen: string;
+  body: string;
+  avatarId?: string;
+}
+
+/** 工单详情（群聊模式：右键看"他在做什么"） */
+interface TaskDetailView {
+  id: string;
+  title: string;
+  member?: string;
+  teamId: string;
+  status: string;
+  statusNote: string;
+  goal?: string;
+  brief?: string;
+  acceptance: string[];
+  workspaceRoot?: string;
+  deliverables: { label: string; ref: string; bytes?: number }[];
+  timeline: { at: string; kind: string; text: string }[];
+}
+
+type MemberDetailState =
+  | {
+      kind: "profile";
+      member: DeskMember;
+      profile?: MemberProfileView;
+      record?: { tasks: number; accepted: number; rejected: number; escalations: number };
+      job?: { id: string; title: string; status: string };
+    }
+  | { kind: "job"; member: DeskMember; detail?: TaskDetailView };
+
+/** 右栏编制表里的一支队 */
+interface RosterGroup {
+  teamName: string;
+  active: number;
+  running: number;
+  review: number;
+  idle: number;
+  members: DeskMember[];
+}
+
+/**
+ * 成员右键菜单（群聊模式）：资料 / 目标 / 进度 / @他 / 催一下。
+ * 形态照工单卡右键（JobMenu）：fixed 定位 + 点外面关闭 + Esc 关闭。
+ */
+function MemberMenu({
+  member,
+  x,
+  y,
+  onClose,
+  onProfile,
+  onJob,
+  onProgress,
+  onAt,
+  onNudge,
+}: {
+  member: DeskMember;
+  x: number;
+  y: number;
+  onClose: () => void;
+  onProfile: () => void;
+  onJob: () => void;
+  onProgress: () => void;
+  onAt: () => void;
+  onNudge: () => void;
+}) {
+  const box = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const onDown = (e: MouseEvent) => {
+      if (box.current && !box.current.contains(e.target as Node)) onClose();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [onClose]);
+  const style = {
+    left: Math.max(8, Math.min(x, (window.innerWidth || 1200) - 240)),
+    top: Math.max(8, Math.min(y, (window.innerHeight || 800) - 220)),
+  };
+  const items: { label: string; hint: string; on: () => void; off?: boolean }[] = [
+    { label: "查看资料", hint: "岗位档案 · 战绩", on: onProfile },
+    { label: "任务目标", hint: member.jobId ? "他被要求做什么" : "他手上没单", on: onJob, off: !member.jobId },
+    { label: "进度", hint: "最近在干什么 · 卷宗时间线", on: onProgress, off: !member.jobId },
+    { label: "@他说话", hint: "插到输入框里", on: onAt },
+    { label: "催一下", hint: "话转给他，下一轮生效", on: onNudge, off: !member.jobId || member.status !== "running" },
+  ];
+  return (
+    <div className="jobmenu" ref={box} style={style} role="menu" aria-label={member.name}>
+      <div className="jobmenu-h">
+        <span className="jobmenu-title">{member.name}</span>
+        <span className="st">{member.role}</span>
+      </div>
+      <div className="jobmenu-sub mono">
+        {member.teamName ?? member.teamId}
+        {member.jobId ? ` · ${member.jobId}` : ""}
+      </div>
+      {items.map((it) => (
+        <button
+          key={it.label}
+          type="button"
+          className="jobmenu-item"
+          disabled={it.off}
+          title={it.hint}
+          onClick={() => {
+            if (it.off) return;
+            it.on();
+            onClose();
+          }}
+        >
+          {it.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * 成员详情（群聊模式）：右键成员后在右栏顶部展开。
+ * 资料看"他是谁"，目标看"他被要求做什么"，进度看"他最近在干什么"。
+ */
+function MemberDetail({ data, onClose }: { data: MemberDetailState; onClose: () => void }) {
+  const t = useT();
+  const m = data.member;
+  return (
+    <div className="mdetail">
+      <div className="mdetail-h">
+        <MemberAvatar name={m.name} avatarId={m.avatarId} size={28} />
+        <div className="mdetail-name">
+          <b>{m.name}</b>
+          <span className="mdetail-role">{m.role}</span>
+        </div>
+        <button type="button" className="icon-btn" onClick={onClose} aria-label={t("common.close")}>
+          <Icon name="x" size="sm" />
+        </button>
+      </div>
+      {data.kind === "profile" ? (
+        data.profile ? (
+          <div className="mdetail-body">
+            <div className="mdetail-row">
+              <span className="k">目标</span>
+              <span className="v">{data.profile.goal || "（未写）"}</span>
+            </div>
+            <div className="mdetail-row">
+              <span className="k">边界</span>
+              <span className="v">{data.profile.boundaries.join("、") || "（未写）"}</span>
+            </div>
+            <div className="mdetail-row">
+              <span className="k">工具</span>
+              <span className="v mono">{data.profile.tools.join("、") || "（无）"}</span>
+            </div>
+            <div className="mdetail-row">
+              <span className="k">上限</span>
+              <span className="v mono">
+                {data.profile.limits.maxTurns} 轮 · {data.profile.limits.budgetTokens} tok · {data.profile.limits.wallClockMin} 分
+              </span>
+            </div>
+            <div className="mdetail-row">
+              <span className="k">产出</span>
+              <span className="v">{data.profile.outputContract.deliverable || "（未写）"}</span>
+            </div>
+            <div className="mdetail-row">
+              <span className="k">何时升级</span>
+              <span className="v">{data.profile.escalateWhen || "（未写）"}</span>
+            </div>
+            {data.profile.body && (
+              <div className="mdetail-row">
+                <span className="k">做事方式</span>
+                <span className="v">{data.profile.body}</span>
+              </div>
+            )}
+            {data.record && (
+              <div className="mdetail-row">
+                <span className="k">战绩</span>
+                <span className="v mono">
+                  参与 {data.record.tasks} · 通过 {data.record.accepted} · 打回 {data.record.rejected} · 升级 {data.record.escalations}
+                </span>
+              </div>
+            )}
+            {data.job && (
+              <div className="mdetail-row">
+                <span className="k">手上</span>
+                <span className="v mono">
+                  {data.job.id} · {data.job.title}
+                </span>
+              </div>
+            )}
+          </div>
+        ) : (
+          <p className="mdetail-empty">没有读到这份档案。</p>
+        )
+      ) : data.detail ? (
+        <div className="mdetail-body">
+          <div className="mdetail-row">
+            <span className="k">单</span>
+            <span className="v mono">
+              {data.detail.id} · {data.detail.title}
+            </span>
+          </div>
+          {data.detail.goal && (
+            <div className="mdetail-row">
+              <span className="k">目标</span>
+              <span className="v">{data.detail.goal}</span>
+            </div>
+          )}
+          <div className="mdetail-row">
+            <span className="k">完成标准</span>
+            <span className="v">{data.detail.acceptance.join("；") || "（未写）"}</span>
+          </div>
+          <div className="mdetail-row">
+            <span className="k">状态</span>
+            <span className="v">
+              {data.detail.status}
+              {data.detail.statusNote ? ` · ${data.detail.statusNote}` : ""}
+            </span>
+          </div>
+          {data.detail.workspaceRoot && (
+            <div className="mdetail-row">
+              <span className="k">工作区</span>
+              <span className="v mono">{data.detail.workspaceRoot}</span>
+            </div>
+          )}
+          {data.detail.deliverables.length > 0 && (
+            <div className="mdetail-row">
+              <span className="k">产物</span>
+              <span className="v mono">{data.detail.deliverables.map((d) => d.label).join("、")}</span>
+            </div>
+          )}
+          {data.detail.timeline.length > 0 && (
+            <div className="mdetail-row">
+              <span className="k">最近</span>
+              <span className="v">
+                {data.detail.timeline
+                  .slice(-4)
+                  .reverse()
+                  .map((e) => e.text)
+                  .join(" / ")}
+              </span>
+            </div>
+          )}
+        </div>
+      ) : (
+        <p className="mdetail-empty">没有读到这张单。</p>
+      )}
     </div>
   );
 }
@@ -2444,6 +2825,7 @@ function ComposerZone({
   onQueue,
   captureShot,
   members,
+  pendingAt,
 }: {
   configured: boolean;
   turn: Desk["turn"];
@@ -2459,6 +2841,8 @@ function ComposerZone({
   captureShot?: CaptureShot | null;
   /** 群里可点名的人（本群成员排前面，由 DeskView 排好序） */
   members?: { name: string; role?: string }[];
+  /** 右键成员「@他说话」：把名字插进输入框 */
+  pendingAt?: { name: string; nonce: number } | null;
 }) {
   const [draft, setDraft] = useState("");
   const [mode, setMode] = useState<"queue" | "steer">("queue");
@@ -2488,6 +2872,13 @@ function ComposerZone({
     setAttImages((imgs) => [...imgs, { name: captureShot.name, data: captureShot.data }]);
     taRef.current?.focus();
   }, [captureShot]);
+
+  // 右键成员「@他说话」：把 @名字 插进草稿（群聊模式的定向入口）
+  useEffect(() => {
+    if (!pendingAt) return;
+    setDraft((d) => `${d && !/\s$/.test(d) ? `${d} ` : d}@${pendingAt.name} `);
+    taRef.current?.focus();
+  }, [pendingAt?.nonce]);
 
   const detectMention = (value: string, caret: number) => {
     const before = value.slice(0, caret);
@@ -3327,6 +3718,7 @@ export function DeskView({
   onThreadSearch,
   onThreadRename,
   onThreadRemove,
+  onThreadPin,
   onTaskFeed,
   onCreateTeam,
   onManageTeam,
@@ -3371,6 +3763,8 @@ export function DeskView({
   onThreadSearch?: (q: string) => Promise<{ id: string; title: string; hits: string[] }[]>;
   onThreadRename?: (id: string, title: string) => void;
   onThreadRemove?: (id: string) => void;
+  /** 置顶 / 取消置顶（群列表微信式） */
+  onThreadPin?: (id: string, pinned: boolean) => void;
   /** 工单往来（跨会话追溯）：工单出发会话 ≠ 当前会话时按 threadId 回读 */
   onTaskFeed?: (taskId: string) => Promise<{ cards: FeedCard[]; threadId?: string; threadTitle?: string }>;
   /** 建团队（§4.10.3 修正）：用户只给名字，ID 由系统生成 */
@@ -3412,6 +3806,8 @@ export function DeskView({
       .sort((a, b) => Number(inGroup.has(b.name)) - Number(inGroup.has(a.name)))
       .map((m) => ({ name: m.name, role: m.role }));
   }, [desk.jobs, desk.members, desk.thread.id]);
+  /** 右键成员「@他说话」：把名字插进输入框（群聊模式） */
+  const [atTarget, setAtTarget] = useState<{ name: string; nonce: number } | null>(null);
   // 默认永远是「会话频道」：用户与风铃的完整对话不会被任何工单抢走。
   // 需要拍板的单走右栏/频道提示，用户点开才切工单详情（2026-11-11 修）。
   const [activeId, setActiveId] = useState<string | undefined>(undefined);
@@ -3517,6 +3913,7 @@ export function DeskView({
           onThreadSearch={onThreadSearch}
           onThreadRename={onThreadRename}
           onThreadRemove={onThreadRemove}
+          onThreadPin={onThreadPin}
           onCancelTask={onCancelTask}
           onDismissTask={onDismissTask}
           onRemoveTask={onRemoveTask}
@@ -3551,6 +3948,7 @@ export function DeskView({
             turn={desk.turn}
             queue={desk.queue}
             members={mentionMembers}
+            pendingAt={atTarget}
             onStandby={onStandby}
             onSend={onSend}
             onFileSearch={onFileSearch}
@@ -3574,6 +3972,7 @@ export function DeskView({
           }}
           onCreateTeam={onCreateTeam}
           onManageTeam={onManageTeam}
+          onAt={(name) => setAtTarget({ name, nonce: Date.now() })}
           onThread={(id) => {
             setRightOpen(false);
             onThread?.(id);

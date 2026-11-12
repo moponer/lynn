@@ -1,0 +1,206 @@
+// 群聊模式 P1（2026-11-12）：团队与群绑定 / 纯度闸 / 心跳兜底 / 群列表 / 右键菜单数据源
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { Kernel } from "../dist/main/kernel.js";
+import { TeamStore } from "../dist/main/team-store.js";
+
+const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), "lynn-group-p1-"));
+
+function seedModel(root) {
+  fs.writeFileSync(
+    path.join(root, "settings.json"),
+    JSON.stringify(
+      {
+        model: {
+          provider: "test",
+          baseUrl: "http://127.0.0.1:9/v1",
+          model: "test-model",
+          apiKey: { encrypted: false, data: "test-key" },
+          updatedAt: new Date().toISOString(),
+        },
+      },
+      null,
+      2,
+    ),
+    "utf-8",
+  );
+}
+
+const member = (name, role) => ({
+  name,
+  role,
+  goal: `把${role}的事做完`,
+  boundaries: ["只动工作区"],
+  tools: ["read_file", "write_file"],
+  model: "test-model",
+  limits: { maxTurns: 6, budgetTokens: 100000, wallClockMin: 10 },
+  outputContract: { deliverable: "report.md", evidence: ["报告文件"], acceptance: ["数字可对账"] },
+  escalateWhen: "卡住",
+  body: "",
+});
+
+/** 两支队：t1 是本群（林工），t2 是别群（阿明） */
+function seedTeams(root) {
+  const teams = new TeamStore(root);
+  teams.createTeam("t1", "月报突击队");
+  teams.writeMember("t1", member("林工", "数据整理员"));
+  teams.createTeam("t2", "竞品调研组");
+  teams.writeMember("t2", member("阿明", "调研员"));
+}
+
+function setup() {
+  const root = tmp();
+  seedModel(root);
+  seedTeams(root);
+  const kernel = new Kernel(root);
+  kernel.handle("config.prefs", { autoStart: false });
+  return { root, kernel, teams: new TeamStore(root) };
+}
+
+const BRIEF =
+  "【目标】把 9 月材料整理成月报\n【完成标准】产出月报文件，数字与源材料核对一致\n【材料与位置】材料文件在工作区\n【限制】只做 9 月，不要改源材料";
+
+/** 用户点「开始」才真正建单——契约卡只是计划 */
+const start = (kernel, taskId) => {
+  const plan = kernel.handle("session.snapshot").board.decisions.find((d) => d.kind === "plan" && d.jobId === taskId);
+  assert.ok(plan, `应有 ${taskId} 的任务契约`);
+  assert.equal(kernel.handle("decision.resolve", { id: plan.id, action: "start" }).ok, true);
+};
+
+const assign = (kernel, taskId, teamId = "t1", who = "林工") =>
+  kernel.runTool("assign_task", {
+    teamId,
+    taskId,
+    member: who,
+    brief: BRIEF,
+    deadline: "30 分钟",
+    acceptance: ["数字可对账"],
+  });
+
+async function until(fn, ms = 5000, label = "等待") {
+  const t0 = Date.now();
+  while (Date.now() - t0 < ms) {
+    if (fn()) return;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  assert.fail(`等待超时：${label}`);
+}
+
+test("群绑定：派单建队时把队绑到当前群；本群队伍优先复用", async () => {
+  const { kernel, teams } = setup();
+  try {
+    await kernel.init();
+    const threadId = kernel.currentThreadId;
+    assign(kernel, "task-1");
+    assert.equal(teams.readTeam("t1").threadId, threadId, "本群的队要显式绑到本群");
+
+    // 本群已有工单 → 不传 teamId 也不该另起新队（群里不该冒出两支班底）
+    const again = kernel.runTool("assign_task", {
+      taskId: "task-2",
+      member: "林工",
+      brief: BRIEF,
+      deadline: "30 分钟",
+    });
+    assert.doesNotMatch(again, /找不到|没有可用团队/, "本群队伍要能直接复用");
+    const snap = kernel.handle("session.snapshot");
+    const t2 = snap.board.track.find((t) => t.id === "task-2");
+    assert.equal(t2?.teamId, "t1", "第二张单还是本群那支队");
+  } finally {
+    await kernel.dispose();
+  }
+});
+
+test("群任务纯净性闸：本群有在办的事时，别群的队不许混进来", async () => {
+  const { kernel } = setup();
+  try {
+    await kernel.init();
+    assign(kernel, "task-1");
+    const r = kernel.runTool("assign_task", {
+      teamId: "t2",
+      taskId: "task-x",
+      member: "阿明",
+      brief: BRIEF,
+      deadline: "30 分钟",
+    });
+    assert.match(r, /另一条任务线/, "别群的活塞进本群要被拒，并说清该另开一群");
+    assert.match(r, /另开一群/);
+  } finally {
+    await kernel.dispose();
+  }
+});
+
+test("心跳兜底：群里 @ 了成员但风铃没接住 → 巡检事实里出现", async () => {
+  const { kernel } = setup();
+  try {
+    await kernel.init();
+    assign(kernel, "task-1");
+    kernel.handle("feed.send", { text: "@林工 这段口径按季度重出" });
+
+    const pending = kernel.pendingMentions();
+    assert.equal(pending.length, 1, "没接住的 @ 要被心跳捞出来");
+    assert.equal(pending[0].member, "林工");
+    assert.match(pending[0].text, /季度/);
+
+    // 风铃在群里回了一句 → 不再算未回应
+    kernel.card({ kind: "lynn", text: "收到，我让林工按季度重出。" });
+    assert.equal(kernel.pendingMentions().length, 0, "回应过就不再提醒");
+  } finally {
+    await kernel.dispose();
+  }
+});
+
+test("群列表：最近消息摘要落进会话索引；置顶可切", async () => {
+  const { kernel } = setup();
+  try {
+    await kernel.init();
+    kernel.handle("feed.send", { text: "群里第一句：帮我核一下 Q3" });
+    await until(
+      () => {
+        const snap = kernel.handle("session.snapshot");
+        return Boolean(snap.threads.find((t) => t.id === snap.thread.id)?.lastPreview);
+      },
+      4000,
+      "摘要落进会话索引",
+    );
+    const snap = kernel.handle("session.snapshot");
+    const th = snap.threads.find((t) => t.id === snap.thread.id);
+    assert.match(th.lastPreview, /Q3/, "摘要要有群里最后一句");
+
+    const pin = kernel.handle("thread.pin", { id: th.id, pinned: true });
+    assert.equal(pin.ok, true);
+    assert.equal(pin.pinned, true);
+    const after = kernel.handle("session.snapshot");
+    assert.equal(after.threads.find((t) => t.id === th.id)?.pinned, true);
+  } finally {
+    await kernel.dispose();
+  }
+});
+
+test("右键菜单的数据源：成员档案 / 工单详情 / 催办", async () => {
+  const { kernel } = setup();
+  try {
+    await kernel.init();
+    assign(kernel, "task-1");
+
+    const prof = kernel.handle("team.member.detail", { teamId: "t1", name: "林工" });
+    assert.equal(prof.ok, true);
+    assert.equal(prof.profile.role, "数据整理员");
+    assert.ok(prof.profile.goal, "档案要有目标");
+    assert.equal(prof.job?.id, "task-1", "要能看出他手上那张单");
+
+    const det = kernel.handle("task.detail", { taskId: "task-1" });
+    assert.equal(det.ok, true);
+    assert.match(det.detail.brief, /【目标】/, "简报原文要留在单上（判卷口径冻结）");
+    assert.deepEqual(det.detail.acceptance, ["数字可对账"], "完成标准是派单时冻结的那版");
+
+    // 没人跑 → 催办如实失败，不假装催到了
+    const nudge = kernel.handle("task.nudge", { taskId: "task-1" });
+    assert.equal(nudge.ok, false);
+    assert.match(nudge.error, /没有在跑/);
+  } finally {
+    await kernel.dispose();
+  }
+});

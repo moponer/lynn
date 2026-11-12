@@ -123,6 +123,14 @@ export interface TaskRecord {
    * - required：关键任务（审计/对账/安全/可复跑）仍强制 ≥1 项已验证证据。
    */
   evidencePolicy?: EvidencePolicy;
+  /**
+   * 派单时的简报原文（2026-11-12 群聊模式落库）。
+   * 判卷口径在派单那一刻就冻结——不然成员事后拿不出"我按当时的标准做的"的证据，
+   * 因为标准根本没存下来。存在单上后，群里右键成员就能看到"他被要求做什么"。
+   */
+  brief?: string;
+  /** 派单时的完成标准（冻结版） */
+  acceptance?: string[];
 }
 
 export class TaskConflictError extends Error {
@@ -283,6 +291,10 @@ export class TaskStore {
     workspaceRoot?: string;
     workspace?: TaskWorkspaceRecord;
     evidencePolicy?: EvidencePolicy;
+    /** 派单简报原文（判卷口径冻结在单上，2026-11-12） */
+    brief?: string;
+    /** 派单时的完成标准（冻结版） */
+    acceptance?: string[];
   }): TaskRecord {
     if (this.get(input.id)) throw new TaskRuleError(`工单已存在: ${input.id}`);
     if (input.parentId) {
@@ -310,6 +322,8 @@ export class TaskStore {
       workspaceRoot: input.workspaceRoot ?? input.workspace?.root,
       ...(input.workspace ? { workspace: input.workspace } : {}),
       ...(input.evidencePolicy ? { evidencePolicy: input.evidencePolicy } : {}),
+      ...(input.brief ? { brief: input.brief } : {}),
+      ...(input.acceptance?.length ? { acceptance: input.acceptance } : {}),
     };
     this.write(rec);
     return rec;

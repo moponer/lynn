@@ -265,6 +265,31 @@ const snapshot = {
           },
         ],
       },
+      {
+        // 走查：别群的队——右栏应折叠在「其他团队」下面，不与本群混排
+        id: "t3",
+        name: "竞品调研组",
+        status: "active",
+        members: [
+          {
+            name: "周禾",
+            role: "竞品调研",
+            goal: "把同类产品的做法摸清楚",
+            status: "idle",
+            statusNote: "空闲",
+            progress: 0,
+            budgetUsed: 0,
+            budgetTotal: 300,
+            rejections: 0,
+            rejectionLimit: 3,
+            toolWhitelist: ["read_file", "list_dir"],
+            color: "#d08a4e",
+            avatarId: "a09",
+            model: "deepseek-chat",
+            turnLimit: 12,
+          },
+        ],
+      },
     ],
     track: [
       {
@@ -435,8 +460,23 @@ const snapshot = {
   threads: process.env.LYNN_PREVIEW_EMPTY
     ? []
     : [
-        { id: "t-main", title: "月报整理", updatedAt: "2026-11-02T14:32:00.000Z", counts: { active: 0, archived: 2 } },
-        { id: "t-2", title: "插件工坊", updatedAt: "2026-11-01T10:05:00.000Z", counts: { active: 1, archived: 0 } },
+        {
+          id: "t-main",
+          title: "月报整理",
+          updatedAt: "2026-11-02T14:32:00.000Z",
+          counts: { active: 1, archived: 2 },
+          pinned: true,
+          lastPreview: "顾明：第 3 节已写完，条数从 1284 对到 1284，无缺口。",
+          lastAt: "2026-11-02T14:32:00.000Z",
+        },
+        {
+          id: "t-2",
+          title: "插件工坊",
+          updatedAt: "2026-11-01T10:05:00.000Z",
+          counts: { active: 1, archived: 0 },
+          lastPreview: "风铃：草稿已生成，等你点「发布」。",
+          lastAt: "2026-11-01T10:05:00.000Z",
+        },
       ],
 };
 

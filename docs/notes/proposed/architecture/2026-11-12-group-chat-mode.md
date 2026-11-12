@@ -339,13 +339,32 @@ lastReadAt?: string;
 - 新增测试覆盖：①@只认本群成员（陌生 @ 丢弃 + 如实出卡）②派单/契约卡由工具层强制点名 ③成员交回报以本人名义发言（带头像与岗位）④定向说明只进当轮不进历史。
 - 走查（`npm run shot -- shots\group-chat.png groupchat`）：`talks:2`（风铃/顾明）、`atChips:2`、`talkRoles:["数据整理员"]`、`talkAvatars:1`、`userRightGap:2 / userLeftGap:449`（用户右对齐）、`@` 补全候选 `["@顾明 数据整理员"]`（群成员优先于文件）。截图 `shots/group-chat.png`。
 
-### 10.4 P0 未覆盖（留给 P1）
+### 10.4 P1 落地记录（2026-11-12 已交付）
 
-- 群里 @ 未回应的心跳兜底（第 5 节决策已定走心跳，但巡检事实尚未加）。
-- 左栏微信式群列表（群名/最近消息/未读角标/置顶/`+ 新群`）。
-- 右栏本群置顶 + 他群折叠 + 成员右键菜单（资料/目标/进度/@TA/催一下）。
-- `TeamRecord.threadId` 显式绑定（当前"本群"仍靠工单 threadId 派生）。
-- 群任务纯净性闸（派单与本群目标不符 → 拒绝并要求开新群）。
+| 项 | 落点 | 说明 |
+|---|---|---|
+| 团队与群显式绑定 | `TeamRecord.threadId` + `TeamStore.bindThread()` + `kernel.bindGroup()` | 之前"本群"靠"最近一张单的 threadId == 当前会话"猜，猜错就把别群的人塞进来。现在建队/派单时显式绑定（只首次绑定，不改旧归属） |
+| 本群队伍优先 | `kernel.resolveTeamId()` | 本群有工单或已绑队 → 用本群的队，不再另起新队（群里不该冒出两支班底） |
+| 群任务纯净性闸 | `assign_task` 内 | 本群已有在办的事时，别群的队被拒，并说清"另开一群"。返工（reworkTaskId）不受限 |
+| 心跳兜底「群内 @ 未回应」 | `heartbeat.ts` 新增 `unansweredMentions` + `kernel.pendingMentions()` | 用户 @成员后风铃没接住 → 下一轮巡检捞出来。判定"已回应"排除带 code 的卡（模型挂掉的重试提示也是 lynn 卡，但它不是回应） |
+| 群列表（微信式） | `ThreadMeta.lastPreview/lastAt/pinned` + `thread.pin` RPC + 左栏改造 | 头像块 + 群名/置顶 + 时间 + 在办角标 + 最近一句摘要；置顶的排最前。摘要由 `kernel.persistPreview()` 落进会话索引（取最后一句**对话**，不取系统报错） |
+| 右栏本群置顶 | `Roster` 的 `groupTeamIds` + `teamOpenOverride` | 本群的队标"本群"且默认展开，别群折叠在「其他团队（n）」下面 |
+| 成员右键菜单 | `MemberMenu` + `MemberDetail` + 3 个新 RPC | 查看资料 / 任务目标 / 进度 / @他说话 / 催一下。菜单形态照工单卡右键（fixed + 点外面关 + Esc 关） |
+| 判卷口径冻结 | `TaskRecord.brief/acceptance` + `assign_task` 落库 | 派单时的简报与完成标准存到单上 → 右键成员能看"他被要求做什么"，事后不能改口径（leader 的"暗卷"在 lynn 的正确落法） |
+| 用户催办 | `task.nudge` RPC + `nudgeMember(taskId, note, byUser)` | 话转给成员（下一轮生效），不越权：返工与否由风铃定 |
+
+**新增 RPC**：`thread.pin` / `team.member.detail` / `task.detail` / `task.nudge`。
+
+**验证**：`npm run typecheck` 0 错；`npm run lint:design` 过；`npm test` **561/561 绿**（新增 `tests/group-chat-p1.test.mjs` 5 条：群绑定与本群优先 / 纯度闸 / 心跳兜底 / 群列表摘要与置顶 / 右键数据源）。走查 `npm run shot -- shots\group-p1.png groupp1`：`pins:1`、`groupTags:["本群"]`、`othersLabel:"其他团队（1）"`、右键菜单 5 项（在跑时才可催）。截图 `shots/group-p1.png`。
+
+### 10.5 P1 遗留（下一轮）
+
+1. **群内 @ 的"待回应"视觉标记**：现在只有心跳兜底，群里看不出"这条 @ 还没人接"。应给 user 卡加"待风铃处理"角标，风铃一动就消（纯 UI，不烧 token）。
+2. **群列表未读数**：现在只有"在办角标"，没有"你没看过的消息"计数（需要 per-thread `lastReadAt`）。
+3. **群名/群公告**：一个群 = 一件事的名字；目前群名沿用会话自动命名（首条消息前 20 字）。
+4. **多群并发**：切群即换 Pi 会话（`threads/<id>/pi/`），多群常驻成本未测。
+5. **`TaskRecord.member` 单值 → 多承办人**：仅当出现"一单多人协作"真需求时做。
+
 
 ---
 

@@ -604,6 +604,35 @@ app.whenReady().then(async () => {
     await new Promise((r) => setTimeout(r, 500));
   }
 
+  // 可选：群聊 P1 走查（左栏群列表 + 右栏本群置顶 + 成员右键菜单）
+  if (process.argv[3] === "groupp1") {
+    const info = await win.webContents.executeJavaScript(`(() => ({
+      threadRows: document.querySelectorAll('.thread-row').length,
+      threadAv: document.querySelectorAll('.thread-av').length,
+      threadPrev: [...document.querySelectorAll('.thread-prev')].map((x) => x.textContent.trim().slice(0, 24)),
+      pins: document.querySelectorAll('.thread-pin').length,
+      groupTags: [...document.querySelectorAll('.tg-tag')].map((x) => x.textContent.trim()),
+      othersLabel: document.querySelector('.tgroup-others-h')?.textContent.trim() ?? null,
+      othersTeams: document.querySelectorAll('.tgroup-others .tgroup-card').length,
+    }))()`);
+    console.log("GROUPP1", JSON.stringify(info));
+    // 右键一个成员卡 → 菜单
+    const opened = await win.webContents.executeJavaScript(`(() => {
+      const el = document.querySelector('.mcard');
+      if (!el) return false;
+      const r = el.getBoundingClientRect();
+      el.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: r.left + 20, clientY: r.top + 12 }));
+      return true;
+    })()`);
+    await new Promise((r) => setTimeout(r, 450));
+    const menu = await win.webContents.executeJavaScript(`(() => ({
+      menu: !!document.querySelector('.jobmenu'),
+      items: [...document.querySelectorAll('.jobmenu-item')].map((x) => x.textContent.trim()),
+      disabled: [...document.querySelectorAll('.jobmenu-item:disabled')].map((x) => x.textContent.trim()),
+    }))()`);
+    console.log("GROUPP1_MENU", opened, JSON.stringify(menu));
+  }
+
   // 可选：切主题，参数形如 night:light / paper:dark / celadon:dark
   const themeArg = process.argv[4];
   if (themeArg) {

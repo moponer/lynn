@@ -847,6 +847,12 @@ export default function App() {
             .then(() => refresh())
             .catch((err) => setNotice(`会话改名失败：${err instanceof Error ? err.message : String(err)}`));
         }}
+        onThreadPin={(id, pinned) => {
+          setNotice(null);
+          void rpc("thread.pin", { id, pinned })
+            .then(() => refresh())
+            .catch((err) => setNotice(`置顶失败：${err instanceof Error ? err.message : String(err)}`));
+        }}
         onThreadRemove={(id) => {
           setNotice(null);
           void rpc("thread.remove", { id })
