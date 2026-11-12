@@ -126,7 +126,7 @@ test("C1：跨会话派单 → 后台回报落回出发会话；新会话点名�
     // 用户切到新会话——此时后台还在跑
     const created = kernel.handle("session.new");
     assert.notEqual(created.threadId, threadA);
-    const notice = kernel.handle("session.snapshot").feed.find((c) => (c.text ?? "").includes("新会话已开始"));
+    const notice = kernel.handle("session.snapshot").feed.find((c) => (c.text ?? "").includes("新群已开始"));
     assert.ok(notice, "新会话应有系统卡");
     assert.equal(notice.action, "stopRunning", "有单在跑就必须给停机动作");
     assert.match(notice.text, /1 张单在后台跑/);

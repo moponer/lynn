@@ -47,11 +47,11 @@ test("ThreadStore：search 命中卡片文本与 history，空关键词返回空
   assert.deepEqual(s.search("不存在的词"), []);
 });
 
-test("ThreadStore：autoTitle 只改首条消息时的『新会话』", () => {
+test("ThreadStore：autoTitle 只改首条消息时的『新群』", () => {
   const root = tmp();
   const s = new ThreadStore(root);
   const a = s.create();
-  assert.equal(a.title, "新会话");
+  assert.equal(a.title, "新群");
   s.autoTitle(a.id, "帮我写一个导出脚本");
   assert.equal(s.get(a.id).title, "帮我写一个导出脚本");
   s.autoTitle(a.id, "第二条不该覆盖标题");

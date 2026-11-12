@@ -159,7 +159,7 @@ export function SettingsModal({
     threadModelId: string | null;
     activeModelId: string | null;
     threadTitle: string;
-  }>({ defaultModelId: null, threadModelId: null, activeModelId: null, threadTitle: "新会话" });
+  }>({ defaultModelId: null, threadModelId: null, activeModelId: null, threadTitle: "新群" });
   /** 自定义端点风险确认：本机/局域网/非 HTTPS 保存或探测前必须勾选 */
   const [riskAck, setRiskAck] = useState(false);
   /** 从 /v1/models 发现模型（批量导入） */

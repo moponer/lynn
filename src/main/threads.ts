@@ -90,7 +90,7 @@ export class ThreadStore {
     const normalized = typeof roots === "string" ? normalizeRoots({ primary: roots }) : normalizeRoots(roots);
     const meta: ThreadMeta = {
       id: `th-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
-      title: (title?.trim() || "新会话").slice(0, 40),
+      title: (title?.trim() || "新群").slice(0, 40),
       createdAt: at,
       updatedAt: at,
       ...(normalized ? { roots: normalized } : {}),
@@ -277,7 +277,7 @@ export class ThreadStore {
   /** 自动命名：首条用户消息前 20 字 */
   autoTitle(threadId: string, text: string): void {
     const t = this.get(threadId);
-    if (!t || t.title !== "新会话") return;
-    this.rename(threadId, text.trim().slice(0, 20) || "新会话");
+    if (!t || t.title !== "新群") return;
+    this.rename(threadId, text.trim().slice(0, 20) || "新群");
   }
 }

@@ -14,7 +14,7 @@ const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), "lynn-link-"));
 
 test("C4：新会话提示——没有在跑的单就不提停机；有就点名并给动作", () => {
   const quiet = newSessionNotice([]);
-  assert.match(quiet.text, /新会话已开始/);
+  assert.match(quiet.text, /新群已开始/);
   assert.equal(quiet.action, undefined, "没在跑的单不该冒出一个停机按钮");
 
   const busy = newSessionNotice(["WO-2418", "WO-2419"]);
@@ -74,7 +74,7 @@ test("C4：切会话再切回来，顶栏用量跟着线程走；session.new 的
     const created = kernel.handle("session.new");
     assert.equal(kernel.handle("session.snapshot").usage.sessionIn, 0, "新线程从 0 起，不继承甲会话的累计");
 
-    const notice = kernel.handle("session.snapshot").feed.find((c) => (c.text ?? "").includes("新会话已开始"));
+    const notice = kernel.handle("session.snapshot").feed.find((c) => (c.text ?? "").includes("新群已开始"));
     assert.ok(notice, "新会话有系统卡");
     assert.notEqual(notice.action, "stopRunning", "没有成员在跑就不该出现停机按钮");
 

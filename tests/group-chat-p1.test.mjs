@@ -285,6 +285,26 @@ test("多群并行：群 A 的成员在跑时，群 B 照样能派单——两�
   }
 });
 
+test("群名：一个群 = 一件事——派单后群名用任务标题（用户改过就不动）", async () => {
+  const { kernel } = setup();
+  try {
+    await kernel.init();
+    kernel.runTool("assign_task", {
+      teamId: "t1",
+      taskId: "task-1",
+      member: "林工",
+      brief: BRIEF,
+      deadline: "30 分钟",
+      title: "Q3 订单核对表",
+    });
+    const id = kernel.handle("session.snapshot").thread.id;
+    const name = kernel.handle("session.snapshot").threads.find((t) => t.id === id)?.title ?? "";
+    assert.match(name, /Q3 订单核对表/, "群名该用任务标题，而不是默认名");
+  } finally {
+    await kernel.dispose();
+  }
+});
+
 test("群公告（全局段）：写进去 → 风铃每轮都看得见", async () => {
   const { kernel } = setup();
   try {

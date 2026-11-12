@@ -1807,7 +1807,7 @@ button:disabled,
   .spine { width: 180px; }
 }
 @media (max-width: 1120px) {
-  .ledger { width: 232px; }
+  .ledger { width: 268px; }
   .spine { display: none; }
 }
 

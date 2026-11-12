@@ -648,10 +648,10 @@ const READ_ONLY_TOOLS = new Set(["check_progress", "check_roster", "read_artifac
  */
 export function newSessionNotice(running: string[]): { text: string; action?: "stopRunning" } {
   if (running.length === 0) {
-    return { text: "新会话已开始。上一段对话留在「会话」列表里，随时能切回。" };
+    return { text: "新群已开始。上一段的往来留在「群」列表里，随时能切回。" };
   }
   return {
-    text: `新会话已开始。上一段对话留在「会话」列表里，随时能切回。注意：还有 ${running.length} 张单在后台跑（${running.join("、")}），不停会继续消耗预算并可能弹审批。`,
+    text: `新群已开始。上一段的往来留在「群」列表里，随时能切回。注意：还有 ${running.length} 张单在后台跑（${running.join("、")}），不停会继续消耗预算并可能弹审批。`,
     action: "stopRunning",
   };
 }
@@ -952,7 +952,7 @@ export class Kernel {
     // 必须保持空场，不能重启一次就偷偷补回一条同名的「新会话」。
     const indexFile = path.join(dataRoot, "threads", "index.json");
     const defaultRoots: RootSet = { primary: this.defaultWorkspace, extras: [] };
-    const current = list[0] ?? (fs.existsSync(indexFile) ? null : this.threads.create("新会话", defaultRoots));
+    const current = list[0] ?? (fs.existsSync(indexFile) ? null : this.threads.create("新群", defaultRoots));
     this.currentThreadId = current?.id ?? "";
     this.ensureDefaultWorkspace();
     this.applyRoots(this.rootsForThread(current));
@@ -1913,7 +1913,7 @@ export class Kernel {
    */
   private ensureThreadId(): string {
     if (!this.currentThreadId) {
-      const meta = this.threads.create("新会话", this.roots);
+      const meta = this.threads.create("新群", this.roots);
       // 不走 switchThread：它会清空 feed，把这一轮已经生成的心跳卡/工具卡一起抹掉。
       // 这里是"给内存里已有的内容补一个归属"，不是"切到另一条会话"。
       this.currentThreadId = meta.id;
@@ -4057,6 +4057,12 @@ export class Kernel {
         }
         const decisionId = `plan-${taskId}-${Date.now().toString(36)}`;
         this.pendingPlans.set(decisionId, { ...ctx, decisionId });
+        // 一个群 = 一件事：群名还没定过时，用任务标题命名（用户手动改过就不动）
+        try {
+          this.threads.autoTitle(this.ensureThreadId(), title);
+        } catch {
+          /* 命名失败不影响派单 */
+        }
         const permNote = readRoots?.length ? `\n\n只读授权申请（点「开始」即批准）：${readRoots.join("、")}` : "";
         // 禁区 / 取舍 / 型态也上契约卡：用户点「开始」前就该看见这次的红线
         const methodNote =
@@ -5752,7 +5758,7 @@ export class Kernel {
           },
           thread: {
             id: this.currentThreadId,
-            title: this.currentThreadId ? (this.threads.get(this.currentThreadId)?.title ?? "新会话") : "",
+            title: this.currentThreadId ? (this.threads.get(this.currentThreadId)?.title ?? "新群") : "",
             projectRoot: this.threads.get(this.currentThreadId)?.projectRoot,
           },
           threads: this.threads
@@ -6824,7 +6830,7 @@ export class Kernel {
           defaultModelId: defaultId,
           threadModelId: threadId,
           activeModelId: activeId,
-          threadTitle: this.threads.get(this.currentThreadId)?.title ?? "新会话",
+          threadTitle: this.threads.get(this.currentThreadId)?.title ?? "新群",
         } as RpcContracts[M]["result"];
       }
 
@@ -7343,7 +7349,7 @@ export class Kernel {
         const inherited: RootSet = projectRoot
           ? { primary: path.resolve(String(projectRoot)), extras: this.roots.extras }
           : this.roots;
-        const meta = this.threads.create("新会话", inherited);
+        const meta = this.threads.create("新群", inherited);
         // C4：切走前把还在跑的单记下来——用户以为"从头开始"，后台其实还在烧预算、还可能弹审批
         const running = [...this.memberRuns.keys()];
         this.switchThread(meta.id);
