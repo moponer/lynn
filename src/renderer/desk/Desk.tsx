@@ -2841,7 +2841,8 @@ function MemberDetail({ data, onClose }: { data: MemberDetailState; onClose: () 
           <MemberAvatar name={m.name} avatarId={m.avatarId} size={40} />
           <div className="mdetail-id">
             <b>{m.name}</b>
-            <span className="mdetail-role">{m.role}</span>
+            {/* 名字与岗位一样时不必重复（实测截图里两行一模一样） */}
+            {m.role !== m.name && <span className="mdetail-role">{m.role}</span>}
           </div>
           <span className="mdetail-state" data-state={m.status}>
             {m.statusLabel}

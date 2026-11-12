@@ -2496,11 +2496,16 @@ html[data-mode="light"] { color-scheme: light; }
   display: grid; place-items: center; padding: 24px;
 }
 .mdetail-card {
-  width: min(520px, 92vw); max-height: 78vh; overflow: auto;
-  background: var(--sheet-2); border-radius: var(--r-m);
-  padding: 16px 18px 18px; box-shadow: 0 18px 48px rgba(0, 0, 0, .45);
+  width: min(560px, 92vw); max-height: 80vh; overflow: auto;
+  background: var(--desk); border-radius: var(--r-m);
+  padding: 0 18px 18px; box-shadow: 0 18px 48px rgba(0, 0, 0, .45);
 }
-.mdetail-hd { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+/* 头部单独一块：头像与名字浮起来，下面四节各是独立块（深浅两套主题都靠底色分层，不靠描边） */
+.mdetail-hd {
+  display: flex; align-items: center; gap: 10px;
+  margin: 0 -18px 14px; padding: 14px 18px;
+  background: var(--sheet-2); border-radius: var(--r-m) var(--r-m) 0 0;
+}
 .mdetail-id { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .mdetail-id b { font-size: var(--fs-body); color: var(--ink); }
 .mdetail-role { font-size: var(--fs-meta); color: var(--ink-3); }
@@ -2509,16 +2514,30 @@ html[data-mode="light"] { color-scheme: light; }
 .mdetail-state[data-state="delivered"] { color: var(--brass); }
 .mdetail-state[data-state="stuck"] { color: var(--red); }
 .mdetail-hd .icon-btn { flex: none; }
-.mdetail-body { display: flex; flex-direction: column; gap: 14px; }
-.mdetail-sec { display: flex; flex-direction: column; gap: 6px; }
-.mdetail-sec-h {
+.mdetail-body { display: flex; flex-direction: column; gap: 12px; }
+/* 一节一块浅底：分层靠块与留白，不靠描边（左侧竖线是全局禁令） */
+.mdetail-sec {
+  background: var(--sheet);
+  border-radius: var(--r-s);
+  padding: 10px 12px 12px;
+  display: flex; flex-direction: column; gap: 9px;
+}.mdetail-sec-h {
   margin: 0; font-family: var(--f-mono); font-size: var(--fs-label); letter-spacing: 0;
-  color: var(--ink-3); font-weight: 500;
+  color: var(--ink-2); font-weight: 500;
+  display: flex; align-items: center; gap: 6px;
 }
-.mdetail-dl { margin: 0; display: flex; flex-direction: column; gap: 6px; }
-.mdetail-row { display: grid; grid-template-columns: 64px 1fr; gap: 10px; align-items: start; }
-.mdetail-row dt { font-size: var(--fs-meta); color: var(--ink-4); }
-.mdetail-row dd { margin: 0; font-size: var(--fs-meta); color: var(--ink-2); overflow-wrap: anywhere; line-height: 1.6; }
+.mdetail-sec-h::before {
+  content: ""; width: 5px; height: 5px; border-radius: 50%;
+  background: var(--brass); flex: none;
+}
+.mdetail-dl { margin: 0; display: flex; flex-direction: column; gap: 9px; }
+/* 键在上、值在下：值往往很长，两列并排会把它挤成一条缝 */
+.mdetail-row { display: flex; flex-direction: column; gap: 2px; }
+.mdetail-row dt { font-size: var(--fs-label); color: var(--ink-3); }
+.mdetail-row dd {
+  margin: 0; font-size: var(--fs-meta); color: var(--ink);
+  line-height: 1.7; overflow-wrap: anywhere; white-space: pre-wrap;
+}
 .mdetail-empty { font-size: var(--fs-meta); color: var(--ink-3); margin: 0; }
 .roster-note {
   font-size: var(--fs-meta); color: var(--blue); background: var(--blue-wash);
