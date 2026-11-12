@@ -23,6 +23,34 @@ import { trayFallbackBuffer, trayIconPaths } from "./tray-icon";
 import { needsUserAttention } from "./notify-policy";
 
 /**
+ * stdout/stderr 被管道提前关闭时（命令行重定向后管道断、IDE 启动器关流），
+ * console.log 会抛 EPIPE；Electron 主进程把它当未捕获异常弹错误框，
+ * 用户看到的是"A JavaScript error occurred in the main process"，与产品无关。
+ * 写日志失败不该弄崩应用——吞掉 EPIPE，其余照旧抛。
+ */
+for (const stream of [process.stdout, process.stderr]) {
+  stream.on("error", (err: NodeJS.ErrnoException) => {
+    if (err && err.code === "EPIPE") return;
+    throw err;
+  });
+}
+
+/**
+ * console.log 写已关闭的管道时会**同步抛** EPIPE（不是 error 事件，拦不住），
+ * Electron 主进程会把它弹成"A JavaScript error occurred in the main process"——
+ * 用户看到的是崩溃框，其实只是日志写不出去。包一层：写不出去就跳过，别弄崩应用。
+ */
+const rawLog = console.log.bind(console);
+console.log = (...args: unknown[]) => {
+  try {
+    rawLog(...args);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException | undefined)?.code;
+    if (code !== "EPIPE") throw err;
+  }
+};
+
+/**
  * Electron 主进程 —— 薄壳（§4.1）。
  * 只做：窗口、生命周期、IPC 转发、safeStorage 凭据加密。
  * 不含 Agent 逻辑、不含工具实现——那些在 kernel.ts（未来换成 Pi 运行时转发）。

@@ -9,10 +9,77 @@ const out = process.argv[2] || path.join(__dirname, "..", "shots", "desk.png");
 const W = Number(process.env.LYNN_PREVIEW_WIDTH) || 1600;
 const H = Number(process.env.LYNN_PREVIEW_HEIGHT) || 1000;
 
+// stdout 被管道提前关闭时（PowerShell 的 Select-Object -First / Select-String 截断），
+// 继续写日志会 EPIPE；Electron 主进程把它当未捕获异常弹框，整次走查直接崩掉。
+// 写日志失败不该弄崩走查——吞掉 EPIPE，其余照旧抛。
+for (const stream of [process.stdout, process.stderr]) {
+  stream.on("error", (err) => {
+    if (err && err.code === "EPIPE") return;
+    throw err;
+  });
+}
+
+/**
+ * 等页面真的就绪（固定等待在冷启动时不靠谱：Electron 首次起进程可能慢一拍，
+ * 走查代码一抛错整条链就断在截图之前 → 走查跑完却没有图）。
+ */
+async function waitFor(check, timeoutMs = 10000, step = 150) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < timeoutMs) {
+    try {
+      if (await check()) return true;
+    } catch {
+      /* 页面还没就绪，继续等 */
+    }
+    await new Promise((r) => setTimeout(r, step));
+  }
+  return false;
+}
+
+/** 走查结果落文件：别指望 stdout（管道随时可能被截断） */
+function writeJson(name, data) {
+  try {
+    const file = path.join(path.dirname(out), path.basename(out, path.extname(out)) + ".json");
+    fs.writeFileSync(file, JSON.stringify({ [name]: data }, null, 2), "utf-8");
+  } catch {
+    /* 落盘失败不影响截图 */
+  }
+}
+
+// stdout 被管道提前关闭时（PowerShell 的 Select-Object -First / Select-String 截断），
+// 继续写日志会 EPIPE。EPIPE 在写已关闭的管道时是**同步抛出**（堆栈：console.log →
+// WriteStream.write → throw），'error' 事件拦不住，会变成 unhandled exception，
+// 被 Electron 主进程弹成"A JavaScript error occurred in the main process"。
+// 两道防线：stream 事件 + 包住 console.log。写日志失败不该弄崩走查。
+for (const stream of [process.stdout, process.stderr]) {
+  stream.on("error", (err) => {
+    if (err && err.code === "EPIPE") return;
+    throw err;
+  });
+}
+const rawLog = console.log.bind(console);
+console.log = (...args) => {
+  try {
+    rawLog(...args);
+  } catch (err) {
+    if (!err || err.code !== "EPIPE") throw err;
+  }
+};
+
+// stdout 的 EPIPE 在 Node 里默认会让进程直接退出（SIGPIPE 语义）——
+// 走查脚本因此可能"跑了一半什么都没产出"。吞掉 EPIPE，让它跑完并把结果写文件。
+process.on("uncaughtException", (err) => {
+  const code = err && err.code;
+  if (code === "EPIPE") return;
+  throw err;
+});
+
 app.disableHardwareAcceleration();
 // review/e3 模式都要见到验收印章（决策印章优先级更高），关掉 A5 演示裁决
 if (process.argv[3] === "review" || process.argv[3] === "e3") process.env.LYNN_PREVIEW_NO_DECISIONS = "1";
 app.whenReady().then(async () => {
+  // 走查代码抛错不该连累截图：截图在最后，异常一路冒上来就什么都没有了
+  try {
   const isPet = process.argv[3] === "pet";
   const win = new BrowserWindow({
     width: isPet ? 240 : W,
@@ -39,7 +106,12 @@ app.whenReady().then(async () => {
     path.join(__dirname, "..", "dist", "renderer", "index.html"),
     isPet ? { query: petMood ? { pet: "1", mood: petMood } : { pet: "1" } } : undefined,
   );
-  await new Promise((r) => setTimeout(r, 1200));
+  await new Promise((r) => setTimeout(r, 600));
+  // 等应用真的画出来（冷启动可能慢）：左栏群行或右栏成员卡出现即视为就绪
+  await waitFor(
+    () => win.webContents.executeJavaScript("!!document.querySelector('.thread-row, .mcard, .feed-item')"),
+    12000,
+  );
 
   if (isPet) {
     await new Promise((r) => setTimeout(r, 800));
@@ -584,6 +656,7 @@ app.whenReady().then(async () => {
       };
     })()`);
     console.log("GROUPCHAT", JSON.stringify(info));
+    writeJson("GROUPCHAT", info);
     // @ 补全：输入 "@顾" 应先列群里的人（本群成员排前面），再列文件
     await win.webContents.executeJavaScript(`(() => {
       const ta = document.querySelector('.composer-in');
@@ -641,6 +714,7 @@ app.whenReady().then(async () => {
       items: [...document.querySelectorAll('.jobmenu-item')].map((x) => x.textContent.trim()),
     }))()`);
     console.log("GROUPP1_TMENU", JSON.stringify(tmenu));
+    writeJson("GROUPP1_TMENU", tmenu);
     // 成员右键 → 查看资料 → 应弹出资料卡（分层）
     await win.webContents.executeJavaScript(`(() => {
       const b = document.querySelector('.mcard');
@@ -664,7 +738,9 @@ app.whenReady().then(async () => {
       rows: [...document.querySelectorAll('.mdetail-row dt')].map((x) => x.textContent.trim()),
     }))()`);
     console.log("GROUPP1_PROFILE", prof, JSON.stringify(card));
+    writeJson("GROUPP1_PROFILE", card);
     console.log("GROUPP1", JSON.stringify(info));
+    writeJson("GROUPP1", info);
     // 右键一个成员卡 → 菜单
     const opened = await win.webContents.executeJavaScript(`(() => {
       const el = document.querySelector('.mcard');
@@ -713,4 +789,13 @@ app.whenReady().then(async () => {
   fs.writeFileSync(out, img.toPNG());
   console.log("SHOT", out, img.getSize());
   app.quit();
+  } catch (err) {
+    // 走查失败要说清，别只留下"没有图"
+    console.log("SHOT_ERR", String(err && err.stack ? err.stack : err));
+    try {
+      app.quit();
+    } catch {
+      /* 退出失败无所谓 */
+    }
+  }
 });
