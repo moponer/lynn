@@ -19,12 +19,28 @@ import {
   type ChannelConfig,
   type TokenCache,
 } from "./messaging";
+import { trayFallbackBuffer, trayIconPaths } from "./tray-icon";
+import { needsUserAttention } from "./notify-policy";
 
 /**
  * Electron 主进程 —— 薄壳（§4.1）。
  * 只做：窗口、生命周期、IPC 转发、safeStorage 凭据加密。
  * 不含 Agent 逻辑、不含工具实现——那些在 kernel.ts（未来换成 Pi 运行时转发）。
  */
+
+// 冷启动：GPU 着色器磁盘缓存在本机常因权限失败反复重试（disk_cache 报错），
+// 内容每次都能重编译，关掉它只省磁盘 I/O，不影响画面。
+app.commandLine.appendSwitch("disable-gpu-shader-disk-cache");
+
+/**
+ * 低内存模式（LYNN_LOW_MEMORY=1）：关掉独立 GPU 进程与硬件合成。
+ * 默认不开——桌面端动效需要合成器；只有内存受限环境显式开启。
+ */
+if (process.env.LYNN_LOW_MEMORY === "1") {
+  app.disableHardwareAcceleration();
+  app.commandLine.appendSwitch("disable-gpu");
+  app.commandLine.appendSwitch("disable-software-rasterizer");
+}
 
 const kernel = new Kernel();
 // 用系统凭据库加密 API Key（§4.7：凭据只经内核注入，不下发渲染层）
@@ -55,11 +71,15 @@ const captureHost = createCaptureHost({
   },
 });
 
-/** 托盘图标（M1-18）：assets/tray.png（scripts/gen-tray-icon.mjs 生成） */
+/** 托盘图标（M1-18）：assets/tray.png；路径解析失败时内嵌兜底，绝不给空图标 */
 function trayIcon() {
-  const p = path.join(__dirname, "..", "assets", "tray.png");
-  const img = nativeImage.createFromPath(p);
-  return img.isEmpty() ? nativeImage.createEmpty() : img;
+  for (const p of trayIconPaths(app.getAppPath(), __dirname)) {
+    const img = nativeImage.createFromPath(p);
+    if (!img.isEmpty()) return img;
+  }
+  const fallback = nativeImage.createFromBuffer(trayFallbackBuffer());
+  if (fallback.isEmpty()) console.warn("[tray] 托盘图标文件缺失，内嵌兜底也失败");
+  return fallback;
 }
 
 function createTray(): void {
@@ -412,10 +432,9 @@ app.on("second-instance", () => focusMain());
 
 app.whenReady().then(async () => {
   if (!singleInstance) return;
-  await kernel.init(); // 动态加载 Pi（ESM）；失败自动降级直连
-  // 启动即打插件集指纹；10 分钟内第 3 次启动自动进安全模式（§4.11.4）
-  const boot = kernel.noteKernelStart();
-  console.log(`[plugins] fingerprint=${boot.fingerprint} safeMode=${boot.safeMode} starts=${boot.starts}`);
+  // 首屏优先：窗口、托盘、快捷键、更新器先起来，不等内核的插件/MCP/office 探测。
+  // 内核构造函数已经把会话、记忆、台账、工具面备好；后台 init 完成后，
+  // L1/MCP 指纹变化会让下一条消息自动重建 Pi worker（不丢能力）。
   createWindow();
   createTray();
   registerHotkey();
@@ -523,12 +542,102 @@ app.whenReady().then(async () => {
         const p = params as { taskId: string; ref: string };
         const base = path.resolve(kernel.dataRoot, "tasks", p.taskId);
         const target = path.resolve(base, p.ref);
+        // 目录外的交付物（只读根原件 / 超 10MB 未复制进 artifacts）只登记绝对路径：
+        // 认 task.json 里登记过的那几个，别的一律照旧拒绝。
         if (!target.startsWith(base + path.sep)) {
-          return { ok: false, error: "证据路径越界，已拒绝" };
+          const abs = path.isAbsolute(String(p.ref ?? ""));
+          if (!abs || !kernel.isTaskDeliverable(p.taskId, String(p.ref ?? ""))) {
+            return { ok: false, error: "证据路径越界，已拒绝" };
+          }
         }
         if (!fs.existsSync(target)) return { ok: false, error: "文件不存在（可能已被移动）" };
         const err = await shell.openPath(target);
         return err ? { ok: false, error: err } : { ok: true };
+      }
+      if (method === "preview.read") {
+        // 内置预览：只把内容交给渲染层，不调 shell.openPath，外部程序零启动开销。
+        // 路径守卫与 evidence.open 完全一致，前端拿不到工作区之外的字节。
+        const p = params as { taskId: string; ref: string };
+        const base = path.resolve(kernel.dataRoot, "tasks", p.taskId);
+        const target = path.resolve(base, String(p.ref ?? ""));
+        if (!target.startsWith(base + path.sep)) {
+          const abs = path.isAbsolute(String(p.ref ?? ""));
+          if (!abs || !kernel.isTaskDeliverable(p.taskId, String(p.ref ?? ""))) {
+            return { ok: false, kind: "missing", error: "预览路径越界，已拒绝" };
+          }
+        }
+        if (!fs.existsSync(target) || !fs.statSync(target).isFile()) {
+          return { ok: false, kind: "missing", error: "文件不存在（可能已被移动）" };
+        }
+        const ext = path.extname(target).slice(1).toLowerCase();
+        const bytes = fs.statSync(target).size;
+        const mime: Record<string, string> = {
+          png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif",
+          webp: "image/webp", bmp: "image/bmp", svg: "image/svg+xml", avif: "image/avif",
+        };
+        if (mime[ext]) {
+          if (bytes > 8 * 1024 * 1024) return { ok: true, kind: "binary", ext, bytes };
+          const buf = fs.readFileSync(target);
+          return { ok: true, kind: "image", dataUrl: `data:${mime[ext]};base64,${buf.toString("base64")}`, ext, bytes };
+        }
+        // PDF：沙箱 iframe 里开不了 Chromium 阅读器，返回标记由抽屉引导开独立预览窗口
+        if (ext === "pdf") return { ok: true, kind: "pdf", ext, bytes };
+        // Office 三件套（docx/xlsx/pptx）：渲染层用开源库保真渲染（docx-preview /
+        // @js-preview/excel / pptx-preview，懒加载），主进程只递字节。此前自研的
+        // docx→HTML 只能出"素颜正文"，图片样式全丢；正文提取仍走 docx-read（read_artifact）。
+        if (ext === "docx" || ext === "docm" || ext === "xlsx" || ext === "xlsm" || ext === "pptx") {
+          const OFFICE_LIMIT = 16 * 1024 * 1024;
+          if (bytes > OFFICE_LIMIT) {
+            return { ok: true, kind: "binary", ext, bytes, error: "文件超过 16MB，内置预览带不动，请用系统程序打开。" };
+          }
+          return { ok: true, kind: "office", ext, bytes, dataBase64: fs.readFileSync(target).toString("base64") };
+        }
+        const LIMIT = 600_000;
+        const fd = fs.openSync(target, "r");
+        const take = Math.min(bytes, LIMIT);
+        const buf = Buffer.alloc(take);
+        try {
+          fs.readSync(fd, buf, 0, take, 0);
+        } finally {
+          fs.closeSync(fd);
+        }
+        if (bytes === 0) return { ok: true, kind: "empty", ext, bytes };
+        // 二进制（xlsx/pptx/zip…）不做乱码文本预览，如实说清有什么替代路径
+        if (buf.includes(0)) {
+          const hint: Record<string, string> = {
+            xlsx: "Excel 文件暂无内置预览。可以让风铃用 office_read_table 把数据读出来，或转存成 CSV 再看。",
+            pptx: "演示文稿暂无内置预览，可用系统程序打开。",
+            doc: "旧版 .doc 不支持内置预览；让风铃转存成 .docx 就能直接看。",
+            zip: "压缩包不做解包预览，可用系统程序打开。",
+          };
+          return { ok: true, kind: "binary", ext, bytes, error: hint[ext] };
+        }
+        return { ok: true, kind: "text", text: buf.toString("utf8"), ext, bytes, truncated: bytes > LIMIT };
+      }
+      if (method === "preview.pdfWindow") {
+        // PDF 预览：应用内独立窗口，Chromium 自带阅读器（翻页/缩放/搜索都有）。
+        // 路径守卫与 preview.read 完全一致：只放行 tasks/<id>/ 内或已登记的交付物。
+        const p = params as { taskId: string; ref: string };
+        const base = path.resolve(kernel.dataRoot, "tasks", p.taskId);
+        const target = path.resolve(base, String(p.ref ?? ""));
+        if (!target.startsWith(base + path.sep)) {
+          const abs = path.isAbsolute(String(p.ref ?? ""));
+          if (!abs || !kernel.isTaskDeliverable(p.taskId, String(p.ref ?? ""))) {
+            return { ok: false, error: "预览路径越界，已拒绝" };
+          }
+        }
+        if (!fs.existsSync(target) || !fs.statSync(target).isFile()) return { ok: false, error: "文件不存在（可能已被移动）" };
+        if (!win || win.isDestroyed()) return { ok: false, error: "主窗口不在了" };
+        const pdfWin = new BrowserWindow({
+          width: 1080,
+          height: 860,
+          parent: win,
+          autoHideMenuBar: true,
+          title: `${path.basename(target)} · 预览`,
+          backgroundColor: "#26282d",
+        });
+        void pdfWin.loadFile(target);
+        return { ok: true };
       }
       if (method === "app.pickDirs") {
         // 只读授权多选：一次选多个目录（整盘等敏感选择由内核再验）
@@ -573,6 +682,21 @@ app.whenReady().then(async () => {
         void shell.openPath(target);
         return { ok: true, path: target };
       }
+      // 端点发现/健康检查/本机网关探测要真发 HTTP，走异步方法，不塞进同步 handle
+      if (method === "model.discover") return kernel.modelDiscover(params as never);
+      if (method === "model.health") return kernel.modelHealth(params as never);
+      if (method === "gateway.list") return kernel.listGateways();
+      if (method === "app.openExternal") {
+        const p = params as { url: string };
+        try {
+          const u = new URL(String(p.url ?? ""));
+          if (u.protocol !== "https:" && u.protocol !== "http:") return { ok: false, error: "只允许打开 http/https 链接" };
+          await shell.openExternal(u.toString());
+          return { ok: true };
+        } catch (err) {
+          return { ok: false, error: err instanceof Error ? err.message : String(err) };
+        }
+      }
       return kernel.handle(method as RpcMethod, params);
     } catch (err) {
       return { error: err instanceof Error ? err.message : String(err) };
@@ -591,10 +715,23 @@ app.whenReady().then(async () => {
       if (c.kind === "tool" && (c.badge === "回报" || c.badge === "需要你拍板")) {
         notifyOnce(c.title || "成员交活了", (c.text || "进审查台看看。").slice(0, 120));
       } else if (c.kind === "system" && c.code) {
-        notifyOnce("风铃遇到了问题", (c.text || "").slice(0, 120));
+        // 5xx / 429 / 网络抖动是转瞬即逝的运行错误，落 feed 就够；
+        // 只有「用户必须动手」的错误才发系统通知，避免右下角反复弹「风铃遇到了问题」。
+        if (needsUserAttention(c.code)) notifyOnce("风铃遇到了问题", (c.text || "").slice(0, 120));
       }
     }
   });
+
+  // 内核后台初始化：不再挡首屏。失败只记日志，不把窗口变白屏。
+  void (async () => {
+    try {
+      await kernel.init();
+      const boot = kernel.noteKernelStart();
+      console.log(`[plugins] fingerprint=${boot.fingerprint} safeMode=${boot.safeMode} starts=${boot.starts}`);
+    } catch (err) {
+      console.error("[kernel] init failed:", err);
+    }
+  })();
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

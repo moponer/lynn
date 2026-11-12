@@ -16,6 +16,7 @@ test("prefs：默认关窗进托盘+通知开；部分更新落盘并进快照",
     const snap = () => kernel.handle("session.snapshot");
     assert.equal(snap().prefs.trayOnClose, true, "关窗进托盘默认开");
     assert.equal(snap().prefs.notify, true, "通知默认开");
+    assert.equal(snap().prefs.autoStart, true, "默认自主：契约直接开工，不卡在等用户点开始");
 
     const r = kernel.handle("config.prefs", { autoStart: false, trayOnClose: false });
     assert.equal(r.trayOnClose, false);

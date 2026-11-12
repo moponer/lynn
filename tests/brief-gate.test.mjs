@@ -34,7 +34,10 @@ function setup() {
     escalateWhen: "卡住",
     body: "",
   });
-  return { root, kernel: new Kernel(root), tasks: new TaskStore(root) };
+  const kernel = new Kernel(root);
+  // 这组用例专测「契约卡」路径；默认已改为自动开工，这里显式关掉以保留原断言。
+  kernel.handle("config.prefs", { autoStart: false });
+  return { root, kernel, tasks: new TaskStore(root) };
 }
 
 // ---------- validateBrief 纯函数 ----------

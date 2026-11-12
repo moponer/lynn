@@ -4,12 +4,14 @@ const { contextBridge } = require("electron");
 
 const now = "11-02 14:32";
 const feed = [
-  { id: "c1", kind: "user", createdAt: "14:30", jobId: "WO-2418", text: "把 issues_0914.csv 整理成周报，少一条要说明。" },
+  { id: "c1", kind: "user", createdAt: "14:30", jobId: "WO-2418", text: "把 issues_0914.csv 整理成周报，少一条要说明。",
+    author: { kind: "user" } },
   {
     id: "c2",
     kind: "lynn",
     createdAt: "14:31",
     jobId: "WO-2418",
+    author: { kind: "lynn", name: "风铃" },
     thinking: "先看表头和行数：如果 number 有重复，直接按周聚合会把同一条算两次。\n先核对总数，再决定去重口径。",
     text: [
       "**收到**，我拆成三步：",
@@ -21,14 +23,25 @@ const feed = [
       "验收标准：**条数对得上**、每条都有来源。",
     ].join("\n"),
   },
+  // 群聊：风铃点名 @成员（工具层强制），成员以本人名义交回报
+  {
+    id: "c8",
+    kind: "user",
+    createdAt: "14:31",
+    text: "@顾明 这段口径按季度重出，别再按周聚合。",
+    author: { kind: "user" },
+    mentions: [{ kind: "member", name: "顾明", memberId: "顾明" }],
+  },
   {
     id: "c3",
     kind: "tool",
     badge: "派单",
     title: "顾明 · WO-2418",
     meta: "截止 15:00",
-    body: "简报：读 issues_0914.csv，按 number 去重，输出 report_0914.md 第 3 节；附行数对账。",
+    body: "@顾明 简报：读 issues_0914.csv，按 number 去重，输出 report_0914.md 第 3 节；附行数对账。",
     jobId: "WO-2418",
+    author: { kind: "lynn", name: "风铃" },
+    mentions: [{ kind: "member", name: "顾明", memberId: "顾明" }],
     createdAt: "14:31",
   },
   {
@@ -39,6 +52,7 @@ const feed = [
     meta: "证据 2 项",
     body: "已生成第 3 节；附 report_0914.md 与行数对账日志。",
     jobId: "WO-2418",
+    author: { kind: "member", name: "顾明", memberId: "顾明", role: "数据整理员", avatarId: "a01", teamId: "t1" },
     // 战报（report_to_user 落进 feed 的那份）：战果抽屉按 jobId 取最近一条
     report: {
       conclusion: "第 3 节已写完，条数从 1284 对到 1284，无缺口。",
@@ -64,7 +78,83 @@ const feed = [
     },
     createdAt: "10-28",
   },
+  // 走查：系统总结输出带表格/代码块，验证「不是一坨纯文本」
+  {
+    id: "c7",
+    kind: "system",
+    createdAt: "14:33",
+    text: [
+      "**上下文压缩完成**，账目如下：",
+      "",
+      "- 归档早期往来 12 条，保留最近 3 轮与全部工单编号",
+      "- 未动任何卷宗文件；需要回看时按工单号检索",
+      "",
+      "| 项目 | 数量 | 处理 |",
+      "| --- | --- | --- |",
+      "| 早期往来 | 12 | 归档 |",
+      "| 最近往来 | 8 | 保留 |",
+      "| 工单编号 | 19 | 全留 |",
+      "",
+      "```ts",
+      "const kept = cards.slice(-8);",
+      "await archive(cards.slice(0, -8));",
+      "```",
+    ].join("\n"),
+  },
+  // 走查：系统消息分类（清理/巡检/预算/恢复/授权/错误），验证标签、图标与底色能一眼分开
+  { id: "s1", kind: "system", title: "清理", systemTone: "cleanup", createdAt: "09:58", text: "已删除 3 张单：perm-locate-002、perm-audit-003、perm-audit-001（工单/卷宗/临时文件已清；共享工作区未改动）" },
+  { id: "s2", kind: "system", title: "巡检", systemTone: "patrol", createdAt: "10:02", text: "心跳巡检（待审查 2 张）。机器事实已摆到桌面上，由风铃判断处置。" },
+  { id: "s3", kind: "system", title: "预算提示", systemTone: "budget", createdAt: "10:04", text: "会话已用 82% 软预算，已切到备用模型。" },
+  { id: "s4", kind: "system", title: "恢复", systemTone: "recover", createdAt: "10:05", text: "2 张单在上次运行时中断，已标成「卡住」。" },
+  { id: "s5", kind: "system", title: "授权", systemTone: "auth", createdAt: "10:06", text: "已批准只读授权：F:\\TMP-RU~1" },
+  { id: "s6", kind: "system", title: "需要注意", systemTone: "error", code: "E_PROVIDER", createdAt: "10:07", text: "端点 429：稍后自动重试。" },
+  // 走查：最新跟踪进度在对话流底部，按步逐行（旧版是一张卡堆在顶部）
+  {
+    id: "c8",
+    kind: "tool",
+    badge: "进度",
+    title: "顾明 · WO-2418",
+    meta: "第 6 步 · 42s",
+    createdAt: "14:34",
+    body: [
+      "读取 issues_0914.csv（1284 行）",
+      "按 number 去重 → 1284 条唯一，无缺口",
+      "生成第 3 节草稿",
+      "写入 report_0914.md",
+      "附行数对账日志 rowcount.log",
+      "等待风铃验收",
+    ].join("\n"),
+  },
+  // 走查：正在跑的任务，进度卡应亮起「执行中」脉冲（jobId 在 snapshot.running 内）
+  {
+    id: "c9",
+    kind: "tool",
+    badge: "进度",
+    title: "阿黎 · WO-2420",
+    jobId: "WO-2420",
+    meta: "第 3 步 · 8s",
+    createdAt: "14:35",
+    body: [
+      "browser_navigate → 超星学习平台",
+      "browser_click #submit（登录）",
+      "正在抓取第 3 门课进度…",
+    ].join("\n"),
+  },
 ];
+
+// 走查：超长思考让对话流真的可滚，验证「贴底跟随」与细滚动条（不进产品数据）
+if (process.env.LYNN_PREVIEW_LONGTHINK) {
+  feed.push({
+    id: "c6",
+    kind: "lynn",
+    createdAt: "14:33",
+    streaming: true,
+    text: "",
+    thinking: Array.from({ length: 36 }, (_, i) =>
+      `【阶段 ${i + 1}】核对第 ${i + 1} 批数据的编号与行数；缺一条就记进对账日志，先不急着改口径。`,
+    ).join("\n"),
+  });
+}
 
 const avatarPicks = {};
 const snapshot = {
@@ -93,6 +183,24 @@ const snapshot = {
         name: "月报突击队",
         status: "active",
         members: [
+          // 走查：同岗位空闲成员聚合（4 个「源码审查员」应收成一行 ×4，而不是铺 4 张卡）
+          ...[1, 2, 3, 4].map((i) => ({
+            name: `源码审查员${i}`,
+            role: "源码审查工程师",
+            goal: "对任意给定代码范围给出可复核的问题清单",
+            status: "idle",
+            statusNote: "空闲",
+            progress: 0,
+            budgetUsed: 0,
+            budgetTotal: 300,
+            rejections: 0,
+            rejectionLimit: 3,
+            toolWhitelist: ["read_file", "list_dir"],
+            color: "#6fa892",
+            avatarId: "a02",
+            model: "deepseek-chat",
+            turnLimit: 12,
+          })),
           {
             name: "顾明",
             role: "数据整理",
@@ -114,7 +222,7 @@ const snapshot = {
           {
             name: "阿计",
             role: "浏览器自动化",
-            goal: "登录后台并截取对账数据",
+            goal: "用浏览器完成需要交互的页面取数与表单操作",
             status: "running",
             statusNote: "正在跑",
             progress: 42,
@@ -177,6 +285,20 @@ const snapshot = {
         // 成员读写工作区演示：图纸上会显示「成员工作区（可读写…）」
         workspaceRoot: "F:/spiker/hermix-desktop",
         evidenceCount: process.env.LYNN_PREVIEW_HEAVY ? 22 : 2,
+        // 内置预览走查：交付箱里有一份可点开的报告
+        deliverables: [
+          { path: "report_0914.md", ref: "artifacts/report_0914.md", bytes: 2048 },
+          { path: "rowcount.log", ref: "artifacts/rowcount.log", bytes: 512 },
+        ],
+        // 详情区走查：时间线只留两条有信息量的（session 与最后一条 transition 会被过滤）
+        round: 2,
+        timeline: [
+          { at: "11-02 14:31", kind: "assign", text: "派给顾明：把 issues_0914.csv 整理成周报第 3 节" },
+          { at: "11-02 14:32", kind: "session", text: "lynn-mwcvacuv" },
+          { at: "11-02 14:34", kind: "report", text: "任务已重新派单，成员正在后台执行。正在等待回报，不做提前审核。" },
+          { at: "11-02 14:35", kind: "note", text: "第 2 轮重做：沿用原工单，未新建工单" },
+          { at: "11-02 14:36", kind: "transition", text: "→ in_review（待风铃验收）" },
+        ],
         version: 3,
         rejectRounds: 0,
         evidence: process.env.LYNN_PREVIEW_HEAVY
@@ -241,6 +363,24 @@ const snapshot = {
         rejectRounds: 0,
         evidence: [],
       },
+      // 走查归档带折叠：满 11 条时默认只露 5 条、删除动作 hover 才显形
+      ...(process.env.LYNN_PREVIEW_ARCHIVE_MANY
+        ? Array.from({ length: 9 }, (_, i) => ({
+            id: `task-mwbio-${String(i + 1).padStart(3, "0")}`,
+            teamId: "t1",
+            title: [
+              "权限定位核对", "审计留痕归档", "插件扫描", "周报样例校验",
+              "依赖清单复核", "日志切分", "索引重建", "缓存预热", "收尾对账",
+            ][i],
+            status: i % 3 === 0 ? "canceled" : "done",
+            member: "顾明",
+            at: "2026-10-24T09:12:00.000Z",
+            evidenceCount: 0,
+            version: 1,
+            rejectRounds: 0,
+            evidence: [],
+          }))
+        : []),
     ],
     // A5 演示用三条挂起裁决；review 模式要进审查台（印章区得让位给验收印章），env 关掉
     decisions: process.env.LYNN_PREVIEW_NO_DECISIONS
@@ -363,6 +503,85 @@ if (process.env.LYNN_PREVIEW_MULTI) {
   snapshot.running = ["WO-2420", "WO-2421"];
 }
 
+// 运行信号走查（LYNN_PREVIEW_RUN=1）：当前会话(t-main)真有一张在跑的单，
+// 让「成员卡呼吸环 / 工单卡呼吸环 / 进度卡执行中」三处同时成立。
+// 默认（无此 env）不触发，不影响已认可的正常截图。
+if (process.env.LYNN_PREVIEW_RUN) {
+  snapshot.board.track.push({
+    id: "WO-2425",
+    teamId: "t1",
+    title: "周报第 3 节正在生成（浏览器抓对账数据）",
+    status: "in_progress",
+    statusNote: "in_progress · 阿计",
+    member: "阿计",
+    at: now,
+    threadId: "t-main",
+    evidenceCount: 0,
+    version: 1,
+    rejectRounds: 0,
+    evidence: [],
+  });
+  // desk.running 由内核 runningTaskIds() 提供；夹具里直接对齐当前在跑单
+  snapshot.running = ["WO-2425"];
+  // 当前会话往来里加一张该单的进度卡，亮起「执行中」脉冲（jobId 命中 running）
+  feed.push({
+    id: "c10",
+    kind: "tool",
+    badge: "进度",
+    title: "阿计 · WO-2425",
+    jobId: "WO-2425",
+    meta: "第 2 步 · 3s",
+    createdAt: "14:36",
+    body: [
+      "browser_navigate → 对账后台",
+      "browser_click #export（导出 CSV）",
+      "正在解析第 3 节字段…",
+    ].join("\n"),
+  });
+}
+
+// 产出柜走查（LYNN_PREVIEW_OUT=1）：照真机那屏的样子造数据 ——
+// 真交付物（docx/md，带字节数）+ 几条"整句话当 ref"的 command 证据。
+// 旧版会把后者当文档卡铺一屏（「成员回报正文结论：…」+「文档 未核 …qnj8-5」），
+// 新版必须只留真文件、能点开预览。
+if (process.env.LYNN_PREVIEW_OUT) {
+  const outJob = snapshot.board.track.find((t) => t.id === "WO-2418");
+  if (outJob) {
+    outJob.deliverables = [
+      {
+        path: "G:\\实习相关文件\\上海第二工业大学继续教育学院_毕业实习四方协议书_25工企Z11(2).docx",
+        ref: "artifacts/毕业实习四方协议书.docx",
+        bytes: 40045,
+      },
+      {
+        path: "G:\\实习相关文件\\上海第二工业大学继续教育学院_毕业实习日志_25工企Z11(2).docx",
+        ref: "artifacts/毕业实习日志.docx",
+        bytes: 61244,
+      },
+      { path: "G:\\实习相关文件\\_build\\日志正文.md", ref: "artifacts/日志正文.md", bytes: 9210 },
+      { path: "G:\\实习相关文件\\_build\\封面.png", ref: "artifacts/封面.png", bytes: 128000 },
+      ...(outJob.deliverables || []),
+    ];
+    outJob.evidence = [
+      ...outJob.evidence,
+      {
+        kind: "command",
+        label: "成员回报正文结论：「共 4 个 .docx 文件 + 1 个空目录」",
+        ref: "成员回报正文结论：「共 4 个 .docx 文件 + 1 个空目录」，逐文件核对见 §2",
+        verified: false,
+        at: now,
+      },
+      {
+        kind: "command",
+        label: "成员自述曾在 G:\\实习相关文件 下逐个打开过",
+        ref: "成员自述曾在 G:\\实习相关文件 下逐个打开过，均为可解析 OOXML",
+        verified: false,
+        at: now,
+      },
+    ];
+  }
+}
+
 // 卡住（blocked）：连续两个节点没交新证据。默认就挂一张——
 // 走查要能看见「卡住 2 时 41 分」转红 + 卡上的「停掉止损」。
 snapshot.board.track.push({
@@ -416,6 +635,100 @@ if (process.env.LYNN_PREVIEW_EMPTY) {
 contextBridge.exposeInMainWorld("lynn", {
   rpc: async (method, params) => {
     if (method === "session.snapshot") return snapshot;
+    // 内置预览走查：假桥按后缀给内容，渲染层照常排版/高亮，不启外部程序
+    if (method === "preview.pdfWindow") return { ok: true };
+    if (method === "preview.read") {
+      const ref = String(params?.ref || "report.md");
+      const ext = ref.split(".").pop().toLowerCase();
+      if (ext === "ts" || ext === "tsx") {
+        return {
+          ok: true, kind: "text", ext, bytes: 512,
+          text: [
+            "export function summarize(rows: Row[]): Summary {",
+            "  // 编号去重后再对账，避免同一条被算两次",
+            "  const seen = new Set<string>();",
+            "  const kept = rows.filter((r) => !seen.has(r.number) && seen.add(r.number));",
+            "  return { total: rows.length, unique: kept.length, gap: rows.length - kept.length };",
+            "}",
+          ].join("\n"),
+        };
+      }
+      if (ext === "csv") {
+        return { ok: true, kind: "text", ext, bytes: 240, text: "number,title,status\nA-1,登录超时,open\nA-2,导出为空,done\nA-3,排序错乱,open" };
+      }
+      if (ext === "log") {
+        return { ok: true, kind: "text", ext, bytes: 512, text: "[14:31] read issues_0914.csv 1284 rows\n[14:32] dedupe by number -> 1284 unique\n[14:33] write report_0914.md section 3\n[14:34] verify rowcount 1284 == 1284" };
+      }
+      if (ext === "json") {
+        return { ok: true, kind: "text", ext, bytes: 380, text: '{"task":"task-abc","status":"in_review","totals":{"rows":1284,"unique":1284},"steps":["读取源表","去重对账","写报告"]}' };
+      }
+      // docx：用真的 buildDocx 造一份（渲染层 docx-preview 走真解析，不是假 HTML）
+      if (ext === "docx" || ext === "docm") {
+        try {
+          const { buildDocx } = require("../dist/main/docx.js");
+          const buf = buildDocx({
+            title: "周报 · 仓库评估结论",
+            blocks: [
+              { type: "heading", level: 1, text: "核对结论" },
+              { type: "paragraph", text: "数据完整，条数可与源表逐条对齐。" },
+              { type: "heading", level: 2, text: "核对过程" },
+              { type: "table", headers: ["阶段", "产出"], rows: [["读取源表", "issues_0914.csv（1284 行）"], ["去重对账", "唯一编号 1284 条"]] },
+            ],
+          });
+          return { ok: true, kind: "office", ext, bytes: buf.length, dataBase64: buf.toString("base64") };
+        } catch {
+          return { ok: true, kind: "binary", ext, bytes: 40045 };
+        }
+      }
+      // xlsx / pptx：开源库渲染（mock 里没有真文件，给错误路径验降级文案）
+      if (ext === "xlsx" || ext === "xlsm" || ext === "pptx") {
+        return { ok: true, kind: "office", ext, bytes: 51200, dataBase64: Buffer.from("not a real office file").toString("base64") };
+      }
+      // pdf：沙箱 iframe 开不动阅读器，真机引导开独立预览窗口
+      if (ext === "pdf") return { ok: true, kind: "pdf", ext, bytes: 88213 };
+      // 其余二进制如实说（xlsx 真机会带替代路径提示）
+      if (/^(xlsx?|pptx?|zip|rar|7z|et|wps|dps)$/.test(ext)) {
+        return { ok: true, kind: "binary", ext, bytes: 40045 };
+      }
+      // 图片：给一张真图（内联 SVG），验卡面缩略图与抽屉内嵌渲染
+      if (/^(png|jpe?g|gif|webp|bmp|svg)$/.test(ext)) {
+        const svg =
+          '<svg xmlns="http://www.w3.org/2000/svg" width="160" height="100">' +
+          '<rect width="160" height="100" fill="#22313a"/>' +
+          '<rect x="16" y="22" width="72" height="9" fill="#8fa9b3"/>' +
+          '<rect x="16" y="42" width="122" height="6" fill="#4a5f6a"/>' +
+          '<rect x="16" y="56" width="96" height="6" fill="#4a5f6a"/>' +
+          '<rect x="16" y="70" width="108" height="6" fill="#4a5f6a"/></svg>';
+        return { ok: true, kind: "image", ext, bytes: 128000, dataUrl: `data:image/svg+xml;utf8,${encodeURIComponent(svg)}` };
+      }
+      return {
+        ok: true, kind: "text", ext: ext || "md", bytes: 2048,
+        text: [
+          "# 周报第 3 节 · 仓库评估结论",
+          "",
+          "**结论**：数据完整，条数可与源表逐条对齐。",
+          "",
+          "## 核对过程",
+          "",
+          "1. 读取 `issues_0914.csv`，共 1284 行",
+          "2. 按 `number` 去重，仍为 1284 条，无缺口",
+          "3. 生成第 3 节并附行数对账日志",
+          "",
+          "| 检查项 | 源表 | 报告 | 结果 |",
+          "| --- | --- | --- | --- |",
+          "| 总行数 | 1284 | 1284 | 一致 |",
+          "| 唯一编号 | 1284 | 1284 | 一致 |",
+          "| 缺失来源 | 0 | 0 | 通过 |",
+          "",
+          "> 验收标准：条数对得上、每条都有来源。",
+          "",
+          "```ts",
+          "const gap = source.length - unique.length;",
+          "if (gap !== 0) throw new Error(`缺 ${gap} 条`);",
+          "```",
+        ].join("\n"),
+      };
+    }
     // 版本握手：预览没有真内核，给一个"刚刚构建"的时间；LYNN_PREVIEW_STALE=1 时模拟旧内核
     if (method === "app.info") {
       return process.env.LYNN_PREVIEW_STALE ? { ok: true } : { buildAt: new Date().toISOString() };
@@ -452,6 +765,19 @@ contextBridge.exposeInMainWorld("lynn", {
       };
     }
     if (method === "data.cleanup") return { ok: true, freedBytes: 1024 * 1024, removed: 3 };
+    if (method === "gateway.list") {
+      return {
+        gateways: [
+          { id: "ollama", name: "Ollama", baseUrl: "http://127.0.0.1:11434/v1", needsKey: false, docsUrl: "https://ollama.com/download", note: "本地模型，不联网；需要先 ollama serve。", status: "running", latencyMs: 8, modelCount: 3 },
+          { id: "ofm", name: "OFM 免费模型网关", baseUrl: "http://127.0.0.1:18900/v1", needsKey: true, docsUrl: "https://github.com/Ebony-Vinyl/dsh-our-free-model", note: "第三方免费池；只建议非敏感数据。", status: "needs_key" },
+        ],
+      };
+    }
+    if (method === "model.discover") {
+      return { ok: true, models: [{ id: "free-a", ownedBy: "ofm" }, { id: "free-b" }], latencyMs: 12, url: "http://127.0.0.1:18899/v1/models" };
+    }
+    if (method === "model.health") return { ok: true, latencyMs: 12, modelCount: 3, via: "models" };
+    if (method === "app.openExternal") return { ok: true };
     if (method === "permission.set") return { ok: true, mode: "ask" };
     if (method === "feed.send") return { ok: true, queued: false };
     if (method === "session.abort") return { ok: true, aborted: true };
@@ -494,6 +820,8 @@ contextBridge.exposeInMainWorld("lynn", {
             isDefault: true,
             isThreadModel: false,
             updatedAt: new Date().toISOString(),
+            riskLevel: "remote",
+            riskAccepted: true,
           }]
           : [],
         defaultModelId: m.configured ? id : null,
@@ -501,6 +829,10 @@ contextBridge.exposeInMainWorld("lynn", {
         activeModelId: m.configured ? id : null,
         threadTitle: snapshot.thread?.title ?? "新会话",
       };
+    }
+    // 成员战绩：走查时给一份可读的成绩，验证「点开才拉」这条按需通路
+    if (method === "team.member.record") {
+      return { tasks: 7, accepted: 5, rejected: 1, escalations: 1 };
     }
     // 编制页：预览给一队两成员（含岗位提示词），便于设计走查
     if (method === "team.list") {

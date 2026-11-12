@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { ModelConfigView, ModelEntryView, TeamAdminView, UsageView } from "../../shared/contract";
+import type { GatewayView, ModelConfigView, ModelEntryView, TeamAdminView, UsageView } from "../../shared/contract";
 import { THEMES, type ThemeId, type ThemeMode } from "../desk/theme";
 import { fmtTime } from "../desk/model";
 import { buildPack, checkPack, describePack, downloadPack, type LynnPack } from "../desk/lynnpack";
 import { useUiPlugins } from "../desk/ui-host";
 import { AvatarStage } from "../desk/AvatarStage";
+import { endpointRiskLevel } from "../../shared/endpoint-risk";
 import type { AvatarState } from "../../shared/avatar";
 import { AMBIENT_MODE_LABEL, type AmbientMode } from "../../shared/ambient";
 import { AVATARS, avatarById, avatarFor } from "../../shared/avatars";
@@ -159,12 +160,29 @@ export function SettingsModal({
     activeModelId: string | null;
     threadTitle: string;
   }>({ defaultModelId: null, threadModelId: null, activeModelId: null, threadTitle: "新会话" });
+  /** 自定义端点风险确认：本机/局域网/非 HTTPS 保存或探测前必须勾选 */
+  const [riskAck, setRiskAck] = useState(false);
+  /** 从 /v1/models 发现模型（批量导入） */
+  const [discover, setDiscover] = useState<{
+    open: boolean;
+    busy: boolean;
+    models: { id: string; ownedBy?: string }[];
+    selected: Set<string>;
+    error?: string;
+  }>({ open: false, busy: false, models: [], selected: new Set() });
+  /** 每条模型的健康检查结果 */
+  const [health, setHealth] = useState<Record<string, { state: "checking" | "ok" | "bad"; text: string }>>({});
+  /** 本机免费/本地网关：打开模型页时探测一次，不自动启动进程 */
+  const [gateways, setGateways] = useState<GatewayView[]>([]);
+  const [gwBusy, setGwBusy] = useState(false);
+  const [gwRiskAck, setGwRiskAck] = useState(false);
   const [avState, setAvState] = useState<AvatarState>("waiting_confirm");
   const [busy, setBusy] = useState<"" | "save" | "test" | "list">("");
   const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
   const [packMsg, setPackMsg] = useState<string>("");
   const [preview, setPreview] = useState<{ pack: LynnPack; lines: string[] } | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const apiKeyRef = useRef<HTMLInputElement>(null);
   const t = useT();
   const { all: uiPlugins, disabled: uiDisabled, errors: uiErrors, toggle: toggleUi } = useUiPlugins();
 
@@ -576,9 +594,24 @@ export function SettingsModal({
     }
   };
 
-  /** 打开模型页时拉一次列表（含当前对话的模型覆盖） */
+  const refreshGateways = async () => {
+    setGwBusy(true);
+    try {
+      const r = await window.lynn.rpc("gateway.list");
+      setGateways(r.gateways);
+    } catch {
+      setGateways([]);
+    } finally {
+      setGwBusy(false);
+    }
+  };
+
+  /** 打开模型页时拉一次列表（含当前对话的模型覆盖）+ 探测本机网关 */
   useEffect(() => {
-    if (tab === "model") void refreshModels();
+    if (tab === "model") {
+      void refreshModels();
+      void refreshGateways();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab]);
 
@@ -589,12 +622,16 @@ export function SettingsModal({
     setBaseUrl(m?.baseUrl ?? "https://api.deepseek.com/v1");
     setModel(m?.model ?? "deepseek-chat");
     setApiKey("");
+    setRiskAck(Boolean(m?.riskAccepted));
+    setDiscover({ open: false, busy: false, models: [], selected: new Set() });
     setResult(null);
   };
 
   const cancelEdit = () => {
     setEditingId(null);
     setApiKey("");
+    setRiskAck(false);
+    setDiscover({ open: false, busy: false, models: [], selected: new Set() });
     setResult(null);
   };
 
@@ -610,8 +647,22 @@ export function SettingsModal({
       return;
     }
     // 换端点还留空 Key = 把旧服务商的 Key 发到新端点（实机 401 Invalid token 的根因）
-    if (!apiKey.trim() && target && target.baseUrl.replace(/\/+$/, "") !== baseUrl.trim().replace(/\/+$/, "")) {
+    const sameEndpoint =
+      !!target && target.baseUrl.replace(/\/+$/, "").toLowerCase() === baseUrl.trim().replace(/\/+$/, "").toLowerCase();
+    if (!apiKey.trim() && target && !sameEndpoint) {
       setResult({ ok: false, text: "换了 Base URL，请重新填写这个端点的 API Key（旧 Key 不会带到新服务商）。" });
+      return;
+    }
+    const risk = endpointRiskLevel(baseUrl);
+    const ack = riskAck || (sameEndpoint && Boolean(target?.riskAccepted));
+    if (risk !== "remote" && !ack) {
+      setResult({
+        ok: false,
+        text:
+          risk === "local"
+            ? "这是本机/局域网网关：可能复用第三方免费额度，prompt 可能被上游记录，且随时限流。请先勾选风险确认。"
+            : "这个端点不是 HTTPS：Key 与内容会明文传输。请先勾选风险确认。",
+      });
       return;
     }
     setBusy("save");
@@ -624,6 +675,7 @@ export function SettingsModal({
         baseUrl: baseUrl.trim(),
         model: model.trim(),
         apiKey: apiKey.trim() || undefined,
+        ...(ack ? { riskAccepted: true } : {}),
       });
       if (!r.ok) {
         setResult({ ok: false, text: r.error });
@@ -632,12 +684,166 @@ export function SettingsModal({
       setResult({ ok: true, text: isEdit ? "已更新这条模型配置；下一条消息生效。" : "已添加模型，并设为新对话默认。" });
       setEditingId(null);
       setApiKey("");
+      setRiskAck(false);
       await refreshModels();
       onSaved();
     } catch (err) {
       setResult({ ok: false, text: err instanceof Error ? err.message : String(err) });
     } finally {
       setBusy("");
+    }
+  };
+
+  /** 拉 /v1/models：不消耗 token；本机/非 HTTPS 必须先勾风险确认 */
+  const runDiscover = async (override?: { baseUrl?: string; apiKey?: string; riskAccepted?: boolean; editingId?: string }) => {
+    const url = (override?.baseUrl ?? baseUrl).trim();
+    const key = (override?.apiKey ?? apiKey).trim();
+    const ack = override?.riskAccepted ?? riskAck;
+    const id = override?.editingId ?? editingId;
+    if (!url) {
+      setResult({ ok: false, text: "先填 Base URL。" });
+      return;
+    }
+    const risk = endpointRiskLevel(url);
+    if (risk !== "remote" && !ack) {
+      setResult({
+        ok: false,
+        text:
+          risk === "local"
+            ? "这是本机/局域网网关：探测会把 Key 发给该端点，且可能复用第三方免费额度。请先勾选风险确认。"
+            : "这个端点不是 HTTPS：探测会把 Key 明文发出去。请先勾选风险确认。",
+      });
+      return;
+    }
+    setDiscover({ open: true, busy: true, models: [], selected: new Set() });
+    setResult(null);
+    try {
+      const r = await window.lynn.rpc("model.discover", {
+        ...(id && id !== "new" ? { id } : {}),
+        baseUrl: url,
+        ...(key ? { apiKey: key } : {}),
+        riskAccepted: ack,
+      });
+      if (!r.ok) {
+        setDiscover({ open: true, busy: false, models: [], selected: new Set(), error: r.error });
+        return;
+      }
+      setDiscover({
+        open: true,
+        busy: false,
+        models: r.models.map((m) => ({ id: m.id, ownedBy: m.ownedBy })),
+        selected: new Set(r.models.map((m) => m.id)),
+      });
+      setResult({ ok: true, text: `发现 ${r.models.length} 个模型，耗时 ${r.latencyMs}ms` });
+    } catch (err) {
+      setDiscover({
+        open: true,
+        busy: false,
+        models: [],
+        selected: new Set(),
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
+
+  /** 连接本机网关：填端点 +（无需 Key 的）占位 Key，并立刻发现模型；不启动第三方进程 */
+  const connectGateway = async (g: GatewayView) => {
+    const prevKey = apiKey.trim() === "local" ? "" : apiKey.trim();
+    setEditingId("new");
+    setLabel(g.name);
+    setProvider(g.name);
+    setBaseUrl(g.baseUrl);
+    setModel("");
+    setApiKey(g.needsKey ? prevKey : "local");
+    setRiskAck(gwRiskAck);
+    setDiscover({ open: false, busy: false, models: [], selected: new Set() });
+    setResult(null);
+    if (!gwRiskAck) {
+      setResult({ ok: false, text: "本地/局域网网关可能复用第三方免费额度或记录 prompt；先勾选上面的风险确认。" });
+      return;
+    }
+    if (g.needsKey) {
+      if (prevKey) {
+        await runDiscover({ baseUrl: g.baseUrl, apiKey: prevKey, riskAccepted: true, editingId: "new" });
+        return;
+      }
+      setResult({
+        ok: false,
+        text: `端点已自动填入。把 ${g.name} 的本地 Key 粘到下方 API Key，再点一次「连接」就会自动发现模型（lynn 不读取其它应用的凭据文件）。`,
+      });
+      setTimeout(() => apiKeyRef.current?.focus(), 80);
+      return;
+    }
+    await runDiscover({ baseUrl: g.baseUrl, apiKey: "local", riskAccepted: true, editingId: "new" });
+  };
+
+  const importDiscovered = async () => {
+    const picked = discover.models.filter((m) => discover.selected.has(m.id));
+    if (!picked.length) {
+      setResult({ ok: false, text: "先选至少一个模型。" });
+      return;
+    }
+    if (!apiKey.trim()) {
+      setResult({ ok: false, text: "批量导入需要重新输入这个端点的 API Key（Key 不会跨条目复用）。" });
+      return;
+    }
+    const risk = endpointRiskLevel(baseUrl);
+    if (risk !== "remote" && !riskAck) {
+      setResult({ ok: false, text: "本机/非 HTTPS 端点批量导入前要先勾选风险确认。" });
+      return;
+    }
+    setBusy("save");
+    setResult(null);
+    try {
+      const host = (() => {
+        try {
+          return new URL(baseUrl).hostname;
+        } catch {
+          return provider.trim() || "自定义端点";
+        }
+      })();
+      let n = 0;
+      for (const m of picked) {
+        const r = await window.lynn.rpc("model.save", {
+          label: `${label.trim() || host} · ${m.id}`.slice(0, 40),
+          provider: provider.trim() || host,
+          baseUrl: baseUrl.trim(),
+          model: m.id,
+          apiKey: apiKey.trim(),
+          riskAccepted: risk !== "remote" ? true : undefined,
+        });
+        if (!r.ok) {
+          setResult({ ok: false, text: `导入 ${m.id} 失败：${r.error}` });
+          return;
+        }
+        n += 1;
+      }
+      setResult({ ok: true, text: `已导入 ${n} 个模型；新对话默认仍是原来那条。` });
+      setDiscover({ open: false, busy: false, models: [], selected: new Set() });
+      setEditingId(null);
+      setApiKey("");
+      setRiskAck(false);
+      await refreshModels();
+      onSaved();
+    } catch (err) {
+      setResult({ ok: false, text: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const checkModelHealth = async (m: ModelEntryView) => {
+    setHealth((h) => ({ ...h, [m.id]: { state: "checking", text: "检测中…" } }));
+    try {
+      const r = await window.lynn.rpc("model.health", { id: m.id });
+      setHealth((h) => ({
+        ...h,
+        [m.id]: r.ok
+          ? { state: "ok", text: `正常 ${r.latencyMs}ms${r.modelCount ? ` · ${r.modelCount} 模型` : ""}` }
+          : { state: "bad", text: `失败：${r.error}` },
+      }));
+    } catch (err) {
+      setHealth((h) => ({ ...h, [m.id]: { state: "bad", text: `失败：${err instanceof Error ? err.message : String(err)}` } }));
     }
   };
 
@@ -1111,6 +1317,8 @@ export function SettingsModal({
 
     if (tab === "model") {
       const active = models.find((m) => m.id === modelMeta.activeModelId);
+      const risk = endpointRiskLevel(baseUrl);
+      const riskNeedsAck = risk !== "remote";
       return (
         <div className="sf-pane">
           <h3>{t("model.title")}</h3>
@@ -1118,6 +1326,56 @@ export function SettingsModal({
           <div className="sf-hint">
             当前对话「{modelMeta.threadTitle}」使用：<b>{active?.label ?? "未配置模型"}</b>
             （{modelMeta.threadModelId ? "本对话指定" : "跟随全局默认"}）
+          </div>
+
+          <div className="sf-group">
+            <div className="sf-group-head">
+              <b>本地 / 免费模型</b>
+              <small>只探测本机端口，不自动启动第三方进程；点「连接」自动填端点并拉模型列表</small>
+            </div>
+            <label className="sf-field" style={{ flexDirection: "row", alignItems: "flex-start", gap: 8 }}>
+              <input type="checkbox" checked={gwRiskAck} onChange={(e) => setGwRiskAck(e.target.checked)} style={{ marginTop: 3 }} />
+              <span className="sf-hint">
+                我了解：本机/局域网网关可能复用第三方免费额度、prompt 可能被上游记录，且随时限流或下线；只会在非敏感数据上使用。
+              </span>
+            </label>
+            <div className="sf-list">
+              {gateways.length === 0 && (
+                <p className="sf-empty">{gwBusy ? "正在探测本机网关…" : "没有探测到本机网关；启动 Ollama / LM Studio / OFM 后点「重新检测」。"}</p>
+              )}
+              {gateways.map((g) => (
+                <div className="sf-row" key={g.id}>
+                  <div className="sf-row-main">
+                    <b>{g.name}</b>
+                    <small className="mono">{g.baseUrl}</small>
+                    <small>
+                      {g.status === "running"
+                        ? `运行中 · ${g.modelCount ?? 0} 个模型 · ${g.latencyMs ?? 0}ms`
+                        : g.status === "needs_key"
+                          ? "运行中 · 需要该网关的本地 Key"
+                          : `未检测到${g.error ? ` · ${g.error.slice(0, 80)}` : ""}`}
+                    </small>
+                    <small>{g.note}</small>
+                  </div>
+                  <div className="sf-inline">
+                    <button type="button" className="sf-btn" onClick={() => void refreshGateways()} disabled={gwBusy}>
+                      重新检测
+                    </button>
+                    <button type="button" className="sf-btn primary" onClick={() => void connectGateway(g)} disabled={gwBusy || g.status === "down"}>
+                      连接
+                    </button>
+                    <button
+                      type="button"
+                      className="sf-btn"
+                      onClick={() => void window.lynn.rpc("app.openExternal", { url: g.docsUrl })}
+                    >
+                      说明
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+            {gwBusy && <p className="sf-hint">正在探测本机常见端口（127.0.0.1），不会发外网请求。</p>}
           </div>
 
           <div className="sf-group">
@@ -1140,9 +1398,19 @@ export function SettingsModal({
                         {m.isDefault && m.isThreadModel ? " · " : ""}
                         {m.isThreadModel ? "本对话专用" : ""}
                         {!m.apiKeySet ? " · 未设置 Key" : ""}
+                        {m.riskLevel === "local" ? " · 本机/局域网" : m.riskLevel === "insecure" ? " · 非 HTTPS" : " · 远程"}
+                        {m.riskLevel !== "remote" && !m.riskAccepted ? " · 未确认风险" : ""}
                       </small>
+                      {health[m.id] && (
+                        <small style={{ color: health[m.id].state === "ok" ? "var(--blue)" : health[m.id].state === "bad" ? "var(--red)" : "var(--ink-4)" }}>
+                          {health[m.id].text}
+                        </small>
+                      )}
                     </div>
                     <div className="sf-inline">
+                      <button type="button" className="sf-btn" onClick={() => void checkModelHealth(m)} disabled={busy !== ""}>
+                        检测
+                      </button>
                       <button type="button" className="sf-btn" onClick={() => startEdit(m)} disabled={busy !== ""}>编辑</button>
                       <button type="button" className="sf-btn" onClick={() => void actOnModel("setDefault", m.id)} disabled={busy !== "" || m.isDefault}>
                         设为默认
@@ -1214,6 +1482,7 @@ export function SettingsModal({
               <label className="sf-field">
                 <span className="sf-label">API Key</span>
                 <input
+                  ref={apiKeyRef}
                   className="sf-input"
                   type="password"
                   value={apiKey}
@@ -1222,7 +1491,30 @@ export function SettingsModal({
                 />
                 <small className="sf-hint">{t("model.keyHint")}；换 Base URL 必须重填。</small>
               </label>
+              {riskNeedsAck && (
+                <label className="sf-field" style={{ flexDirection: "row", alignItems: "flex-start", gap: 8 }}>
+                  <input
+                    type="checkbox"
+                    checked={riskAck}
+                    onChange={(e) => setRiskAck(e.target.checked)}
+                    style={{ marginTop: 3 }}
+                  />
+                  <span className="sf-hint">
+                    {risk === "local"
+                      ? "我了解：这是本机/局域网网关，可能复用第三方免费额度，prompt 可能被上游记录，且随时限流或下线；只会在非敏感数据上使用。"
+                      : "我了解：这个端点不是 HTTPS，API Key 与内容会明文传输；只会在可信网络里使用。"}
+                  </span>
+                </label>
+              )}
               <div className="sf-actions">
+                <button
+                  type="button"
+                  className="sf-btn"
+                  onClick={() => void runDiscover()}
+                  disabled={busy !== "" || !baseUrl.trim() || (riskNeedsAck && !riskAck)}
+                >
+                  {discover.busy ? "发现中…" : "发现模型"}
+                </button>
                 <button
                   type="button"
                   className="sf-btn"
@@ -1236,6 +1528,70 @@ export function SettingsModal({
                 </button>
                 <button type="button" className="sf-btn" onClick={cancelEdit} disabled={busy !== ""}>取消</button>
               </div>
+            </div>
+          )}
+          {discover.open && (
+            <div className="sf-group">
+              <div className="sf-group-head">
+                <b>发现模型</b>
+                <small>GET /v1/models，不消耗 token；勾选后批量导入，Key 只加密存本机</small>
+              </div>
+              {discover.busy && <p className="sf-empty">正在读取模型列表…</p>}
+              {discover.error && (
+                <p className="sf-hint" style={{ color: "var(--red)", margin: "4px 0" }}>
+                  {discover.error}
+                </p>
+              )}
+              {!discover.busy && discover.models.length > 0 && (
+                <>
+                  <div className="sf-actions">
+                    <button
+                      type="button"
+                      className="sf-btn"
+                      onClick={() => setDiscover((d) => ({ ...d, selected: new Set(d.models.map((m) => m.id)) }))}
+                    >
+                      全选
+                    </button>
+                    <button type="button" className="sf-btn" onClick={() => setDiscover((d) => ({ ...d, selected: new Set() }))}>
+                      清空
+                    </button>
+                    <span className="sf-note">
+                      已选 {discover.selected.size} / {discover.models.length}
+                    </span>
+                  </div>
+                  <div className="sf-list" style={{ maxHeight: 220, overflowY: "auto" }}>
+                    {discover.models.map((m) => (
+                      <label className="sf-row" key={m.id} style={{ cursor: "pointer" }}>
+                        <input
+                          type="checkbox"
+                          checked={discover.selected.has(m.id)}
+                          onChange={(e) => {
+                            const on = e.target.checked;
+                            setDiscover((d) => {
+                              const s = new Set(d.selected);
+                              if (on) s.add(m.id);
+                              else s.delete(m.id);
+                              return { ...d, selected: s };
+                            });
+                          }}
+                        />
+                        <span className="mono" style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>
+                          {m.id}
+                        </span>
+                        {m.ownedBy && <small>{m.ownedBy}</small>}
+                      </label>
+                    ))}
+                  </div>
+                  <div className="sf-actions">
+                    <button type="button" className="sf-btn primary" onClick={() => void importDiscovered()} disabled={busy !== ""}>
+                      导入选中
+                    </button>
+                    <button type="button" className="sf-btn" onClick={() => setDiscover((d) => ({ ...d, open: false }))}>
+                      关闭
+                    </button>
+                  </div>
+                </>
+              )}
             </div>
           )}
           {result && <div className={`sf-result ${result.ok ? "ok" : "bad"}`}>{result.text}</div>}
@@ -2059,7 +2415,7 @@ export function SettingsModal({
           <div className="sf-group">
             <div className="sf-group-head">
               <b>存储与清理</b>
-              <small>只清过程文件（scratch / 检查点 / 旧日志）；交付物与验收证据永久保留</small>
+              <small>只清过程文件（scratch / 检查点 / 旧日志）；交付物永久保留</small>
             </div>
             {dataUsage ? (
               <>

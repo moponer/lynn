@@ -35,6 +35,7 @@ const profile = (over = {}) => ({
 test("派单后 ask_user 再问「是否确认开工」被挡住，且不生成第二个待拍板", async () => {
   const root = tmp();
   const kernel = new Kernel(root);
+  kernel.handle("config.prefs", { autoStart: false });
   await kernel.init();
   const team = JSON.parse(kernel.runTool("create_team", { name: "测试队" }));
   kernel.runTool("create_member", {
@@ -66,6 +67,7 @@ test("派单后 ask_user 再问「是否确认开工」被挡住，且不生成�
 test("新招成员默认 15 轮封顶（原来是 40，一轮一次模型调用）", async () => {
   const root = tmp();
   const kernel = new Kernel(root);
+  kernel.handle("config.prefs", { autoStart: false });
   await kernel.init();
   const team = JSON.parse(kernel.runTool("create_team", { name: "测试队" }));
   kernel.runTool("create_member", {
@@ -118,16 +120,39 @@ test("启动对账：上次中断留在 in_progress 的单被标成卡住（不�
   store.transition("left-over", "in_progress");
 
   const kernel = new Kernel(root);
+  kernel.handle("config.prefs", { autoStart: false });
   await kernel.init();
   assert.equal(store.get("left-over").status, "blocked");
   const snap = kernel.handle("session.snapshot");
   assert.ok(snap.feed.some((c) => c.kind === "system" && /卡住/.test(c.text ?? "")), "要有一张卡说明发生了什么");
 });
 
-test("停单：没有在跑的单如实报错，不会假装停成功", () => {
-  const kernel = new Kernel(tmp());
+test("停单幂等：不存在的单如实报错，已经停住的单不再回「停不下来」", async () => {
+  const root = tmp();
+  // 先落一张已经卡住的单，再起内核
+  const { TaskStore } = await import("../dist/main/task-store.js");
+  const store = new TaskStore(root);
+  store.create({ id: "stuck-1", title: "已经停住的单", teamId: "t1", member: "阿元" });
+  store.transition("stuck-1", "todo");
+  store.transition("stuck-1", "in_progress");
+  store.transition("stuck-1", "blocked", { note: "用户手动停机" });
+
+  const kernel = new Kernel(root);
+  kernel.handle("config.prefs", { autoStart: false });
+  await kernel.init();
   assert.deepEqual(kernel.runningTaskIds(), []);
-  const r = kernel.handle("task.cancel", { taskId: "job-x" });
-  assert.equal(r.ok, false);
-  assert.match(r.error, /没有在跑的 job-x/);
+
+  const missing = kernel.handle("task.cancel", { taskId: "job-x" });
+  assert.equal(missing.ok, false, "真有单号错才报错");
+  assert.match(missing.error, /没有这张单/);
+
+  // 实机反馈：停机成功后卡片还在，再点一次会回「停不下来：没有在跑的 …」。
+  // 已经不在跑就是用户要的结果，应当静默成功。
+  const again = kernel.handle("task.cancel", { taskId: "stuck-1" });
+  assert.equal(again.ok, true, "已经停住的单再点一次要成功");
+
+  const snap = kernel.handle("session.snapshot");
+  const row = snap.board.track.find((t) => t.id === "stuck-1");
+  assert.equal(row.status, "blocked");
+  assert.match(String(row.statusNote), /用户手动停机/, "卡住成因要能显示，不能一律说是没出新证据");
 });

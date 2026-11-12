@@ -93,6 +93,10 @@ export interface DeskJob {
   readRoots?: string[];
   /** 成员的读写工作区（= 派单时会话的项目目录） */
   workspaceRoot?: string;
+  /** 本单第几轮（卷宗派单/重做事件推导，只读） */
+  round?: number;
+  /** 卷宗状态时间线尾部（只读展示） */
+  timeline?: { at: string; kind: string; text: string }[];
 }
 
 export interface DeskMember {
@@ -133,6 +137,15 @@ export interface DeskDecision {
   plan?: Decision["plan"];
 }
 
+/** 归档带一条记录（展示层）；threadId 只用于分组，不参与任何数据操作 */
+export interface DeskArchived {
+  id: string;
+  title: string;
+  status?: TaskStatus;
+  threadId?: string;
+  at?: string;
+}
+
 export interface Desk {
   project: string;
   subdir: string;
@@ -141,7 +154,7 @@ export interface Desk {
   /** 会话附加根（只读/可写） */
   workspaceExtras: { path: string; mode: "rw" | "ro"; label?: string }[];
   jobs: DeskJob[];
-  archived: { id: string; title: string; status?: TaskStatus }[];
+  archived: DeskArchived[];
   members: DeskMember[];
   /** 未解散的团队数：>1 时成员卡要标出归属，否则同名成员分不清 */
   teamCount: number;
@@ -225,6 +238,8 @@ function toJob(job: TaskTrackItem, teamName?: string, member?: Member, feed: Fee
     threadId: job.threadId,
     readRoots: job.readRoots,
     workspaceRoot: job.workspaceRoot,
+    round: job.round,
+    timeline: job.timeline,
   };
 }
 
@@ -308,7 +323,7 @@ export function deskFromSnapshot(snap: SessionSnapshot): Desk {
     jobs,
     archived: jobs
       .filter((j) => j.status === "done" || j.status === "canceled")
-      .map((j) => ({ id: j.id, title: j.title, status: j.status })),
+      .map((j) => ({ id: j.id, title: j.title, status: j.status, threadId: j.threadId, at: j.at })),
     members,
     teamCount: board.teams.filter((t) => t.status !== "dissolved").length,
     // 解散的团队不再出现在任何"等你拍板"里：印章只对在职的队伍生效

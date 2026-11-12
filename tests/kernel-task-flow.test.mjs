@@ -18,6 +18,7 @@ function setup() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "lynn-flow-"));
   new TeamStore(root).createTeam("t1", "月报突击队");
   const kernel = new Kernel(root);
+  kernel.handle("config.prefs", { autoStart: false });
   kernel.runTool("create_member", {
     teamId: "t1",
     name: "林工",
@@ -83,6 +84,8 @@ test("任务契约：派单先停在 todo；没模型时确认后也停在待办
 test("证据必须是可点开的真实文件：假路径进不了审查，工单停在执行中", () => {
   const { kernel, tasks } = setup();
   assignConfirmed(kernel, "WO-13");
+  // 关键任务才强制证据；普通任务证据可选（见 evidence-policy 测试）
+  tasks.setEvidencePolicy("WO-13", "required");
   const msg = kernel.runTool("review_result", {
     teamId: "t1",
     taskId: "WO-13",
@@ -90,7 +93,7 @@ test("证据必须是可点开的真实文件：假路径进不了审查，工�
     text: "做完了",
     evidence: ["不存在的文件.md"],
   });
-  assert.match(msg, /可验证|停在执行中/);
+  assert.match(msg, /可核验|补齐后再验收/);
   assert.equal(tasks.get("WO-13").status, "in_progress");
   assert.equal(tasks.get("WO-13").evidence[0].verified, false);
 });
@@ -100,9 +103,11 @@ test("回报带真实证据 → 收入 artifacts → in_review；用户拍板 �
   assignConfirmed(kernel, "WO-10");
   const src = evidence("report_0914.md", "# 周报\n");
 
+  // 关键任务（required）无证据仍不能拍板；普通任务证据可选，见 evidence-policy 测试
+  tasks.setEvidencePolicy("WO-10", "required");
   const early = kernel.handle("task.decide", { taskId: "WO-10", action: "approve" });
   assert.equal(early.ok, false);
-  assert.match(early.error, /无证据/);
+  assert.match(early.error, /无证据|关键任务/);
 
   const msg = kernel.runTool("review_result", {
     teamId: "t1",

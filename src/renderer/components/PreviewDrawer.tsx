@@ -1,0 +1,286 @@
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { PreviewReadResult } from "../../shared/contract";
+import { Icon } from "./Icon";
+import { useT } from "../i18n";
+import { HighlightedCode, RichText } from "./RichText";
+
+/**
+ * 内置文件预览抽屉（参考 tether-ai 的 FileDrawer）：
+ *  - Markdown / HTML 默认渲染视图，一键切源码（带语法高亮与行号）；
+ *  - 代码 / 文本 / 日志 / JSON 一律本地高亮，不交给外部关联程序；
+ *  - 图片内嵌显示（点图 1:1 ⇄ 适宽）；
+ *  - docx/xlsx/pptx 交给开源库保真渲染（docx-preview / @js-preview/excel /
+ *    pptx-preview，全部动态 import 懒加载——只在真的预览该格式时才载入代码包）；
+ *  - PDF 走应用内独立窗口（Chromium 自带阅读器）；其余二进制如实说明，外部打开只作为可选出口。
+ * 数据全部来自主进程 preview.read，渲染层拿不到任意文件路径。
+ */
+
+const RENDERABLE = new Set(["md", "markdown", "mdx", "html", "htm", "csv", "tsv", "json", "jsonc"]);
+
+/**
+ * Office 三件套：开源库懒加载渲染。字节由主进程 base64 搭车过来，
+ * 这里解码成 ArrayBuffer 喂给对应库。
+ *   docx  → docx-preview（Apache-2.0）保真渲染样式/图片/表格/分页
+ *   xlsx  → @js-preview/excel（MIT）多 sheet 页签 + 合并单元格 + 样式
+ *   pptx  → pptx-preview（npm 包可商用）幻灯片渲染
+ */
+function OfficePane({ ext, base64 }: { ext: string; base64: string }) {
+  const holder = useRef<HTMLDivElement>(null);
+  const excelRef = useRef<{ destroy: () => void } | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(true);
+  const t = useT();
+
+  useEffect(() => {
+    let gone = false;
+    setErr(null);
+    setBusy(true);
+    const bin = atob(base64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i += 1) bytes[i] = bin.charCodeAt(i);
+
+    (async () => {
+      try {
+        if (ext === "docx" || ext === "docm") {
+          const docx = await import("docx-preview");
+          if (gone || !holder.current) return;
+          holder.current.innerHTML = "";
+          await docx.renderAsync(bytes.buffer, holder.current, undefined, { inWrapper: true });
+        } else if (ext === "xlsx" || ext === "xlsm") {
+          const excel = await import("@js-preview/excel");
+          await import("@js-preview/excel/lib/index.css");
+          if (gone || !holder.current) return;
+          holder.current.innerHTML = "";
+          const previewer = excel.default.init(holder.current);
+          excelRef.current = previewer;
+          await previewer.preview(bytes.buffer);
+        } else {
+          const pptx = await import("pptx-preview");
+          if (gone || !holder.current) return;
+          holder.current.innerHTML = "";
+          const previewer = pptx.init(holder.current, { width: 960 });
+          previewer.preview(bytes.buffer);
+        }
+        if (!gone) setBusy(false);
+      } catch (e) {
+        if (!gone) {
+          setBusy(false);
+          setErr(e instanceof Error ? e.message : String(e));
+        }
+      }
+    })();
+
+    return () => {
+      gone = true;
+      try {
+        excelRef.current?.destroy();
+      } catch {
+        /* 实例可能已随容器销毁 */
+      }
+      excelRef.current = null;
+    };
+  }, [ext, base64]);
+
+  return (
+    <div className="pv-office">
+      {busy && !err && <div className="pv-hint">{t("pv.reading")}</div>}
+      {err && <div className="pv-hint">{t("pv.officeFail", { ext })}（{err}）</div>}
+      <div ref={holder} className="pv-office-holder" />
+    </div>
+  );
+}
+
+function fileName(ref: string): string {
+  return ref.split(/[\\/]/).filter(Boolean).pop() || ref;
+}
+
+/** JSON 美化：合法就缩进重排（键序不重排，只加空格换行）；坏的按原样当源码看 */
+function prettyJson(text: string): string {
+  try {
+    return `${JSON.stringify(JSON.parse(text), null, 2)}\n`;
+  } catch {
+    return text;
+  }
+}
+
+function CsvTable({ text, ext }: { text: string; ext: string }) {
+  const t = useT();
+  const sep = ext === "tsv" ? "\t" : ",";
+  const rows = useMemo(
+    () =>
+      text
+        .split(/\r?\n/)
+        .filter((l) => l.trim())
+        .slice(0, 200)
+        .map((line) => line.split(sep)),
+    [text, sep],
+  );
+  if (rows.length === 0) return <div className="pv-hint">{t("pv.emptyTable")}</div>;
+  return (
+    <div className="pv-table-wrap">
+      <table className="pv-table">
+        <thead>
+          <tr>{rows[0].map((c, i) => <th key={i}>{c}</th>)}</tr>
+        </thead>
+        <tbody>
+          {rows.slice(1).map((r, i) => (
+            <tr key={i}>{r.map((c, j) => <td key={j}>{c}</td>)}</tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+export function PreviewDrawer({
+  taskId,
+  fileRef,
+  onClose,
+}: {
+  taskId: string;
+  /** 别叫 ref：那是 React 保留属性，传字符串会直接把组件渲染炸掉 */
+  fileRef: string;
+  onClose: () => void;
+}) {
+  const [data, setData] = useState<PreviewReadResult | null>(null);
+  const [rendered, setRendered] = useState(true);
+  const [wide, setWide] = useState(false);
+  const [copied, setCopied] = useState(false);
+  /** 图片：false=适配抽屉宽度，true=1:1 原始尺寸（可滚动细看） */
+  const [zoomed, setZoomed] = useState(false);
+  const t = useT();
+  const name = fileName(fileRef);
+  const ext = (data?.ext ?? fileRef.split(".").pop() ?? "").toLowerCase();
+  const canRender = RENDERABLE.has(ext);
+
+  useEffect(() => {
+    let gone = false;
+    setData(null);
+    setRendered(true);
+    setZoomed(false);
+    void window.lynn
+      .rpc("preview.read", { taskId, ref: fileRef })
+      .then((r) => { if (!gone) setData(r); })
+      .catch((err: unknown) => {
+        if (!gone) setData({ ok: false, kind: "missing", error: err instanceof Error ? err.message : String(err) });
+      });
+    return () => { gone = true; };
+  }, [taskId, fileRef]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const text = data?.text ?? "";
+  const bytes = data?.bytes ? `${data.bytes >= 1024 ? `${Math.round(data.bytes / 1024)}KB` : `${data.bytes}B`}` : "";
+
+  return (
+    <div className="pv-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <aside className={`pv-drawer${wide ? " wide" : ""}`} role="dialog" aria-label={`预览 ${name}`}>
+        <header className="pv-head">
+          <div className="pv-name">
+            <Icon name="eye" size="sm" />
+            <strong title={fileRef}>{name}</strong>
+            <span className="mono">{bytes}</span>
+          </div>
+          <div className="pv-acts">
+            {canRender && data?.kind === "text" && (
+              <button type="button" className="ghost-btn" onClick={() => setRendered((v) => !v)}>
+                {rendered ? t("pv.source") : t("pv.preview")}
+              </button>
+            )}
+            {text && (
+              <button
+                type="button"
+                className="ghost-btn"
+                onClick={() => {
+                  void navigator.clipboard.writeText(text).then(() => {
+                    setCopied(true);
+                    window.setTimeout(() => setCopied(false), 1600);
+                  });
+                }}
+              >
+                {copied ? t("pv.copied") : t("pv.copy")}
+              </button>
+            )}
+            <button type="button" className="ghost-btn" title={t("pv.openExternal")} onClick={() => void window.lynn.rpc("evidence.open", { taskId, ref: fileRef })}>
+              <Icon name="folder" size="sm" />
+            </button>
+            <button type="button" className="ghost-btn" title={wide ? t("pv.narrow") : t("pv.wide")} onClick={() => setWide((v) => !v)}>
+              <Icon name={wide ? "minimize" : "maximize"} size="sm" />
+            </button>
+            <button type="button" className="ghost-btn" title={t("pv.close")} onClick={onClose}>
+              <Icon name="x" size="sm" />
+            </button>
+          </div>
+        </header>
+        <div className="pv-path mono" title={fileRef}>{fileRef}</div>
+
+        <div className="pv-body">
+          {!data && <div className="pv-hint">{t("pv.reading")}</div>}
+          {data?.kind === "missing" && <div className="pv-hint">{data.error || t("pv.missing")}</div>}
+          {data?.kind === "empty" && <div className="pv-hint">{t("pv.empty")}</div>}
+          {data?.kind === "binary" && (
+            <div className="pv-hint">
+              {data.error ?? t("pv.binary", { ext })}
+              <button
+                type="button"
+                className="ghost-btn pv-hint-act"
+                onClick={() => void window.lynn.rpc("evidence.open", { taskId, ref: fileRef })}
+              >
+                {t("pv.openNow")}
+              </button>
+            </div>
+          )}
+          {data?.kind === "pdf" && (
+            <div className="pv-hint">
+              {t("pv.pdfHint")}
+              <button
+                type="button"
+                className="ghost-btn pv-hint-act"
+                onClick={() => void window.lynn.rpc("preview.pdfWindow", { taskId, ref: fileRef })}
+              >
+                {t("pv.pdfOpen")}
+              </button>
+            </div>
+          )}
+          {data?.kind === "image" && data.dataUrl && (
+            <div className="pv-image-wrap">
+              <img
+                className={`pv-image${zoomed ? " full" : ""}`}
+                src={data.dataUrl}
+                alt={name}
+                title={zoomed ? t("pv.zoomFit") : t("pv.zoomFull")}
+                onClick={() => setZoomed((v) => !v)}
+              />
+            </div>
+          )}
+          {data?.kind === "office" && data.dataBase64 && (
+            <OfficePane ext={data.ext ?? ext} base64={data.dataBase64} />
+          )}
+          {data?.kind === "text" && (
+            <>
+              {data.truncated && <div className="pv-hint">{t("pv.truncated")}</div>}
+              {rendered && (ext === "html" || ext === "htm") ? (
+                <iframe className="pv-frame" title={`预览 ${name}`} sandbox="" srcDoc={text} />
+              ) : rendered && (ext === "csv" || ext === "tsv") ? (
+                <CsvTable text={text} ext={ext} />
+              ) : rendered && (ext === "md" || ext === "markdown" || ext === "mdx") ? (
+                <RichText text={text} />
+              ) : rendered && (ext === "json" || ext === "jsonc") ? (
+                // JSON：美化视图（缩进重排，键序不动），源码开关切回原始字节
+                <HighlightedCode code={prettyJson(text)} lang="json" path={fileRef} />
+              ) : (
+                <HighlightedCode code={text} path={fileRef} />
+              )}
+            </>
+          )}
+        </div>
+      </aside>
+    </div>
+  );
+}

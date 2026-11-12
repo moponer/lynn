@@ -33,13 +33,21 @@ beforeEach(() => {
   store.createTeam("t1", "月报突击队");
 });
 
-test("create_member：6 人上限，超编必须写理由", () => {
-  for (let i = 0; i < 6; i++) {
-    tools.createMember("t1", member({ name: `成员${i}` }));
+test("create_member：起手 2 人内直接放行，第 3 人起必须写明分工", () => {
+  // 成员名用通用岗位名（档案规范：带编号的任务马甲名会被招募闸拒收）
+  const names = ["审查员", "盘点员", "撰写员", "核验员", "分析员", "校对员"];
+  tools.createMember("t1", member({ name: names[0] }));
+  tools.createMember("t1", member({ name: names[1] }));
+  assert.throws(
+    () => tools.createMember("t1", member({ name: names[2] })),
+    /起手编制先控制在 2 人/,
+    "小任务第 3 人起要写明分工",
+  );
+  for (let i = 2; i < 6; i++) {
+    tools.createMember("t1", member({ name: names[i] }), "并行抓取 4 个站点");
   }
-  assert.throws(() => tools.createMember("t1", member({ name: "第7人" })), /编制已达 6 人上限/);
-  // 写了理由则允许（理由入审计）
-  const file = tools.createMember("t1", member({ name: "第7人" }), "并行抓取 4 个站点");
+  // 写理由仍可扩编（理由入审计）
+  const file = tools.createMember("t1", member({ name: "统筹员" }), "跨站点汇总与复核");
   assert.ok(fs.existsSync(file));
 });
 
@@ -66,12 +74,10 @@ test("check_progress：她只看状态计数与最新回报，不读全量日志
   assert.equal(p.latest.member, "林工");
 });
 
-test("review_result：无证据不算完成（证据原则）", () => {
+test("review_result：证据可选，无证据也能登记（关键任务另由任务层拦）", () => {
   tools.createMember("t1", member());
-  assert.throws(
-    () => tools.reviewResult("t1", "x", { member: "林工", text: "真的做完了", evidence: [] }),
-    /没有证据/,
-  );
+  const r = tools.reviewResult("t1", "x", { member: "林工", text: "真的做完了", evidence: [] });
+  assert.equal(r.verdict, "logged");
   tools.reviewResult("t1", "x", { member: "林工", text: "做完了", evidence: ["reconcile.log"] });
 });
 
@@ -139,14 +145,15 @@ test("审计账本：每个动作追加一条，可归因", () => {
 });
 
 test("create_member：自动从头像库挑脸，同队不撞脸；指定 id 无效当场拒", () => {
-  for (let i = 0; i < 4; i++) tools.createMember("t1", member({ name: `成员${i}` }));
+  const names = ["审查员", "盘点员", "撰写员", "核验员"];
+  for (let i = 0; i < 4; i++) tools.createMember("t1", member({ name: names[i] }), "并行取样与复核");
   const faces = store.listMembers("t1").map((p) => p.avatarId);
   assert.equal(faces.every(Boolean), true, "招募时必须落一个头像 id");
   assert.equal(new Set(faces).size, faces.length, "同一队里不能两个人用同一张脸");
 
   // 同一个名字重招（换个队）仍是同一张脸：界面不会突然换人
-  const again = member({ name: "成员0" });
-  assert.throws(() => tools.createMember("t1", { ...again, avatarId: "nope" }), /未知头像 id/);
-  tools.createMember("t1", { ...again, avatarId: "a11" });
-  assert.equal(store.readMember("t1", "成员0").avatarId, "a11", "用户/风铃指定的 id 必须原样落盘");
+  const again = member({ name: names[0] });
+  assert.throws(() => tools.createMember("t1", { ...again, avatarId: "nope" }, "头像复核"), /未知头像 id/);
+  tools.createMember("t1", { ...again, avatarId: "a11" }, "头像复核");
+  assert.equal(store.readMember("t1", names[0]).avatarId, "a11", "用户/风铃指定的 id 必须原样落盘");
 });

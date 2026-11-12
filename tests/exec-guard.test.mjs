@@ -90,3 +90,70 @@ test("成员被中止：不再发模型请求，直接如实报 aborted", async 
   assert.equal(result.status, "aborted");
   assert.match(result.report, /停止/);
 });
+
+/**
+ * 实机误报（2026-11-11）：成员为了统计 .tsx 数跑
+ *   Get-ChildItem ... | Where-Object { $_.FullName -notmatch 'node_modules|\.git|target|\\.cargo' }
+ * 被拦成「越出工作区：\\.cargo」；`dir /s /b`、`cmd /c` 被拦成「/s」「/c」。
+ * 三条都是把命令开关 / 正则字面量当成了路径，成员只能改写重试（白烧轮次）。
+ */
+test("findPathEscape：命令开关与正则字面量不再被当成路径", () => {
+  const root = path.join(tmp(), "workspace");
+  fs.mkdirSync(root, { recursive: true });
+  const ok = [
+    `dir /s /b "${root}"`,
+    `cmd /c "echo TEMP=%TEMP%"`,
+    `Get-ChildItem -Path '${root}' -Directory -Recurse -Filter 'components' | Where-Object { $_.FullName -notmatch 'node_modules|\\.git|target|\\.cargo' }`,
+    `Select-String -Path "${root}\\a.txt" -Pattern 'a\\.b|c\\.d'`,
+  ];
+  for (const cmd of ok) {
+    assert.equal(findPathEscape(cmd, root), null, `不该拦：${cmd}`);
+  }
+});
+
+test("删除分级：本单刚造的文件自动放行，不弹审批卡", async () => {
+  const root = tmp();
+  const audits = [];
+  let asked = 0;
+  const t = new Toolkit(root, {
+    onAudit: (ev) => audits.push(ev),
+    runStartedAt: Date.now() - 1_000,
+    onBeforeCommand: async () => {
+      asked += 1;
+      return { ok: true };
+    },
+  });
+  // 成员自己先落一个探针文件（实机命令：echo probe> probe-fallback.txt & del probe-fallback.txt）
+  fs.writeFileSync(path.join(root, "probe-fallback.txt"), "probe", "utf-8");
+  const out = await t.runCommand({ command: "del probe-fallback.txt" });
+  assert.equal(asked, 0, "自己刚造的文件不该再打扰用户");
+  assert.ok(audits.some((a) => a.kind === "cmd_auto"), "要留一条自动放行审计");
+  assert.doesNotMatch(out, /用户拒绝/);
+});
+
+test("删除分级：工作区里的既有文件仍要用户点头；越界删除先拒、不弹卡", async () => {
+  const root = tmp();
+  let asked = 0;
+  let verdict = false;
+  const t = new Toolkit(root, {
+    onBeforeCommand: async () => {
+      asked += 1;
+      return { ok: verdict };
+    },
+  });
+  const keep = path.join(root, "keep.txt");
+  fs.writeFileSync(keep, "x", "utf-8");
+  const past = new Date(Date.now() - 3_600_000);
+  fs.utimesSync(keep, past, past); // 开工前就存在 → 不是本单产物
+
+  const denied = await t.runCommand({ command: "del keep.txt" });
+  assert.equal(asked, 1, "既有文件必须问人");
+  assert.match(denied, /用户拒绝/);
+  assert.ok(fs.existsSync(keep), "被拒就不该真删");
+
+  // 越界：直接拒，连审批都不该弹（以前先弹卡、点了头再拒，白打扰一次）
+  asked = 0;
+  const escaped = await t.runCommand({ command: "del D:\\qcc\\不存在的文件.txt" });
+  assert.equal(asked, 0, "越界命令不该弹审批卡");
+  assert.match(escaped, /越出工作区/);
+});

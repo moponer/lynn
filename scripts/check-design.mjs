@@ -2,8 +2,7 @@
 /**
  * 设计约束 CI 检查（设计规范 §3.2 / 计划书 §4.2.4）：
  *
- *  1) 零卡片描边：样式里不允许 `border` / `border-top` 等声明，
- *     唯一例外是制图语法本身（`.crop` 角标定位点）；
+ *  1) 零卡片描边：样式里不允许任何 `border` / `border-top` 等描边声明（无例外）；
  *  2) 四功能色：`:root` 与每个主题块都必须定义 --blue / --seal / --red / --brass；
  *  3) 不设品牌装饰色：任何地方出现 `--accent` 即失败；
  *  4) 行内样式同样零描边：`border:` 只允许 `0` / `none`。
@@ -47,7 +46,7 @@ function scanCss(file) {
         if (/^border(-(top|right|bottom|left|block|inline))?\s*:/i.test(d) && !/^border-radius/i.test(d)) {
           const value = d.split(":").slice(1).join(":").trim();
           const isReset = /^(0|none)(\s|!important|$)/i.test(value);
-          if (!isReset && !/\.crop/.test(sel)) fail(file, declLine, `描边（零描边规则）：${sel} { ${d} }`);
+          if (!isReset) fail(file, declLine, `描边（零描边规则）：${sel} { ${d} }`);
         }
       }
     }
@@ -252,4 +251,4 @@ if (violations.length > 0) {
   for (const v of violations) console.error("  " + v);
   process.exit(1);
 }
-console.log("设计约束检查通过：零描边（仅 crop 角标）、四功能色齐全、无装饰色、CSS 变量引用全部有定义。");
+console.log("设计约束检查通过：零描边（无例外）、四功能色齐全、无装饰色、CSS 变量引用全部有定义。");

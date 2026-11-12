@@ -90,6 +90,7 @@ export default function App() {
   const ambient = useMemo(() => ambientForTheme(theme.id), [theme.id]);
   const [avatar, setAvatar] = useState(() => localStorage.getItem("lynn.avatar") !== "0");
   const [notice, setNotice] = useState<string | null>(null);
+  const [fullAsk, setFullAsk] = useState(false);
   /**
    * `stage.console` 卡槽：哪个插件占了它、用注册表里的哪个视图。
    * 启用状态来自主进程（_state.json），不在本地记「当前是不是大屏」——
@@ -205,11 +206,18 @@ export default function App() {
     [changeAvatar, changeTheme],
   );
 
+  /**
+   * 快照请求序号：done/error 会连续触发多次 refresh，旧响应不能覆盖新状态。
+   * 之前「恢复后的回复偶发不进 DOM」正是两次 refresh 乱序 + rAF 旧 delta 覆写终态卡。
+   */
+  const refreshSeq = useRef(0);
   const refresh = useCallback(async () => {
+    const seq = ++refreshSeq.current;
     try {
-      setSnap(await rpc("session.snapshot"));
+      const next = await rpc("session.snapshot");
+      if (seq === refreshSeq.current) setSnap(next);
     } catch (err) {
-      setNotice(`读取会话失败：${err instanceof Error ? err.message : String(err)}`);
+      if (seq === refreshSeq.current) setNotice(`读取会话失败：${err instanceof Error ? err.message : String(err)}`);
     }
   }, []);
 
@@ -263,9 +271,19 @@ export default function App() {
   const deltaFrame = useRef<number | null>(null);
 
   useEffect(() => {
+    // 终态（card / done / error）到达时，先丢弃还没跑的 rAF delta：
+    // 否则旧的半截补字会在终态卡之后回写，把「恢复成功」又覆盖成半句话。
+    const clearPendingDelta = () => {
+      if (deltaFrame.current !== null) {
+        window.cancelAnimationFrame(deltaFrame.current);
+        deltaFrame.current = null;
+      }
+      pendingDelta.current = null;
+    };
     // 增量事件：卡片 upsert / 流式补字 / 回合状态；只有完成与错误才拉权威快照
     const off = window.lynn.onEvent((ev: KernelEvent) => {
       if (ev.type === "card") {
+        clearPendingDelta();
         setSnap((s) => (s ? { ...s, feed: upsertCard(s.feed, ev.card) } : s));
         return;
       }
@@ -309,6 +327,12 @@ export default function App() {
         acceptShot(ev.shot);
         return;
       }
+      if (ev.type === "done" || ev.type === "error") {
+        // 终态一律以权威快照为准，且 refresh 有序号保护，旧响应不会覆盖新状态
+        clearPendingDelta();
+        void refresh();
+        return;
+      }
       void refresh();
     });
     return () => {
@@ -338,13 +362,34 @@ export default function App() {
 
   const desk: Desk | null = useMemo(() => (snap ? deskFromSnapshot(snap) : null), [snap]);
 
-  const onPermission = useCallback(
+  const applyPermission = useCallback(
     async (mode: PermissionMode) => {
       await rpc("permission.set", { mode });
       await refresh();
     },
     [refresh],
   );
+
+  /** 全权 = 不再逐项征询：误点一次就把门禁全撤了，代价太大，先问一句 */
+  const onPermission = useCallback(
+    (mode: PermissionMode) => {
+      if (mode === "full" && snap?.permission !== "full") {
+        setFullAsk(true);
+        return;
+      }
+      void applyPermission(mode);
+    },
+    [applyPermission, snap?.permission],
+  );
+
+  useEffect(() => {
+    if (!fullAsk) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setFullAsk(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [fullAsk]);
 
   /** 发送失败必须可见：之前用 void 吞掉了 rejection，界面一片空白 */
   const onSend = useCallback(
@@ -874,6 +919,43 @@ export default function App() {
           <button type="button" onClick={() => chooseStage("console")} title="切到沉浸控制台（大屏态势视图）">
             控制台 <span aria-hidden="true">›</span>
           </button>
+        </div>
+      )}
+      {fullAsk && (
+        <div
+          className="perm-overlay"
+          onClick={(e) => e.target === e.currentTarget && setFullAsk(false)}
+        >
+          <div
+            className="perm-ask"
+            role="dialog"
+            aria-modal="true"
+            aria-label={i18nStrings["perm.fullAsk.title"] ?? "切到全权？"}
+          >
+            <div className="perm-ask-head">
+              <Icon name="warn" size="sm" />
+              <span>{i18nStrings["perm.fullAsk.title"] ?? "切到全权？"}</span>
+            </div>
+            <p className="perm-ask-body">
+              {i18nStrings["perm.fullAsk.body"] ??
+                "风铃将不再逐项征询你的同意：可读写工作区文件、执行命令、操作浏览器。确认后随时可以切回其它档位。"}
+            </p>
+            <div className="perm-ask-acts">
+              <button type="button" className="perm-btn" onClick={() => setFullAsk(false)}>
+                {i18nStrings["perm.fullAsk.cancel"] ?? "取消"}
+              </button>
+              <button
+                type="button"
+                className="perm-btn go"
+                onClick={() => {
+                  setFullAsk(false);
+                  void applyPermission("full");
+                }}
+              >
+                {i18nStrings["perm.fullAsk.confirm"] ?? "确认开启"}
+              </button>
+            </div>
+          </div>
         </div>
       )}
       {settingsOpen && (

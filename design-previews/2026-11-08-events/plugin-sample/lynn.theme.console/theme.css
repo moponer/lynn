@@ -1,0 +1,136 @@
+/* 沉浸控制台 · 形态层（L0 插件自带，随插件启用/停用）
+ *
+ * 作用域必须用 html[data-theme-plugin="<插件 id>"]：
+ * 基础主题把 data-theme 永远写成 celadon，插件拿不到自己的 id 做作用域。
+ *
+ * 纪律：
+ *  - 零 border（一律 box-shadow: inset 0 0 0 1px）
+ *  - 零渐变、零斜体、零全大写、零 emoji、零蓝紫
+ *  - 字号 >= 10px（与 scripts/check-design.mjs 同一条线）
+ *  - 只改形态（字体/圆角/密度/凹陷），不改色值（色值归 theme.json）
+ */
+
+html[data-theme-plugin="lynn.theme.console"] {
+  --console-r: 2px;
+  /* --term 不在 skin 白名单（16 键）里，所以由形态层派生：
+     dark/light 各自跟随 --ink-2，终端前景色不用另配色值 */
+  --term: var(--ink-2);
+}
+
+/* ---------- 面板标题：凹刻等宽小章，与内容分层 ---------- */
+html[data-theme-plugin="lynn.theme.console"] .panel-h {
+  padding: 12px 2px 8px;
+  box-shadow: inset 0 -1px 0 var(--rule-soft);
+}
+html[data-theme-plugin="lynn.theme.console"] .panel-h .t,
+html[data-theme-plugin="lynn.theme.console"] .h-cap {
+  font-family: var(--f-mono);
+  font-size: 10px;
+  font-weight: 400;
+  letter-spacing: .04em;
+  font-stretch: 100%;
+  color: var(--ink-2);
+  text-transform: none;
+  background: var(--desk-3);
+  border-radius: var(--console-r);
+  padding: 3px 8px;
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, .62), inset 0 -1px 0 rgba(255, 255, 255, .045),
+    inset 0 0 0 1px var(--rule);
+}
+html[data-theme-plugin="lynn.theme.console"] .panel-h .n,
+html[data-theme-plugin="lynn.theme.console"] .panel-h .cap {
+  font-size: 10px;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--ink-4);
+}
+/* 左栏台账头：标题章 + 计数右对齐，头部分隔靠发丝 */
+html[data-theme-plugin="lynn.theme.console"] .ledger-head {
+  padding: 11px 12px 8px;
+  box-shadow: inset 0 -1px 0 var(--rule-soft);
+}
+html[data-theme-plugin="lynn.theme.console"] .h-count {
+  font-size: 10px;
+  color: var(--ink-4);
+}
+/* 分组标签：去全大写、去大字距，与标题章同族但更轻（不抢章） */
+html[data-theme-plugin="lynn.theme.console"] .grp-label {
+  font-family: var(--f-mono);
+  font-size: 10px;
+  letter-spacing: .02em;
+  text-transform: none;
+  color: var(--ink-3);
+  padding: 10px 6px 5px;
+}
+html[data-theme-plugin="lynn.theme.console"] .scope-tag {
+  font-size: 10px;
+  letter-spacing: 0;
+  border-radius: var(--console-r);
+  box-shadow: inset 0 0 0 1px var(--rule-soft);
+}
+
+/* ---------- 卡片：方角 + 凹陷顶线，去掉浮起阴影 ---------- */
+html[data-theme-plugin="lynn.theme.console"] .mcard,
+html[data-theme-plugin="lynn.theme.console"] .job,
+html[data-theme-plugin="lynn.theme.console"] .arch-item,
+html[data-theme-plugin="lynn.theme.console"] .thread-row {
+  border-radius: var(--console-r);
+  box-shadow: inset 0 0 0 1px var(--rule-soft);
+}
+html[data-theme-plugin="lynn.theme.console"] .mcard.active {
+  box-shadow: inset 0 0 0 1px var(--rule), inset 0 1px 2px rgba(0, 0, 0, .38);
+}
+
+/* ---------- 按钮：凹陷双层，等宽标字 ---------- */
+html[data-theme-plugin="lynn.theme.console"] .btn,
+html[data-theme-plugin="lynn.theme.console"] .sf-btn,
+html[data-theme-plugin="lynn.theme.console"] .ghost-btn {
+  font-family: var(--f-mono);
+  font-size: 10px;
+  letter-spacing: 0;
+  border-radius: var(--console-r);
+  box-shadow: inset 0 0 0 1px var(--rule-soft);
+}
+html[data-theme-plugin="lynn.theme.console"] .btn:active,
+html[data-theme-plugin="lynn.theme.console"] .sf-btn:active {
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, .45), inset 0 0 0 1px var(--rule);
+}
+
+/* ---------- 分段 / 页签：方角，选中只靠底色 ---------- */
+html[data-theme-plugin="lynn.theme.console"] .seg-item,
+html[data-theme-plugin="lynn.theme.console"] .tab {
+  border-radius: var(--console-r);
+  box-shadow: inset 0 0 0 1px var(--rule-soft);
+}
+
+/* ---------- 输入区：压成内凹槽 ---------- */
+html[data-theme-plugin="lynn.theme.console"] .composer-in,
+html[data-theme-plugin="lynn.theme.console"] .search {
+  border-radius: var(--console-r);
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, .35), inset 0 0 0 1px var(--rule-soft);
+}
+
+/* ---------- 长文本：终端前景色 + 等宽（只给流水/事件行，正文不动） ---------- */
+html[data-theme-plugin="lynn.theme.console"] .ev,
+html[data-theme-plugin="lynn.theme.console"] .feed-item .body,
+html[data-theme-plugin="lynn.theme.console"] .diff {
+  font-family: var(--f-mono);
+  color: var(--term);
+}
+html[data-theme-plugin="lynn.theme.console"] .md code,
+html[data-theme-plugin="lynn.theme.console"] .md pre {
+  border-radius: var(--console-r);
+}
+
+/* ---------- 顶部工具条：去浮层感，只留发丝 ---------- */
+html[data-theme-plugin="lynn.theme.console"] .rail-top {
+  box-shadow: inset 0 -1px 0 var(--rule-soft);
+}
+/* 缓存命中徽标：数据来自 UsageView.cacheRead/cacheWrite（Pi stats），与读数同族 */
+html[data-theme-plugin="lynn.theme.console"] .cache-badge {
+  font-family: var(--f-mono);
+  font-size: 10px;
+  letter-spacing: 0;
+  border-radius: var(--console-r);
+  box-shadow: inset 0 0 0 1px var(--rule-soft);
+}

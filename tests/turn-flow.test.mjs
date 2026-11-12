@@ -10,6 +10,7 @@ import { TeamStore } from "../dist/main/team-store.js";
 function setup() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "lynn-turn-"));
   const kernel = new Kernel(root);
+  kernel.handle("config.prefs", { autoStart: false });
   const teams = new TeamStore(root);
   teams.createTeam("t1", "测试组");
   teams.writeMember("t1", {

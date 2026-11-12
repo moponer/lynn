@@ -1,0 +1,14 @@
+{
+  "id": "lynn.view.console",
+  "name": "沉浸控制台",
+  "version": "0.1.0",
+  "apiVersion": 1,
+  "tier": "L0",
+  "source": "official",
+  "description": "整屏控制台视图：态势球 + 双流 + 军印。占 stage.console 卡槽，组件来自宿主内置注册表，插件本身零代码。",
+  "engines": { "kernel": "^1.4.0" },
+  "contributes": {
+    "slots": ["stage.console"],
+    "view": "console"
+  }
+}

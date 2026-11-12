@@ -92,6 +92,7 @@ test("内核：上一单保留编制后，新单子直接用模板开工（不�
   seed(root);
   const { Kernel } = await import("../dist/main/kernel.js");
   const kernel = new Kernel(root);
+  kernel.handle("config.prefs", { autoStart: false });
   try {
     assert.match(kernel.runTool("dissolve_team", { teamId: "t1", keep: true }), /保留/);
     const out = kernel.runTool("assign_task", {

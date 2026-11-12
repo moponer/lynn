@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { type CaptureShot, type FeedCard, type PermissionMode, type QueueItem, cacheHitRate } from "../../shared/contract";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import { type CaptureShot, type FeedCard, type PermissionMode, type QueueItem, type TaskStatus, cacheHitRate } from "../../shared/contract";
 import { Icon, type IconName } from "../components/Icon";
 import { WindowControls } from "../components/WindowControls";
 import type { Desk, DeskDecision, DeskDiff, DeskEvidence, DeskJob, DeskMember } from "./model";
@@ -8,9 +9,14 @@ import { Slot, SandboxAction, SandboxHtml } from "./ui-host";
 import { AmbientLayer } from "./AmbientLayer";
 import type { AmbientMode, AmbientParams } from "../../shared/ambient";
 import { STAGE_KEYS, STATUS_KEY, fmtTime } from "./model";
+import { groupArchived } from "../../shared/archive-groups";
 import { FeedScroller, FeedView } from "./Feed";
 import { MemberAvatar } from "./MemberAvatar";
+import { PreviewDrawer } from "../components/PreviewDrawer";
 import { useT } from "../i18n";
+
+/** 点交付物 / 证据：一律进内置预览，不再拉起外部关联程序 */
+type OpenPreview = (taskId: string, ref: string) => void;
 
 /**
  * 值台（Dispatch Desk）—— 设计规范 §4 的三栏骨架：
@@ -24,6 +30,9 @@ const PERMISSIONS: { mode: PermissionMode; labelKey: string; en: string }[] = [
   { mode: "auto", labelKey: "perm.auto", en: "AUTO" },
   { mode: "full", labelKey: "perm.full", en: "FULL" },
 ];
+
+/** 归档带默认只露最近 5 条：历史列表不占满整条左栏，其余走「查看全部」 */
+const ARCHIVE_PREVIEW = 5;
 
 /** 台账分组（数组顺序即渲染顺序）；空组直接不渲染，不留占位假条目 */
 const GROUP_META: { k: Exclude<JobGroup, "archived">; labelKey: string; color: string; stoppable: boolean }[] = [
@@ -67,7 +76,6 @@ function statusChipClass(job: DeskJob): string {
 
 function TopRail({
   desk,
-  current,
   permission,
   onPermission,
   onOpenSettings,
@@ -83,7 +91,6 @@ function TopRail({
   onRemoveReadRoot,
 }: {
   desk: Desk;
-  current?: DeskJob;
   permission: PermissionMode;
   onPermission: (m: PermissionMode) => void;
   onOpenSettings: () => void;
@@ -105,14 +112,29 @@ function TopRail({
   onRemoveReadRoot?: (path: string) => void;
 }) {
   const [wsMenu, setWsMenu] = useState(false);
+  /** 菜单用 fixed 定位：顶栏与图纸都有 overflow / 层叠上下文，absolute 会被裁掉或盖住 */
+  const [wsPos, setWsPos] = useState({ top: 0, left: 0 });
   const wsRef = useRef<HTMLDivElement | null>(null);
+  const wsBtnRef = useRef<HTMLButtonElement | null>(null);
+  const wsMenuRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     if (!wsMenu) return;
     const onDown = (e: MouseEvent) => {
-      if (wsRef.current && !wsRef.current.contains(e.target as Node)) setWsMenu(false);
+      const t = e.target as Node;
+      // 菜单已 portal 到 body，不在 wsRef 里：两处都要判，否则点菜单项会被当成「点外面」
+      if (wsRef.current?.contains(t) || wsMenuRef.current?.contains(t)) return;
+      setWsMenu(false);
     };
+    const close = () => setWsMenu(false);
     document.addEventListener("mousedown", onDown);
-    return () => document.removeEventListener("mousedown", onDown);
+    // fixed 菜单不跟滚动/缩放走：位置一变就关掉，避免悬在错的地方
+    window.addEventListener("resize", close);
+    window.addEventListener("scroll", close, true);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      window.removeEventListener("resize", close);
+      window.removeEventListener("scroll", close, true);
+    };
   }, [wsMenu]);
   const shortName = (p: string) => p.split(/[\\/]/).filter(Boolean).pop() ?? p;
   const extras = desk.workspaceExtras;
@@ -152,16 +174,22 @@ function TopRail({
         <div className="wsmenu-wrap" ref={wsRef}>
           <button
             type="button"
+            ref={wsBtnRef}
             className="crumb-chip crumb-btn"
-            onClick={() => setWsMenu((v) => !v)}
+            onClick={() => {
+              const r = wsBtnRef.current?.getBoundingClientRect();
+              if (r) setWsPos({ top: r.bottom + 6, left: r.left });
+              setWsMenu((v) => !v);
+            }}
             title={desk.workspacePrimary ?? t("top.projectHint", { dir: desk.project })}
           >
             <Icon name="folder" size="sm" /> {desk.project}
             {extras.length > 0 && <span className="wsmenu-badge">{extras.length}</span>}
             <Icon name="chev" size="sm" />
           </button>
-          {wsMenu && (
-            <div className="wsmenu" role="menu">
+          {wsMenu &&
+            createPortal(
+            <div ref={wsMenuRef} className="wsmenu" role="menu" style={{ top: wsPos.top, left: wsPos.left }}>
               <button
                 type="button"
                 className="jobmenu-item"
@@ -210,16 +238,14 @@ function TopRail({
               >
                 添加只读目录…
               </button>
-            </div>
-          )}
+            </div>,
+            document.body,
+            )}
         </div>
-        <span className="seg">{mode === "review" ? t("top.crumbReview") : t("top.crumbJob")}</span>
-        <Icon name="chev" size="sm" />
-        <span className="cur mono">{current?.id ?? "—"}</span>
       </div>
       <div className="spacer" />
 
-      {/* 任务状态只看两处：左栏「工单」台账 + 右栏动态（同一信息不再第三个入口印一遍） */}
+      {/* 顶栏不再印工单号：左栏台账 + 右栏动态已经各有一处，第三个入口只是「—」这样的空占位 */}
 
       {/* 窄窗：右栏收成抽屉后，"等你拍板"必须有个进得去的入口（悬停边缘不算入口） */}
       {pending !== undefined && pending > 0 && onToggleRight && (
@@ -238,13 +264,12 @@ function TopRail({
       {mode !== "review" && (
         <>
           <div className="seg">
-            <span className="seg-label">{t("top.permission")}</span>
             {PERMISSIONS.map((p) => (
               <button
                 type="button"
                 key={p.mode}
                 aria-pressed={permission === p.mode}
-                className={`seg-item${permission === p.mode ? " on" : ""}`}
+                className={`seg-item${p.mode === "full" ? " danger" : ""}${permission === p.mode ? " on" : ""}`}
                 onClick={() => onPermission(p.mode)}
                 title={t("top.switchTo", { label: t(p.labelKey) })}
               >
@@ -302,7 +327,7 @@ function TopRail({
           {Array.from({ length: 12 }, (_, i) => (
             <i
               key={i}
-              className={`${i < filled ? "on" : ""}${contextPct >= 90 && i < filled ? " hot" : ""}`}
+              className={i < filled ? "on" : ""}
               style={{ height: `${8 + i}px` }}
             />
           ))}
@@ -369,9 +394,12 @@ function Ledger({
   onRevokeRead,
   onSnapshotProject,
   onExportTask,
+  onPreview,
 }: {
   desk: Desk;
   activeId?: string;
+  /** 交付物点开走内置预览 */
+  onPreview?: OpenPreview;
   onSelect: (id: string) => void;
   onThread?: (id: string) => void;
   onThreadNew?: () => void;
@@ -394,6 +422,10 @@ function Ledger({
 }) {
   const [q, setQ] = useState("");
   const [showAllArchive, setShowAllArchive] = useState(false);
+  /** 归档删除两段确认：第一次点亮「确认」，第二次才真删 */
+  const [archDeleting, setArchDeleting] = useState<string | null>(null);
+  /** 归档折叠：按「会话 + 归一化标题」分组，多记录的组默认收起；只影响展示，不合并、不删除数据 */
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
   /** 左栏三视图：会话 / 工单 / 交付箱（跨任务汇总的交付物） */
   const [view, setView] = useState<"threads" | "jobs" | "outputs">("threads");
   const [tq, setTq] = useState("");
@@ -410,6 +442,8 @@ function Ledger({
   const visible = desk.jobs.filter(match);
   const byGroup = (g: JobGroup) => visible.filter((j) => j.group === g);
   const archived = desk.archived.filter((a) => !q || `${a.id} ${a.title}`.toLowerCase().includes(q.toLowerCase()));
+  // 分组只用于渲染；archived 里的每一条仍原样保留，展开后可逐张打开 / 删除。
+  const archiveGroups = groupArchived(archived);
   const activeCount = desk.jobs.filter((j) => j.group !== "archived").length;
   // 交付箱：跨任务汇总「用户要带走的东西」，物理文件不搬家
   const outputs = desk.jobs.flatMap((j) =>
@@ -445,10 +479,16 @@ function Ledger({
           onClick={() => setView("outputs")}
           title="交付箱：所有验收过的交付物（物理文件仍在原处）"
         >
-          交付箱
+          {t("rail.outputs")}
           <span className="n">{outputs.length}</span>
         </button>
-        <button type="button" className="icon-btn rail-new" onClick={onThreadNew} title={t("top.newThread")}>
+        <button
+          type="button"
+          className="icon-btn rail-new"
+          onClick={onThreadNew}
+          title={t("top.newThread")}
+          aria-label={t("top.newThread")}
+        >
           <Icon name="plus" size="sm" />
         </button>
       </div>
@@ -642,30 +682,82 @@ function Ledger({
             <div className="ab-h">
               <Icon name="archive" size="sm" />
               <span>{t("ledger.archiveStrip")}</span>
-              <span className="mono" style={{ marginLeft: "auto" }}>
+              <span
+                className="mono"
+                style={{ marginLeft: "auto" }}
+                title={`共 ${archived.length} 条 · ${archiveGroups.length} 组；折叠只影响展示，记录与卷宗一张不少`}
+              >
                 {archived.length}
               </span>
             </div>
             <ol>
-              {(showAllArchive ? archived : archived.slice(0, 20)).map((a) => (
-                <li key={a.id}>
-                  {/* 归档不是坟场：点得开才叫可追溯 */}
-                  <button
-                    type="button"
-                    className={`arch-item${a.id === activeId ? " on" : ""}`}
-                    title={`打开 ${a.id}（~/.lynn/tasks/${a.id}/）`}
-                    onClick={() => onSelect(a.id)}
+              {(showAllArchive ? archiveGroups : archiveGroups.slice(0, ARCHIVE_PREVIEW)).map((g) => {
+                const open = expandedGroups.has(g.key);
+                const toggle = () =>
+                  setExpandedGroups((prev) => {
+                    const next = new Set(prev);
+                    if (next.has(g.key)) next.delete(g.key);
+                    else next.add(g.key);
+                    return next;
+                  });
+                // 组内每一条仍是独立归档行：可点开、可逐张删除；右键本行也能进入删除确认。
+                const rows = g.items.map((a) => (
+                  <li
+                    className="arch-row"
+                    key={a.id}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      setArchDeleting(a.id);
+                    }}
                   >
-                    <span className="arch-id mono">{a.id}</span>
-                    <span className="arch-title">{a.title}</span>
-                    <span className={`st ${a.status === "canceled" ? "st-idle" : "st-done"}`}>
-                      {t(STATUS_KEY[a.status ?? "done"], {})}
-                    </span>
-                  </button>
-                </li>
-              ))}
+                    <button
+                      type="button"
+                      className={`arch-item${a.id === activeId ? " on" : ""}`}
+                      title={`打开 ${a.id}（~/.lynn/tasks/${a.id}/）`}
+                      onClick={() => onSelect(a.id)}
+                    >
+                      <span className="arch-title">{a.title || a.id}</span>
+                      <span className="arch-state">{t(STATUS_KEY[(a.status ?? "done") as TaskStatus], {})}</span>
+                    </button>
+                    <button
+                      type="button"
+                      className={`arch-del${archDeleting === a.id ? " sure" : ""}`}
+                      title={archDeleting === a.id ? "再点一次：连卷宗一起彻底删掉" : "删除这张归档单（也可右键本行）"}
+                      aria-label={archDeleting === a.id ? "确认删除" : "删除这张归档单"}
+                      onClick={() => {
+                        if (archDeleting !== a.id) {
+                          setArchDeleting(a.id);
+                          return;
+                        }
+                        onRemoveTask?.(a.id);
+                        setArchDeleting(null);
+                      }}
+                    >
+                      {archDeleting === a.id ? "确认删除" : <Icon name="x" size="sm" />}
+                    </button>
+                  </li>
+                ));
+                // 单条组没有折叠意义，直接显示，不额外增加一次点击。
+                if (g.count === 1) return rows[0];
+                return (
+                  <li className="arch-group" key={g.key}>
+                    <button
+                      type="button"
+                      className="arch-group-h"
+                      aria-expanded={open}
+                      title={open ? t("ledger.archiveLess") : t("ledger.archiveExpand", { n: g.count })}
+                      onClick={toggle}
+                    >
+                      <span className="arch-caret" aria-hidden>{open ? "▾" : "▸"}</span>
+                      <span className="arch-title">{g.title}</span>
+                      <span className="arch-count mono">×{g.count}</span>
+                    </button>
+                    {open && <ol className="arch-sub">{rows}</ol>}
+                  </li>
+                );
+              })}
             </ol>
-            {archived.length > 20 && (
+            {archiveGroups.length > ARCHIVE_PREVIEW && (
               <button type="button" className="strip-link" onClick={() => setShowAllArchive((v) => !v)}>
                 {showAllArchive ? t("ledger.archiveLess") : t("ledger.archiveAll", { n: archived.length })}
               </button>
@@ -769,9 +861,9 @@ function Ledger({
                 key={`${o.job.id}-${o.path}-${i}`}
                 className="thread-row"
                 disabled={!openable}
-                title={`${o.path}\n${o.ref}${o.bytes ? `\n${fmtB(o.bytes)}` : ""}${openable ? "\n点击打开" : "\n（外部路径，去原位置查看）"}`}
+                title={`${o.path}\n${o.ref}${o.bytes ? `\n${fmtB(o.bytes)}` : ""}${openable ? "\n点击内置预览" : "\n（外部路径，去原位置查看）"}`}
                 onClick={() => {
-                  if (openable) void window.lynn.rpc("evidence.open", { taskId: o.job.id, ref: o.ref });
+                  if (openable) onPreview?.(o.job.id, o.ref);
                 }}
               >
                 <b>{o.path.split(/[\\/]/).filter(Boolean).pop() ?? o.path}</b>
@@ -812,6 +904,9 @@ function JobRow({
     // 外层用 div：里面要放「停」按钮，button 套 button 是非法结构
     <div
       className={`job${active ? " on" : ""}`}
+      data-status={job.status}
+      data-group={job.group}
+      data-running={running ? "1" : undefined}
       role="button"
       tabIndex={0}
       // 工单号不再占据首行（没人记得 WO-2418）：需要时悬停看，审计在图纸里
@@ -830,6 +925,7 @@ function JobRow({
       }}
     >
       <div className="job-top">
+        <span className="job-mark" />
         {showTeam && job.teamName ? (
           <span className="job-team">
             <Icon name="users" size="sm" /> {job.teamName}
@@ -842,10 +938,11 @@ function JobRow({
           {t(STATUS_KEY[job.status] ?? "status.todo")}
         </span>
       </div>
-      <div className="job-title">{job.title}</div>
+      <div className="job-title" title={job.title}>{job.title}</div>
       <div className="job-meta">
-        <Icon name="user" size="sm" /> {job.member ?? t("sheet.lynn")}
-        <span style={{ color: "var(--ink-4)" }}>·</span>
+        <MemberAvatar name={job.member ?? t("sheet.lynn")} size={20} />
+        <span className="job-who">{job.member ?? t("sheet.lynn")}</span>
+        <span className="job-dot">·</span>
         <span className="mono">{fmtTime(job.at)}</span>
         {running && onCancel && (
           <button
@@ -1013,7 +1110,14 @@ function JobMenu({
 
 // ============================ SHEET ============================
 
+const CHANNEL_TAB = { k: "channel", labelKey: "sheet.tabChannel", icon: "term" as IconName };
 const FEED_TAB = { k: "feed", labelKey: "sheet.tabFeed", icon: "bell" as IconName };
+
+/** 卷宗事件类型 → 人话（详情区状态时间线；kind 由内核 taskCase 固定） */
+const TIMELINE_LABEL: Record<string, string> = {
+  created: "建单", assign: "派单", report: "回报", reject: "打回", approve: "验收",
+  transition: "状态", artifact: "产物", note: "记录", session: "会话",
+};
 
 function Sheet({
   job,
@@ -1025,9 +1129,17 @@ function Sheet({
   onFeedAction,
   onExample,
   onNewThread,
+  onBackToChannel,
+  pendingJob,
+  onOpenJob,
+  onPreview,
+  running,
 }: {
   job?: DeskJob;
   feed: FeedCard[];
+  onPreview?: OpenPreview;
+  /** 真正在跑的任务 id（desk.running）：进度卡据此亮起"执行中"脉冲 */
+  running?: string[];
   /** 当前会话 id：工单的出发会话不同时，往来要去那边读 */
   threadId?: string;
   /** 工单出发会话的标题（C3：眉标要能"回到会话"，标题比 id 好认） */
@@ -1038,11 +1150,19 @@ function Sheet({
   onExample?: (text: string) => void;
   /** 空场里的「开一条会话」 */
   onNewThread?: () => void;
+  /** 从工单详情回到本会话频道（清掉选中态，而不是切线程） */
+  onBackToChannel?: () => void;
+  /** 有待拍板的单时，频道里给一个显式入口，不自动抢走主区 */
+  pendingJob?: { id: string; title: string };
+  onOpenJob?: (id: string) => void;
 }) {
-  const [tab, setTab] = useState("feed");
+  // 打开工单先看「本会话对话」：用户要改口/调简报时，得先看见自己与风铃说了什么
+  const [tab, setTab] = useState("channel");
   /** 来自另一个会话的往来（当前 feed 里没有） */
   const [foreign, setForeign] = useState<{ cards: FeedCard[]; threadId: string; title?: string } | null>(null);
-  const channel = useMemo(() => feed.filter((c) => !c.jobId), [feed]);
+  // 频道 = 群。除了无归属的对话，带作者的动作卡（成员交付、风铃调度）也要在群里出现：
+  // 否则成员干完活只在工单详情里看得见，群里像没人干过活（群聊模式的核心）。
+  const channel = useMemo(() => feed.filter((c) => !c.jobId || c.author), [feed]);
   const t = useT();
   const jobId = job?.id;
   const jobThread = job?.threadId;
@@ -1068,10 +1188,6 @@ function Sheet({
     // 所以不能说「说吧，要办什么」——先给一个明确的开场动作。
     return (
       <div className="sheet blank-sheet">
-        <span className="crop tl" />
-        <span className="crop tr" />
-        <span className="crop bl" />
-        <span className="crop br" />
         <div className="sheet-head">
           <div className="sheet-eyebrow">
             <span>{t("sheet.lynn")}</span>
@@ -1096,10 +1212,6 @@ function Sheet({
   if (!job) {
     return (
       <div className="sheet">
-        <span className="crop tl" />
-        <span className="crop tr" />
-        <span className="crop bl" />
-        <span className="crop br" />
         <div className="sheet-head">
           <div className="sheet-eyebrow">
             <span>{t("sheet.channel")}</span>
@@ -1108,6 +1220,14 @@ function Sheet({
           </div>
           <h1 className="sheet-title">{t("sheet.emptyTitle")}</h1>
           <div className="sheet-sub">{t("sheet.emptySub")}</div>
+          {pendingJob && (
+            <div className="sheet-sub" style={{ marginTop: 8 }}>
+              {t("sheet.pendingJob", { n: 1 })}{" "}
+              <button type="button" className="strip-link" title={pendingJob.title} onClick={() => onOpenJob?.(pendingJob.id)}>
+                {t("sheet.openJob")} →
+              </button>
+            </div>
+          )}
         </div>
         <div className="sheet-body">
           <FeedScroller resetKey={threadId ?? "channel"}>
@@ -1115,6 +1235,8 @@ function Sheet({
               cards={channel}
               onAction={onFeedAction}
               collapseHistory
+              runningIds={running}
+              onPreview={onPreview}
               empty={
                 <>
                   {t("sheet.feedEmpty")}
@@ -1131,37 +1253,23 @@ function Sheet({
             />
           </FeedScroller>
         </div>
-        <div className="titleblock">
-          <div className="tb-cell">
-            <div className="k">工单</div>
-            <div className="v">—</div>
-          </div>
-          <div className="tb-cell">
-            <div className="k">版本</div>
-            <div className="v">—</div>
-          </div>
-          <div className="tb-cell hi">
-            <div className="k">阶段</div>
-            <div className="v">待受理</div>
-          </div>
-          <div className="tb-cell">
-            <div className="k">成员</div>
-            <div className="v">—</div>
-          </div>
-          <div className="tb-cell">
-            <div className="k">提交</div>
-            <div className="v">—</div>
-          </div>
-          <div className="tb-cell">
-            <div className="k">验收</div>
-            <div className="v">—</div>
-          </div>
-        </div>
       </div>
     );
   }
 
   const evidence = job.evidence;
+  const overBudget = !!job.budget && job.budget.used > job.budget.total;
+  // 时间线只留有信息量的最近两条：session 是内部会话 ID；最后一条 transition 与上面的
+  // 「状态」重复；回报正文可能很长，压成一句摘要（全文仍在 hover title 与卷宗里）。
+  const timelineEvents = (job.timeline ?? [])
+    .filter((e) => e.kind !== "session")
+    .filter((e, i, arr) => !(e.kind === "transition" && i === arr.length - 1))
+    .slice(-2)
+    .reverse();
+  const timelineBrief = (e: { kind: string; text: string }) => {
+    const text = String(e.text ?? "");
+    return e.kind === "report" && text.length > 44 ? `${text.slice(0, 44)}…` : text;
+  };
   // 工作区已经单独显示过一次：只读授权里与它重复的目录不再报一遍（同一路径两行是噪音）
   const extraReadRoots = (job.readRoots ?? []).filter((d) => d !== job.workspaceRoot);
   // 只收本单的卡：频道消息不该混进工单往来（原来 `|| !c.jobId` 把全局对话塞进每张单）
@@ -1170,11 +1278,6 @@ function Sheet({
 
   return (
     <div className="sheet">
-      <span className="crop tl" />
-      <span className="crop tr" />
-      <span className="crop bl" />
-      <span className="crop br" />
-
       <div className="sheet-head">
         <div className="sheet-eyebrow">
           {/* D2 信息唯一归属：工单号只在 crumbs + titleblock，眉标不再报一遍；角色归右栏成员卡（同屏两遍就是噪音） */}
@@ -1183,8 +1286,9 @@ function Sheet({
           <span title={job.memberRole ? `${job.member} · ${job.memberRole}` : job.member}>
             {t("sheet.assignedTo", { who: job.member ?? t("sheet.lynn") })}
           </span>
-          {/* C3：这张单从哪个会话来的，就要能从这儿回去（不再只能翻台账猜） */}
-          {job.threadId && job.threadId !== threadId && (
+          {/* 回程入口只留一个：跨会话单回「派单会话」，同会话单回「本会话对话」。
+              两个「← 回到对话」并排出现在同一条眉标里，比没有入口还乱。 */}
+          {job.threadId && job.threadId !== threadId ? (
             <button
               type="button"
               className="eyebrow-link"
@@ -1194,6 +1298,15 @@ function Sheet({
               ← {t("sheet.backToThread")}
               {threadTitle ? `《${threadTitle}》` : ""}
             </button>
+          ) : (
+            <button
+              type="button"
+              className="eyebrow-link"
+              title={t("sheet.backToChannelTitle")}
+              onClick={() => onBackToChannel?.()}
+            >
+              ← {t("sheet.backToChannel")}
+            </button>
           )}
         </div>
 
@@ -1202,69 +1315,133 @@ function Sheet({
           {job.title}
         </h1>
 
-        {/* 一行元信息：预算 / 工作区 / 只读授权。证据条数归证据链，这里不重复。 */}
-        <div className="sheet-meta">
-          {job.budget && (
-            <span className="mi">
-              {t("sheet.budgetLabel")}
-              <b className="mono">
-                {job.budgetKind === "money"
-                  ? `¥${job.budget.used.toFixed(2)} / ¥${job.budget.total.toFixed(2)}`
-                  : `${job.budget.used}K / ${job.budget.total}K`}
-              </b>
-            </span>
-          )}
-          {job.workspaceRoot && (
-            <span className="mi" title={job.workspaceRoot}>
-              <Icon name="folder" size="sm" />
-              {/* 只显示目录名：整条长路径在元信息行里是最大的一块噪音，全文进 title；「工作区」标签给目录名语义（裸英文目录名读起来像乱码） */}
-              <span>{t("sheet.workspace")}</span>
-              <span className="mono">{job.workspaceRoot.split(/[\\/]/).filter(Boolean).pop()}</span>
-            </span>
-          )}
-          {extraReadRoots.length > 0 && (
-            <span className="mi" title={extraReadRoots.join("\n")}>
-              <Icon name="lock" size="sm" />
-              <span className="mono">{extraReadRoots.join("、")}</span>
-            </span>
+        {/* 主信息：这张单走到第几轮、现在什么状态、最近发生了什么。优先于一切计数与预算。 */}
+        <div className="sheet-primary">
+          <div className="sp-head">
+            <span className="sp-round">第 {job.round ?? 1} 轮</span>
+            <span className="sp-state">{job.statusLabel}</span>
+            <span className="sp-at mono">{job.at ? fmtTime(job.at) : ""}</span>
+            {job.group === "archived" && <span className="sp-state">已归档</span>}
+          </div>
+          {timelineEvents.length > 0 && (
+            <ol className="sp-timeline" aria-label={t("sheet.timelineLabel")}>
+              {timelineEvents.map((e, i) => (
+                <li key={`${e.kind}-${i}`} title={e.text}>
+                  <span className="sp-t mono">{fmtTime(e.at)}</span>
+                  <span className="sp-k">{TIMELINE_LABEL[e.kind] ?? e.kind}</span>
+                  <span className="sp-v">{timelineBrief(e)}</span>
+                </li>
+              ))}
+            </ol>
           )}
         </div>
+
+        {/* 次级信息一律收进折叠区：预算明细（含超额）、工作区、只读授权、证据与往来计数。
+            页签仍可点，计数改在下面汇总，不再铺满标题区。 */}
+        <details className="sheet-stats">
+          <summary>
+            <span>{t("sheet.statsToggle")}</span>
+            {overBudget && <span className="sp-warn">{t("sheet.budgetOver")}</span>}
+          </summary>
+          <div className="sp-grid">
+            {job.budget && (
+              <div className="sp-cell">
+                <span className="sp-k">{t("sheet.budgetLabel")}</span>
+                <b className="mono">
+                  {job.budgetKind === "money"
+                    ? `¥${job.budget.used.toFixed(2)} / ¥${job.budget.total.toFixed(2)}`
+                    : `${job.budget.used}K / ${job.budget.total}K`}
+                </b>
+                {overBudget && <span className="sp-warn">{t("sheet.budgetOver")}</span>}
+              </div>
+            )}
+            {job.workspaceRoot && (
+              <div className="sp-cell" title={job.workspaceRoot}>
+                <span className="sp-k">{t("sheet.workspace")}</span>
+                <span className="mono">{job.workspaceRoot.split(/[\\/]/).filter(Boolean).pop()}</span>
+              </div>
+            )}
+            {extraReadRoots.length > 0 && (
+              <div className="sp-cell" title={extraReadRoots.join("\n")}>
+                <span className="sp-k">只读授权</span>
+                <span className="mono">{extraReadRoots.join("、")}</span>
+              </div>
+            )}
+            <div className="sp-cell">
+              <span className="sp-k">{t("sheet.deliverables")}</span>
+              <span className="mono">{job.deliverables?.length ?? 0}</span>
+            </div>
+            <div className="sp-cell">
+              <span className="sp-k">{t("sheet.statsCounts")}</span>
+              <span className="mono">
+                {t("sheet.statsCountsValue", { channel: channel.length, feed: jobCards.length, evidence: evidence.length })}
+              </span>
+            </div>
+          </div>
+        </details>
       </div>
 
       {/* 阶段与页签合成一条"导航带"：两行并一行，标题区才不被挤成糊 */}
       <div className="sheet-toolbar">
-        <div className="steps">
+        {/* 阶段压成一行刻度：只有当前这一步会转。已完成的用勾，其余用淡点，
+            编号底圆和逐段连线都是重复噪音，去掉后靠留白分节奏。 */}
+        <div className="steps" aria-label={t("sheet.stageFlow")}>
           {STAGE_KEYS.map((key, i) => {
             const done = i < job.stage;
             const now = i === job.stage;
+            // 只有真有成员在跑才转：待审查/卡住时转圈会让人以为还在执行
+            const live = now && job.group === "running";
             return (
-              <span key={key} style={{ display: "flex", alignItems: "center" }}>
-                <span className={`step${done ? " done" : now ? " now" : ""}`}>
-                  <span className="n">{done ? "✓" : i + 1}</span>
-                  <span className="l">{t(key)}</span>
+              <span
+                key={key}
+                className={`step${done ? " done" : now ? " now" : ""}${live ? " live" : ""}`}
+                aria-current={now ? "step" : undefined}
+              >
+                <span className="step-mark" aria-hidden="true">
+                  {live ? (
+                    <svg className="step-ring" viewBox="0 0 16 16">
+                      <circle className="track" cx="8" cy="8" r="6" />
+                      <circle className="arc" cx="8" cy="8" r="6" />
+                    </svg>
+                  ) : (
+                    // 完成态只给一个实心点：六段各挂一个对勾，符号比阶段名还抢眼
+                    <span className={`step-dot${done ? " on" : ""}`} />
+                  )}
                 </span>
-                {i < STAGE_KEYS.length - 1 && <span className={`step-line${done ? " done" : ""}`} />}
+                <span className="l">{t(key)}</span>
               </span>
             );
           })}
         </div>
         <div className="tabs">
           {[
+            CHANNEL_TAB,
             FEED_TAB,
             ...(job.diff ? [{ k: "diff", labelKey: "sheet.tabDiff", icon: "diff" as IconName }] : []),
             ...(job.artifact ? [{ k: "artifact", labelKey: "sheet.tabArtifact", icon: "table" as IconName }] : []),
-            ...(evidence.length > 0 ? [{ k: "evidence", labelKey: "sheet.tabEvidence", icon: "list" as IconName }] : []),
+            // 交付物优先：有交付物或核对记录就出现，用户先看结果
+            ...(evidence.length > 0 || (job.deliverables?.length ?? 0) > 0
+              ? [{ k: "evidence", labelKey: "sheet.tabEvidence", icon: "list" as IconName }]
+              : []),
           ].map((tabDef) => {
-            const count = tabDef.k === "feed" ? jobCards.length : tabDef.k === "evidence" ? evidence.length : 0;
+            const count =
+              tabDef.k === "channel"
+                ? channel.length
+                : tabDef.k === "feed"
+                  ? jobCards.length
+                  : tabDef.k === "evidence"
+                    ? (job.deliverables?.length ?? evidence.length)
+                    : 0;
             return (
               <button
                 type="button"
                 key={tabDef.k}
                 className={`tab${tab === tabDef.k ? " on" : ""}`}
+                aria-pressed={tab === tabDef.k}
+                title={`${t(tabDef.labelKey)}${count > 0 ? ` · ${count}` : ""}`}
                 onClick={() => setTab(tabDef.k)}
               >
                 <Icon name={tabDef.icon} size="sm" /> {t(tabDef.labelKey)}
-                {count > 0 && <span className="tag">{count}</span>}
               </button>
             );
           })}
@@ -1274,6 +1451,18 @@ function Sheet({
       <div className="sheet-body">
         {/* 对话是唯一主角：常驻单列；差异 / 产物 / 证据链都收进页签，按需展开。
             页签视图和 FeedScroller 互斥渲染——两个 flex:1 并排会把中间栏劈成两半 */}
+        {tab === "channel" && (
+          <FeedScroller resetKey={`channel-${job.id}`}>
+            <FeedView
+              cards={channel}
+              onAction={onFeedAction}
+              runningIds={running}
+              onPreview={onPreview}
+              empty={t("sheet.channelEmpty")}
+            />
+          </FeedScroller>
+        )}
+
         {tab === "feed" && (
           <FeedScroller resetKey={job.id}>
             <>
@@ -1289,17 +1478,24 @@ function Sheet({
                   </button>
                 </div>
               )}
-              <FeedView cards={jobCards} onAction={onFeedAction} collapseHistory empty={t("sheet.jobFeedEmpty")} />
+              <FeedView
+                cards={jobCards}
+                onAction={onFeedAction}
+                collapseHistory
+                runningIds={running}
+                onPreview={onPreview}
+                empty={t("sheet.jobFeedEmpty")}
+              />
             </>
           </FeedScroller>
         )}
 
-        {tab !== "feed" && (
+        {tab !== "feed" && tab !== "channel" && (
           <div className="work feed-work">
             {tab === "diff" && job.diff && <DiffView diff={job.diff} />}
             {tab === "artifact" && job.artifact && <ArtifactView job={job} />}
             {tab === "evidence" && (
-              <EvidenceView taskId={job.id} evidence={evidence} deliverables={job.deliverables} />
+              <EvidenceView taskId={job.id} evidence={evidence} deliverables={job.deliverables} onPreview={onPreview} />
             )}
             {tab === "diff" && !job.diff && <div className="spine-empty">{t("sheet.evidenceEmpty")}</div>}
             {tab === "artifact" && !job.artifact && <div className="spine-empty">{t("sheet.evidenceEmpty")}</div>}
@@ -1308,21 +1504,6 @@ function Sheet({
         )}
       </div>
 
-      <div className="titleblock">
-        {/* 只留三格：阶段归阶段流、成员归眉标——同一信息不在一屏报两遍 */}
-        <div className="tb-cell">
-          <div className="k">工单</div>
-          <div className="v">{job.id}</div>
-        </div>
-        <div className="tb-cell">
-          <div className="k">版本</div>
-          <div className="v">v{job.version}</div>
-        </div>
-        <div className="tb-cell">
-          <div className="k">提交</div>
-          <div className="v">{fmtTime(job.at)}</div>
-        </div>
-      </div>
     </div>
   );
 }
@@ -1350,16 +1531,17 @@ function EvidenceView({
   taskId,
   evidence,
   deliverables,
+  onPreview,
 }: {
   taskId: string;
   evidence: DeskEvidence[];
   /** 交付物（与证据分开：交付物是用户要带走的，证据是"我核对过"） */
   deliverables?: { path: string; ref: string; bytes?: number }[];
+  onPreview?: OpenPreview;
 }) {
   const t = useT();
   const list = deliverables ?? [];
-  if (evidence.length === 0 && list.length === 0) return <div className="spine-empty">{t("sheet.evidenceEmpty")}</div>;
-  const verified = evidence.filter((e) => e.level !== "pending").length;
+  if (evidence.length === 0 && list.length === 0) return <div className="spine-empty">{t("sheet.deliverablesEmpty")}</div>;
   // 卷宗内的 artifacts/ 可点开；只读根里的外部绝对路径不在证据目录内，不给假按钮
   const openable = (ref: string) => !!ref && !/^[a-zA-Z]:[\\/]/.test(ref) && !ref.startsWith("/");
   const size = (b?: number) =>
@@ -1369,7 +1551,7 @@ function EvidenceView({
       {list.length > 0 && (
         <>
           <div className="ev-cap">
-            交付物
+            {t("sheet.deliverables")}
             <span className="mono">{list.length}</span>
           </div>
           <div className="ev-grid">
@@ -1381,7 +1563,7 @@ function EvidenceView({
                 title={`${d.path}\n${d.ref}${d.bytes ? `\n${size(d.bytes)}` : ""}`}
                 className={`evr ok${openable(d.ref) ? " openable" : ""}`}
                 onClick={() => {
-                  if (openable(d.ref)) void window.lynn.rpc("evidence.open", { taskId, ref: d.ref });
+                  if (openable(d.ref)) onPreview?.(taskId, d.ref);
                 }}
               >
                 <span className="t">{d.path}</span>
@@ -1391,14 +1573,13 @@ function EvidenceView({
         </>
       )}
       {evidence.length > 0 && (
-        <>
-          <div className="ev-cap" style={{ marginTop: list.length ? 18 : 0 }}>
-            {t("sheet.evidenceChain")}
-            <span className="mono">
-              {verified} / {evidence.length}
-            </span>
-          </div>
-          <div className="ev-grid">
+        // 核对记录留在后台可查，默认收起：用户要的是结果，不是核对过程
+        <details className="ev-audit">
+          <summary>
+            {t("sheet.auditTrail")}
+            <span className="mono">{evidence.length}</span>
+          </summary>
+          <div className="ev-grid" style={{ marginTop: 8 }}>
             {evidence.map((e, i) => (
               <button
                 type="button"
@@ -1407,15 +1588,14 @@ function EvidenceView({
                 title={e.ref ? `${e.title}\n${e.detail}\n点击打开` : e.detail}
                 className={`evr${e.level === "ok" ? " ok" : e.level === "warn" ? " warn" : " pending"}${e.ref ? " openable" : ""}`}
                 onClick={() => {
-                  if (!e.ref) return;
-                  void window.lynn.rpc("evidence.open", { taskId, ref: e.ref });
+                  if (e.ref) onPreview?.(taskId, e.ref);
                 }}
               >
                 <span className="t">{e.title}</span>
               </button>
             ))}
           </div>
-        </>
+        </details>
       )}
     </div>
   );
@@ -1469,7 +1649,6 @@ function Roster({
   onOpenReview,
   onPlan,
   onAnswer,
-  onCancel,
   onSelectJob,
   onCreateTeam,
   onManageTeam,
@@ -1494,16 +1673,13 @@ function Roster({
   onOpenReview?: (taskId: string) => void;
   onPlan: (id: string, action: "start" | "revise" | "reject", text?: string) => void;
   onAnswer: (id: string, text: string) => void;
-  /** 停掉一张卡住/在跑的单 */
-  onCancel?: (taskId: string) => void;
   /** 建团队：这里只要名字，ID 由系统生成（§4.10.3 修正） */
   onCreateTeam?: (name: string) => void;
   /** 手动管理编制：改岗位 / 移出成员 / 解散团队 */
   onManageTeam?: () => void;
 }) {
   const t = useT();
-  const active = desk.members.filter((m) => m.status !== "idle");
-  const idle = desk.members.filter((m) => m.status === "idle");
+  // 成员状态由成员卡自己表达（排序 + 状态色），标题栏不再报两套互相打架的总数
   // 多条挂起裁决：当前索引钳在有效范围内——处理完一条快照刷新后自动落到下一条（A5）
   const decisions = desk.decisions;
   const [dIdx, setDIdx] = useState(0);
@@ -1525,20 +1701,52 @@ function Roster({
       : null;
   const [naming, setNaming] = useState(false);
   const [teamName, setTeamName] = useState("");
-  /** 多团队分组：团队名 + 该队未归档的单数（回答"这队手上还有什么"） */
+  /** 编制规模上来之后先收敛：按状态筛人、团队卡可折叠、同岗位空闲成员聚合 */
+  const [rosterFilter, setRosterFilter] = useState<"all" | "running" | "review" | "idle">("all");
+  const [collapsedTeams, setCollapsedTeams] = useState<Set<string>>(new Set());
+  const [openRoles, setOpenRoles] = useState<Set<string>>(new Set());
+  const visibleMembers = useMemo(() => {
+    if (rosterFilter === "all") return desk.members;
+    const want = rosterFilter === "running" ? "running" : rosterFilter === "review" ? "delivered" : "idle";
+    return desk.members.filter((m) => m.status === want);
+  }, [desk.members, rosterFilter]);
+  /** 多团队分组：团队名 + 未归档单数 + 在跑/待审/空闲人数（先看统计，再决定展开哪队） */
   const memberGroups = useMemo(() => {
-    const map = new Map<string, { teamName: string; active: number; members: DeskMember[] }>();
-    for (const m of desk.members) {
+    const map = new Map<
+      string,
+      { teamName: string; active: number; running: number; review: number; idle: number; members: DeskMember[] }
+    >();
+    for (const m of visibleMembers) {
       const g = map.get(m.teamId) ?? {
         teamName: m.teamName ?? m.teamId,
         active: desk.jobs.filter((j) => j.teamId === m.teamId && j.status !== "done" && j.status !== "canceled").length,
+        running: 0,
+        review: 0,
+        idle: 0,
         members: [],
       };
       g.members.push(m);
+      if (m.status === "running") g.running += 1;
+      else if (m.status === "delivered") g.review += 1;
+      else if (m.status === "idle") g.idle += 1;
       map.set(m.teamId, g);
     }
     return map;
-  }, [desk.members, desk.jobs]);
+  }, [visibleMembers, desk.jobs]);
+  const toggleTeam = (teamId: string) =>
+    setCollapsedTeams((prev) => {
+      const next = new Set(prev);
+      if (next.has(teamId)) next.delete(teamId);
+      else next.add(teamId);
+      return next;
+    });
+  const toggleRole = (key: string) =>
+    setOpenRoles((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
   const submitTeam = () => {
     const name = teamName.trim();
     if (!name) return;
@@ -1556,19 +1764,47 @@ function Roster({
         <div className="panel-h">
           <div className="l">
             <span className="t">{t("roster.title")}</span>
-            <span className="n">{t("roster.capacity", { n: desk.members.length })}</span>
+            <span className="n">{t("roster.count", { n: desk.members.length })}</span>
           </div>
-          <span className="cap">{t("roster.split", { a: active.length, b: idle.length })}</span>
           {onClose && (
-            <button type="button" className="icon-btn only-narrow" onClick={onClose} title={t("common.close")}>
-              ✕
+            <button
+              type="button"
+              className="icon-btn only-narrow"
+              onClick={onClose}
+              title={t("common.close")}
+              aria-label={t("common.close")}
+            >
+              <Icon name="x" size="sm" />
             </button>
           )}
         </div>
 
+        {/* 规模上来先按状态收敛：26 人平铺时，找「在跑 / 待审」比翻名单快 */}
+        <div className="roster-filter" role="tablist" aria-label="编制筛选">
+          {(
+            [
+              ["all", "全部"],
+              ["running", "在跑"],
+              ["review", "待审"],
+              ["idle", "空闲"],
+            ] as const
+          ).map(([k, label]) => (
+            <button
+              key={k}
+              type="button"
+              role="tab"
+              aria-selected={rosterFilter === k}
+              className={`rf-chip${rosterFilter === k ? " on" : ""}`}
+              onClick={() => setRosterFilter(k)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
         {/* 建团队：给名字就行，ID 由系统生成——不让用户在面板里找 ID */}
         {onCreateTeam && (
-          <div style={{ display: "flex", gap: 8, marginBottom: 10, alignItems: "center" }}>
+          <div className="roster-actions">
             {naming ? (
               <>
                 <input
@@ -1654,7 +1890,7 @@ function Roster({
               onOpenReview={onOpenReview ? () => onOpenReview(sealJob.id) : undefined}
             />
           ) : sealJob?.action === "unblock" ? (
-            <BlockedSeal job={sealJob} onStop={onCancel} />
+            <BlockedSeal job={sealJob} />
           ) : (
             <div className="sealcard-empty">
               <Icon name="shield" size="sm" />
@@ -1668,28 +1904,69 @@ function Roster({
         {/* 团队卡组：一队一张分组卡，队内是成员小卡。
             不折叠：折叠箭头会让一队人藏起来，而右栏本来就是为了一眼看清编制。
             也不再单列「动态」区：在跑的排到队内前面，同一个人不画两遍。 */}
-        {[...memberGroups.entries()].map(([teamId, g]) => (
-          <section className="tgroup-card" key={teamId}>
-            <div className="tgroup-h">
-              <span className="t" title={g.teamName}>
-                {g.teamName}
-              </span>
-              <span className="n">{g.members.length}</span>
-            </div>
-            <div className="tgroup-list">
-              {[...g.members]
-                .sort((a, b) => memberRank(a) - memberRank(b))
-                .map((m) => (
-                  <MemberCard
-                    key={`${m.teamId}:${m.name}`}
-                    m={m}
-                    active={!!decision?.jobId && m.jobId === decision.jobId}
-                    onSelect={onSelectJob}
-                  />
-                ))}
-            </div>
-          </section>
-        ))}
+        {[...memberGroups.entries()].map(([teamId, g]) => {
+          const collapsed = collapsedTeams.has(teamId);
+          const split = splitRoster(g.members);
+          return (
+            <section className="tgroup-card" key={teamId}>
+              <div className="tgroup-h">
+                <button
+                  type="button"
+                  className="tgroup-toggle"
+                  aria-expanded={!collapsed}
+                  onClick={() => toggleTeam(teamId)}
+                  title={collapsed ? "展开这支队" : "收起这支队"}
+                >
+                  <span className="tg-caret" aria-hidden>{collapsed ? "▸" : "▾"}</span>
+                  <span className="t">{g.teamName}</span>
+                </button>
+                <span className="tgroup-stat">
+                  {g.running > 0 && <span className="s run">在跑 {g.running}</span>}
+                  {g.review > 0 && <span className="s review">待审 {g.review}</span>}
+                  {g.idle > 0 && <span className="s idle">空闲 {g.idle}</span>}
+                </span>
+              </div>
+              {!collapsed && (
+                <div className="tgroup-list">
+                  {[...split.active]
+                    .sort((a, b) => memberRank(a) - memberRank(b))
+                    .map((m) => (
+                      <MemberCard
+                        key={`${m.teamId}:${m.name}`}
+                        m={m}
+                        active={!!decision?.jobId && m.jobId === decision.jobId}
+                        onSelect={onSelectJob}
+                        onManage={onManageTeam}
+                      />
+                    ))}
+                  {split.groups.map((rg) => {
+                    const key = `${teamId}::${rg.role}`;
+                    const opened = openRoles.has(key);
+                    return (
+                      <div className="role-group" key={key}>
+                        <button type="button" className="role-h" aria-expanded={opened} onClick={() => toggleRole(key)}>
+                          <span className="tg-caret" aria-hidden>{opened ? "▾" : "▸"}</span>
+                          <span className="t">{rg.role}</span>
+                          <span className="n">×{rg.members.length}</span>
+                        </button>
+                        {opened &&
+                          rg.members.map((m) => (
+                            <MemberCard
+                              key={`${m.teamId}:${m.name}`}
+                              m={m}
+                              active={false}
+                              onSelect={onSelectJob}
+                              onManage={onManageTeam}
+                            />
+                          ))}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </section>
+          );
+        })}
       </div>
     </aside>
   );
@@ -1967,7 +2244,7 @@ function AcceptSeal({
  * 卡住（blocked）：她连续两个节点没交新证据。
  * 这里不能出现"验收归档"——没有交付物，收下就是在没有证据的情况下把单推成 done。
  */
-function BlockedSeal({ job, onStop }: { job: DeskJob; onStop?: (taskId: string) => void }) {
+function BlockedSeal({ job }: { job: DeskJob }) {
   const t = useT();
   return (
     <div className="sealcard">
@@ -1980,18 +2257,43 @@ function BlockedSeal({ job, onStop }: { job: DeskJob; onStop?: (taskId: string) 
             {job.at ? ` · ${fmtTime(job.at)}` : ""}
           </div>
           <div className="ask">{t("seal.blockedBody")}</div>
+          {/* 真实成因（用户手动停机 / 没交回报 / 打回 3 轮 / 进程重启对账）由工单记录提供 */}
+          {job.statusNote && <div className="ask ask-sub">{job.statusNote}</div>}
         </div>
-      </div>
-      <div className="seal-actions">
-        <button type="button" className="btn btn-reject" onClick={() => onStop?.(job.id)}>
-          {t("seal.blockedStop")}
-        </button>
       </div>
       <div className="rounds">
         <span className="rounds-note">{t("seal.blockedNote")}</span>
       </div>
     </div>
   );
+}
+
+/**
+ * 队内拆分（2026-11-12）：有活的人单独露出；都空闲的同岗位收成「岗位 ×N」。
+ * 26 人、单队 14 人时平铺等于让用户滚动找自己人，先把同岗的重复项收掉。
+ */
+function splitRoster(members: DeskMember[]): {
+  active: DeskMember[];
+  groups: { role: string; members: DeskMember[] }[];
+} {
+  const active: DeskMember[] = [];
+  const byRole = new Map<string, DeskMember[]>();
+  for (const m of members) {
+    if (m.status === "running" || m.status === "delivered" || m.status === "stuck" || m.jobId) {
+      active.push(m);
+      continue;
+    }
+    const role = m.role || "未标注岗位";
+    const arr = byRole.get(role) ?? [];
+    arr.push(m);
+    byRole.set(role, arr);
+  }
+  const groups: { role: string; members: DeskMember[] }[] = [];
+  for (const [role, arr] of byRole) {
+    if (arr.length > 1) groups.push({ role, members: arr });
+    else active.push(arr[0]);
+  }
+  return { active, groups };
 }
 
 /**
@@ -2004,25 +2306,50 @@ function MemberCard({
   m,
   active,
   onSelect,
+  onManage,
 }: {
   m: DeskMember;
   active: boolean;
   onSelect?: (jobId: string) => void;
+  onManage?: () => void;
 }) {
   const t = useT();
   const brief = m.jobTitle || m.role;
+  // 有单就开工单，没单就打开岗位档案：成员卡不再是「点了没反应」的展示件
+  const action = Boolean(m.jobId || onManage);
+  // 战绩按需拉：快照每几秒一次，扫 assignments/*.jsonl 太贵，放到用户点开时再算
+  const [showRecord, setShowRecord] = useState(false);
+  const [record, setRecord] = useState<{ tasks: number; accepted: number; rejected: number; escalations: number } | null>(
+    null,
+  );
+  const [recordBusy, setRecordBusy] = useState(false);
+  const toggleRecord = async () => {
+    const next = !showRecord;
+    setShowRecord(next);
+    if (!next || record || recordBusy) return;
+    setRecordBusy(true);
+    try {
+      setRecord(await window.lynn.rpc("team.member.record", { teamId: m.teamId, name: m.name }));
+    } catch {
+      setRecord({ tasks: 0, accepted: 0, rejected: 0, escalations: 0 });
+    } finally {
+      setRecordBusy(false);
+    }
+  };
   const open = () => {
     if (m.jobId) onSelect?.(m.jobId);
+    else onManage?.();
   };
   return (
     <div
-      className={`mcard${active ? " active" : ""}${m.jobId ? " linkable" : ""}`}
-      role={m.jobId ? "button" : undefined}
-      tabIndex={m.jobId ? 0 : undefined}
-      title={m.jobId ? t("member.openJob", { id: m.jobId }) : brief}
+      className={`mcard${active ? " active" : ""}${action ? " linkable" : ""}`}
+      data-state={m.status === "running" ? "running" : undefined}
+      role={action ? "button" : undefined}
+      tabIndex={action ? 0 : undefined}
+      title={m.jobId ? t("member.openJob", { id: m.jobId }) : onManage ? "空闲：查看岗位档案" : brief}
       onClick={open}
       onKeyDown={(e) => {
-        if (!m.jobId) return;
+        if (!action) return;
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
           open();
@@ -2031,11 +2358,33 @@ function MemberCard({
     >
       <MemberAvatar name={m.name} avatarId={m.avatarId} size={36} />
       <div className="mcard-txt">
-        <div className="mcard-name">{m.name}</div>
+        <div className="mcard-name">
+          {m.name}
+          {m.status === "running" && <span className="mcard-live" aria-label={t("feed.live")} />}
+        </div>
         <div className="mcard-brief" title={brief}>
           {brief}
         </div>
+        {showRecord && (
+          <div className="mcard-stat mono">
+            {record
+              ? `参与 ${record.tasks} · 通过 ${record.accepted} · 打回 ${record.rejected} · 升级 ${record.escalations}`
+              : "读取中…"}
+          </div>
+        )}
       </div>
+      <button
+        type="button"
+        className="mcard-record-btn"
+        aria-expanded={showRecord}
+        title="这个岗位历次验收战绩"
+        onClick={(e) => {
+          e.stopPropagation();
+          void toggleRecord();
+        }}
+      >
+        {showRecord ? "收起" : "战绩"}
+      </button>
     </div>
   );
 }
@@ -2075,6 +2424,14 @@ function SealGlyph({ big }: { big?: boolean }) {
 
 // ============================ COMPOSER ============================
 
+/**
+ * @ 补全候选：成员（@ 留在正文，是群里的定向诉求）还是文件（@ 摘掉，进随附条）。
+ * 两者混在一张列表里会让人误点——成员名和文件路径长得太像。
+ */
+type MentionItem =
+  | { kind: "member"; name: string; role?: string }
+  | { kind: "file"; path: string; size: number };
+
 function ComposerZone({
   configured,
   turn,
@@ -2086,6 +2443,7 @@ function ComposerZone({
   onAbort,
   onQueue,
   captureShot,
+  members,
 }: {
   configured: boolean;
   turn: Desk["turn"];
@@ -2099,6 +2457,8 @@ function ComposerZone({
   onQueue: (action: "clear" | "remove", id?: string) => void;
   /** 全局快捷键截好的图：按 id 注入本轮随附，用户自己决定发不发 */
   captureShot?: CaptureShot | null;
+  /** 群里可点名的人（本群成员排前面，由 DeskView 排好序） */
+  members?: { name: string; role?: string }[];
 }) {
   const [draft, setDraft] = useState("");
   const [mode, setMode] = useState<"queue" | "steer">("queue");
@@ -2110,9 +2470,9 @@ function ComposerZone({
   // 本轮随附（M1-16）：发送前可见、逐片可裁剪
   const [attFiles, setAttFiles] = useState<string[]>([]);
   const [attImages, setAttImages] = useState<{ name: string; data: string }[]>([]);
-  // @ 文件提及补全
+  // @ 补全：群里的人（成员）+ 项目文件
   const [mention, setMention] = useState<{ start: number; q: string } | null>(null);
-  const [mentionItems, setMentionItems] = useState<{ path: string; size: number }[]>([]);
+  const [mentionItems, setMentionItems] = useState<MentionItem[]>([]);
   const [mentionIdx, setMentionIdx] = useState(0);
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const imgSeq = useRef(0);
@@ -2132,15 +2492,28 @@ function ComposerZone({
   const detectMention = (value: string, caret: number) => {
     const before = value.slice(0, caret);
     const m = /(^|\s)@([^\s@]{0,80})$/.exec(before);
-    if (m && onFileSearch) {
+    if (m) {
       const q = m[2];
       const start = caret - q.length - 1;
       setMention({ start, q });
       setMentionIdx(0);
+      // 群里的人优先：他就在眼前，比翻文件路径更可能是想要的
+      const people = (members ?? [])
+        .filter((mm) => (q ? mm.name.includes(q) || q.includes(mm.name) : true))
+        .slice(0, 8)
+        .map((mm) => ({ kind: "member" as const, name: mm.name, role: mm.role }));
+      if (people.length) {
+        setMentionItems(people);
+        return;
+      }
+      if (!onFileSearch) {
+        setMentionItems([]);
+        return;
+      }
       if (searchTimer.current) clearTimeout(searchTimer.current);
       searchTimer.current = setTimeout(() => {
         void onFileSearch(q).then((files) => {
-          setMentionItems(files);
+          setMentionItems(files.map((f) => ({ kind: "file" as const, path: f.path, size: f.size })));
         });
       }, 200);
     } else {
@@ -2149,11 +2522,16 @@ function ComposerZone({
     }
   };
 
-  const pickMention = (p: string) => {
+  const pickMention = (p: MentionItem) => {
     if (!mention) return;
-    // 从草稿里摘掉 @token：文件进随附条，不留在正文里
-    setDraft((d) => d.slice(0, mention.start) + d.slice(mention.start + mention.q.length + 1));
-    setAttFiles((f) => (f.includes(p) ? f : [...f, p]));
+    if (p.kind === "member") {
+      // 成员 @ 留在正文里：这才是"对某个人说的话"，摘掉就丢了定向语义
+      setDraft((d) => d.slice(0, mention.start) + `@${p.name} ` + d.slice(mention.start + mention.q.length + 1));
+    } else {
+      // 文件：从草稿里摘掉 @token，进随附条，不留在正文里
+      setDraft((d) => d.slice(0, mention.start) + d.slice(mention.start + mention.q.length + 1));
+      setAttFiles((f) => (f.includes(p.path) ? f : [...f, p.path]));
+    }
     setMention(null);
     setMentionItems([]);
     taRef.current?.focus();
@@ -2173,7 +2551,7 @@ function ComposerZone({
   const submit = () => {
     if (mention) {
       const pick = mentionItems[mentionIdx];
-      if (pick) pickMention(pick.path);
+      if (pick) pickMention(pick);
       return;
     }
     const text = draft.trim();
@@ -2265,19 +2643,22 @@ function ComposerZone({
 
       <div className="composer-row" style={{ position: "relative" }}>
         {mention && mentionItems.length > 0 && (
-          <div className="mention-pop" role="listbox" aria-label="文件补全">
-            {mentionItems.map((f, i) => (
+          <div className="mention-pop" role="listbox" aria-label="@ 补全">
+            {mentionItems.map((it, i) => (
               <button
                 type="button"
-                key={f.path}
+                key={it.kind === "member" ? `m:${it.name}` : `f:${it.path}`}
                 role="option"
                 aria-selected={i === mentionIdx}
-                className={`mention-item${i === mentionIdx ? " on" : ""}`}
+                className={`mention-item${i === mentionIdx ? " on" : ""}${it.kind === "member" ? " who" : ""}`}
                 onMouseEnter={() => setMentionIdx(i)}
-                onClick={() => pickMention(f.path)}
+                onClick={() => pickMention(it)}
               >
-                <span className="p">@{f.path}</span>
-                <span className="s">{fmtSize(f.size)}</span>
+                <span className="p">
+                  {it.kind === "member" ? <Icon name="users" size="sm" /> : null}
+                  @{it.kind === "member" ? it.name : it.path}
+                </span>
+                <span className="s">{it.kind === "member" ? (it.role ?? "成员") : fmtSize(it.size)}</span>
               </button>
             ))}
           </div>
@@ -2320,7 +2701,8 @@ function ComposerZone({
               }
               if (e.key === "Enter" || e.key === "Tab") {
                 e.preventDefault();
-                pickMention(mentionItems[mentionIdx]?.path ?? "");
+                const pick = mentionItems[mentionIdx];
+                if (pick) pickMention(pick);
                 return;
               }
             }
@@ -2431,12 +2813,14 @@ function ReviewDesk({
   onBack,
   onApprove,
   onReject,
+  onPreview,
 }: {
   desk: Desk;
   job: DeskJob;
   onBack: () => void;
   onApprove: () => void;
   onReject: (reason: { what: string; expect: string; deadline: string }) => void;
+  onPreview?: OpenPreview;
 }) {
   const r = reviewOf(job);
   const [what, setWhat] = useState(r.reject.what);
@@ -2461,7 +2845,6 @@ function ReviewDesk({
     <div className="scene">
       <TopRail
         desk={desk}
-        current={job}
         permission="ask"
         onPermission={() => {}}
         onOpenSettings={() => {}}
@@ -2538,11 +2921,6 @@ function ReviewDesk({
         <main className="center">
           <div className="sheet-wrap">
             <div className="sheet">
-              <span className="crop tl" />
-              <span className="crop tr" />
-              <span className="crop bl" />
-              <span className="crop br" />
-
               <div className="sheet-head">
                 <div className="sheet-eyebrow">
                   <span>验收包 · {job.id}</span>
@@ -2629,34 +3007,6 @@ function ReviewDesk({
 
               </div>
 
-              <div className="titleblock">
-                <div className="tb-cell">
-                  <div className="k">验收包</div>
-                  <div className="v">{job.id}</div>
-                </div>
-                <div className="tb-cell">
-                  <div className="k">版本</div>
-                  <div className="v">v{job.version}</div>
-                </div>
-                <div className="tb-cell">
-                  <div className="k">轮次</div>
-                  <div className="v">
-                    {Math.min(job.rejections + 1, job.rejectLimit)} / {job.rejectLimit}
-                  </div>
-                </div>
-                <div className="tb-cell">
-                  <div className="k">成员</div>
-                  <div className="v">{job.member ?? "—"}</div>
-                </div>
-                <div className="tb-cell">
-                  <div className="k">提交</div>
-                  <div className="v">{fmtTime(job.at)}</div>
-                </div>
-                <div className="tb-cell sealv">
-                  <div className="k">验收</div>
-                  <div className="v">{sent ? "已打回" : job.action === "none" ? "风铃在验" : "等你拍板"}</div>
-                </div>
-              </div>
             </div>
           </div>
 
@@ -2705,7 +3055,7 @@ function ReviewDesk({
                             disabled={!ref}
                             title={ref ? `打开 ${ref}` : "这项没有可打开的文件"}
                             onClick={() => {
-                              if (ref) void window.lynn.rpc("evidence.open", { taskId: job.id, ref });
+                              if (ref) onPreview?.(job.id, ref);
                             }}
                           >
                             <Icon name={c.ok ? "check" : "warn"} size="sm" />
@@ -3045,23 +3395,45 @@ export function DeskView({
   notice?: string | null;
 }) {
   const waitingFirst = useMemo(() => {
-    const w = desk.jobs.find((j) => j.action !== "none");
-    return w ?? desk.jobs[0];
+    // 归档/已取消的单不能再被默认选中：否则左栏「工单 0」，主区却霸着一张旧单的详情，
+    // 看起来像"凭空冒出一张单"（2026-11-11 修）。用户显式点归档项仍可打开。
+    const live = desk.jobs.filter((j) => j.group !== "archived");
+    return live.find((j) => j.action !== "none") ?? live[0];
   }, [desk.jobs]);
-  const [activeId, setActiveId] = useState<string | undefined>(waitingFirst?.id);
+  /**
+   * 群里可点名的人（@ 补全候选）：本群工单的承办成员排前面。
+   * 本群先、别群后——群里 @ 一个听不见的人没有意义。
+   */
+  const mentionMembers = useMemo(() => {
+    const inGroup = new Set(
+      desk.jobs.filter((j) => j.threadId === desk.thread.id && j.member).map((j) => j.member as string),
+    );
+    return [...desk.members]
+      .sort((a, b) => Number(inGroup.has(b.name)) - Number(inGroup.has(a.name)))
+      .map((m) => ({ name: m.name, role: m.role }));
+  }, [desk.jobs, desk.members, desk.thread.id]);
+  // 默认永远是「会话频道」：用户与风铃的完整对话不会被任何工单抢走。
+  // 需要拍板的单走右栏/频道提示，用户点开才切工单详情（2026-11-11 修）。
+  const [activeId, setActiveId] = useState<string | undefined>(undefined);
   const [reviewId, setReviewId] = useState<string | null>(null);
   /** 窄窗（≤1280）右栏抽屉：顶栏「待办 (n)」开关 */
   const [rightOpen, setRightOpen] = useState(false);
-  /** 有新的审批/裁决到达时自动展开右栏：藏在抽屉里等于没看见 */
+  /**
+   * 有新的「要你动手」的事到达时自动展开右栏：藏在抽屉里等于没看见。
+   * 不只裁决——成员交了**待验收**的活同样要弹出来，否则用户只知道顶栏数字变了，还得自己找单。
+   */
   const prevPending = useRef(0);
   useEffect(() => {
-    const n = desk.decisions.length;
+    const n = desk.decisions.length + desk.jobs.filter((j) => j.action === "accept").length;
     if (n > prevPending.current) setRightOpen(true);
     prevPending.current = n;
-  }, [desk.decisions.length]);
+  }, [desk.decisions.length, desk.jobs]);
   // E6：Ctrl+K 命令面板 / Ctrl+/ 快捷键清单——能力实际存在就必须可发现
   const [cmdkOpen, setCmdkOpen] = useState(false);
   const [keymapOpen, setKeymapOpen] = useState(false);
+  /** 内置预览抽屉：交付箱 / 证据链 / 验收标准三处共用，不启外部程序 */
+  const [preview, setPreview] = useState<{ taskId: string; ref: string } | null>(null);
+  const openPreview = useCallback<OpenPreview>((taskId, ref) => setPreview({ taskId, ref }), []);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -3076,9 +3448,14 @@ export function DeskView({
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
-  const current = desk.jobs.find((j) => j.id === activeId) ?? waitingFirst;
+  const current = activeId ? desk.jobs.find((j) => j.id === activeId) : undefined;
   const reviewJob = desk.jobs.find((j) => j.id === reviewId);
   const pendingCount = desk.decisions.length + desk.jobs.filter((j) => j.action === "accept").length;
+
+  // 选中的单被删掉/不再上台账时回到频道，别留一张"幽灵详情"在中间。
+  useEffect(() => {
+    if (activeId && !desk.jobs.some((j) => j.id === activeId)) setActiveId(undefined);
+  }, [activeId, desk.jobs]);
 
   useEffect(() => {
     if (!rightOpen) return;
@@ -3091,10 +3468,12 @@ export function DeskView({
 
   if (reviewJob) {
     return (
-      <ReviewDesk
+      <>
+        <ReviewDesk
         desk={desk}
         job={reviewJob}
         onBack={() => setReviewId(null)}
+        onPreview={openPreview}
         onApprove={() => {
           onDecision(reviewJob.id, "approve");
           setReviewId(null);
@@ -3102,7 +3481,11 @@ export function DeskView({
         onReject={(reason) => {
           onDecision(reviewJob.id, "reject", reason);
         }}
-      />
+        />
+        {preview && (
+          <PreviewDrawer taskId={preview.taskId} fileRef={preview.ref} onClose={() => setPreview(null)} />
+        )}
+      </>
     );
   }
 
@@ -3111,7 +3494,6 @@ export function DeskView({
       <AmbientLayer params={ambient} mode={ambientMode} standby={false} />
       <TopRail
         desk={desk}
-        current={current}
         permission={permission}
         onPermission={onPermission}
         onOpenSettings={onOpenSettings}
@@ -3142,6 +3524,7 @@ export function DeskView({
           onRevokeRead={onRevokeRead}
           onSnapshotProject={onSnapshotProject}
           onExportTask={onExportTask}
+          onPreview={openPreview}
           />
         <main className="center">
           <div className="sheet-wrap">
@@ -3156,12 +3539,18 @@ export function DeskView({
               onFeedAction={onFeedAction}
               onExample={(t) => onSend(t, "queue")}
               onNewThread={onThreadNew}
+              onBackToChannel={() => setActiveId(undefined)}
+              pendingJob={waitingFirst ? { id: waitingFirst.id, title: waitingFirst.title } : undefined}
+              onOpenJob={setActiveId}
+              onPreview={openPreview}
+              running={desk.running}
             />
           </div>
           <ComposerZone
             configured={configured}
             turn={desk.turn}
             queue={desk.queue}
+            members={mentionMembers}
             onStandby={onStandby}
             onSend={onSend}
             onFileSearch={onFileSearch}
@@ -3179,7 +3568,6 @@ export function DeskView({
           onOpenReview={(id) => setReviewId(id)}
           onPlan={(id, action, text) => onDecisionResolve(id, action, text)}
           onAnswer={(id, text) => onDecisionResolve(id, "answer", text)}
-          onCancel={onCancelTask}
           onSelectJob={(id) => {
             setActiveId(id);
             setRightOpen(false);
@@ -3214,6 +3602,9 @@ export function DeskView({
         />
       )}
       {keymapOpen && <KeymapOverlay onClose={() => setKeymapOpen(false)} />}
+      {preview && (
+        <PreviewDrawer taskId={preview.taskId} fileRef={preview.ref} onClose={() => setPreview(null)} />
+      )}
     </div>
   );
 }

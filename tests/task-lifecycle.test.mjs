@@ -81,7 +81,9 @@ function setup(prefs) {
   const root = tmp();
   seedModel(root, prefs);
   seedTeam(root, ["林工", "小舟"]);
-  return { root, kernel: new Kernel(root), tasks: new TaskStore(root) };
+  const kernel = new Kernel(root);
+  kernel.handle("config.prefs", { autoStart: false });
+  return { root, kernel, tasks: new TaskStore(root) };
 }
 
 function assignAndStart(kernel, taskId, member = "林工") {

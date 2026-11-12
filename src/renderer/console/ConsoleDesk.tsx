@@ -3,6 +3,7 @@ import type { PermissionMode } from "../../shared/contract";
 import type { Desk, DeskDecision, DeskEvidence, DeskJob } from "../desk/model";
 import { fmtTime } from "../desk/model";
 import { WindowControls } from "../components/WindowControls";
+import { PreviewDrawer } from "../components/PreviewDrawer";
 import { Field } from "./Field";
 import { LynnCore } from "./Seal";
 import { Stream } from "./Stream";
@@ -84,6 +85,11 @@ export function ConsoleDesk(props: ConsoleViewProps) {
     setResultJob(jobId ? { id: jobId, ref } : null);
     setDrawer("result");
   };
+  /**
+   * 产物预览：点产出卡直接开内置预览（md/代码渲染、图片内嵌、csv 出表），
+   * 不再跳到"这张单的战果"里让用户自己点第二下。
+   */
+  const [previewFile, setPreviewFile] = useState<{ taskId: string; ref: string } | null>(null);
   const [draft, setDraft] = useState("");
   /** cd 回执（成功/失败都写在底栏，不吞） */
   const [cdMsg, setCdMsg] = useState("");
@@ -128,6 +134,12 @@ export function ConsoleDesk(props: ConsoleViewProps) {
   /** 能直接拍板的单（in_review）：验收 / 打回 */
   const waiting = useMemo(() => active.filter((j) => j.group === "waiting"), [active]);
   const pending = desk.decisions;
+  /**
+   * 有效相位：只要有单在等你验收、或有事等你拍板，印章就必须先报「待你拍板」。
+   * 光靠 turn.phase 不够——成员交完回报后 turn 可能已经回 idle，单子却还挂在台账里等验收，
+   * 那时印章显示「侦听中」会让人以为没事，实际全在主界面上等你。
+   */
+  const phaseEff = pending.length > 0 || waiting.length > 0 ? "decide" : phase;
   const turnBusy = desk.turn.busy;
   const ctxPct = desk.usage.contextPercent ?? null;
   const currentJobId = desk.turn.taskId ?? null;
@@ -172,18 +184,44 @@ export function ConsoleDesk(props: ConsoleViewProps) {
   const mergeCmds = active.reduce((n, j) => n + (cmdCount.get(j.id) ?? 0), 0);
 
   /**
-   * 产出柜 = 真实落盘的文件。
-   * 模型里 DeskJob.artifact 从来没被赋值，能拿到的只有证据链上的 ref（artifacts/xxx），
-   * 所以这里按证据条目出卡，不按"工单标题"假装交付物。
+   * 产出柜 = 真实落盘的文件，不是"成员说过的话"。
+   * 口径（2026-11-11 重做：之前按证据条目出卡，把 command 证据的整句 ref 当成文档名，
+   * 卡片上全是「成员回报正文结论：…」+「文档 未核 …qnj8-5」，对用户零信息量）：
+   *  1. 先取这张单登记的交付物（deliverables，验收后永久保留）；
+   *  2. 没有交付物再退回真文件形态的证据（ref 形如 artifacts/xxx，有扩展名）；
+   *  3. `kind: "command"` 的证据 ref 是一整句命令输出，不是路径 —— 一律不进产出柜；
+   *  4. 同一份文件在多张单里各存一份副本：按 ref 合并成一张卡并标张数，不铺一屏重复卡。
    */
-  const outputs = useMemo(
-    () =>
-      active
-        .flatMap((j) => j.evidence.filter((e) => e.ref).map((e) => ({ job: j, ev: e })))
-        .slice(-6)
-        .reverse(),
-    [active],
-  );
+  const outputs = useMemo(() => {
+    const seen = new Map<string, OutItem>();
+    for (const j of active) {
+      const add = (rawRef: string | undefined, filePath: string | undefined, bytes: number | undefined) => {
+        const ref = rawRef ?? "";
+        if (!isFileRef(ref)) return;
+        const hit = seen.get(ref);
+        if (hit) {
+          // 同一张单里"交付物 + 证据"会各登记一次，别把它算成两张单
+          hit.jobIds.add(j.id);
+          hit.jobs = hit.jobIds.size;
+          if (hit.bytes == null && bytes != null) hit.bytes = bytes;
+          return;
+        }
+        seen.set(ref, {
+          taskId: j.id,
+          ref,
+          name: baseName(filePath || ref),
+          path: filePath || ref,
+          bytes,
+          from: j.title,
+          jobs: 1,
+          jobIds: new Set([j.id]),
+        });
+      };
+      for (const d of j.deliverables ?? []) add(d.ref, d.path, d.bytes);
+      for (const e of j.evidence) add(e.ref, e.title, undefined);
+    }
+    return [...seen.values()].slice(-6).reverse();
+  }, [active]);
 
   /** 流水栏：优先锁定单，其次当前回合单，最后是第一张在办单 */
   const streamJobId = picked?.job.id ?? currentJobId ?? active[0]?.id ?? null;
@@ -221,9 +259,7 @@ export function ConsoleDesk(props: ConsoleViewProps) {
           }),
       });
     }
-    if (job.group === "stuck") {
-      out.push({ key: "stop", label: "停掉止损", tone: "bad", run: () => onCancelTask(job.id) });
-    }
+    // 卡住由风铃处置（同一单重做 / 换策略 / 关单 / 汇报），不再把「取消归档」摆给用户。
     if (job.group === "running" || job.group === "queued") {
       out.push({ key: "stop", label: "停下", run: () => onCancelTask(job.id) });
     }
@@ -330,19 +366,23 @@ export function ConsoleDesk(props: ConsoleViewProps) {
           {/* 军印的顶栏缩写：窄窗才出现（宽窗右栏有完整军印，不重复） */}
           <button
             type="button"
-            className={`cs-seal-mini${pending.length ? " hot" : ""}`}
-            onClick={() => setDrawer(pending.length ? "decide" : "result")}
-            title={pending.length ? "有待你拍板的裁决" : "她很安静，点开看最近战果"}
+            className={`cs-seal-mini${pending.length + waiting.length ? " hot" : ""}`}
+            onClick={() => setDrawer(pending.length || waiting.length ? "decide" : "result")}
+            title={
+              pending.length + waiting.length
+                ? "有需要你动手的事（拍板 / 验收）"
+                : "她很安静，点开看最近战果"
+            }
           >
-            {pending.length ? `待判 ${pending.length}` : "侦听中"}
+            {pending.length + waiting.length ? `待办 ${pending.length + waiting.length}` : "侦听中"}
           </button>
         </div>
         <div className="cs-top-r">
           <span className="cs-readout">
             任务<b>{active.length}</b>
           </span>
-          <span className={`cs-readout hot${pending.length ? " on" : ""}`}>
-            待判<b>{pending.length}</b>
+          <span className={`cs-readout hot${pending.length + waiting.length ? " on" : ""}`}>
+            待办<b>{pending.length + waiting.length}</b>
           </span>
           <button
             type="button"
@@ -569,25 +609,30 @@ export function ConsoleDesk(props: ConsoleViewProps) {
             <Stream side="left" lines={lines.filter((l) => l.kind !== "cmd")} max={7} />
             <Stream side="right" lines={lines.filter((l) => l.kind === "cmd" || l.kind === "tool")} max={5} />
 
-            {/* 球心告警：有待判就压在球心；一旦锁定某张单，让位给详情卡（Esc 关掉再回来） */}
-            {pending.length > 0 && !picked && (
+            {/* 球心告警：有待判 / 待验收就压在球心；一旦锁定某张单，让位给详情卡（Esc 关掉再回来）。
+                凡是需要用户动手的，都必须在这里一步直达——不能只藏在右栏小印章里让人到处找。 */}
+            {(pending.length > 0 || waiting.length > 0) && !picked && (
               <div className="cs-alert">
                 <div className="cs-alert-top">
                   <i className="cs-alert-led" />
                   ALERT / 需介入
-                  <span className="n mono">{String(pending.length).padStart(2, "0")}</span>
+                  <span className="n mono">{String(pending.length + waiting.length).padStart(2, "0")}</span>
                 </div>
                 <div className="cs-alert-t">
-                  {pending.length > 1
-                    ? `${pending.length} 项待你拍板 · 风铃已停在卡点`
-                    : "风铃已停在当前节点，等待拍板"}
+                  {pending.length > 0
+                    ? pending.length > 1
+                      ? `${pending.length} 项待你拍板 · 风铃已停在卡点`
+                      : "风铃已停在当前节点，等待拍板"
+                    : `${waiting.length} 张交付等你验收 · 成员已交回报`}
                 </div>
                 <div className="cs-alert-d mono">
-                  {pending[0].who} · {pending[0].question}
+                  {pending.length > 0
+                    ? `${pending[0].who} · ${pending[0].question}`
+                    : `${shortId(waiting[0].id)} · ${waiting[0].title}`}
                 </div>
                 <div className="cs-alert-acts">
                   <button type="button" onClick={() => setDrawer("decide")}>
-                    查看并处置
+                    {pending.length > 0 ? "查看并处置" : "去验收"}
                   </button>
                   <button type="button" className="ghost" onClick={() => openResult()}>
                     看战果
@@ -712,11 +757,14 @@ export function ConsoleDesk(props: ConsoleViewProps) {
               </span>
             </div>
             <div className="cs-lynn">
-              <LynnCore phase={phase} onClick={() => setDrawer(pending.length ? "decide" : "result")} />
+              <LynnCore
+                phase={phaseEff}
+                onClick={() => setDrawer(pending.length || waiting.length ? "decide" : "result")}
+              />
             </div>
             <div className="cs-lynn-foot">
               <span className="cs-lynn-state">
-                <b>{phase === "decide" ? "待你拍板" : turnBusy ? "在推进" : "侦听中"}</b>
+                <b>{phaseEff === "decide" ? "待你拍板" : turnBusy ? "在推进" : "侦听中"}</b>
                 <span className="cs-beat" aria-hidden="true">
                   <i />
                   <i />
@@ -746,11 +794,9 @@ export function ConsoleDesk(props: ConsoleViewProps) {
                 <div className="cs-out-grid">
                   {outputs.map((o) => (
                     <OutCard
-                      key={`${o.job.id}-${o.ev.ref}`}
-                      name={o.ev.title || o.ev.ref || o.job.title}
-                      jobId={o.job.id}
-                      verified={Boolean(o.ev.verified)}
-                      onClick={() => openResult(o.job.id, o.ev.ref)}
+                      key={`${o.taskId}-${o.ref}`}
+                      item={o}
+                      onOpen={() => setPreviewFile({ taskId: o.taskId, ref: o.ref })}
                     />
                   ))}
                 </div>
@@ -767,6 +813,7 @@ export function ConsoleDesk(props: ConsoleViewProps) {
             <button
               type="button"
               key={m}
+              className={m === "full" ? "danger" : undefined}
               aria-pressed={permission === m}
               onClick={() => onPermission(m)}
               title={`切到 ${m}`}
@@ -851,6 +898,7 @@ export function ConsoleDesk(props: ConsoleViewProps) {
                   /* 单张战果底部能就地办的事：验收 / 停掉止损 / 停下 / 重开（打回要填三要素，转处置抽屉） */
                   acts={resultActs}
                   onMore={() => setDrawer("decide")}
+                  onOpenFile={(taskId, ref) => setPreviewFile({ taskId, ref })}
                 />
               )}
               {drawer === "decide" &&
@@ -899,10 +947,21 @@ export function ConsoleDesk(props: ConsoleViewProps) {
                 ))}
               {drawer === "usage" && <UsageTab desk={desk} />}
               {drawer === "config" && <ConfigTab desk={desk} onOpenSettings={onOpenSettings} />}
-              {drawer === "archive" && <ArchiveTab desk={desk} onPurgeOrphans={onPurgeOrphans} />}
+              {drawer === "archive" && (
+                <ArchiveTab desk={desk} onPurgeOrphans={onPurgeOrphans} onRemoveTask={onRemoveTask} />
+              )}
             </div>
           </aside>
         </div>
+      )}
+
+      {/* ================= 产物预览：点产出卡直接开，不跳二级 ================= */}
+      {previewFile && (
+        <PreviewDrawer
+          taskId={previewFile.taskId}
+          fileRef={previewFile.ref}
+          onClose={() => setPreviewFile(null)}
+        />
       )}
     </div>
   );
@@ -1081,54 +1140,142 @@ function TaskCard({
   );
 }
 
-/** 产出卡：缩略图在上（形状随机的东西不画，只按类型给一个版面骨架） */
-function outTypeOf(name: string): "code" | "sheet" | "image" | "slides" | "link" {
-  const n = name.toLowerCase();
-  if (/\.(xlsx?|csv)$/.test(n)) return "sheet";
-  if (/\.(png|jpe?g|webp|svg)$/.test(n)) return "image";
-  if (/\.(pptx?|key)$/.test(n)) return "slides";
-  if (/^https?:/.test(n)) return "link";
-  return "code";
+/** 产出柜里的一张卡：一件真文件（已按 ref 合并多单副本） */
+interface OutItem {
+  taskId: string;
+  ref: string;
+  name: string;
+  path: string;
+  bytes?: number;
+  /** 来源工单标题：只放提示里当出处，卡面上不铺整句 */
+  from: string;
+  /** 这件东西在几张单里各存了一份（同一张单里"交付物 + 证据"重复登记不算两张单） */
+  jobs: number;
+  jobIds: Set<string>;
 }
 
-const OUT_LABEL: Record<string, string> = {
-  code: "文档",
-  sheet: "表格",
-  image: "图片",
-  slides: "演示",
-  link: "链接",
-};
+/**
+ * 证据的 ref 有两种形态：`artifacts/xxx` 是真文件；`kind: "command"` 那种是一整句命令输出。
+ * 只有前者算产物 —— 把整句话当文件名画出来，就是上一版那屏「成员回报正文结论：…」噪音的来源。
+ */
+function isFileRef(ref: string | undefined): boolean {
+  if (!ref) return false;
+  if (/^artifacts\//.test(ref)) return true;
+  if (/\s/.test(ref)) return false;
+  return /\.[a-z0-9]{1,8}$/i.test(ref);
+}
 
-function OutCard({
-  name,
-  jobId,
-  verified,
-  onClick,
-}: {
-  name: string;
-  jobId: string;
-  verified: boolean;
-  onClick: () => void;
-}) {
-  const type = outTypeOf(name);
+function baseName(p: string): string {
+  return p.split(/[\\/]/).filter(Boolean).pop() ?? p;
+}
+
+function extOf(name: string): string {
+  const m = /\.([a-z0-9]{1,8})$/i.exec(name);
+  return m ? m[1].toLowerCase() : "";
+}
+
+/** 字节数 → 人能读的大小（不知道就留空，不写 0B 骗人） */
+function fmtBytes(n?: number): string {
+  if (!n || n <= 0) return "";
+  if (n >= 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)}MB`;
+  if (n >= 1024) return `${Math.round(n / 1024)}KB`;
+  return `${n}B`;
+}
+
+/**
+ * 长文件名去掉没信息量的中段：「上海第二工业大学继续教育学院_毕业实习四方协议书_25工企Z11(2).docx」
+ * 这类四张卡前缀完全一样，真正区分它们的是后段，扩展名必须保住。
+ */
+function shortName(name: string, max = 30): string {
+  if (name.length <= max) return name;
+  const ext = extOf(name);
+  const stem = ext ? name.slice(0, name.length - ext.length - 1) : name;
+  const tail = Math.max(10, max - ext.length - 8);
+  return `${stem.slice(0, 6)}…${stem.slice(-tail)}${ext ? `.${ext}` : ""}`;
+}
+
+type FileKind = "image" | "text" | "doc" | "sheet" | "slides" | "pdf" | "code" | "other";
+
+function fileKindOf(name: string): FileKind {
+  const ext = extOf(name);
+  if (/^(png|jpe?g|gif|webp|bmp|svg|avif)$/.test(ext)) return "image";
+  if (/^(md|markdown|txt|log|csv|tsv|json|ya?ml|xml|ini)$/.test(ext)) return "text";
+  if (/^(docx?|rtf|odt|wps)$/.test(ext)) return "doc";
+  if (/^(xlsx?|xlsm|ods|et)$/.test(ext)) return "sheet";
+  if (/^(pptx?|key|dps)$/.test(ext)) return "slides";
+  if (ext === "pdf") return "pdf";
+  if (/^(ts|tsx|js|jsx|mjs|cjs|rs|py|go|java|c|h|cpp|sh|ps1|sql|css|html?)$/.test(ext)) return "code";
+  return "other";
+}
+
+/** 文本缩略：只留前 3 行非空内容再截断（卡面很小，塞多了就是糊） */
+function excerptOf(text: string): string {
+  return text
+    .split(/\r?\n/)
+    .map((l) => l.replace(/\s+$/, ""))
+    .filter((l) => l.trim())
+    .slice(0, 3)
+    .join("\n")
+    .slice(0, 90);
+}
+
+/** 卡面缩略图：图片真渲染、文本给真摘要、其余给类型牌子。不再画随机骨架条——那不是预览，是装饰。 */
+function useThumb(item: OutItem, kind: FileKind) {
+  const [thumb, setThumb] = useState<{ dataUrl?: string; text?: string; bytes?: number }>({});
+  useEffect(() => {
+    if (kind !== "image" && kind !== "text" && kind !== "code") {
+      setThumb({});
+      return;
+    }
+    let gone = false;
+    void window.lynn
+      .rpc("preview.read", { taskId: item.taskId, ref: item.ref })
+      .then((r) => {
+        if (gone) return;
+        const bytes = typeof r.bytes === "number" ? r.bytes : undefined;
+        // 证据类产物没登记字节数：读一次顺手把真实大小补上，省掉再 stat 一趟
+        if (r.ok === false) return setThumb({ bytes });
+        if (r.kind === "image" && r.dataUrl) setThumb({ dataUrl: r.dataUrl, bytes });
+        else if (r.kind === "text" && r.text) setThumb({ text: excerptOf(r.text), bytes });
+        else setThumb({ bytes });
+      })
+      .catch(() => {
+        /* 读不到就退回类型牌子，不在卡上报错 */
+      });
+    return () => {
+      gone = true;
+    };
+  }, [item.taskId, item.ref, kind]);
+  return thumb;
+}
+
+/** 产出卡：缩略图在上（真内容），下面是文件名 + 类型/大小；点开就是内置预览 */
+function OutCard({ item, onOpen }: { item: OutItem; onOpen: () => void }) {
+  const kind = fileKindOf(item.name);
+  const ext = extOf(item.name);
+  const thumb = useThumb(item, kind);
+  const size = fmtBytes(item.bytes ?? thumb.bytes);
   return (
-    <button type="button" className="cs-out" onClick={onClick} title={name}>
-      <span className={`cs-thumb ${type}`} aria-hidden="true">
-        {type === "sheet"
-          ? Array.from({ length: 16 }, (_, i) => <i key={i} />)
-          : type === "image"
-            ? Array.from({ length: 4 }, (_, i) => <i key={i} />)
-            : type === "slides"
-              ? Array.from({ length: 3 }, (_, i) => <i key={i} />)
-              : type === "link"
-                ? [<i key={0} />, <i key={1} />]
-                : Array.from({ length: 5 }, (_, i) => <i key={i} />)}
+    <button
+      type="button"
+      className={`cs-out k-${kind}`}
+      onClick={onOpen}
+      title={`${item.path}${item.from ? `\n来自：${item.from}` : ""}`}
+    >
+      <span className="cs-thumb" aria-hidden="true">
+        {thumb.dataUrl ? (
+          <img className="cs-thumb-img" src={thumb.dataUrl} alt="" />
+        ) : thumb.text ? (
+          <span className="cs-thumb-txt mono">{thumb.text}</span>
+        ) : (
+          <span className="cs-thumb-ext mono">{(ext || "FILE").toUpperCase()}</span>
+        )}
       </span>
-      <span className="cs-oname">{name}</span>
+      <span className="cs-oname">{shortName(item.name)}</span>
       <span className="cs-ometa">
-        <span className="cs-otype mono">{OUT_LABEL[type]}</span>
-        {!verified && <span className="cs-otype">未核</span>}
-        <span className="cs-osrc mono">{shortId(jobId)}</span>
+        <span className="cs-otype mono">{ext ? ext.toUpperCase() : "文件"}</span>
+        {size && <span className="cs-osize mono">{size}</span>}
+        {item.jobs > 1 && <span className="cs-ojobs mono">{item.jobs} 单</span>}
       </span>
     </button>
   );
@@ -1209,16 +1356,46 @@ function DecisionCard({
   );
 }
 
-/** 一件落盘的东西：名字 + 位置 + 核没核。汇总视角再标一句"这来自哪张单" */
-function EvRow({ ev, on, src }: { ev: DeskEvidence; on?: boolean; src?: string }) {
-  return (
-    <div className={`cs-ev-row${on ? " on" : ""}`}>
+/**
+ * 一件落盘的东西：文件名 + 位置 + 核没核。汇总视角再标一句"这来自哪张单"。
+ * 能预览的文件整行可点（点开就是内置预览）；`title` 里常是原始全路径，卡面只留末段。
+ */
+function EvRow({
+  ev,
+  on,
+  src,
+  onOpen,
+}: {
+  ev: DeskEvidence;
+  on?: boolean;
+  src?: string;
+  onOpen?: () => void;
+}) {
+  const name = shortName(baseName(ev.title || ev.ref || ""));
+  // 第二行只放"名字之外"的信息：来源单号、原始路径（原始路径和文件名一样时就不重复写一遍）
+  const orig = ev.title && /[\\/]/.test(ev.title) ? ev.title : "";
+  const sub = [src, orig].filter(Boolean).join(" · ");
+  const body = (
+    <>
       <span className={`cs-ev-d${ev.verified ? " ok" : ""}`} aria-hidden="true" />
-      <span className="cs-ev-n">{ev.title}</span>
+      <span className="cs-ev-n">{name}</span>
       <span className="cs-ev-t mono">{ev.verified ? "已核" : "未核"}</span>
-      <span className="cs-ev-p mono">{src ? `${src} · ${ev.ref}` : ev.ref}</span>
-    </div>
+      {sub && <span className="cs-ev-p mono">{sub}</span>}
+    </>
   );
+  if (onOpen) {
+    return (
+      <button
+        type="button"
+        className={`cs-ev-row cs-ev-btn${on ? " on" : ""}`}
+        onClick={onOpen}
+        title={orig || ev.ref || name}
+      >
+        {body}
+      </button>
+    );
+  }
+  return <div className={`cs-ev-row${on ? " on" : ""}`}>{body}</div>;
 }
 
 /** 时间戳 → 时:分（往来记录用不到秒） */
@@ -1240,6 +1417,7 @@ function ResultTab({
   focusRef,
   acts,
   onMore,
+  onOpenFile,
 }: {
   desk: Desk;
   lines: ConsoleLine[];
@@ -1247,6 +1425,8 @@ function ResultTab({
   focusRef?: string;
   acts?: Act[];
   onMore?: () => void;
+  /** 点产物行 → 开内置预览（渲染层只递 ref，字节由主进程守门） */
+  onOpenFile?: (taskId: string, ref: string) => void;
 }) {
   const job = jobId ? desk.jobs.find((j) => j.id === jobId) : undefined;
 
@@ -1254,7 +1434,10 @@ function ResultTab({
   if (jobId) {
     if (!job) return <div className="cs-note">这张单已经不在台账里了（可能被删除或合并）。</div>;
     const evs = job.evidence;
-    const verified = evs.filter((e) => e.verified).length;
+    // 产物 = 真文件；command 那类证据的 ref 是一整句话，归到"核对记录"，不混进产物清单
+    const fileEvs = evs.filter((e) => isFileRef(e.ref));
+    const otherEvs = evs.filter((e) => !isFileRef(e.ref));
+    const verified = fileEvs.filter((e) => e.verified).length;
     return (
       <>
         <div className="cs-lead">
@@ -1267,7 +1450,7 @@ function ResultTab({
         </div>
         <div className="cs-cells">
           <div className="cs-cell">
-            <b className="mono">{evs.length}</b>
+            <b className="mono">{fileEvs.length}</b>
             <span>落盘产物</span>
           </div>
           <div className="cs-cell">
@@ -1296,12 +1479,31 @@ function ResultTab({
           </div>
         )}
 
-        {evs.length > 0 && (
+        {fileEvs.length > 0 && (
           <>
             <div className="cs-sec mono">产物清单</div>
             <div className="cs-evs">
-              {evs.map((e) => (
-                <EvRow key={e.ref} ev={e} on={Boolean(focusRef) && e.ref === focusRef} />
+              {fileEvs.map((e) => (
+                <EvRow
+                  key={e.ref}
+                  ev={e}
+                  on={Boolean(focusRef) && e.ref === focusRef}
+                  onOpen={onOpenFile ? () => onOpenFile(job.id, e.ref ?? "") : undefined}
+                />
+              ))}
+            </div>
+          </>
+        )}
+
+        {/* 命令输出、核对结论这些是"她说做过什么"，不是可带走的产物：单独一段，别混进清单 */}
+        {otherEvs.length > 0 && (
+          <>
+            <div className="cs-sec mono">核对记录</div>
+            <div className="cs-doc">
+              {otherEvs.map((e) => (
+                <p key={e.ref}>
+                  <b className="mono">{e.verified ? "已核" : "未核"}</b> {e.title}
+                </p>
               ))}
             </div>
           </>
@@ -1361,7 +1563,10 @@ function ResultTab({
   /* ---------------- 本轮汇总 ---------------- */
   const done = desk.jobs.filter((j) => j.group === "archived");
   const withReport = done.filter((j) => j.report);
-  const files = desk.jobs.flatMap((j) => j.evidence.filter((e) => e.ref).map((e) => ({ j, e })));
+  // 只算真文件：命令证据的 ref 是一句话，算进去"落盘 N 件"就是在虚报
+  const files = desk.jobs.flatMap((j) =>
+    j.evidence.filter((e) => isFileRef(e.ref)).map((e) => ({ j, e })),
+  );
   return (
     <>
       <div className="cs-lead">
@@ -1393,7 +1598,12 @@ function ResultTab({
           <div className="cs-sec mono">本轮产物</div>
           <div className="cs-evs">
             {files.map(({ j, e }) => (
-              <EvRow key={`${j.id}-${e.ref}`} ev={e} src={j.id} />
+              <EvRow
+                key={`${j.id}-${e.ref}`}
+                ev={e}
+                src={j.id}
+                onOpen={onOpenFile ? () => onOpenFile(j.id, e.ref ?? "") : undefined}
+              />
             ))}
           </div>
         </>
@@ -1492,12 +1702,16 @@ function ConfigTab({ desk, onOpenSettings }: { desk: Desk; onOpenSettings: () =>
 function ArchiveTab({
   desk,
   onPurgeOrphans,
+  onRemoveTask,
 }: {
   desk: Desk;
   onPurgeOrphans?: () => void;
+  onRemoveTask?: (taskId: string) => void;
 }) {
   /** 批量删除不可恢复：第一次点只换文案，第二次才真删（不弹窗打断沉浸） */
   const [armed, setArmed] = useState(false);
+  /** 单项删除同样两段确认：归档清单不该只能看不能收尾 */
+  const [delId, setDelId] = useState<string | null>(null);
   const orphanNote =
     desk.orphans > 0 ? (
       <div className="cs-orphan">
@@ -1533,6 +1747,23 @@ function ArchiveTab({
             <span className="cs-ar-id mono">{shortId(a.id)}</span>
             <span className="cs-ar-t">{a.title}</span>
             <span className="cs-ar-m mono">{a.status ?? ""}</span>
+            {onRemoveTask && (
+              <button
+                type="button"
+                className={`cs-ar-del${delId === a.id ? " sure" : ""}`}
+                title={delId === a.id ? "再点一次：连卷宗一起彻底删掉" : "删除这张归档单"}
+                onClick={() => {
+                  if (delId !== a.id) {
+                    setDelId(a.id);
+                    return;
+                  }
+                  onRemoveTask(a.id);
+                  setDelId(null);
+                }}
+              >
+                {delId === a.id ? "确认" : "×"}
+              </button>
+            )}
           </div>
         ))}
       </div>

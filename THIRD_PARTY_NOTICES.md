@@ -14,6 +14,8 @@
 | `react` / `react-dom` | MIT | 渲染层 UI |
 | `@fontsource-variable/archivo` / `@fontsource/ibm-plex-mono` | OFL 1.1 | 随包拉丁字体（SIL Open Font License） |
 | `@dicebear/core` / `@dicebear/collection` | MIT | 成员头像的开源插画库：用固定 seed 在**本地**生成 SVG，不联网、无 CDN、不上报；当前画风 `notionists`（DiceBear 设计，MIT） |
+| `react-markdown` / `remark-gfm` | MIT | 对话与内置预览的 Markdown 渲染（标题 / 列表 / 表格 / 代码块），参考 tether-ai 的 FileDrawer 同款组合；不开 raw HTML |
+| `highlight.js` | BSD-3-Clause | 代码块与内置预览的语法高亮：只引 `lib/core` + 按需注册语言，纯本地着色，不联网、不拉 CDN |
 | `electron` / `electron-builder` | MIT | 桌面壳与打包 |
 | `typescript` / `vite` / `@vitejs/plugin-react` | Apache-2.0 / MIT / MIT | 构建链 |
 | `@types/*` | MIT / Apache-2.0 | 类型定义（仅开发期） |
@@ -23,12 +25,13 @@
 - **浏览器能力**：lynn 不捆绑、不下载浏览器，只驱动用户本机 Edge（playwright-core，Apache-2.0）。登录 / 支付 / 验证码类页面在代码层强制拦截，需要用户确认（见隐私说明）。
 - **遥测**：Pi 生态包 `pi-telemetry` 是上游 `@earendil-works/pi-ai` 的依赖树成员，但 lynn 在运行时以 `PI_TELEMETRY=0` 禁用之，并有自动化测试锁定该行为；应用自身无遥测。
 - **头像**：只用 DiceBear JS 库离线生成 SVG（data-uri），不请求 `api.dicebear.com`，没有外链图片；12 张脸的 seed 固定在 `src/shared/avatars.ts`，同名成员跨会话不换脸。
+- **内置预览**：`preview.read` 只在 `~/.lynn/tasks/<taskId>/` 内读字节，md / html / csv / 代码 / 图片全在渲染层本地排版，不调用 `shell.openPath`；外部程序打开只作为用户显式点击的备选出口。HTML 预览放进 `sandbox=""` 的 iframe，不执行脚本。
 - 消息平台（QQ / 飞书）只走官方开放平台 API + 用户自建应用凭据，不接非官方协议。
 
 ## 依赖清单（自动生成）
 
 <!-- AUTO-DEPS START（由 scripts/gen-notices.mjs 生成，勿手改） -->
-共 484 个顶层包（含直接与传递依赖）：
+共 587 个顶层包（含直接与传递依赖）：
 
 ```
 @anthropic-ai/sdk@0.129.0
@@ -152,6 +155,7 @@
 @jridgewell/resolve-uri@3.1.2
 @jridgewell/sourcemap-codec@1.6.0
 @jridgewell/trace-mapping@0.3.31
+@js-preview/excel@1.7.14
 @malept/cross-spawn-promise@2.0.0
 @malept/flatpak-bundler@0.4.0
 @napi-rs/lzma-linux-x64-gnu@1.5.1
@@ -211,11 +215,14 @@
 @types/babel__traverse@7.28.0
 @types/cacheable-request@6.0.3
 @types/debug@4.1.13
+@types/estree-jsx@1.0.5
 @types/estree@1.0.10
 @types/fs-extra@9.0.13
+@types/hast@3.0.5
 @types/http-cache-semantics@4.2.0
 @types/json-schema@7.0.15
 @types/keyv@3.1.4
+@types/mdast@4.0.4
 @types/ms@2.1.0
 @types/node@22.20.5
 @types/prop-types@15.7.15
@@ -223,6 +230,8 @@
 @types/react@18.3.31
 @types/responselike@1.0.3
 @types/retry@0.12.0
+@types/unist@3.0.3
+@ungap/structured-clone@1.4.0
 @vitejs/plugin-react@4.7.0
 @xmldom/xmldom@0.8.15
 abbrev@4.0.0
@@ -238,6 +247,7 @@ async@3.2.6
 asynckit@0.4.0
 at-least-node@1.0.0
 aws4@1.13.2
+bail@2.0.2
 balanced-match@4.0.4
 base64-js@1.5.1
 baseline-browser-mapping@2.11.34
@@ -256,7 +266,12 @@ cacheable-lookup@5.0.4
 cacheable-request@7.0.4
 call-bind-apply-helpers@1.0.2
 caniuse-lite@1.0.30001820
+ccount@2.0.1
 chalk@6.0.0
+character-entities-html4@2.1.0
+character-entities-legacy@3.0.0
+character-entities@2.0.2
+character-reference-invalid@2.0.1
 chownr@3.0.0
 chromium-pickle-js@0.2.0
 ci-info@4.4.0
@@ -265,6 +280,7 @@ clone-response@1.0.3
 color-convert@2.0.1
 color-name@1.1.4
 combined-stream@1.0.8
+comma-separated-tokens@2.0.3
 commander@5.1.0
 compare-version@0.1.2
 concat-map@0.0.1
@@ -275,20 +291,25 @@ cross-spawn@7.0.6
 csstype@3.2.3
 data-uri-to-buffer@4.0.1
 debug@4.4.3
+decode-named-character-reference@1.3.0
 decompress-response@6.0.0
 defer-to-connect@2.0.1
 define-data-property@1.1.4
 define-properties@1.2.1
 delayed-stream@1.0.0
+dequal@2.0.3
 detect-node@2.1.0
+devlop@1.1.0
 diff@8.0.4
 dir-compare@4.2.0
 dmg-builder@26.18.0
+docx-preview@0.4.1
 dotenv-expand@11.0.7
 dotenv@16.6.1
 dunder-proto@1.0.1
 duplexer2@0.1.4
 ecdsa-sig-formatter@1.0.11
+echarts@5.6.0
 ejs@3.1.10
 electron-builder-squirrel-windows@26.18.0
 electron-builder@26.18.0
@@ -309,6 +330,7 @@ es6-error@4.1.1
 esbuild@0.21.5
 escalade@3.2.0
 escape-string-regexp@4.0.0
+estree-util-is-identifier-name@3.0.0
 exponential-backoff@3.1.3
 extend@3.0.2
 fast-deep-equal@3.1.3
@@ -345,16 +367,26 @@ has-property-descriptors@1.0.2
 has-symbols@1.1.0
 has-tostringtag@1.0.2
 hasown@2.0.4
-highlight.js@10.7.3
+hast-util-to-jsx-runtime@2.3.7
+hast-util-whitespace@3.0.0
+highlight.js@11.12.0
 hosted-git-info@9.0.3
+html-url-attributes@3.0.1
 http-cache-semantics@4.3.0
 http-proxy-agent@9.1.0
 http2-wrapper@1.0.3
 https-proxy-agent@9.1.0
 ignore@7.0.8
+immediate@3.0.6
 inflight@1.0.6
 inherits@2.0.4
+inline-style-parser@0.2.9
+is-alphabetical@2.0.1
+is-alphanumerical@2.0.1
+is-decimal@2.0.1
 is-fullwidth-code-point@3.0.0
+is-hexadecimal@2.0.1
+is-plain-obj@4.1.0
 isarray@1.0.0
 isbinaryfile@5.0.7
 isexe@2.0.0
@@ -370,21 +402,69 @@ json-schema-traverse@1.0.0
 json-stringify-safe@5.0.1
 json5@2.2.3
 jsonfile@6.2.1
+jszip@3.10.2
 jwa@2.0.1
 jws@4.0.1
 keyv@4.5.4
 lazy-val@1.0.5
+lie@3.3.0
 lodash.escaperegexp@4.1.2
 lodash.isequal@4.5.0
 lodash@4.18.1
 long@5.3.2
+longest-streak@3.1.0
 loose-envify@1.4.0
 lowercase-keys@2.0.0
 lru-cache@5.1.1
+markdown-table@3.1.0
 marked-cjk-friendly@0.1.2
 marked@18.0.11
 matcher@3.0.0
 math-intrinsics@1.1.0
+mdast-util-find-and-replace@3.0.4
+mdast-util-from-markdown@2.1.0
+mdast-util-gfm-autolink-literal@2.1.0
+mdast-util-gfm-footnote@2.1.0
+mdast-util-gfm-strikethrough@2.0.1
+mdast-util-gfm-table@2.0.1
+mdast-util-gfm-task-list-item@2.0.1
+mdast-util-gfm@3.1.0
+mdast-util-mdx-expression@2.0.1
+mdast-util-mdx-jsx@3.2.1
+mdast-util-mdxjs-esm@2.0.1
+mdast-util-phrasing@4.1.0
+mdast-util-to-hast@13.2.1
+mdast-util-to-markdown@2.2.3
+mdast-util-to-string@4.0.0
+micromark-core-commonmark@2.0.4
+micromark-extension-gfm-autolink-literal@2.1.0
+micromark-extension-gfm-footnote@2.1.0
+micromark-extension-gfm-strikethrough@2.1.0
+micromark-extension-gfm-table@2.1.2
+micromark-extension-gfm-tagfilter@2.0.0
+micromark-extension-gfm-task-list-item@2.1.0
+micromark-extension-gfm@3.0.0
+micromark-factory-destination@2.0.1
+micromark-factory-label@2.0.1
+micromark-factory-space@2.1.0
+micromark-factory-title@2.0.1
+micromark-factory-whitespace@2.0.1
+micromark-util-character@2.1.1
+micromark-util-chunked@2.0.1
+micromark-util-classify-character@2.0.1
+micromark-util-combine-extensions@2.0.1
+micromark-util-decode-numeric-character-reference@2.0.2
+micromark-util-decode-string@2.0.1
+micromark-util-edit-map@1.0.0
+micromark-util-encode@2.0.1
+micromark-util-html-tag-name@2.0.1
+micromark-util-normalize-identifier@2.0.1
+micromark-util-resolve-all@2.0.1
+micromark-util-sanitize-uri@2.0.1
+micromark-util-subtokenize@2.1.0
+micromark-util-symbol@2.0.1
+micromark-util-types@2.0.3
+micromark@4.0.3
 mime-db@1.52.0
 mime-types@2.1.35
 mime@2.6.0
@@ -421,6 +501,8 @@ openai@7.19.0
 p-cancelable@2.1.1
 p-limit@3.1.0
 p-retry@4.6.2
+pako@1.0.11
+parse-entities@4.0.2
 partial-json@0.1.7
 path-is-absolute@1.0.1
 path-key@3.1.1
@@ -432,11 +514,13 @@ playwright-core@1.64.1
 plist@3.1.0
 postcss@8.5.32
 postject@1.0.0-alpha.6
+pptx-preview@1.0.7
 proc-log@6.1.0
 process-nextick-args@2.0.1
 progress@2.0.3
 promise-retry@2.0.1
 proper-lockfile@4.1.2
+property-information@7.2.0
 protobufjs@7.6.6
 proxy-agent-negotiate@1.1.0
 pump@3.0.4
@@ -445,10 +529,15 @@ pvutils@1.2.0
 quick-lru@5.1.1
 quickjs-wasi@3.6.2
 react-dom@18.3.1
+react-markdown@10.1.0
 react-refresh@0.17.0
 react@18.3.1
 read-binary-file-arch@1.0.6
 readable-stream@2.3.8
+remark-gfm@4.0.1
+remark-parse@11.0.0
+remark-rehype@11.1.2
+remark-stringify@11.0.0
 require-directory@2.1.1
 require-from-string@2.0.2
 resedit@1.7.2
@@ -465,6 +554,7 @@ scheduler@0.23.2
 semver-compare@1.0.0
 semver@6.3.1
 serialize-error@7.0.1
+setimmediate@1.0.5
 shebang-command@2.0.0
 shebang-regex@3.0.0
 signal-exit@3.0.7
@@ -472,12 +562,15 @@ simple-update-notifier@2.0.0
 source-map-js@1.2.2
 source-map-support@0.5.21
 source-map@0.6.1
+space-separated-tokens@2.0.2
 sprintf-js@1.1.3
 standardwebhooks@1.1.1
 stat-mode@1.0.0
 string_decoder@1.1.1
 string-width@4.2.3
+stringify-entities@4.0.4
 strip-ansi@6.0.1
+style-to-object@2.0.2
 sumchecker@3.0.1
 supports-color@7.2.0
 tar@7.5.22
@@ -488,6 +581,8 @@ tiny-typed-emitter@2.1.0
 tinyglobby@0.2.17
 tmp-promise@3.0.3
 tmp@0.2.7
+trim-lines@3.0.1
+trough@2.2.0
 truncate-utf8-bytes@1.0.2
 ts-algebra@2.0.0
 tslib@2.9.1
@@ -496,11 +591,20 @@ typebox@1.3.27
 typescript@5.9.3
 undici-types@6.21.0
 undici@8.10.2
+unified@11.0.5
+unist-util-is@6.0.1
+unist-util-position@5.0.0
+unist-util-stringify-position@4.0.0
+unist-util-visit-parents@6.1.0
+unist-util-visit@5.2.0
 universalify@2.0.1
 unzipper@0.12.5
 update-browserslist-db@1.3.4
 utf8-byte-length@1.0.5
 util-deprecate@1.0.2
+uuid@10.0.0
+vfile-message@4.0.4
+vfile@6.0.3
 vite@5.4.21
 web-streams-polyfill@3.3.3
 webcrypto-core@1.9.2
@@ -515,6 +619,8 @@ yaml@2.9.0
 yargs-parser@21.1.1
 yargs@17.7.3
 yocto-queue@0.1.0
+zrender@5.6.1
+zwitch@2.0.4
 ```
 <!-- AUTO-DEPS END -->
 

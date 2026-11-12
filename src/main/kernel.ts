@@ -4,7 +4,9 @@ import * as path from "node:path";
 import type {
   BoardData,
   Decision,
+  FeedAuthor,
   FeedCard,
+  FeedMention,
   KernelEvent,
   MemberStatus,
   PermissionMode,
@@ -18,7 +20,9 @@ import type {
   UsageView,
 } from "../shared/contract";
 import { ManagementTools, MANAGEMENT_ONLY_TOOLS } from "./management-tools";
-import { streamChat, probeEndpoint, type ChatMessage, type ToolSchema } from "./llm";
+import { LlmError, probeEndpoint, streamChat, streamChatWithRetry, type ChatMessage, type ToolSchema } from "./llm";
+import { discoverModels, endpointRiskLevel, normalizeBaseUrl } from "./endpoint";
+import { probeGateways } from "./gateways";
 import { SettingsStore, loadApiKey, defaultDataRoot, type StoredModelConfig } from "./settings";
 import { applyPiEnvironment } from "./pi-home";
 import { reapOrphanWorkers } from "./agent-orphans";
@@ -38,6 +42,11 @@ import { SchedulerStore, recover as recoverScheduler, type DueItem } from "./sch
 import { KnowledgeStore, watchKnowledge } from "./knowledge";
 import { appendUsage, evaluateBudget, pickModel } from "./budget";
 import { groupOf } from "../shared/task-groups";
+import { LogGate } from "./log-policy";
+import { detectTrailingRepetition, stripTrailingRepetition } from "./repetition";
+import { estimateTaskScale, scaleLimits, type EvidencePolicy } from "./task-scale";
+import { findDuplicateAssignment } from "./assignment-guard";
+import { readDocxText } from "./docx-read";
 import { avatarById, avatarFor, isAvatarId } from "../shared/avatars";
 import {
   buildInjection,
@@ -49,7 +58,9 @@ import {
 import { probeSoffice, readTable, writeTable, type EngineHealth } from "./office";
 import { BrowserController, sensitiveUrl } from "./browser";
 import { COMPLIANCE_NOTE, loadMessaging, type ChannelConfig } from "./messaging";
-import { TeamStore, effectiveToolsOf, generateTeamId } from "./team-store";
+import { TeamStore, effectiveToolsOf, generateTeamId, type MemberProfile } from "./team-store";
+import { MEMBER_WORK_STYLE_BODY, MEMBER_PROFILE_RULES, validateMemberProfile, memberProfileRejection } from "./member-profile";
+import { isAskingUserForOutputDetails, claimsDone, NO_DELIVERABLE_HINT, REPLY_GUARD_HINT } from "./reply-guard";
 import {
   createDraft,
   listDrafts,
@@ -79,13 +90,23 @@ import {
 import { BUILTIN_STRINGS } from "../shared/i18n-strings";
 import { TaskStore } from "./task-store";
 import type { DeliverableRef, TaskRecord, TaskWorkspaceRecord } from "./task-store";
-import { TaskCase } from "./task-case";
+import { TaskCase, type TimelineEvent } from "./task-case";
 import { ContextStore } from "./context-store";
 import { scanUiPlugins } from "./ui-plugins";
 import { PluginHost } from "./plugin-host";
 import { PluginSetStore } from "./plugin-set";
 import { runMemberTask, validateBrief, MEMBER_EXEC_TOOLS, type MemberRunResult } from "./member-runner";
-import { collectHeartbeatFacts, heartbeatSignature, heartbeatIsEmpty, heartbeatPrompt, type HeartbeatFacts } from "./heartbeat";
+import {
+  collectHeartbeatFacts,
+  heartbeatSignature,
+  heartbeatIsEmpty,
+  heartbeatPrompt,
+  heartbeatWakeDecision,
+  capHeartbeatFacts,
+  probeDelayMs,
+  type HeartbeatFacts,
+  type WakeGateState,
+} from "./heartbeat";
 import { L1Host } from "./plugin-l1";
 import { AgentHost, type AgentStats, type RpcToolSpec } from "./agent-host";
 import { PiRpcHost } from "./pi-rpc-host";
@@ -119,7 +140,28 @@ interface RuntimeHost {
 
 // ---------- 我方工具定义（与 RPC worker / 直连共用一份语义） ----------
 
-const TEAM_HINT = "团队 ID。**省略即可**：系统会绑定当前团队，没有就自动新建一个（ID 由系统生成，不要问用户要）";
+const TEAM_HINT = "团队 id，可省略（系统自动绑定/新建）";
+
+/**
+ * 工单标题清洗（2026-11-11）：简报首行常常是「上一单失败：被当成项目的 C:\Users\Ad…」这种
+ * 复盘+半截路径，直接 slice(40) 会变成主区大标题里的乱码。这里去掉段落标记/路径/URL，
+ * 超长用省略号而不是硬砍，保留全文在 title 属性里回查。
+ */
+export function cleanTaskTitle(raw: string, fallback: string): string {
+  const s = (raw ?? "")
+    .replace(/^【[^】]*】\s*/, "")
+    // 模型常把简报第一句连编号一起当标题（「1. 文档包含四个章节：…」），编号不是任务名
+    .replace(/^\s*(?:\d+[.、)]|第[一二三四五六七八九十]+[、.)])\s*/, "")
+    // 重派标题里的「（第2轮）」「（workspace模式重派）」是轮次噪声，不是任务名；
+    // 留着会让台账出现两张看起来不同的单，其实是同一件事。
+    .replace(/[（(]\s*(第\s*\d+\s*轮|workspace\s*模式重派|重派|重做|替补|承接|备份|最终版|第\s*\d+\s*版|并行备份)\s*[）)]/gi, "")
+    .replace(/[A-Za-z]:[\\/][^\s，。；,，)）]*/g, "（路径）")
+    .replace(/\\\\[^\s]+|https?:\/\/\S+/g, "（链接）")
+    .replace(/\s+/g, " ")
+    .trim();
+  const base = s || fallback;
+  return base.length > 36 ? `${base.slice(0, 36)}…` : base;
+}
 
 /** 流式 delta 的发送去抖：一帧一次。渲染层再按 rAF 合帧，两处都不许降到"肉眼看得出卡"的档位 */
 const DELTA_FRAME_MS = 16;
@@ -131,8 +173,27 @@ const DELTA_FRAME_MS = 16;
 const DEFAULT_MAX_PARALLEL_MEMBERS = 4;
 /** 成员多久没有任何动作就标"可能卡住"（蓝本 tether-ai 是 120s） */
 const MEMBER_STALL_MS = 120_000;
+/**
+ * 单条工具最长免检时长：命令在跑时不算"没动作"（构建/大文件/浏览器会跑很久），
+ * 但一条工具占着跑这么久就是真卡住了，照常报，不能永远豁免。
+ */
+const TOOL_BUSY_MAX_MS = 10 * 60_000;
+/** 卡住超过这么久还没人处置 → 再交一次风铃，不让它安静地烂在台账里 */
+const BLOCKED_AGE_MS = 30 * 60_000;
+/** 堆积超限时一轮只交这么多张给她清（多了上下文会爆，少了清不动堆积） */
+const BACKLOG_BATCH = 3;
+/** 堆积态下的额外纪律：只清这一批就停，不许罗列全表、不许反问用户 */
+const BACKLOG_ORDER =
+  "\n\n【堆积态·只清一批】上面只列了其中一部分，先把这几张处理掉（验收 / 原单重做 / 关单都行），处理完就停，" +
+  "不要一次性罗列其余单子，也不要问用户要不要取消——关不关由你定。下一轮会给你下一批。";
 /** 这类卡片是"重复事件"（权限拦截 / 外呼审计）：同一张单反复出现就聚合计数，不逐条刷屏 */
 const AGGREGATED_BADGES = new Set(["已拦截", "出站"]);
+
+/**
+ * 成员工具轮次下限。一轮一次模型调用，读材料 / 写产物 / 提交回报至少各占一轮；
+ * 低于 8 轮时成员通常只能交出「章节目录式」骨架稿（2026-11-12 实机：给 3 轮 → 只有标题）。
+ */
+const MIN_TURNS = 8;
 
 const TOOL_JSON: ToolSchema[] = [
   {
@@ -154,22 +215,22 @@ const TOOL_JSON: ToolSchema[] = [
     function: {
       name: "create_member",
       description:
-        "招募团队成员（书面岗位）：名字、岗位、单一目标、边界（不许做什么）、工具白名单、产出契约与验收标准。**团队最小 1 人**：一张单一个人做得完就只招 1 人，不要为凑角色多招（每个人都在烧预算/时限）。**一条任务线一支团队**：不要把人招进上一条任务的团队；沿用旧班底要显式传 teamId。超过 6 人编制需要 justification。团队不存在会自动新建。",
+        `招募团队成员（书面岗位）。${MEMBER_PROFILE_RULES}\n**团队最小 1 人**：一张单一个人做得完就只招 1 人，不要为凑角色多招（每个人都在烧预算/时限）。**一条任务线一支团队**：不要把人招进上一条任务的团队；沿用旧班底要显式传 teamId。超过 6 人编制需要 justification。团队不存在会自动新建。`,
       parameters: {
         type: "object",
         required: ["name", "role", "goal", "tools"],
         properties: {
           teamId: { type: "string", description: TEAM_HINT },
           teamName: { type: "string", description: "需要自动建队时用的团队名（可选）" },
-          name: { type: "string" },
-          role: { type: "string" },
-          goal: { type: "string", description: "单一职责：这个岗位对什么产出负责（写「负责什么结果」，不写「会做什么」）" },
-          boundaries: { type: "array", items: { type: "string" } },
+          name: { type: "string", description: "通用岗位名（如「代码审查员」）；禁带任务对象、阶段、编号或 A/B/C 后缀——名字是战绩主键" },
+          role: { type: "string", description: "能力域：擅长哪类活、以什么身份做事；不写具体任务对象" },
+          goal: { type: "string", description: "这个岗位长期对哪类结果负责（不写本次要看哪个目录/文件、要算哪个数字）" },
+          boundaries: { type: "array", items: { type: "string" }, description: "稳定边界：永远不做什么；本次任务的临时限制写进简报" },
           tools: {
             type: "array",
             items: { type: "string" },
             description:
-              "执行类工具白名单，只能填这些真实工具名：read_file / write_file / list_dir / run_command / browser_navigate / browser_snapshot / browser_click / browser_fill / browser_extract / browser_close / office_read_table / office_write_table / kb_add",
+              "执行类工具白名单，只能填这些真实工具名：read_file / write_file / list_dir / run_command / browser_navigate / browser_snapshot / browser_click / browser_fill / browser_extract / browser_close / office_read_table / office_write_table / office_write_docx / kb_add",
           },
           deliverable: { type: "string" },
           acceptance: { type: "array", items: { type: "string" } },
@@ -184,14 +245,27 @@ const TOOL_JSON: ToolSchema[] = [
     function: {
       name: "assign_task",
       description:
-        "向成员派单。成员只拿到简报包，看不到你们的对话，所以简报必须自足：按四段写【目标】【完成标准】【材料与位置】【限制】，缺了会被代码层退回重写。委托目标或材料位置不明确时先用 ask_user 问清用户，不要猜着派单。**一条任务线一支团队**：不传 teamId 时，新会话会新建团队（不会塞进上一条任务的班底）；要沿用旧班底必须显式传 teamId 并说明理由。多个任务并行时一任务一团队可以，但要先把任务清单（各派给谁、多久）告诉用户。",
+        "向成员派单。成员只拿到简报包，看不到你们的对话，所以简报必须自足：按四段写【目标】【完成标准】【材料与位置】【限制】，缺了会被代码层退回重写。委托目标或材料位置不明确时先用 ask_user 问清用户，不要猜着派单。**一条任务线一支团队**：不传 teamId 时，新会话会新建团队（不会塞进上一条任务的班底）；要沿用旧班底必须显式传 teamId 并说明理由。多个任务并行时一任务一团队可以，但要先把任务清单（各派给谁、多久）告诉用户。**群里点名**：用户 @某人 是对他的定向诉求，别当全队广播；派完在群里 @他 说清在做什么。",
       parameters: {
         type: "object",
-        required: ["taskId", "member", "brief", "deadline"],
+        required: ["member", "brief", "deadline"],
         properties: {
           teamId: { type: "string", description: TEAM_HINT },
           teamName: { type: "string", description: "需要自动建队时用的团队名（可选；以任务主题命名，不要花哨代号）" },
-          taskId: { type: "string" },
+          taskId: { type: "string", description: "系统生成，模型不要填；旧调用可省略" },
+          reworkTaskId: {
+            type: "string",
+            description:
+              "重做 / 打回 / 卡住重来时填**原工单 ID**：沿用同一张单的状态与卷宗，不新建工单。新任务不要填。",
+          },
+          evidencePolicy: {
+            type: "string",
+            enum: ["required", "optional"],
+            description:
+              "证据策略：关键任务（审计/对账/安全/可复跑）填 required；其余省略（自动判 optional，证据不强制）。",
+          },
+          title: { type: "string", description: "任务名（可选，给一句人话；不给则从简报首行清洗后取）" },
+          taskTitle: { type: "string", description: "title 的旧别名（可选）" },
           member: { type: "string" },
           brief: {
             type: "string",
@@ -238,7 +312,7 @@ const TOOL_JSON: ToolSchema[] = [
     function: {
       name: "nudge_member",
       description:
-        "给**正在跑**的成员补一句指示（下一轮生效，不用重派、不丢已写文件）。用于纠正方向、划清边界（例如「你只能访问任务工作区，别再去读 F:\\\\spiker」）、要求先交阶段性回报。",
+        "给**正在跑**的成员补一句指示（下一轮生效，不用重派、不丢已写文件）。用于纠正方向、划清边界（例如「你只能访问任务工作区，别再去读 F:\\\\spiker」）、要求先交阶段性回报。用户 @某个成员 时，这是对他的定向要求——用这个转达，别新建工单。",
       parameters: {
         type: "object",
         required: ["taskId", "note"],
@@ -254,13 +328,17 @@ const TOOL_JSON: ToolSchema[] = [
     function: {
       name: "stop_task",
       description:
-        "停掉一张在跑的单：成员收手，工单转「卡住」等你决定。用于明显卡死、反复越界、方向已错——不要让它一直烧预算。",
+        "停掉一张在跑/卡住的单。成员收手后由**你**决定下一步：目标仍成立就在同一张单上重做（assign_task 带 reworkTaskId），方向已错或做不了就带 dismiss=true 关单并如实汇报。不要问用户要不要取消——这是你的活。",
       parameters: {
         type: "object",
         required: ["taskId"],
         properties: {
           taskId: { type: "string" },
           reason: { type: "string", description: "为什么停（会记进卷宗与卡）" },
+          dismiss: {
+            type: "boolean",
+            description: "判定这张单不再继续时置 true：直接取消归档（卷宗保留），不再把决定推给用户",
+          },
         },
       },
     },
@@ -280,17 +358,35 @@ const TOOL_JSON: ToolSchema[] = [
   {
     type: "function",
     function: {
-      name: "review_result",
-      description: "登记成员节点回报。必须附证据；无证据会被拒绝登记。",
+      name: "read_artifact",
+      description:
+        "读任务产物的正文（docx / md / txt / csv…）。验收前必须看一眼内容：'文件存在 + 成员说结构齐全'不是验收，骨架稿、占位符（undefined）、空章节都只能靠读正文发现。缺省读最后一件交付物。",
       parameters: {
         type: "object",
-        required: ["taskId", "member", "text", "evidence"],
+        required: ["taskId"],
+        properties: {
+          taskId: { type: "string", description: "工单 ID" },
+          ref: { type: "string", description: "产物在卷宗里的路径（如 artifacts/报告.docx）；省略=最后一件交付物" },
+          maxChars: { type: "number", description: "最多读多少字（默认 8000，上限 20000）" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "review_result",
+      description:
+        "登记成员节点回报。证据可选：普通任务不强制登记；关键任务（审计/对账/安全/可复跑）会在进审查时要求证据。",
+      parameters: {
+        type: "object",
+        required: ["taskId", "member", "text"],
         properties: {
           teamId: { type: "string", description: TEAM_HINT },
           taskId: { type: "string" },
           member: { type: "string" },
           text: { type: "string" },
-          evidence: { type: "array", items: { type: "string" } },
+          evidence: { type: "array", items: { type: "string" }, description: "可选：真实文件/命令输出；关键任务要求" },
         },
       },
     },
@@ -415,6 +511,60 @@ const TOOL_JSON: ToolSchema[] = [
  */
 export const AGENT_TOOL_NAMES: readonly string[] = TOOL_JSON.map((t) => t.function.name);
 
+/**
+ * 发给模型的紧凑工具面（2026-11-11）。
+ * 完整定义仍保留在 TOOL_JSON 里供文档/测试/执行使用；这里只把「重复的规则说明、冗长的参数描述」
+ * 去掉——规则已在 system prompt 里，模型不需要在 15 个工具里各读一遍。
+ * 关键参数（brief/tools/readRoots/workspace/deadline/evidence/acceptance/spec/entry）保留说明，
+ * 避免压过头让模型不会派单。
+ */
+const COMPACT_TOOL_DESC: Record<string, string> = {
+  create_team: "建团队，只需给任务主题名；ID 系统生成。",
+  create_member: "招募 1 名成员（岗位档案）：只写能力域/做事风格/稳定边界/通用产出，禁写本次路径、文件名、阶段、数字、截止与验收；具体任务进简报。名字用通用岗位名，不带任务词或编号。",
+  assign_task: "派单。简报四段自足；按规模自动配轮次/预算；证据默认可选，关键任务才强制。",
+  check_progress: "查工单/团队进度与状态。",
+  nudge_member: "给在跑的成员补一句指示。",
+  stop_task: "停单后由你决定：同单重做（dismiss=false）或自行关单（dismiss=true），别问用户。",
+  check_roster: "查编制与成员状态。",
+  read_artifact: "读产物正文（docx/md/txt）：验收前看内容，别只看文件在不在。",
+  review_result: "登记成员回报（证据可空；关键任务缺证据会被拦在审查外）。",
+  accept_or_reject: "处理待审契约（approve 开工 / reject 取消）。",
+  report_to_user: "向用户汇报结论、证据、未完成项与待拍板项。",
+  ask_user: "目标/标准/材料/工作区有缺口时问用户；不猜。",
+  dissolve_team: "解散团队（编制与历史仍在，成员不再可用）。",
+  save_memory: "把长期事实写进记忆。",
+  create_plugin_draft: "把稳定流程写成插件草稿（不会自动启用）。",
+  ship_plugin: "仅启用通过准入的 L0 技能草稿；L1/L2 必须由用户启用。",
+};
+
+const KEEP_PARAM_DESC = new Set(["brief", "tools"]);
+
+function compactParam(value: unknown, propName?: string): unknown {
+  if (Array.isArray(value)) return value.map((v) => compactParam(v, propName));
+  if (typeof value !== "object" || value === null) return value;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    if (k === "description" && !(propName && KEEP_PARAM_DESC.has(propName))) continue;
+    if (k === "properties" && typeof v === "object" && v !== null && !Array.isArray(v)) {
+      const props: Record<string, unknown> = {};
+      for (const [pk, pv] of Object.entries(v as Record<string, unknown>)) props[pk] = compactParam(pv, pk);
+      out[k] = props;
+    } else {
+      out[k] = compactParam(v, k === "items" ? propName : k);
+    }
+  }
+  return out;
+}
+
+const COMPACT_TOOL_JSON: ToolSchema[] = TOOL_JSON.map((t) => ({
+  type: "function",
+  function: {
+    name: t.function.name,
+    description: COMPACT_TOOL_DESC[t.function.name] ?? t.function.description,
+    parameters: compactParam(t.function.parameters) as Record<string, unknown>,
+  },
+}));
+
 type DecisionEntry = Decision;
 
 /** 待确认的任务契约（只存一次派单所需的最小上下文） */
@@ -432,6 +582,8 @@ interface PendingPlan {
   readRoots?: string[];
   /** 轮次上限覆盖（1–40） */
   maxTurns?: number;
+  /** 证据策略：required 才强制；缺省按简报自动判定（2026-11-11 放宽） */
+  evidencePolicy?: EvidencePolicy;
   /** M3-07：插件工坊草稿 id——成员工作区即草稿区（产物只能写进草稿） */
   draftId?: string;
 }
@@ -440,10 +592,12 @@ interface PendingPlan {
 interface QueuedInput extends QueueItem {
   mode: "queue" | "steer";
   attachments?: TurnAttachments;
+  /** 群内 @（排队的这条消息点了谁） */
+  mentions?: FeedMention[];
 }
 
 /** 计划档位下也允许的只读工具 */
-const READ_ONLY_TOOLS = new Set(["check_progress", "check_roster"]);
+const READ_ONLY_TOOLS = new Set(["check_progress", "check_roster", "read_artifact"]);
 
 /**
  * C4：新会话提示（纯函数，便于单测）。
@@ -544,6 +698,14 @@ export class Kernel {
   /** 每张单最近一步的时间戳与"被边界拦下"的次数：巡检据此判"没动静"与"在撞墙" */
   private memberStepAt = new Map<string, number>();
   private memberBlocked = new Map<string, number>();
+  /** 正在执行中的工具起始时间（taskId → ms）：命令在跑就不算"没动作"，避免长构建被误判卡住 */
+  private memberToolSince = new Map<string, number>();
+  /** 被边界拦下的具体命令（taskId → 命令集合）：按命令去重，同一句反复撞墙才算"做的是做不到的事" */
+  private memberBlockedCmds = new Map<string, Set<string>>();
+  /** 卡住老化：每张单上次被"催一次风铃"的时间，避免同一张单反复注入 */
+  private blockedAgedNoted = new Map<string, number>();
+  /** 跟踪卡折叠窗口：20 秒内的连续步骤折进同一张卡，避免一次工具调用刷一张 */
+  private progressAt = new Map<string, number>();
   /** 指挥者巡检：定时器与节流（不催也管） */
   private supervisorTimer: NodeJS.Timeout | null = null;
   private lastSupervisorAt = 0;
@@ -552,8 +714,21 @@ export class Kernel {
   private pendingSkillText = "";
   /** 心跳巡检（M3-01）：定时器、节流与同批事实去重 */
   private heartbeatTimer: NodeJS.Timeout | null = null;
+  /** 秒级探针（2026-11-11）：有成员在跑 1s 一次，只读内存态，零 token / 零 I/O */
+  private probeTimer: NodeJS.Timeout | null = null;
+  /** 事件驱动唤醒闸：合并窗口 / 同批冷却 / 每小时配额 */
+  private wakeGate: WakeGateState = { lastWakeAt: 0, windowStart: 0, windowCount: 0, lastSig: "", lastSigAt: 0 };
+  /** busy 时被挡下的心跳事件：收尾后补评估一次，别让「成员退出」白白蒸发 */
+  private heartbeatPending: string | null = null;
+  /** 探针已报过的「沉默成员」，避免每秒重复触发 */
+  private silentNoted = new Map<string, number>();
   private lastHeartbeatAt = Date.now(); // init 后先静默一个间隔，不抢启动窗口
   private heartbeatNoted = new Map<string, number>();
+  /**
+   * 堆积态节流：上一批没清掉就把注入间隔逐级拉长（上限 60 分钟），清动了立刻恢复常速。
+   * 否则她清不动时会每 5 分钟空烧一轮 token，用户那边还看不到任何变化。
+   */
+  private backlogGate = { at: 0, count: 0, waitMin: 0 };
   /** 成员本轮累计 token（`teamId::成员` → tokens）：编制表的预算读数不再是硬编码 0 */
   private memberUsage = new Map<string, number>();
   /** 每张单的中止器（用户点「停」）：没有它就只能解散全队来止损 */
@@ -576,6 +751,29 @@ export class Kernel {
   private lastDeltaEmit = 0;
   /** 本轮是否已就模型错误落过卡（Pi 重试时可能连发多条 message_end，别刷屏） */
   private turnErrorReported = false;
+  /** 日志闸：分类开关 + 每分钟限流 + 字段截断（设置里可整体关掉） */
+  private logGate = new LogGate(() => this.settings.getPrefs().log);
+  /** 连续删除合并窗口：批量删 5 张只落一条汇总卡，不再刷 5 条「已删除」 */
+  private pendingRemovals: { taskId: string; kept: string[]; shared: boolean; threadId?: string }[] = [];
+  private removalTimer: NodeJS.Timeout | null = null;
+  /** 本轮是否因流式复读熔断自动停止（别把这次 abort 误报成端点错误） */
+  private repetitionAborted = false;
+  /** 上次复读扫描的累计长度：每 ~400 字符扫一次，不逐 token 做周期检测 */
+  private lastRepetitionScan = 0;
+  /** check_progress 空转计数（taskId → 上次结果签名 + 连续相同次数） */
+  private progressPolls = new Map<string, { sig: string; count: number }>();
+  /** 已把「卡住」交回风铃处置过的单（每单一次，重做时清除） */
+  private blockedHandled = new Set<string>();
+  /**
+   * 已经用 read_artifact 看过产物的单。验收前必须看过正文——
+   * 实机她只看"文件存在 + 成员说结构齐全"就把四行标题的骨架稿验收通过了。
+   */
+  private artifactsInspected = new Set<string>();
+
+  /** 这张单的产物正文有没有在验收前被读过（验收闸查询；只读） */
+  hasInspectedArtifact(taskId: string): boolean {
+    return this.artifactsInspected.has(taskId);
+  }
 
   /** 回合状态（唯一真相源，渲染层只读） */
   private turn: TurnState = { phase: "idle", busy: false, pending: 0 };
@@ -595,6 +793,8 @@ export class Kernel {
   /** 排队输入（生成中打字） */
   private queue: QueuedInput[] = [];
   private queueSeq = 0;
+  /** 工单主键序号：生产环境由系统生成，模型不能自己编（2026-11-11） */
+  private taskSeq = 0;
   /** 待确认的任务契约（decisionId → 派单上下文） */
   private pendingPlans = new Map<string, PendingPlan>();
   /** 最近一次「任务契约已呈给用户」的时间：用来挡"派完单又问一遍是否开工" */
@@ -657,6 +857,12 @@ export class Kernel {
   private createFreshSession = false;
   /** 用户点了停止：本轮结束时不追加"已完成"类文案 */
   private abortRequested = false;
+  /** 直连路径当前回合的取消器：session.abort 立即 abort()，不再等整段 SSE 跑完 */
+  private chatAbort: AbortController | null = null;
+  /** 本轮是「看一眼就走」的巡检轮（心跳/卡住处置）：结束后从 history 摘掉、不写时间线 */
+  private ephemeralFrom = -1;
+  /** 工单落盘后的合并窗口定时器（秒级事件心跳用） */
+  private taskChangeTimer: NodeJS.Timeout | null = null;
 
   private decryptor: ((blob: Buffer) => string) | null = null;
 
@@ -665,7 +871,8 @@ export class Kernel {
     // 测试环境（LYNN_HOME 隔离）无 safeStorage；main.ts 会用真实现覆盖
     this.settings = new SettingsStore(dataRoot, (plain) => Buffer.from(plain, "utf-8"), () => false);
     this.teamStore = new TeamStore(dataRoot);
-    this.taskStore = new TaskStore(dataRoot);
+    // 工单落盘回调：有成员在跑时，状态一变就评估一次心跳（500ms 合并窗口）
+    this.taskStore = new TaskStore(dataRoot, { onChange: () => this.onTaskStoreChanged() });
     this.taskCase = new TaskCase(dataRoot);
     this.contextStore = new ContextStore(dataRoot);
     this.checkpoints = new CheckpointStore(path.join(dataRoot, "checkpoints"));
@@ -733,16 +940,33 @@ export class Kernel {
     return () => this.listeners.delete(cb);
   }
 
-  /** 结构化日志：~/.lynn/logs/agent.log（JSONL，5MB 轮转一份）。定位问题不靠 console。 */
+  /**
+   * 结构化日志：~/.lynn/logs/agent.log（JSONL，5MB 轮转，保留 2 份）。
+   * 分类与限流见 log-policy.ts：默认只开 member/tool/task/system，heartbeat 关；
+   * 每类有每分钟上限，超了丢弃并合并成一条 log_throttled，最坏总量约 15MB。
+   */
   private log(kind: string, data: Record<string, unknown> = {}): void {
     try {
+      const cat = this.logGate.allow(kind);
+      if (!cat) return;
       const dir = path.join(this.dataRoot, "logs");
       fs.mkdirSync(dir, { recursive: true });
       const file = path.join(dir, "agent.log");
-      if (fs.existsSync(file) && fs.statSync(file).size > 5 * 1024 * 1024) {
-        fs.renameSync(file, path.join(dir, "agent.1.log"));
+      const cap = 5 * 1024 * 1024;
+      if (fs.existsSync(file) && fs.statSync(file).size > cap) {
+        const one = path.join(dir, "agent.1.log");
+        const two = path.join(dir, "agent.2.log");
+        if (fs.existsSync(one)) fs.renameSync(one, two);
+        fs.renameSync(file, one);
       }
-      fs.appendFileSync(file, JSON.stringify({ at: new Date().toISOString(), kind, ...data }) + "\n", "utf-8");
+      const dropped = this.logGate.takeDropped(cat);
+      // kind 必须放在 data 之后：data 里也常有 kind 字段（工具审计的 cmd_run），
+      // 之前被它覆盖，agent.log 里只有 cmd_run、看不出这些是 tool_audit 写的。
+      let text = JSON.stringify({ at: new Date().toISOString(), ...this.logGate.trim(data), kind }) + "\n";
+      if (dropped > 0) {
+        text += JSON.stringify({ at: new Date().toISOString(), kind: "log_throttled", category: cat, dropped }) + "\n";
+      }
+      fs.appendFileSync(file, text, "utf-8");
     } catch {
       /* 日志失败不能影响主流程 */
     }
@@ -756,7 +980,7 @@ export class Kernel {
     teamId: string,
     taskId: string,
     member: string,
-    ev: { kind: "cmd_blocked" | "cmd_net" | "cmd_run"; command: string; why?: string; cwd: string },
+    ev: { kind: "cmd_blocked" | "cmd_net" | "cmd_run" | "cmd_auto"; command: string; why?: string; cwd: string },
     /** 出发会话：后台成员的审计卡要写回它，否则别的会话会被拦截记录刷屏（C2） */
     threadId: string = this.currentThreadId,
   ): void {
@@ -766,10 +990,16 @@ export class Kernel {
     } catch {
       /* 审计写不进去也不能影响执行，但会缺一条记录 */
     }
-    this.log("tool_audit", { kind: ev.kind, taskId, member, why: ev.why });
+    this.log("tool_audit", { audit: ev.kind, taskId, member, why: ev.why });
     if (ev.kind === "cmd_blocked") {
-      // 撞墙计数：巡检据此判断"它在做做不到的事"（而不是单纯慢）
-      this.memberBlocked.set(taskId, (this.memberBlocked.get(taskId) ?? 0) + 1);
+      // 撞墙计数：巡检据此判断"它在做做不到的事"（而不是单纯慢）。
+      // 按命令去重——同一条命令重试 3 次说明真在硬撞；不同命令各撞一次只是正常探索，
+      // 累计原始次数会把"换着法子找路"误判成"明知做不到还硬来"。
+      const sig = ev.command.trim().replace(/\s+/g, " ").slice(0, 200);
+      const seen = this.memberBlockedCmds.get(taskId) ?? new Set<string>();
+      seen.add(sig);
+      this.memberBlockedCmds.set(taskId, seen);
+      this.memberBlocked.set(taskId, seen.size);
       this.cardTo(threadId, {
         kind: "tool",
         badge: "已拦截",
@@ -780,6 +1010,16 @@ export class Kernel {
       });
     } else if (ev.kind === "cmd_net") {
       this.cardTo(threadId, { kind: "tool", badge: "出站", jobId: taskId, title: `${member} · ${taskId}`, body: `出站命令已审计：${ev.command}` });
+    } else if (ev.kind === "cmd_auto") {
+      // 低风险自清理（本单自己造的文件 / 全权档工作区内删除）：不打扰用户，但必须留痕——
+      // "系统替我批了"这件事本身要能回查，否则等于悄悄删。
+      this.cardTo(threadId, {
+        kind: "tool",
+        badge: "放行",
+        jobId: taskId,
+        title: `${member} · ${taskId}`,
+        body: `删除类命令自动放行（不需要你点头）：${ev.why ?? "低风险"}\n${ev.command}`,
+      });
     }
   }
 
@@ -799,6 +1039,9 @@ export class Kernel {
         members: ev.members,
         jobId: ev.jobId,
         report: ev.report,
+        artifacts: ev.artifacts,
+        author: ev.author,
+        mentions: ev.mentions,
       });
     }
     this.notify(ev);
@@ -821,6 +1064,127 @@ export class Kernel {
     this.notify({ type: "card", card: full });
     this.persistThreadSoon();
     return full;
+  }
+
+  // ---------- 群聊：作者、@ 与本群成员（2026-11-12 群聊模式） ----------
+
+  /**
+   * 成员作者身份：档案能读就带上岗位与头像，读不到也不编。
+   * 群里"谁在说话"要有名字和脸——这是成员第一次在对话流里有发言位置。
+   */
+  private memberAuthor(teamId: string, member: string): FeedAuthor | undefined {
+    const name = String(member ?? "").trim();
+    if (!name) return undefined;
+    let role: string | undefined;
+    let avatarId: string | undefined;
+    try {
+      const p = this.teamStore.readMember(teamId, name);
+      role = p?.role;
+      avatarId = p?.avatarId;
+    } catch {
+      /* 档案读不到：只留名字，不编岗位 */
+    }
+    const face = avatarById(avatarId) ?? avatarFor(name);
+    return {
+      kind: "member",
+      name,
+      memberId: name,
+      teamId: teamId || undefined,
+      role,
+      avatarId: avatarId ?? face.id,
+    };
+  }
+
+  /**
+   * 本群成员名单（派生，不落盘）：本会话所有工单的承办人 + 这些工单所属团队的成员。
+   * 群里 @ 只能 @ 本群的人——@ 别群的人没有意义（他不在这个群里，听不见）。
+   */
+  private groupMembers(): FeedAuthor[] {
+    const out = new Map<string, FeedAuthor>();
+    const tasks = this.taskStore.list().filter((t) => t.threadId === this.currentThreadId);
+    for (const t of tasks) {
+      if (!t.member || out.has(t.member)) continue;
+      const a = this.memberAuthor(t.teamId, t.member);
+      if (a) out.set(t.member, a);
+    }
+    for (const t of tasks) {
+      let list: MemberProfile[] = [];
+      try {
+        list = this.teamStore.listMembers(t.teamId);
+      } catch {
+        list = [];
+      }
+      for (const p of list) {
+        if (out.has(p.name)) continue;
+        const face = avatarById(p.avatarId) ?? avatarFor(p.name);
+        out.set(p.name, {
+          kind: "member",
+          name: p.name,
+          memberId: p.name,
+          teamId: t.teamId,
+          role: p.role,
+          avatarId: p.avatarId ?? face.id,
+        });
+      }
+    }
+    return [...out.values()];
+  }
+
+  /**
+   * 解析消息里的 @：只认本群成员（+ 风铃），陌生名字丢弃并如实回报。
+   * "不 @" = 只有风铃看见；"@某人" = 对这个人的定向诉求。
+   */
+  private resolveMentions(
+    text: string,
+    hint?: { name: string }[],
+  ): { mentions: FeedMention[]; unknown: string[] } {
+    const byName = new Map(this.groupMembers().map((m) => [m.name ?? "", m]));
+    const found = new Map<string, FeedMention>();
+    const unknown: string[] = [];
+    const scan = `${text}\n${(hint ?? []).map((h) => `@${h.name}`).join("\n")}`;
+    const re = /(^|[^\w@])@([^\s@，。！？、；：,.;:!?"'“”‘’()（）\[\]【】<>]{1,20})/g;
+    for (const m of scan.matchAll(re)) {
+      const name = m[2];
+      // 像路径/文件名的（@note.md、@src/x.ts）不是人名：不当 mention，也不报"群里没有这个人"
+      if (name.includes(".") || name.includes("/") || name.includes("\\")) continue;
+      if (name === "风铃") {
+        found.set(name, { kind: "lynn", name });
+        continue;
+      }
+      const hit = byName.get(name);
+      if (hit?.memberId) found.set(name, { kind: "member", name, memberId: hit.memberId });
+      else if (!unknown.includes(name)) unknown.push(name);
+    }
+    return { mentions: [...found.values()], unknown };
+  }
+
+  /**
+   * 工具层强制点名：动作卡正文前缀 @某人 + mentions 标记。
+   * 模型忘了写 @ 也要补上——群里"谁对谁做了什么"必须看得见，不能只看标题猜。
+   */
+  private atMember(member: string, body?: string): { body?: string; mentions?: FeedMention[] } {
+    const name = String(member ?? "").trim();
+    if (!name) return { body };
+    const mentions: FeedMention[] = [{ kind: "member", name, memberId: name }];
+    if (!body) return { body: `@${name}`, mentions };
+    const already = body.includes(`@${name}`);
+    return { body: already ? body : `@${name} ${body}`, mentions };
+  }
+
+  /**
+   * 群内定向说明（拼在当轮消息尾部，不进历史）。
+   * @某人 = 只对他一个人的诉求，不是对全队的广播。
+   */
+  private groupDirective(mentions: FeedMention[]): string {
+    const names = mentions.map((m) => (m.kind === "lynn" ? "风铃" : m.name)).join("、");
+    const first = mentions[0];
+    const who = first ? (first.kind === "lynn" ? "风铃" : first.name) : names;
+    return (
+      `【群内定向】这条消息 @ 到了：${names}。` +
+      "@某人 = 只对他一个人的诉求，不是对全队的广播：必须落到针对他的具体动作" +
+      "（在跑就 nudge_member 补话 / 已交就 assign_task 带 reworkTaskId 返工 / 没单就 assign_task），" +
+      `并在本群回一条 @${who} 的说明，不要泛泛地说「已安排」。`
+    );
   }
 
   /** 拦截聚合：计数 +1，原因/命令换成最近一次（用户要看的是"现在为什么还被拦"） */
@@ -899,6 +1263,53 @@ export class Kernel {
     Object.assign(hit, patch);
     this.threads.saveState(threadId, { feed: st.feed.slice(-200), history: st.history });
     this.notify({ type: "thread", threadId });
+  }
+
+  /**
+   * 跟踪进度按对话流走（2026-11-11 修）：
+   * 旧做法是开工时建一张卡、之后就地堆到 1500 字，最新进展永远压在会话顶部；
+   * 现在每次新进展都追加到会话末尾，贴底跟随让用户看到的就是最新一步。
+   * 20 秒内 / 少于 6 行的连续步骤折进末尾那张卡，不刷屏。
+   */
+  private appendProgress(
+    threadId: string,
+    taskId: string,
+    member: string,
+    text: string,
+    meta: string,
+    badge: NonNullable<FeedCard["badge"]> = "进度",
+  ): void {
+    const local = !threadId || threadId === this.currentThreadId || !this.threadExists(threadId);
+    const list = local ? this.feed : this.threads.loadState(threadId).feed;
+    const last = list[list.length - 1];
+    const now = Date.now();
+    const lines = (last?.body ?? "").split("\n").filter((l) => l.trim()).length;
+    const fold =
+      badge === "进度" &&
+      !!last &&
+      last.kind === "tool" &&
+      last.badge === "进度" &&
+      last.jobId === taskId &&
+      now - (this.progressAt.get(taskId) ?? 0) < 20_000 &&
+      lines < 6;
+    this.progressAt.set(taskId, now);
+    const at = new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
+    if (fold && last) {
+      this.patchCardTo(threadId, last, {
+        body: `${last.body ?? ""}\n${text}`.trim(),
+        meta,
+        createdAt: at,
+      });
+      return;
+    }
+    this.cardTo(threadId, {
+      kind: "tool",
+      badge,
+      jobId: taskId,
+      title: `${member} · ${taskId}`,
+      meta,
+      body: text,
+    });
   }
 
   /** 回合状态迁移：所有 UI 的"谁在干什么"都只读这一个字段 */
@@ -1410,6 +1821,81 @@ export class Kernel {
     return process.env.LYNN_USE_LEGACY_RPC !== "1";
   }
 
+  /** 这张单此刻是否真有工具在执行（超过上限就不算，免得一条挂死的工具永远免检） */
+  private toolBusy(taskId: string, now: number = Date.now()): boolean {
+    const since = this.memberToolSince.get(taskId);
+    if (since === undefined) return false;
+    return now - since < TOOL_BUSY_MAX_MS;
+  }
+
+  /**
+   * 预览/打开守卫用：这句 ref 是不是这张单登记过的交付物。
+   * solidifyDeliverables 只把 ≤10MB 且在工作区内的复制进 artifacts，其余（只读根、超大文件）
+   * 只登记绝对路径原文。不认这些路径的话，G 盘这类目录外交付物点开永远没反应。
+   */
+  isTaskDeliverable(taskId: string, ref: string): boolean {
+    const t = this.taskStore.get(taskId);
+    if (!t?.deliverables?.length) return false;
+    const target = path.resolve(ref);
+    return t.deliverables.some(
+      (d) => d.ref === ref || d.path === ref || path.resolve(d.path) === target,
+    );
+  }
+
+  /**
+   * 待你拍板的东西必须跨重启活着。
+   * pendingPlans / decisions 原本只在内存里：进程一重启，"等用户确认契约"的单就没人认领，
+   * 心跳会把一张本来在正常等你的单当成"停滞"去催风铃重做/关单——用户的决定被系统自己吃掉了。
+   * 审批类决策带着 promise 解析器，跨重启没有意义（两条审批都有超时兜底），只持久化 plan / question。
+   */
+  private pendingFile(): string {
+    return path.join(this.dataRoot, "pending.json");
+  }
+
+  private persistPending(): void {
+    try {
+      const plans = [...this.pendingPlans.values()];
+      const decisions = this.decisions.filter((d) => d.kind !== "approval");
+      if (plans.length === 0 && decisions.length === 0) {
+        try {
+          fs.unlinkSync(this.pendingFile());
+        } catch {
+          /* 本来就没有 */
+        }
+        return;
+      }
+      const tmp = `${this.pendingFile()}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify({ plans, decisions }, null, 2), "utf-8");
+      fs.renameSync(tmp, this.pendingFile());
+    } catch {
+      /* 持久化失败不能挡住派单：下一次状态变化还会再写 */
+    }
+  }
+
+  private loadPending(): void {
+    type PendingFile = { plans?: PendingPlan[]; decisions?: Decision[] };
+    let data: PendingFile;
+    try {
+      data = JSON.parse(fs.readFileSync(this.pendingFile(), "utf-8")) as PendingFile;
+    } catch {
+      return; // 没有/坏了就当没有
+    }
+    for (const p of data.plans ?? []) {
+      if (!p?.taskId || !p?.decisionId) continue;
+      const rec = this.taskStore.get(p.taskId);
+      // 工单已结案/被删：契约作废，别再挂一张点不动的卡
+      if (!rec || rec.status === "done" || rec.status === "canceled") continue;
+      this.pendingPlans.set(p.decisionId, p);
+    }
+    for (const d of data.decisions ?? []) {
+      if (!d?.id || d.kind === "approval") continue;
+      if (this.decisions.some((x) => x.id === d.id)) continue;
+      // 指向的单已经没了，问题也就没意义
+      if (d.jobId && !this.taskStore.get(d.jobId)) continue;
+      this.decisions.push(d);
+    }
+  }
+
   /**
    * 启动对账：上次进程被杀/退出时留在 in_progress 的单，成员已经不在跑了。
    * 不收拾的话台账上永远挂着"进行中"，点「停」还会回"没有在跑的"。
@@ -1419,7 +1905,10 @@ export class Kernel {
     for (const t of this.taskStore.list()) {
       if (t.status !== "in_progress" || this.memberRuns.has(t.id)) continue;
       try {
-        this.taskStore.transition(t.id, "blocked");
+        this.taskStore.transition(t.id, "blocked", {
+          blockedReason: "reconcile",
+          note: "上次进程中断，成员已不在跑",
+        });
         n += 1;
       } catch {
         /* 迁移规则不允许就不强改 */
@@ -1428,12 +1917,16 @@ export class Kernel {
     if (n > 0) {
       this.card({
         kind: "system",
-        text: `${n} 张单在上次运行时中断、没有收尾（成员已不在跑），已标成「卡住」。要重做就重新派单。`,
+        title: "恢复",
+        systemTone: "recover",
+        text: `${n} 张单在上次运行时中断、没有收尾（成员已不在跑），已标成「卡住」。风铃会在同一张单上判断重做或关单，不用你处理。`,
       });
     }
   }
 
   async init(): Promise<void> {
+    // 先把上次没拍板的契约/提问捞回来：否则它们在内存里消失，重启后会被当成"停滞"误处置
+    this.loadPending();
     // 上次没收尾的单先对账（放在最前：界面一打开就该是真实状态）
     this.reconcileOrphanTasks();
     // office 引擎健康（M2-06）：探测一次；失败不影响 CSV
@@ -1479,8 +1972,10 @@ export class Kernel {
     this.supervisorTimer.unref?.();
     // 心跳巡检（M3-01）：机械层聚合"待审查/停滞工单/定时任务异常"，没事零 token，
     // 有事才起一轮由风铃自主处置（停/催/捡/问/汇报），间隔与去重见 heartbeatTick。
-    this.heartbeatTimer = setInterval(() => this.heartbeatTick(), 60_000);
+    this.heartbeatTimer = setInterval(() => this.heartbeatTick("timer"), 60_000);
     this.heartbeatTimer.unref?.();
+    // 秒级探针（2026-11-11）：只读内存态、零 token；有成员在跑 1s 一次，空闲退避 15s。
+    this.probeTick();
     // 知识库增量索引（M2-09）：文件变更去抖 800ms 后增量重索引
     this.kbWatch = watchKnowledge(this.knowledge.dir, () => this.knowledge.reindex(), {
       onChange: (r) => {
@@ -1665,6 +2160,8 @@ export class Kernel {
     this.tools.reviewResult(teamId, taskId, { member, text, evidence, sessionId: sessionId ?? this.host?.sessionId });
     this.taskCase.append(taskId, { kind: "report", member, text, meta: { evidence } });
     this.taskCase.appendSummary(taskId, `${member} 回报：${text.slice(0, 60)}`);
+    // 新回报 = 新产物：上一轮的"已读"不算数，验收前要重读
+    this.artifactsInspected.delete(taskId);
 
     try {
       this.taskStore.ensureInProgress({
@@ -1719,14 +2216,14 @@ export class Kernel {
     } catch (err) {
       // 证据不足 → 停在执行中，如实告知；状态已就位 → 忽略
       if (!(err instanceof Error) || !/不允许的迁移/.test(err.message)) {
-        // 后台回报也要归出发会话（C2）：否则在别的会话里会凭空多出一张"证据未通过"卡
+        // 只有关键任务（evidencePolicy=required）才会走到这里；普通任务证据可选，不拦。
         this.cardTo(threadId, {
           kind: "tool",
           badge: "回报",
-          title: `证据未通过验证 · ${member} · ${taskId}`,
-          body: `已登记 ${evidence.length} 项，其中可验证 ${verified} 项。无已验证证据不能进审查（§4.10.5）。`,
+          title: `交付待补充 · ${member} · ${taskId}`,
+          body: `本单要求核验记录，目前可核验 ${verified} 项。补齐后即可进入验收。`,
         });
-        return `回报已登记；但 ${verified} 项证据可验证（要求 ≥1）：文件不存在或无法复跑，工单停在执行中。`;
+        return `回报已登记；本单要求核验记录，目前可核验 ${verified} 项（要求 ≥1）：补齐后再验收，或确认按普通任务放行。`;
       }
     }
 
@@ -1734,10 +2231,17 @@ export class Kernel {
       kind: "tool",
       badge: "回报",
       title: `${member} · ${taskId}`,
-      body: `${text}\n证据：${evidence.join("、")}\n可验证：${verified}/${evidence.length}`,
+      // 用户只看结果：回报卡就是成员交回的那段结论，不附证据清单与核验计数
+      body: text,
+      // 群聊：成员第一次以自己的身份在群里发言（带头像、岗位、名字）
+      author: this.memberAuthor(teamId, member),
     });
+    // 成员交回结果：立即评估一次心跳，让风铃尽快验收/收尾（有闸，不会每次回报都烧上下文）
+    this.requestHeartbeat("report");
     return moved
-      ? `回报已登记，${verified} 项证据已验证并收入卷宗，工单进入待审查。`
+      ? evidence.length
+        ? `回报已登记，${verified} 项证据已验证并收入卷宗，工单进入待审查。`
+        : "回报已登记（未附证据，本单证据可选），工单进入待审查。"
       : "回报已登记（含证据索引）。";
   }
 
@@ -1833,6 +2337,7 @@ export class Kernel {
           // 成员的读写工作区 = 契约上批准的目录（缺省 = 会话主根）
           workspaceRoot: wsRoot,
           workspace: this.workspaceRecordFor(p.taskId, wsRoot),
+          evidencePolicy: p.evidencePolicy,
         });
         this.taskStore.transition(p.taskId, "todo");
       } else if (existing.status === "backlog" || existing.status === "blocked") {
@@ -1955,21 +2460,14 @@ export class Kernel {
       "utf-8",
     );
 
-    // 进度卡：一张单一张卡，跑的过程中就地更新——不再一次工具调用刷一张卡。
+    // 跟踪输出跟着进度走：每次新进展追加到会话底部，不再汇总在顶部那张开工卡里。
     // 必须带 jobId 且写回出发会话：否则图纸「往来」里只有"派单·契约"一条，
     // 用户看到的就是"跑了二十分钟什么都没发生"（实报）。
     const controller = new AbortController();
     const steps: string[] = [];
     const startedAt = Date.now();
     const elapsedSec = () => Math.round((Date.now() - startedAt) / 1000);
-    const live = this.cardTo(runThreadId, {
-      kind: "tool",
-      badge: "进度",
-      jobId: taskId,
-      title: `${member} 在干 · ${taskId}`,
-      meta: "刚开工",
-      body: "（等他第一步）",
-    });
+    this.appendProgress(runThreadId, taskId, member, "（等他第一步）", "刚开工");
     let lastStepAt = Date.now();
     /** 里程碑汇报：不打断成员，但每 2 分钟给自己留一条可回看的进度卡（不催也要报） */
     let lastMilestoneAt = Date.now();
@@ -1978,11 +2476,7 @@ export class Kernel {
       lastStepAt = Date.now();
       this.memberLastStep.set(memberKey, text);
       this.memberStepAt.set(taskId, Date.now());
-      const tail = steps.slice(-6).join("\n");
-      this.patchCardTo(runThreadId, live, {
-        meta: `第 ${steps.length} 步 · ${elapsedSec()}s`,
-        body: tail.length > 1500 ? `…\n${tail.slice(-1500)}` : tail,
-      });
+      this.appendProgress(runThreadId, taskId, member, text, `第 ${steps.length} 步 · ${elapsedSec()}s`);
       if (Date.now() - lastMilestoneAt >= 120_000) {
         lastMilestoneAt = Date.now();
         this.cardTo(runThreadId, {
@@ -1996,13 +2490,18 @@ export class Kernel {
       }
     };
     // 卡死可见：长时间没有任何动作就报一次（不自动杀，让人决定）
+    // 但"正在跑的命令"不算没动作：tool-start 会刷新 lastStepAt，并在这里显示执行了多久。
     let stalledNotified = false;
     const stallTimer = setInterval(() => {
       const quiet = Date.now() - lastStepAt;
-      if (quiet < MEMBER_STALL_MS || stalledNotified) return;
+      // 工具真在执行就不算卡住（长构建/大文件/浏览器）；超过上限 toolBusy 会自己失效，恢复检查
+      if (this.toolBusy(taskId)) return;
+      // 有工具在跑：tool-start 已经在会话底部留了「正在执行」，定时器不再重复刷同一句
+      if (quiet < MEMBER_STALL_MS) return;
+      if (stalledNotified) return;
       stalledNotified = true;
       const body = `已经 ${Math.round(quiet / 1000)}s 没有任何动作。可以点台账/右键「停」，或再等等。\n\n最后动作：\n${steps.slice(-3).join("\n") || "（一步都没做）"}`;
-      this.patchCardTo(runThreadId, live, { meta: `第 ${steps.length} 步 · 可能卡住`, body });
+      this.appendProgress(runThreadId, taskId, member, body, `第 ${steps.length} 步 · 可能卡住`);
       this.cardTo(runThreadId, { kind: "system", jobId: taskId, text: `${member} · ${taskId}：${body}` });
     }, 15_000);
     stallTimer.unref?.();
@@ -2026,8 +2525,12 @@ export class Kernel {
         ...this.roots.extras.filter((r) => r.mode === "rw").map((r) => r.path),
         ...(this.taskStore.get(taskId)?.workspace?.roots ?? []).filter((r) => r.mode === "rw").map((r) => r.path),
       ],
-      // 删除类命令必须用户点头：挂一张审批卡，超时按拒绝
+      // 删除类命令必须用户点头：挂一张审批卡，超时按拒绝。
+      // 工具层已经先放过"本单开工后新造的文件"（自清理），到这里的是真有风险的删除。
       onBeforeCommand: (cmd) => this.awaitCommandApproval(member, taskId, cmd),
+      runStartedAt: startedAt,
+      // 权限档=全权：工作区内删除不再逐次点头（工作区外仍由路径守卫直接拒）
+      autoDeleteInWorkspace: () => this.permission === "full",
       // 收件箱：风铃/巡检中途补的指示，成员每轮开头取（催办不杀进程、不重派）
       inbox: (() => {
         const box = this.memberInbox.get(taskId) ?? [];
@@ -2035,6 +2538,18 @@ export class Kernel {
         return box;
       })(),
       onAudit: (ev) => this.auditTool(teamId, taskId, member, ev, runThreadId),
+      // 工具调用审计（tool 类，默认每分钟 120 条上限，字段自动截断）。
+      // 实机「成员跑完未交付」只能看到没交回报，看不到它是否调过工具、调成什么样。
+      onToolCall: (ev) =>
+        this.log("member_tool", {
+          taskId,
+          member,
+          tool: ev.name,
+          ok: ev.ok,
+          ms: ev.ms,
+          args: ev.args,
+          outcome: ev.outcome,
+        }),
       onBeforeWrite: (rel, full, existed) => this.checkpoints.beforeWrite(rel, full, existed),
       office: {
         read: (file) => readTable(file, this.officeHealth),
@@ -2052,8 +2567,29 @@ export class Kernel {
         add: (name, markdown) => this.knowledge.addDoc(name, markdown),
       },
       onEvent: (ev) => {
-        if (ev.kind === "tool") pushStep(ev.text);
+        // 工具开始就刷新心跳与卡面：一条递归命令跑 100s 时，此前界面与看门狗都当它死了
+        if (ev.kind === "tool-start") {
+          lastStepAt = Date.now();
+          this.memberStepAt.set(taskId, Date.now());
+          // 命令在跑的这段时间不算"没动作"：长构建/大文件/浏览器会跑几分钟，
+          // 光靠 tool-start 刷一次时间戳不够，得让看门狗知道"它现在正在干活"。
+          this.memberToolSince.set(taskId, Date.now());
+          this.memberLastStep.set(memberKey, ev.text);
+          this.appendProgress(
+            runThreadId,
+            taskId,
+            member,
+            `正在执行（还没返回）：\n${ev.text}`,
+            `第 ${steps.length + 1} 步 · 执行中 · ${elapsedSec()}s`,
+          );
+          return;
+        }
+        if (ev.kind === "tool") {
+          this.memberToolSince.delete(taskId);
+          pushStep(ev.text);
+        }
         if (ev.kind === "turn") {
+          this.memberToolSince.delete(taskId);
           const progress = ev.progress ?? 0;
           this.memberProgress.set(member, progress);
           // 只推回合状态（不刷卡片），编制表的进度条据此实时走
@@ -2061,18 +2597,40 @@ export class Kernel {
         }
       },
     });
+    this.log("member_start", {
+      taskId,
+      member,
+      teamId,
+      turns: maxTurns ?? profile.limits?.maxTurns ?? 0,
+      tools: allowed.join(","),
+    });
     void run
       .then((result) => {
         this.memberProgress.set(member, 100);
         // 预算读数：按真实 token 累计（此前编制表恒显示 0）
         this.memberUsage.set(memberKey, (this.memberUsage.get(memberKey) ?? 0) + result.promptTokens + result.completionTokens);
         const used = Math.round((Date.now() - startedAt) / 1000);
-        if (result.status === "reported" && result.evidence.length > 0) {
+        // 成员侧此前在日志里完全不可见（只有命令审计），排查"为什么没交回报"只能猜。
+        // 一条收尾摘要即可定位：几轮跑完、交没交、交了几件产物。
+        this.log("member_exit", {
+          taskId,
+          member,
+          status: result.status,
+          turns: result.turns,
+          seconds: used,
+          reportChars: result.report.length,
+          evidence: result.evidence.length,
+          deliverables: result.deliverables.length,
+          error: result.error,
+        });
+        // 只要成员交了回报就登记——**证据可选**（2026-11-11 起普通任务不再强制）。
+        // 旧条件要求 evidence.length > 0：交了回报但没附证据的单被当成「没交出回报」，
+        // 直接掉进 blocked → 巡检催重做 → 同一件事反复重派（2026-11-12 实机两轮空转）。
+        if (result.status === "reported") {
           // 成员交的证据是相对**工作区**的（"report.md"），卷宗校验只认卷宗目录 / cwd / dataRoot；
           // 不先解析到工作区，真文件也会被判成"验不了"，工单停在执行中（C1 实机验暴露的真 bug）。
           const rootsForEvidence = this.effectiveReadRoots(taskId, teamId);
           const evidence = result.evidence.map((e) => this.resolveMemberPath(e, workdir, rootsForEvidence));
-          // 只有真交了证据才登记；空回报进登记通道会抛错，原来那条路直接变成"崩溃"卡
           this.registerReport(teamId, taskId, member, result.report, evidence, undefined, runThreadId, result.evidence, workdir);
           // 交付物与证据分开：交付物永久固化，过程证据只登记
           if (result.deliverables.length) {
@@ -2083,17 +2641,25 @@ export class Kernel {
               runThreadId,
             );
           }
-          this.patchCardTo(runThreadId, live, {
-            badge: "回报",
+          // 产物在回报卡上也做成可点：用户不用等风铃汇总就能先看一眼
+          const delivered = (this.taskStore.get(taskId)?.deliverables ?? []).map((d) => ({
+            label: d.path.split(/[\\/]/).filter(Boolean).pop() ?? d.path,
+            ref: d.ref,
+            ...(d.bytes ? { bytes: d.bytes } : {}),
+          }));
+          this.cardTo(runThreadId, {
+            kind: "tool", badge: "回报", jobId: taskId,
             title: `${member} 回报 · ${taskId}`,
             meta: `${result.turns} 轮 · ${used}s`,
             body: result.report.slice(0, 1500),
+            author: this.memberAuthor(teamId, member),
+            ...(delivered.length ? { artifacts: delivered } : {}),
           });
           return;
         }
         if (result.status === "aborted") {
-          this.patchCardTo(runThreadId, live, {
-            badge: "已停止",
+          this.cardTo(runThreadId, {
+            kind: "tool", badge: "已停止", jobId: taskId,
             title: `${member} 已停止 · ${taskId}`,
             meta: `${used}s`,
             body: "用户中止。已写出的文件留在工作区。",
@@ -2101,21 +2667,32 @@ export class Kernel {
           return;
         }
         // 没回报：如实说清、把单子标成"卡住"让它在待你区里显形，别静默消失
-        this.patchCardTo(runThreadId, live, {
-          badge: "未完成",
+        this.cardTo(runThreadId, {
+          kind: "tool", badge: "未完成", jobId: taskId,
           title: `${member} 没交出回报 · ${taskId}`,
           meta: `${result.turns} 轮 · ${used}s`,
           body: `${result.report}\n\n最后 ${Math.min(steps.length, 3)} 步：\n${steps.slice(-3).join("\n") || "（一步都没做）"}`,
         });
         try {
-          this.taskStore.transition(taskId, "blocked");
+          this.taskStore.transition(taskId, "blocked", {
+            blockedReason: "no_report",
+            note:
+              result.status === "turn_limit"
+                ? `轮次用尽（${result.turns} 轮）仍未交出回报`
+                : "成员跑完但没有交出带证据的回报",
+          });
         } catch {
           /* 状态已经不在可迁移范围内就不强改 */
         }
+        this.escalateBlockedToLynn(
+          taskId,
+          result.status === "turn_limit" ? `轮次用尽（${result.turns} 轮）未交回报` : "成员跑完但没交出带证据的回报",
+          runThreadId,
+        );
       })
       .catch((err: unknown) => {
-        this.patchCardTo(runThreadId, live, {
-          badge: "崩溃",
+        this.cardTo(runThreadId, {
+          kind: "tool", badge: "崩溃", jobId: taskId,
           title: `${member} 执行崩溃 · ${taskId}`,
           meta: `${steps.length} 步`,
           body: err instanceof Error ? err.message : String(err),
@@ -2124,21 +2701,38 @@ export class Kernel {
       .finally(() => {
         clearInterval(stallTimer);
         this.memberRuns.delete(taskId);
+        // 成员结束/崩溃：立即评估一次心跳（不用等 5 分钟定时器）；是否叫醒模型由闸决定
+        this.requestHeartbeat("member_exit");
         this.memberAborts.delete(taskId);
         this.memberInbox.delete(taskId);
         this.memberStepAt.delete(taskId);
         this.memberBlocked.delete(taskId);
+        this.memberBlockedCmds.delete(taskId);
+        this.memberToolSince.delete(taskId);
+        this.progressAt.delete(taskId);
         if (this.memberActive.get(memberKey) === taskId) this.memberActive.delete(memberKey);
       });
     this.memberRuns.set(taskId, run);
     this.memberAborts.set(taskId, controller);
     this.memberActive.set(memberKey, taskId);
+    // 自动开工不再单独发系统卡：工作区、工具、只读授权全部并进这一张派单卡（实机刷两张是冗余）。
+    const readRoots = this.effectiveReadRoots(taskId, teamId);
+    // 群里"谁对谁做了什么"必须看得见：派单一律点名 @成员（工具层强制，模型忘了也补上）
+    const at = this.atMember(
+      member,
+      [
+        `工作区：${workdir}（可读写；删除类命令要你点头；回报后自动进审查台）`,
+        `只读授权：${readRoots.length ? readRoots.join("、") : "无（只能读工作区）"}`,
+      ].join("\n"),
+    );
     this.emit({
       type: "tool",
       badge: "派单",
       title: `${member} 开工 · ${taskId}`,
       meta: `工具：${allowed.join("、") || "无"}`,
-      body: `工作区：${workdir}（可读写；删除类命令要你点头；回报后自动进审查台）`,
+      body: at.body,
+      author: { kind: "lynn", name: "风铃" },
+      mentions: at.mentions,
     });
     return { ok: true, message: "成员已开工（后台执行），回报后会自动进待审查。" };
   }
@@ -2146,17 +2740,49 @@ export class Kernel {
   /**
    * 停掉一张正在跑的成员单（§4.10.4 缺的那一半）。
    * 之前想止损只有"解散整队"一条路，会连带停掉同队其他成员。
+   *
+   * 幂等：已经停过/已经结束的单再来一次不算失败——那正是用户想要的结果。
+   * 之前第二次点「停掉这张单」会回"停不下来：没有在跑的 …"（实机报障），
+   * 因为它把"已经没有在跑"当成了错误，而界面上的卡在成功停机后并没有换掉按钮。
    */
   cancelMemberTask(taskId: string): { ok: boolean; error?: string } {
     const controller = this.memberAborts.get(taskId);
-    if (!controller) return { ok: false, error: `没有在跑的 ${taskId}（可能已经结束或从未开工）` };
+    const rec0 = this.taskStore.get(taskId);
+    if (!controller) {
+      if (!rec0) return { ok: false, error: `没有这张单：${taskId}` };
+      // 已经停在终态/卡住：静默成功（界面 refresh 后按钮会跟着状态变）
+      if (rec0.status === "blocked" || rec0.status === "canceled" || rec0.status === "done") return { ok: true };
+      // 台账还挂着 in_progress 却没人在跑（进程异常退出、对账前）：顺手收口，不留"假进行中"
+      let fixed = false;
+      try {
+        this.taskStore.transition(taskId, "blocked", {
+          member: rec0.member,
+          blockedReason: "crash",
+          note: "成员已不在运行（用户点停收口）",
+        });
+        this.taskCase.append(taskId, { kind: "transition", text: "→ blocked（成员已不在运行）" });
+        fixed = true;
+      } catch {
+        /* 迁移不允许就保持原样 */
+      }
+      const note = fixed
+        ? `${taskId} 本来就没人在跑，已把状态收口为「卡住」。`
+        : `${taskId} 现在没有成员在跑（可能已经结束），不需要再停。`;
+      if (rec0.threadId) this.cardTo(rec0.threadId, { kind: "system", jobId: taskId, text: note });
+      else this.card({ kind: "system", text: note });
+      return { ok: true };
+    }
     controller.abort();
     // 停了就必须有可见变化：原来只 abort，工单永远停在 in_progress，台账上看着"还在跑"
     let moved = false;
     try {
       const rec = this.taskStore.get(taskId);
       if (rec && rec.status === "in_progress") {
-        this.taskStore.transition(taskId, "blocked", { member: rec.member });
+        this.taskStore.transition(taskId, "blocked", {
+          member: rec.member,
+          blockedReason: "user_stop",
+          note: "用户手动停机",
+        });
         this.taskCase.append(taskId, { kind: "transition", text: "→ blocked（用户手动停机）" });
         moved = true;
       }
@@ -2164,8 +2790,9 @@ export class Kernel {
       /* 状态已不在可迁移范围就不强改 */
     }
     const text = moved
-      ? `已停 ${taskId}：成员收手，工单转入「卡住」——可以右键取消或重新派单，不再一直挂在「进行中」。`
+      ? `已停 ${taskId}：成员收手，工单转入「卡住」。风铃会自己判断重做 / 换策略 / 关单，不用你来点取消。`
       : `已停 ${taskId}：成员在本轮模型调用结束后收手，已写出的文件留在工作区。`;
+    if (moved) this.escalateBlockedToLynn(taskId, "成员已停机");
     // C2 原则：工单相关卡片归出发会话——在别的会话点「停」不该把过程噪音写进当前会话
     const owner = this.taskStore.get(taskId)?.threadId;
     if (owner) this.cardTo(owner, { kind: "system", text });
@@ -2236,16 +2863,30 @@ export class Kernel {
 
   /**
    * 删除类命令的用户审批：挂一张审批卡（右栏「等你拍板」），最长等 5 分钟，超时按拒绝。
-   * 成员被拒就停手（工具层已挡住，不存在"换个写法绕过"）。
+   *
+   * 为什么是用户而不是风铃批：删除不可撤销，工具层只做"防御性拦截"，不做价值判断——
+   * 模型放行一次错误删除，代价由用户承担。所以定级**只有用户能批**。
+   * 但"低风险"不该打扰人：工具层已经把「本单开工后自己造的文件」（探针、临时落盘）自动放行了，
+   * 走到这里的都是工作区里的既有文件/目录（或参数说不清的删除）。
+   *
+   * 另外两处修正（实机反馈）：
+   *   1. 以前会把主会话 setTurn(awaiting_plan)，成员在后台等审批却把用户当前对话标成"等你裁决"；
+   *      成员是后台任务，不该劫持主会话状态。
+   *   2. 审批结果写进工单卷宗，风铃下一轮 check_progress 就能看到"用户批过/拒过哪条删除"。
    */
   private awaitCommandApproval(member: string, taskId: string, command: string): Promise<{ ok: boolean; reason?: string }> {
     const id = `ap-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 5)}`;
     const owner = this.taskStore.get(taskId)?.threadId ?? this.currentThreadId;
+    const root = this.taskStore.get(taskId)?.workspaceRoot ? `工作区：${this.taskStore.get(taskId)?.workspaceRoot}` : "";
     return new Promise((resolve) => {
+      // 等人点头期间成员是"合法静默"：不刷心跳的话 2 分钟后巡检会把它当卡死，风铃可能直接停掉它
+      const heartbeat = setInterval(() => this.memberStepAt.set(taskId, Date.now()), 30_000);
+      heartbeat.unref?.();
       const timer = setTimeout(() => {
+        clearInterval(heartbeat);
         this.pendingApprovals.delete(id);
         this.decisions = this.decisions.filter((d) => d.id !== id);
-        this.setTurn({ phase: "awaiting_plan" });
+        this.taskCase.append(taskId, { kind: "note", text: `删除审批超时自动拒绝：${command.slice(0, 200)}` });
         resolve({ ok: false, reason: "等了 5 分钟没人点头，按拒绝处理" });
       }, 300_000);
       timer.unref?.();
@@ -2253,7 +2894,13 @@ export class Kernel {
         kind: "delete",
         resolve: (ok: boolean) => {
           clearTimeout(timer);
+          clearInterval(heartbeat);
           this.pendingApprovals.delete(id);
+          this.decisions = this.decisions.filter((d) => d.id !== id);
+          this.taskCase.append(taskId, {
+            kind: "note",
+            text: ok ? `用户批准删除：${command.slice(0, 200)}` : `用户拒绝删除：${command.slice(0, 200)}`,
+          });
           resolve(ok ? { ok: true } : { ok: false, reason: "用户拒绝了这次删除" });
         },
       });
@@ -2261,7 +2908,7 @@ export class Kernel {
         id,
         from: member,
         title: `${member} 要删除文件（${taskId}）`,
-        detail: command,
+        detail: `命令：${command}\n${root}\n删除不可撤销；本单新造的临时文件已由系统自动放行，走到这里的都算既有文件。`,
         kind: "approval",
         jobId: taskId,
         at: new Date().toISOString(),
@@ -2271,7 +2918,6 @@ export class Kernel {
         jobId: taskId,
         text: `${member} 申请执行删除类命令，等你点头（5 分钟内不答复按拒绝）：\n${command}`,
       });
-      this.setTurn({ phase: "awaiting_plan" });
     });
   }
 
@@ -2282,8 +2928,30 @@ export class Kernel {
     return Math.min(Math.floor(raw), 8);
   }
 
-  /** 取消一张单（→ canceled，进归档带）：在跑的会先停下成员 */
-  dismissTask(taskId: string): { ok: boolean; error?: string } {
+  /**
+   * 工单卡住 → 交回风铃自己处置，不把「要不要取消」推给用户。
+   * 每单只注入一次（重做时清掉），正在生成时不叠加新回合。
+   */
+  private escalateBlockedToLynn(taskId: string, reason: string, owner?: string): void {
+    if (this.blockedHandled.has(taskId)) return;
+    this.blockedHandled.add(taskId);
+    const note = `${taskId} 卡住了（${reason}）。风铃会自己判断：重做 / 换策略 / 关单 / 汇报，不需要你来点取消。`;
+    const card = { kind: "system" as const, badge: "进度" as const, jobId: taskId, text: note };
+    if (owner) this.cardTo(owner, card);
+    else this.card(card);
+    if (this.busy) return;
+    this.submitTurn(
+      `【卡住处置】${taskId} 现在没有成员在跑（${reason}）。判断与处置由你做主，不要问用户要不要取消：` +
+        `目标仍成立 → assign_task 带 reworkTaskId=${taskId} 在原单上重做（状态与卷宗都留在这张单里，不要新建工单）；` +
+        `方向已错或做不了 → stop_task 带 dismiss=true 关单，再用 report_to_user 如实汇报；` +
+        `已有回报 → review_result / accept_or_reject 验收。`,
+      undefined,
+      { internal: true, ephemeral: true },
+    );
+  }
+
+  /** 取消一张单（→ canceled，进归档带）：在跑的会先停下成员；by 区分是风铃判定还是用户手动 */
+  dismissTask(taskId: string, by: "user" | "lynn" = "user"): { ok: boolean; error?: string } {
     const rec = this.taskStore.get(taskId);
     if (!rec) return { ok: false, error: `工单不存在：${taskId}` };
     if (rec.status === "canceled") return { ok: true };
@@ -2294,12 +2962,19 @@ export class Kernel {
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
-    this.taskCase.append(taskId, { kind: "note", text: "用户取消这张单" });
-    const text = `已取消 ${taskId}：从台账移到归档带（目录与卷宗保留，可搜可查）。`;
+    this.taskCase.append(taskId, {
+      kind: "note",
+      text: by === "lynn" ? "风铃判定不再继续，取消这张单" : "用户取消这张单",
+    });
+    const text = by === "lynn"
+      ? `风铃判定 ${taskId} 不再继续，已取消归档（目录与卷宗保留，可搜可查）。`
+      : `已取消 ${taskId}：从台账移到归档带（目录与卷宗保留，可搜可查）。`;
     if (rec.threadId) this.cardTo(rec.threadId, { kind: "system", text });
     else this.card({ kind: "system", text });
     if (this.decisions.some((d) => d.jobId === taskId)) {
       this.decisions = this.decisions.filter((d) => d.jobId !== taskId);
+      for (const [id, p] of this.pendingPlans) if (p.taskId === taskId) this.pendingPlans.delete(id);
+      this.persistPending();
       this.setTurn({});
     }
     return { ok: true };
@@ -2341,6 +3016,8 @@ export class Kernel {
     // 指向这张单的挂起裁决/契约一并撤掉，避免点开已删的工单
     if (this.decisions.some((d) => d.jobId === rec.id)) {
       this.decisions = this.decisions.filter((d) => d.jobId !== rec.id);
+      for (const [id, p] of this.pendingPlans) if (p.taskId === rec.id) this.pendingPlans.delete(id);
+      this.persistPending();
       this.setTurn({});
     }
   }
@@ -2408,15 +3085,47 @@ export class Kernel {
     const removed = [taskDir];
     // 工作区只要不在这张单的目录里，就不归这张单所有（可能是共享默认工作区或用户项目）——一律不动
     const kept = wsRoot && !isInside(taskDir, wsRoot) ? [wsRoot] : [];
-    const shared = kept.length > 0 && isInside(this.dataRoot, kept[0]);
-    const text = kept.length
-      ? shared
-        ? `已删除 ${taskId}：工单、卷宗与临时文件已移除；共享工作区 ${kept.join("、")} 未改动。`
-        : `已删除 ${taskId}：工单、卷宗与临时文件已移除；用户项目目录 ${kept.join("、")} 未改动。`
-      : `已删除 ${taskId}：工单、卷宗与工作区一并移除（不可恢复）。`;
-    if (rec.threadId) this.cardTo(rec.threadId, { kind: "system", text });
-    else this.card({ kind: "system", text });
+    this.queueRemovalCard({
+      taskId,
+      kept,
+      shared: kept.length > 0 && isInside(this.dataRoot, kept[0]),
+      threadId: rec.threadId,
+    });
     return { ok: true, removed, kept };
+  }
+
+  /**
+   * 删除消息合并（2026-11-12）：批量删归档单时，5 条「已删除」刷满一屏，
+   * 而且每条都在重复「工单、卷宗与临时文件已移除」。400ms 内连续删除合成一条汇总卡。
+   */
+  private queueRemovalCard(item: { taskId: string; kept: string[]; shared: boolean; threadId?: string }): void {
+    this.pendingRemovals.push(item);
+    if (this.removalTimer) return;
+    this.removalTimer = setTimeout(() => this.flushRemovalCards(), 400);
+    this.removalTimer.unref?.();
+  }
+
+  private flushRemovalCards(): void {
+    const batch = this.pendingRemovals;
+    this.pendingRemovals = [];
+    if (this.removalTimer) {
+      clearTimeout(this.removalTimer);
+      this.removalTimer = null;
+    }
+    if (!batch.length) return;
+    const ids = batch.map((b) => b.taskId);
+    const kept = [...new Set(batch.flatMap((b) => b.kept))];
+    const tail = kept.length
+      ? `；${batch.every((b) => b.shared) ? "共享工作区" : "用户项目目录"} ${kept.join("、")} 未改动`
+      : "；工作区一并移除，不可恢复";
+    const text =
+      batch.length === 1
+        ? `已删除 ${ids[0]}（工单/卷宗/临时文件已清${tail}）`
+        : `已删除 ${batch.length} 张单：${ids.join("、")}（工单/卷宗/临时文件已清${tail}）`;
+    const card = { kind: "system" as const, title: "清理", systemTone: "cleanup" as const, text };
+    const threadId = batch[0].threadId;
+    if (threadId) this.cardTo(threadId, card);
+    else this.card(card);
   }
 
   /**
@@ -2527,17 +3236,21 @@ export class Kernel {
     const text = note.trim();
     if (!text) return "补充指示不能为空：要它改什么、先交什么，写清楚。";
     if (!this.memberRuns.has(taskId)) {
-      return `${taskId} 没有在跑（可能已结束/已停）：要改要求请重新派单，或用 check_progress 看它交了什么。`;
+      return `${taskId} 没有在跑（可能已结束/已停）：要改要求就用 assign_task 带 reworkTaskId=${taskId} 在原单上重做，不要新开单；或 check_progress 看它交了什么。`;
     }
     const box = this.memberInbox.get(taskId) ?? [];
     box.push(text);
     this.memberInbox.set(taskId, box);
     const rec = this.taskStore.get(taskId);
     const owner = rec?.threadId ?? this.currentThreadId;
+    // 催促是风铃对某个成员说的话：走"她的话"而不是系统提示，并点名 @他
+    const at = this.atMember(rec?.member ?? "", `补了一句（下一轮生效）：${text.slice(0, 200)}`);
     this.cardTo(owner, {
-      kind: "system",
+      kind: "lynn",
       jobId: taskId,
-      text: `给 ${rec?.member ?? "成员"} 补了一句（下一轮生效）：${text.slice(0, 200)}`,
+      text: at.body,
+      author: { kind: "lynn", name: "风铃" },
+      mentions: at.mentions,
     });
     return `已送达 ${taskId}：成员下一轮会看到，不用重派。`;
   }
@@ -2557,7 +3270,8 @@ export class Kernel {
       return {
         taskId: id,
         member: rec?.member ?? "成员",
-        quietMs: now - (this.memberStepAt.get(id) ?? now),
+        // 工具正在跑（且没超上限）就不算静默：否则一次 3 分钟的构建就被判"卡住"
+        quietMs: this.toolBusy(id, now) ? 0 : now - (this.memberStepAt.get(id) ?? now),
         blocked: this.memberBlocked.get(id) ?? 0,
         lastStep: this.memberLastStep.get(key),
       };
@@ -2571,7 +3285,7 @@ export class Kernel {
     this.submitTurn(
       `[自动巡检] ${hit.text}\n\n请作为指挥者处理这张单：①check_progress 看细节；②能用一句话纠正就 nudge_member（下一轮生效，不用重派、不丢已写文件）；③明显做不到（例如要访问工作区外的目录）就 stop_task 停掉，并告诉我原因和替代方案；④只是慢就回一句「继续等」。不要重复派单。`,
       undefined,
-      { internal: true },
+      { internal: true, ephemeral: true },
     );
   }
 
@@ -2597,13 +3311,50 @@ export class Kernel {
     }
   }
 
-  private heartbeatTick(): void {
+  /** 真正注入模型的巡检轮次（被闸拦下的不算；测试与诊断用） */
+  private heartbeatRuns = 0;
+
+  /** 已注入的巡检轮次数：巡检轮是 ephemeral，不进 history，测试不能用 history 数 */
+  heartbeatRunCount(): number {
+    return this.heartbeatRuns;
+  }
+
+  private heartbeatTick(trigger: "timer" | "event" = "timer"): void {
     const prefs = this.settings.getPrefs();
     if (!prefs.heartbeat) return;
     if (this.busy) return;
     const now = Date.now();
     const minutes = Math.max(1, Math.round(prefs.heartbeatMinutes || 5));
-    if (now - this.lastHeartbeatAt < minutes * 60_000) return;
+    // 定时器按分钟节流；事件触发已过唤醒闸（合并窗口/同批冷却/每小时配额），这里不再拦。
+    if (trigger === "timer" && now - this.lastHeartbeatAt < minutes * 60_000) return;
+    // 卡住老化：一张单卡住超过 30 分钟还没人处置，就把她叫回来重新判断。
+    // 不走 escalateBlockedToLynn 的「每单只注入一次」——那一次若正忙就永久丢了，
+    // 单子会安静地烂在台账里，界面上只剩一个"卡住"标签。放在堆积闸之前，避免卡得越多越不管。
+    const aged = this.taskStore.list().filter((t) => {
+      if (t.status !== "blocked" || this.memberRuns.has(t.id)) return false;
+      const since = Date.parse(t.updatedAt);
+      if (!Number.isFinite(since) || now - since < BLOCKED_AGE_MS) return false;
+      return now - (this.blockedAgedNoted.get(t.id) ?? 0) >= BLOCKED_AGE_MS;
+    });
+    if (aged.length > 0) {
+      for (const t of aged) this.blockedAgedNoted.set(t.id, now);
+      const mins = Math.round(BLOCKED_AGE_MS / 60_000);
+      this.lastHeartbeatAt = now;
+      this.card({
+        kind: "system",
+        badge: "进度",
+        text: `${aged.length} 张单卡住超过 ${mins} 分钟没有处置：${aged.map((t) => t.id).join("、")}。已让她重新判断下一步。`,
+      });
+      this.heartbeatRuns += 1;
+      this.submitTurn(
+        `【卡住久未处置】${aged.map((t) => `${t.id}「${t.title}」`).join("、")} 卡住超过 ${mins} 分钟且没人跟进。` +
+          `判断与处置由你做主，不要问用户要不要取消：方向仍成立就 assign_task 带 reworkTaskId 在原单重做；` +
+          `做不了就 stop_task 带 dismiss=true 关单并如实汇报；已有回报就 review_result 验收。`,
+        undefined,
+        { internal: true, ephemeral: true },
+      );
+      return;
+    }
     const facts: HeartbeatFacts = collectHeartbeatFacts({
       tasks: this.taskStore.list(),
       runningTaskIds: [...this.memberRuns.keys()],
@@ -2611,6 +3362,53 @@ export class Kernel {
       schedules: this.scheduler.list(),
     });
     if (heartbeatIsEmpty(facts)) return;
+    // 堆积闸：堆到 7 张以上说明她已经处理不过来了。整轮跳过会把堆积冻在原处——没人清就
+    // 永远堆着，界面上只剩每 5 分钟一条一模一样的提示（用户视角就是白烧时间）；全量注入又
+    // 会把 15+ 张塞进上下文（实测模型随后在思考里复读 237 次）。折中：一轮只交最靠前的几张
+    // 让她清，其余只报数，下一轮接着清；对话流里同一堆积量 30 分钟只说一次。
+    const backlog = facts.awaitingReview.length + facts.orphanTasks.length + facts.stalledTasks.length;
+    if (backlog > 6) {
+      // 自适应节流：上一批没清掉就别每 5 分钟烧一轮——间隔逐级翻倍到 1 小时，清动了立刻恢复常速。
+      const gate = this.backlogGate;
+      if (gate.at > 0) {
+        if (now - gate.at < (gate.waitMin || minutes) * 60_000) return;
+        gate.waitMin = backlog >= gate.count ? Math.min(60, (gate.waitMin || minutes) * 2) : 0;
+      }
+      gate.count = backlog;
+      gate.at = now;
+      const capped = capHeartbeatFacts(facts, BACKLOG_BATCH);
+      const batch = [...capped.facts.awaitingReview, ...capped.facts.orphanTasks, ...capped.facts.stalledTasks].map(
+        (t) => t.taskId,
+      );
+      const key = `backlog:${backlog}`;
+      const notedAt = this.heartbeatNoted.get(key);
+      this.lastHeartbeatAt = now;
+      if (notedAt === undefined || now - notedAt >= 30 * 60_000) {
+        this.heartbeatNoted.set(key, now);
+        // 去重表瘦身：2 小时前的记录清掉，防长驻增长
+        for (const [k, at] of this.heartbeatNoted) {
+          if (now - at > 2 * 60 * 60_000) this.heartbeatNoted.delete(k);
+        }
+        this.card({
+          kind: "system",
+          badge: "心跳",
+          title: "巡检",
+          systemTone: "patrol",
+          text:
+            `有 ${backlog} 张单堆着（待审 ${facts.awaitingReview.length} / 停滞 ${facts.stalledTasks.length}）。` +
+            `已让她先清这一批：${batch.join("、")}` +
+            `${capped.dropped > 0 ? `，其余 ${capped.dropped} 张下一轮接着清` : ""}。你不用逐张处理。`,
+        });
+      }
+      this.heartbeatRuns += 1;
+      this.submitTurn(
+        heartbeatPrompt(capped.facts) + BACKLOG_ORDER,
+        undefined,
+        { internal: true, ephemeral: true },
+      );
+      this.log("heartbeat_backlog", { backlog, batch: batch.length, dropped: capped.dropped });
+      return;
+    }
     const sig = heartbeatSignature(facts);
     const notedAt = this.heartbeatNoted.get(sig);
     if (notedAt !== undefined && now - notedAt < 30 * 60_000) return;
@@ -2625,13 +3423,105 @@ export class Kernel {
       ...facts.stalledTasks.map((t) => `停滞 ${t.taskId}「${t.title}」（${t.status}）`),
       ...facts.scheduleIssues.map((s) => `定时任务异常 ${s.name}（${s.lastStatus}）`),
     ].join("；");
-    this.card({ kind: "system", badge: "心跳", text: `心跳巡检（${brief}）。机器事实已摆到桌面上，由风铃判断处置：停/催/捡/问/汇报。` });
-    this.submitTurn(heartbeatPrompt(facts), undefined, { internal: true });
+    this.card({
+      kind: "system",
+      badge: "心跳",
+      title: "巡检",
+      systemTone: "patrol",
+      text: `心跳巡检（${brief}）。机器事实已摆到桌面上，由风铃判断处置：停/催/捡/问/汇报。`,
+    });
+    this.heartbeatRuns += 1;
+    this.submitTurn(heartbeatPrompt(facts), undefined, { internal: true, ephemeral: true });
     this.log("heartbeat_fired", {
       awaitingReview: facts.awaitingReview.length,
       stalled: facts.stalledTasks.length,
       schedules: facts.scheduleIssues.length,
     });
+  }
+
+  /**
+   * 事件驱动唤醒（2026-11-11）：成员回报 / 退出 / 工单卡住 / 定时任务异常时立即评估，
+   * 不用等 5 分钟定时器。是否真叫醒模型由三道闸决定（合并窗口 / 同批冷却 / 每小时配额），
+   * 所以「秒级感知」不会变成「秒级烧 token」。
+   */
+  /**
+   * 工单落盘后的秒级评估（2026-11-11）：500ms 合并窗口。
+   * 只在「有成员在跑」时叫醒——纯落库（历史修复/测试）不值得打扰模型；
+   * 成员退出与回报另有显式触发，不会漏。
+   */
+  private onTaskStoreChanged(): void {
+    if (this.memberRuns.size === 0) return;
+    if (this.taskChangeTimer) return;
+    this.taskChangeTimer = setTimeout(() => {
+      this.taskChangeTimer = null;
+      this.requestHeartbeat("task_state");
+    }, 500);
+    this.taskChangeTimer.unref?.();
+  }
+
+  private requestHeartbeat(reason: string): void {
+    const prefs = this.settings.getPrefs();
+    if (!prefs.heartbeat) return;
+    let facts: HeartbeatFacts;
+    try {
+      facts = collectHeartbeatFacts({
+        tasks: this.taskStore.list(),
+        runningTaskIds: [...this.memberRuns.keys()],
+        pendingPlanTaskIds: [...this.pendingPlans.values()].map((p) => p.taskId),
+        schedules: this.scheduler.list(),
+      });
+    } catch {
+      return;
+    }
+    if (heartbeatIsEmpty(facts)) return;
+    const decision = heartbeatWakeDecision({
+      now: Date.now(),
+      busy: this.busy,
+      sig: heartbeatSignature(facts),
+      state: this.wakeGate,
+      minGapMs: prefs.heartbeatWakeMinMs ?? 20_000,
+      cooldownMs: 30 * 60_000,
+      perHour: prefs.heartbeatWakePerHour ?? 12,
+    });
+    this.wakeGate = decision.next;
+    if (!decision.wake) {
+      // busy 时事件会被丢弃；记下来等这一轮结束补评估一次，别让「成员退出」白白蒸发。
+      if (decision.reason === "busy") this.heartbeatPending = reason;
+      this.log("heartbeat_event_held", { reason, gate: decision.reason });
+      return;
+    }
+    this.log("heartbeat_event", { reason });
+    this.heartbeatTick("event");
+  }
+
+  /**
+   * 秒级探针（零 token、零 I/O）：只看内存里的成员运行态。
+   * 有成员在跑按 prefs.heartbeatProbeMs（默认 1s）看，空闲退避到 15s；
+   * 发现「沉默超过阈值」的成员才交给事件闸，由 requestHeartbeat 决定要不要叫醒模型。
+   */
+  private probeTick(): void {
+    const prefs = this.settings.getPrefs();
+    const base = prefs.heartbeatProbeMs ?? 1000;
+    if (prefs.heartbeat && base > 0) {
+      const now = Date.now();
+      for (const taskId of this.memberRuns.keys()) {
+        if (this.toolBusy(taskId)) {
+          this.silentNoted.delete(taskId);
+          continue;
+        }
+        const at = this.memberStepAt.get(taskId) ?? 0;
+        if (!at || now - at < MEMBER_STALL_MS) continue;
+        const noted = this.silentNoted.get(taskId) ?? 0;
+        if (now - noted < 5 * 60_000) continue;
+        this.silentNoted.set(taskId, now);
+        this.requestHeartbeat("member_silent");
+      }
+      for (const taskId of [...this.silentNoted.keys()]) {
+        if (!this.memberRuns.has(taskId)) this.silentNoted.delete(taskId);
+      }
+    }
+    this.probeTimer = setTimeout(() => this.probeTick(), probeDelayMs(this.memberRuns.size, base));
+    this.probeTimer.unref?.();
   }
 
   /** 在跑的成员单（taskId 列表）：界面据此显示「停」按钮，而不是让用户去猜 */
@@ -2656,6 +3546,29 @@ export class Kernel {
         return JSON.stringify({ teamId: team.id, teamName: team.name, members: team.reused?.members ?? 0 });
       }
       case "create_member": {
+        const profile: MemberProfile = {
+          name: String(args.name ?? ""),
+          role: String(args.role ?? ""),
+          goal: String(args.goal ?? ""),
+          boundaries: (args.boundaries as string[]) ?? [],
+          tools: (args.tools as string[]) ?? [],
+          model: "deepseek-chat",
+          // 15 轮封顶：一轮一次模型调用，40 轮能烧很久且大多数时候后 20 轮都在原地打转
+          limits: { maxTurns: 15, budgetTokens: 300000, wallClockMin: 30 },
+          outputContract: {
+            deliverable: String(args.deliverable ?? "按验收标准交付"),
+            evidence: ["改动文件清单/命令输出", "测试或核对结果"],
+            acceptance: (args.acceptance as string[]) ?? ["完成标准全部满足"],
+          },
+          escalateWhen: String(args.escalateWhen ?? "需要新依赖/越权/卡住"),
+          // 正文只讲做事风格。以前写「目标：${goal}」，等于把本次任务复写进档案，
+          // 实机 31 份档案全部被这样污染，跨任务复用与经验沉淀都无从谈起。
+          body: MEMBER_WORK_STYLE_BODY,
+          ...(isAvatarId(args.avatarId) ? { avatarId: args.avatarId } : {}),
+        };
+        // 闸放在建队之前：不合格就不该顺手多建一支空队。
+        const issues = validateMemberProfile(profile);
+        if (issues.length) return memberProfileRejection(issues);
         // 没有团队就自动建一支：不再让模型回头向用户要 teamId
         let teamId = this.resolveTeamId(args.teamId ? String(args.teamId) : undefined);
         if (!teamId) {
@@ -2666,28 +3579,7 @@ export class Kernel {
           teamId = team.id;
           this.card({ kind: "system", text: `还没有可用团队，已自建「${team.name}」（ID ${team.id}）。` });
         }
-        this.tools.createMember(
-          teamId,
-          {
-            name: String(args.name),
-            role: String(args.role),
-            goal: String(args.goal),
-            boundaries: (args.boundaries as string[]) ?? [],
-            tools: (args.tools as string[]) ?? [],
-            model: "deepseek-chat",
-            // 15 轮封顶：一轮一次模型调用，40 轮能烧很久且大多数时候后 20 轮都在原地打转
-            limits: { maxTurns: 15, budgetTokens: 300000, wallClockMin: 30 },
-            outputContract: {
-              deliverable: String(args.deliverable ?? "按验收标准交付"),
-              evidence: ["改动文件清单/命令输出", "测试或核对结果"],
-              acceptance: (args.acceptance as string[]) ?? ["完成标准全部满足"],
-            },
-            escalateWhen: String(args.escalateWhen ?? "需要新依赖/越权/卡住"),
-            body: `岗位由风铃在任务中招募。目标：${args.goal}`,
-            ...(isAvatarId(args.avatarId) ? { avatarId: args.avatarId } : {}),
-          },
-          args.justification as string | undefined,
-        );
+        this.tools.createMember(teamId, profile, args.justification as string | undefined);
         const hired = this.teamStore.readMember(teamId, String(args.name));
         const face = avatarById(hired.avatarId) ?? avatarFor(hired.name);
         this.emit({
@@ -2700,10 +3592,19 @@ export class Kernel {
         return `已招募 ${args.name}（岗位档案已落盘，用户可读可改）。团队 ID：${teamId}（**同一条任务线**的后续派单可省略 teamId；换新任务请显式给新团队，不要复用这条任务线的班底）。`;
       }
       case "assign_task": {
-        const taskId = String(args.taskId);
-        const member = String(args.member);
-        const brief = String(args.brief);
-        const deadline = String(args.deadline);
+        const member = String(args.member ?? "").trim();
+        const brief = String(args.brief ?? "");
+        const deadline = String(args.deadline ?? "");
+        if (!member || !brief || !deadline) {
+          return "assign_task 缺 member / brief / deadline：先把这三项补齐再派单。";
+        }
+        // 新会话第一句闸：不让记忆里的旧失败把一句闲聊变成新工单
+        if (!this.looksLikeExplicitTaskRequest()) {
+          return "这是新会话的第一句，看起来不像明确的委托。不要直接建队派单：先用 ask_user 问清「是不是真要办这件事、交付什么」，用户确认后再派。";
+        }
+        // 工单 ID 由系统生成：生产环境忽略模型自造的 taskId；NODE_TEST_CONTEXT 保留旧测试的显式 id
+        const explicitTaskId = typeof args.taskId === "string" ? args.taskId.trim() : "";
+        let taskId = explicitTaskId && process.env.NODE_TEST_CONTEXT ? explicitTaskId : this.nextTaskId();
         const tools = (args.tools as string[] | undefined) ?? undefined;
         // M3-07：插件工坊派单——工作区即草稿区（成员产物只能写进草稿，永不自动生效）
         const draftId = args.draftId ? String(args.draftId) : undefined;
@@ -2728,7 +3629,8 @@ export class Kernel {
           }
           workspace = ws;
         }
-        // 只读授权申请：只登记不生效——用户在契约卡上点「开始」才落权（模型不能自我扩权）
+        // 只读授权申请：先登记，开工时（用户点「开始」或用户已开的「自动开始」）才落权，
+        // 模型自己不能扩权。授权最终写在 TaskRecord.readRoots 上。
         let readRoots: string[] | undefined;
         if (Array.isArray(args.readRoots) && args.readRoots.length > 0) {
           const roots = (args.readRoots as unknown[]).map((r) => path.resolve(String(r).trim())).filter(Boolean);
@@ -2738,19 +3640,104 @@ export class Kernel {
           }
           readRoots = roots;
         }
+        // 授权随任务线继承：重派时模型常忘带 readRoots，新单变「零授权」→ 成员读工作区外
+        // 材料被拒 → 回报「需要用户授权」→ 再重派，2026-11-11 长任务里就是这样空转 20+ 次。
+        // 只继承**本会话里用户已批准过**的根（历史工单 readRoots），不是给模型开新权限。
+        if (!readRoots?.length) {
+          const inherited = new Set<string>();
+          for (const t of this.taskStore.list()) {
+            if (this.currentThreadId && t.threadId && t.threadId !== this.currentThreadId) continue;
+            for (const r of t.readRoots ?? []) inherited.add(r);
+          }
+          const usable = [...inherited].filter((r) => {
+            try {
+              return path.isAbsolute(r) && fs.existsSync(r) && fs.statSync(r).isDirectory();
+            } catch {
+              return false;
+            }
+          });
+          if (usable.length) readRoots = usable;
+        }
         let maxTurns: number | undefined;
+        let turnHint = "";
         if (args.maxTurns !== undefined) {
           const n = Number(args.maxTurns);
           if (!Number.isFinite(n) || n < 1) {
             return `maxTurns 必须是 ≥1 的数字（收到：${String(args.maxTurns)}）。`;
           }
           maxTurns = Math.min(Math.round(n), 40);
+          // 下限 8 轮（2026-11-12 定）：实机给了 3 轮，成员只够写出四章节骨架（每个标题一句话），
+          // 随后两轮重做白烧 20 万 token。轮次给少不会省钱，只会多跑几遍。
+          if (maxTurns < MIN_TURNS) {
+            const asked = maxTurns;
+            maxTurns = MIN_TURNS;
+            turnHint = `\n提醒：你给的 ${asked} 轮不够跑完一轮「读材料→产出→回报」，已按下限 ${MIN_TURNS} 轮执行。`;
+          }
         }
-        // 标题取简报里最像"任务名"的一行：跳过【背景】这类段落标记，取第一个正行；
-        // 全是标记行时去掉标记再看（原来直接把"【背景】用户要审查……"摆上台账，读不出任务是什么）
+        // 规模与证据策略（2026-11-11）：小任务 8 轮 / 120K、证据可选；关键任务
+        // （审计/对账/安全/可复跑）才强制证据。显式参数优先，其余按简报自动判定。
+        const acceptanceList = (Array.isArray(args.acceptance) ? args.acceptance : []).map(String);
+        const scale = estimateTaskScale(brief, acceptanceList);
+        const scaleBudget = scaleLimits(scale);
+        // 用户要的是结果，不看证据：默认 optional；只有显式 required 才做内部核验闸。
+        const evPolicy: EvidencePolicy =
+          args.evidencePolicy === "required" || args.evidencePolicy === "optional" ? args.evidencePolicy : "optional";
+        if (maxTurns === undefined) maxTurns = scaleBudget.maxTurns;
+        // 标题：优先用模型显式给的 title/taskTitle；否则取简报里最像"任务名"的一行。
+        // 2026-11-11：必须清洗——简报首行常是「上一单失败：被当成项目的 C:\Users\Ad…」，
+        // 硬砍 40 字会把半条 Windows 路径摆成主区大标题。
         const briefLines = brief.split("\n").map((l) => l.trim()).filter(Boolean);
         const plain = briefLines.find((l) => !/^【[^】]*】/.test(l)) ?? briefLines[0]?.replace(/^【[^】]*】\s*/, "") ?? "";
-        const title = (plain || taskId).slice(0, 40);
+        const explicitTitle =
+          (typeof args.title === "string" && args.title.trim()) ||
+          (typeof args.taskTitle === "string" && args.taskTitle.trim()) ||
+          "";
+        let title = cleanTaskTitle(explicitTitle || plain, taskId);
+        // 一件事 = 一张工单：重做 / 打回 / 卡住重来都归并到原单，状态与卷宗留在同一条时间线。
+        // 2026-11-11 实机：同一成员被重派 24 次，台账出现「（第2轮）」「（workspace模式重派）」
+        // 两张进行中 + 归档带 5 张旧单，全是同一件事。
+        const reworkParam = typeof args.reworkTaskId === "string" ? args.reworkTaskId.trim() : "";
+        let reworkRec: TaskRecord | null = null;
+        if (reworkParam) {
+          const rec = this.taskStore.get(reworkParam);
+          if (!rec) return `reworkTaskId 不存在：${reworkParam}。重做必须指向一张已有工单。`;
+          if (rec.status === "done" || rec.status === "canceled") return `${reworkParam} 已经结案，不能重做；要办新事就别传 reworkTaskId。`;
+          if (rec.member && rec.member !== member) return `${reworkParam} 原本派给 ${rec.member}，换人要另开一张单，不要覆盖别人的记录。`;
+          reworkRec = rec;
+        } else if (!process.env.NODE_TEST_CONTEXT) {
+          const dup = findDuplicateAssignment(
+            this.taskStore.list().map((t) => ({
+              taskId: t.id,
+              title: t.title,
+              member: t.member ?? "",
+              teamId: t.teamId,
+              status: t.status,
+            })),
+            { title, member },
+          );
+          if (dup) reworkRec = this.taskStore.get(dup.taskId);
+        }
+        let reworkRound = 0;
+        if (reworkRec) {
+          if (this.memberRuns.has(reworkRec.id)) {
+            return `${reworkRec.id} 还有成员在跑：用 nudge_member 补话，不要重复开工，也不要新开单。`;
+          }
+          reworkRound = this.teamStore.readAssignments(reworkRec.teamId, reworkRec.id).filter((a) => a.kind === "assign").length + 1;
+          if (reworkRound > 4) {
+            return `${reworkRec.id} 已经重做 ${reworkRound - 1} 轮。先 review_result / accept_or_reject 验收现有回报，` +
+              `或用 stop_task 带 dismiss=true 关单，别原地反复重做，也不要新开单。`;
+          }
+          taskId = reworkRec.id;
+          title = reworkRec.title;
+          this.blockedHandled.delete(taskId);
+          this.blockedAgedNoted.delete(taskId);
+          this.progressPolls.delete(taskId);
+          this.artifactsInspected.delete(taskId); // 重做后产物会换，旧的"已读"不算数
+          // 旧契约作废：同一张单不该叠两张「等你拍板」卡
+          for (const [id, p] of this.pendingPlans) if (p.taskId === taskId) this.pendingPlans.delete(id);
+          this.decisions = this.decisions.filter((d) => !(d.kind === "plan" && d.jobId === taskId));
+          this.persistPending();
+        }
         // M1-08 + §4.10.3 修正：显式 → 当前唯一在职队 → 模板复用 → 自动新建空队。
         // 绝不因为"团队不存在"把活退回去让用户给 ID（这正是此前卡死的根因）。
         let teamId = this.resolveTeamId(args.teamId ? String(args.teamId) : undefined);
@@ -2794,10 +3781,12 @@ export class Kernel {
           taskId,
           title,
           goal: brief,
-          acceptance: (args.acceptance as string[]) ?? ["完成标准全部满足"],
+          acceptance: acceptanceList.length ? acceptanceList : ["完成标准全部满足"],
           member,
           tools,
-          budgetTokens: 300_000,
+          // 按规模给预算：小任务不再照大任务的标准铺开
+          budgetTokens: scaleBudget.budgetTokens,
+          evidencePolicy: evPolicy,
           deadline,
         };
         // 工作区三态（2026-11-10）：显式目录 / "sandbox" / 省略=继承会话主根。
@@ -2822,9 +3811,19 @@ export class Kernel {
           workspace: wsFinal,
           readRoots,
           maxTurns,
+          evidencePolicy: evPolicy,
         };
-        // 还没开工：工单只落 todo，不能谎报"执行中"（七态见 §4.10.4）
-        if (!this.taskStore.get(taskId)) {
+        // 重做：复用原单，只改状态 + 追加卷宗；新任务才 create。
+        // blocked→todo / in_review→in_progress 都是状态机允许的迁移（task-store LEGAL）。
+        if (reworkRec) {
+          try {
+            if (reworkRec.status === "blocked") this.taskStore.transition(taskId, "todo", { threadId: this.ensureThreadId() });
+            else if (reworkRec.status === "in_review") this.taskStore.transition(taskId, "in_progress", { threadId: this.ensureThreadId() });
+          } catch {
+            /* 状态已就位 */
+          }
+          this.taskCase.append(taskId, { kind: "note", text: `第 ${reworkRound} 轮重做：沿用原工单，未新建工单` });
+        } else if (!this.taskStore.get(taskId)) {
           // 建单时就钉住会话与工作区：任务线判定、往来归属、成员在哪儿干活都靠它
           this.taskStore.create({
             id: taskId,
@@ -2834,11 +3833,20 @@ export class Kernel {
             threadId: this.ensureThreadId(),
             workspaceRoot: wsFinal,
             workspace: wsRec,
+            evidencePolicy: evPolicy,
           });
           this.taskStore.transition(taskId, "todo");
         }
+        const reworkNote = reworkRec
+          ? `\n这是 ${taskId} 的第 ${reworkRound} 轮重做：状态与卷宗都记在同一张单里，没有新建工单。`
+          : "";
+        const scaleLabel = scale === "small" ? "小" : scale === "large" ? "大" : "中";
+        const scaleNote =
+          `\n本单按${scaleLabel}任务配置：${maxTurns ?? scaleBudget.maxTurns} 轮 / ` +
+          `${Math.round(scaleBudget.budgetTokens / 1000)}K 预算；按交付结果验收。`;
         if (this.settings.getPrefs().autoStart) {
-          return `已按任务契约开工（设置里开启了自动开始）。${this.startAssignment(ctx)}`;
+          // 自动开始跳过契约卡；授权状态并进「派单」工具卡统一出，别再刷第二张系统卡。
+          return `已按任务契约开工（设置里开启了自动开始）。${this.startAssignment(ctx)}\n任务 ID：${taskId}（系统生成；后续查进度/催办都用它，不要自己编）。${turnHint}${reworkNote}${scaleNote}`;
         }
         const decisionId = `plan-${taskId}-${Date.now().toString(36)}`;
         this.pendingPlans.set(decisionId, { ...ctx, decisionId });
@@ -2847,13 +3855,15 @@ export class Kernel {
           id: decisionId,
           from: "计划",
           title: `任务契约 · ${title}`,
-          detail: `${brief}\n\n工作区（可读写）：${wsFinal}${permNote}`,
+          detail: `${brief}\n\n工作区（可读写）：${wsFinal}${permNote}${scaleNote}`,
           kind: "plan",
           jobId: taskId,
           at: new Date().toISOString(),
           plan,
           checks: plan.acceptance.map((a) => ({ ok: true, text: a })),
         });
+        // 契约必须落盘：重启后靠它把「等用户确认」的单认回来，而不是当成停滞催重做
+        this.persistPending();
         this.lastPlanAt = Date.now();
         this.setTurn({ phase: "awaiting_plan", taskId });
         this.emit({
@@ -2861,19 +3871,41 @@ export class Kernel {
           badge: "需要你拍板",
           title: `待你确认 · ${taskId}`,
           meta: `${member} · 截止 ${deadline}`,
-          body: `${brief}\n\n验收：${plan.acceptance.join("；")}\n工作区（可读写）：${wsFinal}${permNote}`,
+          body: `${brief}\n\n验收：${plan.acceptance.join("；")}\n工作区（可读写）：${wsFinal}${permNote}${scaleNote}`,
         });
-        return "任务契约已呈给用户，等你确认后才开工。不要重复派单，也不要自己模拟成员执行。";
+        return `任务契约已呈给用户，等你确认后才开工。不要重复派单，也不要自己模拟成员执行。任务 ID：${taskId}（系统生成；后续查进度/催办都用它，不要自己编）。${turnHint}${reworkNote}${scaleNote}`;
       }
       case "check_progress": {
         const taskId = String(args.taskId);
-        const teamId = this.resolveTeamId(args.teamId ? String(args.teamId) : undefined);
-        if (!teamId) return "本机还没有任何团队：先 create_team（ID 由系统生成），再招募派单。";
+        // 团队归属优先按工单认：resolveTeamId 是「按当前任务线猜」，同时有别的任务线的队时
+        // 会返回 undefined——2026-11-12 实机因此连报三次「本机还没有任何团队」，
+        // 风铃据此误判"成员没在跑"，同一张单被重派了 3 次。
+        let teamId = this.resolveTeamId(args.teamId ? String(args.teamId) : undefined);
+        if (!teamId) {
+          const owner = this.taskStore.get(taskId)?.teamId;
+          if (owner && this.teamStore.teamExists(owner)) teamId = owner;
+        }
+        if (!teamId) {
+          return this.taskStore.get(taskId)
+            ? `找不到 ${taskId} 归属的团队（工单记录在，团队可能已被解散）：带上 teamId 再查，或直接 accept_or_reject 结案。`
+            : `查不到这张单：${taskId}。ID 由系统生成，别自己编；先看台账或 check_roster。`;
+        }
         const p = {
           ...this.tools.checkProgress(teamId, taskId),
           running: this.memberRuns.has(taskId),
         };
-        return JSON.stringify(p, null, 2);
+        const sig = JSON.stringify(p, null, 2);
+        // 只读工具，但模型会把它当"等状态变"的轮询器：2026-11-11 长任务查了 246 次，
+        // 同一批工单反复查、不验收也不收尾，直到上下文被撑爆。结果没变就明确叫停。
+        const prev = this.progressPolls.get(taskId);
+        const count = prev?.sig === sig ? prev.count + 1 : 1;
+        this.progressPolls.set(taskId, { sig, count });
+        if (count >= 3) {
+          return `${sig}\n\n[轮询提醒] 第 ${count} 次查同一张单，结果没有任何变化。不要再轮询了：` +
+            `有回报就 review_result / accept_or_reject 验收，在跑就等，卡住就 nudge_member 或 stop_task，` +
+            `阶段齐了直接 report_to_user 收尾。继续查不会让状态自己变。`;
+        }
+        return sig;
       }
       case "nudge_member": {
         return this.nudgeMember(String(args.taskId), String(args.note ?? ""));
@@ -2883,10 +3915,96 @@ export class Kernel {
         const r = this.cancelMemberTask(taskId);
         if (!r.ok) return `停不下来：${r.error ?? "未知原因"}`;
         const why = args.reason ? `原因：${String(args.reason)}。` : "";
-        return `已停 ${taskId}。${why}工单转入「卡住」，可以向我说明情况，或让用户右键取消。`;
+        if (args.dismiss === true) {
+          const rec = this.taskStore.get(taskId);
+          const hasDeliverable = (rec?.deliverables?.length ?? 0) > 0;
+          const d = this.dismissTask(taskId, "lynn");
+          if (!d.ok) return `已停下，但没能取消：${d.error ?? "未知原因"}`;
+          if (!hasDeliverable) {
+            // 2026-11-11 实机：成员两次跑完没交付，她直接关单并说「已处理完毕」。
+            // 没有交付物就是失败，必须让用户看见失败本身。
+            this.card({
+              kind: "system",
+              badge: "进度",
+              jobId: taskId,
+              text: `未完成：${taskId} 没有任何交付物，已关单（卷宗保留）。`,
+              mentions: rec?.member ? [{ kind: "member", name: rec.member, memberId: rec.member }] : undefined,
+            });
+            return `已关单，但**这张单没有任何交付物**——不要对用户说「已处理完毕 / 已完成」。` +
+              `如实说明：这件事没做出来、成员两次跑完未交付、卡在哪；给出下一步（换人重做 / 换方式 / 请用户决定），` +
+              `不要说「如果你还需要就再告诉我」。`;
+          }
+          return `已停并取消 ${taskId}。${why}风铃判定不再继续：工单进归档带、卷宗保留，不需要用户确认。`;
+        }
+        return `已停 ${taskId}。${why}工单转入「卡住」，下一步由你决定并自己执行：` +
+          `目标仍成立 → assign_task 带 reworkTaskId=${taskId} 在原单上重做（不会新建工单）；` +
+          `方向已错或做不了 → stop_task 带 dismiss=true 关单并如实汇报。不要问用户要不要取消。`;
       }
       case "check_roster": {
         return JSON.stringify(this.tools.roster(args.teamId ? String(args.teamId) : undefined), null, 2);
+      }
+      case "read_artifact": {
+        /**
+         * 验收前读产物正文（2026-11-12）。此前风铃只能看到"文件存在 + 成员自述结构齐全"，
+         * 实机把一份只有四行章节标题的骨架稿验收通过，用户打开才发现没内容。
+         */
+        const taskId = String(args.taskId ?? "").trim();
+        if (!taskId) return "taskId 必填：要看哪张单的产物。";
+        const rec = this.taskStore.get(taskId);
+        if (!rec) return `没有这张单：${taskId}（ID 由系统生成，别自己编）。先 check_progress 或看台账。`;
+        // 读过就算"看过"（哪怕文件被挪走读不出来）：验收闸只要求她真去读过正文
+        this.artifactsInspected.add(taskId);
+        const base = path.resolve(this.dataRoot, "tasks", taskId);
+        const files: { ref: string; label: string; bytes?: number }[] = [];
+        for (const d of rec.deliverables ?? []) files.push({ ref: d.ref, label: d.path, bytes: d.bytes });
+        for (const e of rec.evidence ?? []) {
+          if (e.ref && !files.some((f) => f.ref === e.ref)) files.push({ ref: e.ref, label: e.label });
+        }
+        const wanted = String(args.ref ?? "").trim();
+        const pick = wanted
+          ? files.find((f) => f.ref === wanted || f.label === wanted || f.ref.endsWith(wanted))
+          : files[files.length - 1];
+        if (!pick) {
+          return wanted
+            ? `这张单里没有这个产物：${wanted}。用不带 ref 的调用看清单。`
+            : `这张单还没有可读产物（交付物 ${rec.deliverables?.length ?? 0} 件、证据 ${rec.evidence?.length ?? 0} 项）：先让成员交回报。`;
+        }
+        const ext =
+          path.extname(pick.ref).slice(1).toLowerCase() || path.extname(pick.label).slice(1).toLowerCase();
+        // 路径守卫与 preview.read 一致：只读卷宗内、或已登记为交付物的绝对路径
+        let target = path.resolve(base, pick.ref);
+        if (!target.startsWith(base + path.sep)) {
+          if (!path.isAbsolute(pick.ref) || !this.isTaskDeliverable(taskId, pick.ref)) {
+            return `这个产物不在卷宗里，读不了：${pick.ref}`;
+          }
+          target = path.resolve(pick.ref);
+        }
+        if (!fs.existsSync(target) || !fs.statSync(target).isFile()) return `产物文件不存在（可能已被移动）：${pick.ref}`;
+        const size = fs.statSync(target).size;
+        const kb = size >= 1024 ? `${(size / 1024).toFixed(1)}KB` : `${size}B`;
+        const limit = Math.max(1000, Math.min(Number(args.maxChars) || 8000, 20_000));
+        let body = "";
+        let note = "";
+        try {
+          if (ext === "docx" || ext === "docm") {
+            body = readDocxText(fs.readFileSync(target));
+            note = "Word 正文；表格按 | 列分隔";
+            if (!body.trim()) body = "（正文是空的：文档里没有段落也没有表格——这就是骨架稿/空稿）";
+          } else if (/^(png|jpe?g|gif|webp|bmp|pdf|zip|xlsx|pptx|doc)$/.test(ext)) {
+            return `产物 ${pick.ref}（${kb}）是二进制，文本核对读不出内容。看它是否存在、大小是否合理，或让用户点内置预览。`;
+          } else {
+            body = fs.readFileSync(target, "utf8");
+          }
+        } catch (err) {
+          return `读不出 ${pick.ref}：${err instanceof Error ? err.message : String(err)}`;
+        }
+        const clipped = body.length > limit;
+        return [
+          `产物：${pick.ref}（${kb}${note ? `，${note}` : ""}）` +
+            (files.length > 1 ? `\n这张单共 ${files.length} 件产物，读其它件就传 ref` : ""),
+          "-".repeat(48),
+          clipped ? `${body.slice(0, limit)}\n……（已截断，原文 ${body.length} 字；需要更多传 maxChars）` : body,
+        ].join("\n");
       }
       case "ship_plugin": {
         // M3-07（Q6 定稿 C）：只有 L0 技能插件允许她自启用，每次启用记审计并落卡告知用户
@@ -2921,17 +4039,32 @@ export class Kernel {
         return `已启用 L0 技能插件 ${enabled.id}。记得在汇报里告知用户（自启用须告知）。`;
       }
       case "review_result": {
+        const taskId = String(args.taskId ?? "");
+        const member = String(args.member ?? "");
+        const text = String(args.text ?? "").trim();
+        // 成员还在跑就别替它交回报：实机风铃把「成员正在后台执行」当成回报登记，
+        // 工单被推进待审查，用户点验收时产物还没生成（2026-11-12 实锤）。
+        if (this.memberRuns.has(taskId)) {
+          return `${taskId} 的成员还在跑：等它自己回报（回报会自动进待审查），要补话用 nudge_member。不要替成员写回报。`;
+        }
+        if (!text) return "回报正文不能为空：写清成员交回了什么、证据是什么。";
         const teamId = this.resolveTeamId(args.teamId ? String(args.teamId) : undefined);
         if (!teamId) return "本机还没有任何团队，无从登记回报。先 create_team（ID 由系统生成）。";
-        return this.registerReport(
-          teamId,
-          String(args.taskId),
-          String(args.member),
-          String(args.text),
-          (args.evidence as string[]) ?? [],
-        );
+        return this.registerReport(teamId, taskId, member, text, (args.evidence as string[]) ?? []);
       }
       case "accept_or_reject": {
+        // 硬闸：有产物的单，验收前必须 read_artifact 看过正文。实机她只看
+        // "文件存在 + 成员说结构齐全"就把四行标题的骨架稿验收通过了（2026-11-12）。
+        if (args.verdict === "accept") {
+          const rec = this.taskStore.get(String(args.taskId));
+          const hasArtifacts = (rec?.deliverables?.length ?? 0) + (rec?.evidence?.length ?? 0) > 0;
+          if (hasArtifacts && !this.artifactsInspected.has(String(args.taskId))) {
+            return (
+              `${args.taskId} 有产物但还没读过正文：先 read_artifact（不带 ref 读最后一件）把内容过一遍再下结论。` +
+              "「文件存在」「成员说结构齐全」不是验收——骨架稿、占位符、空章节只有读了正文才看得见。"
+            );
+          }
+        }
         const teamId = this.resolveTeamId(args.teamId ? String(args.teamId) : undefined);
         if (!teamId) return "本机还没有任何团队，无从验收。先 create_team（ID 由系统生成）。";
         const r = this.tools.acceptOrReject(teamId, String(args.taskId), args.verdict as "accept" | "reject", {
@@ -2976,14 +4109,19 @@ export class Kernel {
             whyNot = err instanceof Error ? err.message : String(err);
           }
         }
+        const atReview = this.atMember(
+          String(args.member ?? ""),
+          args.verdict === "accept"
+            ? undefined
+            : `不合格：${args.what}\n期望：${args.expect}\n时限：${args.deadline}`,
+        );
         this.emit({
           type: "tool",
           badge: "审查",
           title: `${args.verdict === "accept" ? "验收通过" : "打回"} · ${args.member}`,
-          body:
-            args.verdict === "accept"
-              ? undefined
-              : `不合格：${args.what}\n期望：${args.expect}\n时限：${args.deadline}`,
+          body: atReview.body,
+          author: { kind: "lynn", name: "风铃" },
+          mentions: atReview.mentions,
         });
         return r.escalated
           ? "打回轮数已达上限，已自动升级问用户，等待其决定。"
@@ -2991,9 +4129,18 @@ export class Kernel {
             ? archived
               ? "已代验归档：这张单结案，不再占用用户。整件事做完后用 report_to_user 把最终结果汇报给她，她只对那一份拍板。"
               : `验收结论已记录，但没能归档（${whyNot}）。先补齐可说清的证据，或确认这张单确实在待验状态。`
-            : "已打回，并写清了改什么、期望什么、时限。";
+            : `已打回，并写清了改什么、期望什么、时限。让 ${args.taskId ?? "这张单"} 的原成员重做时，用 assign_task 带 reworkTaskId=${String(args.taskId ?? "")} 在同一张单上重派（状态与卷宗都留在这张单里），不要新开工单。`;
       }
       case "report_to_user": {
+        // 汇报里也不许反问产出细节（放哪/叫什么/什么格式/让用户自己存）——那会把活推回用户
+        const reportText = `${String(args.conclusion ?? "")} ${String(args.unfinished ?? "")} ${String(args.decisionsNeeded ?? "")}`;
+        if (isAskingUserForOutputDetails(reportText)) return REPLY_GUARD_HINT;
+        // 没有交付物却宣称「已完成 / 已处理完毕」= 把失败包装成完成（2026-11-11 实机）
+        const doneTaskId = String(args.taskId ?? "");
+        const doneRec = doneTaskId ? this.taskStore.get(doneTaskId) : null;
+        if (doneRec && (doneRec.deliverables?.length ?? 0) === 0 && claimsDone(reportText)) {
+          return NO_DELIVERABLE_HINT;
+        }
         const teamId = this.resolveTeamId(args.teamId ? String(args.teamId) : undefined);
         // 没有团队就不落账（没队可落），但汇报本身必须照常呈给用户
         if (teamId) {
@@ -3015,6 +4162,13 @@ export class Kernel {
         } catch {
           // 没有权威工单（临时派活）：汇报照常呈上，不弹章
         }
+        // 产物做成可点的清单：报告里只给绝对路径字符串，用户还得自己去资源管理器里翻
+        // （实机：汇报写完 "C:\Users\...\漏洞文档测试-续.docx"，用户只能自己去打开）
+        const artifacts = (doneRec?.deliverables ?? []).map((d) => ({
+          label: d.path.split(/[\\/]/).filter(Boolean).pop() ?? d.path,
+          ref: d.ref,
+          ...(d.bytes ? { bytes: d.bytes } : {}),
+        }));
         this.emit({
           type: "tool",
           badge: "汇报",
@@ -3026,8 +4180,10 @@ export class Kernel {
             unfinished: ((args.unfinished as string[]) ?? []).join("；"),
             decision: ((args.decisionsNeeded as string[]) ?? []).join("；"),
           },
+          ...(artifacts.length ? { artifacts } : {}),
           body: [
             `结论：${args.conclusion}`,
+            artifacts.length ? `产物（${artifacts.length} 件，卡片上可直接点开）：${artifacts.map((a) => a.label).join("、")}` : null,
             ((args.evidence as string[]) ?? []).length ? `证据：${(args.evidence as string[]).join("、")}` : null,
             ((args.unfinished as string[]) ?? []).length ? `未完成：${(args.unfinished as string[]).join("；")}` : null,
             ((args.decisionsNeeded as string[]) ?? []).length
@@ -3040,6 +4196,8 @@ export class Kernel {
         return "汇报已呈给用户。";
       }
       case "ask_user": {
+        // 问「文件放哪/叫什么/什么格式/发我」= 把产出细节推回用户，直接拒发并纠正。
+        if (isAskingUserForOutputDetails(String(args.question ?? ""))) return REPLY_GUARD_HINT;
         // 刚呈上任务契约又问"是否确认开工"= 重复确认：契约卡自己带「开始/修改/驳回」，
         // 再来一问只会把用户的回答变成一轮新对话（真实事故：一次派单问了两遍）
         if (this.pendingPlans.size > 0 && Date.now() - this.lastPlanAt < 120_000) {
@@ -3054,6 +4212,7 @@ export class Kernel {
           kind: "question",
           at: new Date().toISOString(),
         });
+        this.persistPending();
         this.emit({
           type: "tool",
           badge: "需要你拍板",
@@ -3085,7 +4244,7 @@ export class Kernel {
         this.memory.save(kind, `${current}\n- ${stamp} ${entry}\n`);
         const hot = this.hotSyncSystemPrompt();
         this.card({ kind: "system", badge: "记忆", text: `已沉淀到${label}：${entry.slice(0, 120)}` });
-        this.log("memory_saved_by_agent", { kind, chars: entry.length, hot });
+        this.log("memory_saved_by_agent", { scope: kind, chars: entry.length, hot });
         return `已写入${label}并热更新到你的系统提示词（hot=${hot}）。同类任务再遇到时你会直接想起来。`;
       }
       case "create_plugin_draft": {
@@ -3106,7 +4265,7 @@ export class Kernel {
           kind: "system",
           text: `插件草稿 ${meta.draftId} 已开：${title}（${kind}）。接下来派插件工程师开发，产物只能写进草稿区。`,
         });
-        this.log("draft_created_by_agent", { draftId: meta.draftId, kind });
+        this.log("draft_created_by_agent", { draftId: meta.draftId, tier: kind });
         return JSON.stringify({
           draftId: meta.draftId,
           draftDir,
@@ -3214,6 +4373,16 @@ export class Kernel {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;
     }
+    if (this.probeTimer) {
+      clearTimeout(this.probeTimer);
+      this.probeTimer = null;
+    }
+    if (this.taskChangeTimer) {
+      clearTimeout(this.taskChangeTimer);
+      this.taskChangeTimer = null;
+    }
+    // 退出前把还没合并的删除消息落掉，别让一条「已删除」凭空消失
+    this.flushRemovalCards();
     this.kbWatch?.close();
     this.kbWatch = null;
     for (const w of this.mcpWatchers) {
@@ -3239,6 +4408,43 @@ export class Kernel {
     this.host = null;
     this.hostStamp = "";
     if (host) await host.stop().catch(() => undefined);
+  }
+
+  /**
+   * 流式复读熔断：模型退化时会把同一段话连打几百次（2026-11-11 实测 237 次 / 17.5K 字），
+   * 正文与思考都必须盯。命中就截掉重复段、落卡说明、主动 abort 本轮，不靠用户点停止。
+   */
+  private guardRepetition(): void {
+    if (this.repetitionAborted || !this.liveCard) return;
+    const live = this.liveCard;
+    const text = live.text ?? "";
+    const thinking = live.thinking ?? "";
+    const len = text.length + thinking.length;
+    if (len - this.lastRepetitionScan < 400) return;
+    this.lastRepetitionScan = len;
+    const parts: { kind: string; value: string }[] = [
+      { kind: "正文", value: text },
+      { kind: "思考", value: thinking },
+    ];
+    for (const part of parts) {
+      const hit = detectTrailingRepetition(part.value);
+      if (!hit) continue;
+      this.repetitionAborted = true;
+      const kept = stripTrailingRepetition(part.value, hit);
+      if (part.kind === "正文") live.text = kept;
+      else live.thinking = kept;
+      this.notify({ type: "delta", text: live.text, thinking: live.thinking, cardId: live.id });
+      this.card({
+        kind: "system",
+        badge: "已拦截",
+        text: `模型在${part.kind}里连续重复同一段内容 ${hit.repeats} 次（约 ${hit.chars} 字），已自动停止本轮，前文保留。` +
+          `这通常是长上下文或任务卡住后的退化：建议新建会话把任务拆小，或换个模型再试。`,
+      });
+      this.log("repetition_aborted", { mode: part.kind, repeats: hit.repeats, chars: hit.chars });
+      void this.host?.abort().catch(() => undefined);
+      this.chatAbort?.abort();
+      return;
+    }
   }
 
   /** 本轮最后一次模型错误（官方 message_end 带 stopReason=error / errorMessage） */
@@ -3282,6 +4488,7 @@ export class Kernel {
         });
       }
     }
+    if (typeof delta === "string" || typeof thinkingDelta === "string") this.guardRepetition();
     // 模型错误由 Pi 写进最终消息；只记录，等本轮结束再决定要不要落卡（重试中别抢先判失败）
     if (ev.type === "message_end") {
       const m = ev.message as { role?: string; stopReason?: string; errorMessage?: string } | undefined;
@@ -3334,12 +4541,32 @@ export class Kernel {
     const extra = [...this.l1.toolSchemas(), ...this.mcp.schemas()].sort((a, b) =>
       a.function.name.localeCompare(b.function.name),
     );
-    return [...TOOL_JSON, ...extra];
+    return [...COMPACT_TOOL_JSON, ...extra];
   }
 
   /** 工具面里实际有哪些名字（诊断/测试用） */
   toolNames(): string[] {
     return this.allTools().map((t) => t.function.name);
+  }
+
+  /** 系统生成工单 ID：不透明、可排序，避免模型把「失败复盘」当 id 自造 */
+  private nextTaskId(): string {
+    this.taskSeq += 1;
+    return `task-${Date.now().toString(36)}-${this.taskSeq.toString(36)}`;
+  }
+
+  /**
+   * 新会话第一句闸：只有 1 条用户消息，且短到不像明确委托时，不允许直接建队派单。
+   * 目的：记忆里的旧失败/旧任务不能把一句「随便聊聊」变成新工单。
+   * 模型收到提示后应先用 ask_user 确认，用户确认（第二轮）后自然放行。
+   */
+  private looksLikeExplicitTaskRequest(): boolean {
+    const users = this.history.filter((m) => m.role === "user");
+    if (users.length !== 1) return true;
+    const text = String(users[0].content ?? "").trim();
+    if (!text) return false;
+    if (text.length >= 24) return true;
+    return /(帮我|请|需要|整理|生成|做|写|查|分析|核对|修复|调研|导出|转|抓|下载|测试|部署|审|对比|总结|翻译|爬|建|改|优化|跑|算)/.test(text);
   }
 
   /**
@@ -3431,7 +4658,8 @@ export class Kernel {
     if (text.trim()) {
       live.text = text;
       this.history.push({ role: "assistant", content: text });
-      this.persist("assistant", text);
+      // 巡检轮的助手回复也不落时间线：它只服务这一轮，不进长期上下文
+      if (this.ephemeralFrom < 0) this.persist("assistant", text);
     }
     this.patchCard(live, { streaming: false });
   }
@@ -3441,8 +4669,13 @@ export class Kernel {
     this.liveCard = live;
     this.lastModelError = null;
     this.turnErrorReported = false;
+    this.repetitionAborted = false;
+    this.lastRepetitionScan = 0;
+    this.progressPolls.clear();
     const beforeIn = this.usage.sessionIn;
     const beforeOut = this.usage.sessionOut;
+    const beforeCacheRead = this.usage.cacheRead;
+    const beforeCacheWrite = this.usage.cacheWrite;
     // 从收到指令那一刻就开始计时：避免冷启动/首 token 期间界面完全静默
     this.setTurn({ activity: "model", activityName: undefined, activityAt: Date.now() });
     try {
@@ -3459,7 +4692,7 @@ export class Kernel {
       // 模型报错但一个字都没产出时，必须给错误卡，不能留下空气泡当作"不回复"
       // （错误由 onAgentEvent 写入，TS 不跨方法追踪属性 narrowing，这里显式收成局部变量）
       const modelError = this.lastModelError as string | null;
-      if (modelError && !(live.text ?? "").trim()) {
+      if (modelError && !(live.text ?? "").trim() && !this.repetitionAborted) {
         const fail = this.classifyError(new Error(modelError));
         this.failTurn(fail.code, `${fail.message}（端点原文：${modelError.slice(0, 160)}）`, fail.action);
         return;
@@ -3468,19 +4701,26 @@ export class Kernel {
       // 用量以 Pi 的 session stats 为准（含缓存与上下文占比），不自估
       const stats = await host.stats();
       if (stats) {
+        // Pi 的 stats 是会话累计值：单轮命中率必须用「本轮增量」算，不能拿累计值冒充
+        const dIn = Math.max(0, stats.tokens.input - beforeIn);
+        const dRead = Math.max(0, (stats.tokens.cacheRead ?? 0) - beforeCacheRead);
+        const dWrite = Math.max(0, (stats.tokens.cacheWrite ?? 0) - beforeCacheWrite);
+        const turnPrompt = dIn + dRead + dWrite;
+        const turnHitRate = turnPrompt > 0 ? Math.round((dRead / turnPrompt) * 1000) / 10 : null;
         this.setUsage({
           sessionIn: stats.tokens.input,
           sessionOut: stats.tokens.output,
-          turnIn: Math.max(0, stats.tokens.input - beforeIn),
+          turnIn: dIn,
           turnOut: Math.max(0, stats.tokens.output - beforeOut),
           cacheRead: stats.tokens.cacheRead ?? 0,
           cacheWrite: stats.tokens.cacheWrite ?? 0,
+          turnHitRate,
           cost: stats.cost ?? 0,
           contextTokens: stats.contextTokens,
           contextWindow: stats.contextWindow,
           contextPercent: stats.contextPercent ?? null,
         });
-        // 缓存命中可观测：按轮落一行（agent.log），命中率掉时能回查到哪一轮、哪次变更之后
+        // 缓存命中可观测：累计与单轮都落一行，命中率掉时能回查到哪一轮
         {
           const prompt = stats.tokens.input + (stats.tokens.cacheRead ?? 0) + (stats.tokens.cacheWrite ?? 0);
           this.log("usage_round", {
@@ -3489,6 +4729,7 @@ export class Kernel {
             cacheRead: stats.tokens.cacheRead ?? 0,
             cacheWrite: stats.tokens.cacheWrite ?? 0,
             hitRate: prompt > 0 ? Math.round(((stats.tokens.cacheRead ?? 0) / prompt) * 1000) / 10 : null,
+            turnHitRate,
           });
         }
         // 工单追溯：这一段是哪个 Pi session 跑的
@@ -3513,14 +4754,28 @@ export class Kernel {
   }
 
   /** 直连降级路径：Pi 不可用时仍可用（原实现保留） */
-  private async runChatDirect(cfg: NonNullable<ReturnType<SettingsStore["getModel"]>>, apiKey: string): Promise<void> {
+  private async runChatDirect(
+    cfg: NonNullable<ReturnType<SettingsStore["getModel"]>>,
+    apiKey: string,
+    /** 当轮真正要发给模型的消息（含群内定向说明）；只改当轮，历史前缀不动 */
+    userText?: string,
+  ): Promise<void> {
+    this.repetitionAborted = false;
+    this.lastRepetitionScan = 0;
+    this.progressPolls.clear();
     // 软上限降级（M2-11）：达软限且有备用模型就换；没有就如实提示继续用（不静默停机）
     const budget = evaluateBudget(this.usage.sessionIn + this.usage.sessionOut, this.settings.getPrefs().softBudgetTokens);
     const picked = pickModel(cfg, this.settings.getPrefs().fallbackModel, budget.mode);
     if (picked.note) this.card({ kind: "system", badge: "工具", title: "预算提示", body: picked.note });
     const usedModel = picked.model;
     const live = this.card({ kind: "lynn", text: "", streaming: true });
+    this.liveCard = live;
     this.setTurn({ activity: "model", activityName: undefined, activityAt: Date.now() });
+    // 本回合取消器：session.abort 直接 abort()，fetch 与 SSE body 立即断开
+    const controller = new AbortController();
+    this.chatAbort = controller;
+    let attempts = 1;
+    let retryNotified = false;
     const patchLive = (text: string, streaming: boolean) => {
       live.text = text;
       live.streaming = streaming;
@@ -3530,8 +4785,18 @@ export class Kernel {
         // cardId 必须带：渲染层只认带 cardId 的 delta，否则降级路径等于没有流式
         this.notify({ type: "delta", text, cardId: live.id });
       }
+      if (streaming) this.guardRepetition();
     };
     const messages: ChatMessage[] = [{ role: "system", content: this.systemPrompt() }, ...this.history];
+    // 群内定向说明只改当轮 user 消息（尾部）：历史前缀原样，缓存命中不被 @ 抖动打穿
+    if (userText) {
+      for (let i = messages.length - 1; i >= 0; i -= 1) {
+        if (messages[i].role === "user") {
+          messages[i] = { role: "user", content: userText };
+          break;
+        }
+      }
+    }
     // 技能注入只改当轮 user 消息（尾部）：system prompt 与历史前缀原样，缓存命中不被技能抖动打穿
     if (this.pendingSkillText) {
       for (let i = messages.length - 1; i >= 0; i -= 1) {
@@ -3541,25 +4806,53 @@ export class Kernel {
         }
       }
     }
+    const endpointHost = (() => {
+      try {
+        return new URL(cfg.baseUrl).host;
+      } catch {
+        return cfg.baseUrl;
+      }
+    })();
     try {
       for (let round = 0; round < 8; round++) {
         let roundText = "";
-        const result = await streamChat({
-          baseUrl: cfg.baseUrl,
-          apiKey,
-          model: usedModel,
-          messages,
-          tools: this.allTools(),
-          onDelta: (t) => {
-            roundText += t;
-            patchLive(roundText, true);
+        const result = await streamChatWithRetry(
+          {
+            baseUrl: cfg.baseUrl,
+            apiKey,
+            model: usedModel,
+            messages,
+            tools: this.allTools(),
+            signal: controller.signal,
+            onDelta: (t) => {
+              roundText += t;
+              patchLive(roundText, true);
+            },
           },
-        });
+          {
+            maxAttempts: 3,
+            onRetry: ({ attempt, status, delayMs }) => {
+              attempts = attempt + 1; // 失败也要如实说「重试过几次」，不能只在成功时更新
+              this.log("llm_retry", { attempt, status, delayMs, model: usedModel, endpoint: endpointHost });
+              if (!retryNotified) {
+                retryNotified = true;
+                this.card({
+                  kind: "system",
+                  text: `模型暂时不可用${status ? `（HTTP ${status}）` : ""}，${Math.round(delayMs)}ms 后自动重试；已产出的内容不会丢。`,
+                });
+              }
+            },
+          },
+        );
+        attempts = result.attempts;
         this.tokensUsed += result.promptTokens + result.completionTokens;
-        // 口径与 Pi 路径一致：sessionIn = 未命中缓存的输入；命中/写入单独累计（端点没报就是 0）
+        // 口径统一：sessionIn = 未命中缓存的输入；命中/写入单独累计。
+        // DeepSeek 的 miss 已在 promptTokens 里，不再重复记到 cacheWrite（2026-11-11 修）。
         const hit = Math.max(0, result.cacheRead);
         const write = Math.max(0, result.cacheWrite);
-        const unhit = Math.max(0, result.promptTokens - hit);
+        const unhit = Math.max(0, result.promptTokens - hit - write);
+        const turnPrompt = result.promptTokens + write;
+        const turnHitRate = turnPrompt > 0 ? Math.round((hit / turnPrompt) * 1000) / 10 : null;
         this.setUsage({
           turnIn: result.promptTokens,
           turnOut: result.completionTokens,
@@ -3567,9 +4860,17 @@ export class Kernel {
           sessionOut: this.usage.sessionOut + result.completionTokens,
           cacheRead: this.usage.cacheRead + hit,
           cacheWrite: this.usage.cacheWrite + write,
+          turnHitRate,
           contextTokens: this.usage.contextTokens + result.promptTokens + result.completionTokens,
         });
-        this.log("usage_direct", { in: result.promptTokens, out: result.completionTokens, cacheRead: hit, cacheWrite: write });
+        this.log("usage_direct", {
+          in: result.promptTokens,
+          out: result.completionTokens,
+          cacheRead: hit,
+          cacheWrite: write,
+          cacheMiss: result.cacheMiss,
+          hitRate: turnHitRate,
+        });
         // 按次记账（M2-11）+ 软上限检查（达限提示/可切备用模型；不静默停机）
         appendUsage(this.dataRoot, {
           at: new Date().toISOString(),
@@ -3608,11 +4909,22 @@ export class Kernel {
       patchLive((live.text || "") + "\n\n（工具轮次达到上限，先停在这里。）", false);
       this.emit({ type: "done", tokens: 0 });
     } catch (err) {
+      // 用户主动停止：只收掉流状态，保留已产出文本；session.abort 已经发过 done，不再报错误
+      if (controller.signal.aborted || this.abortRequested) {
+        this.patchCard(live, { streaming: false });
+        return;
+      }
       const fail = this.classifyError(err);
-      if (!live.text) live.text = fail.message;
+      const status = err instanceof LlmError ? err.status : undefined;
+      const retryNote = attempts > 1 ? `已自动重试 ${attempts - 1} 次仍未成功` : "未触发自动重试";
+      // 错误卡要能行动：状态码、端点、重试情况、下一步动作，不再是泛泛一句「服务端错误」
+      const message = `${fail.message}${status ? `（HTTP ${status}）` : ""} 端点：${endpointHost}。${retryNote}；可点「重试」再发一次，或去设置检查端点/Key。`;
+      if (!live.text) live.text = message;
       this.patchCard(live, { streaming: false, code: fail.code });
-      this.failTurn(fail.code, fail.message, fail.action);
+      this.failTurn(fail.code, message, fail.action);
     } finally {
+      if (this.chatAbort === controller) this.chatAbort = null;
+      if (this.liveCard === live) this.liveCard = null;
       this.setTurn({ activity: undefined, activityName: undefined, activityAt: undefined });
     }
   }
@@ -3621,11 +4933,17 @@ export class Kernel {
    * 提交一轮：卡片 + 落史 + 回合状态 + 结束后排水（排队输入）。
    * `internal`：巡检回合——不进「你」的声音、不改会话标题，用户看到的是那张「开始跟进」卡。
    */
-  private submitTurn(text: string, att?: TurnAttachments, opts?: { internal?: boolean }): void {
+  private submitTurn(
+    text: string,
+    att?: TurnAttachments,
+    opts?: { internal?: boolean; ephemeral?: boolean; mentions?: FeedMention[] },
+  ): void {
     // 会话可以一条不剩：这时候开口说话，就地开一条再写，不用先点「新建会话」
     this.ensureThreadId();
     // 技能激活（M2-10）：每轮按输入重算，命中后 allowed-tools 强制到工具门禁
     this.activateSkillsFor(text);
+    // 群内 @（2026-11-12）：只认本群成员，陌生名字已被 resolveMentions 丢掉
+    const mentions = opts?.mentions ?? [];
     // 本轮随附（M1-16）：文件注入 + 图片落盘；带不上的如实出卡，不静默丢
     let fullText = text;
     if (opts?.internal) {
@@ -3644,13 +4962,23 @@ export class Kernel {
       this.card({
         kind: "user",
         text,
+        author: { kind: "user" },
+        mentions: mentions.length ? mentions : undefined,
         meta: built.pieces.length ? `随附 ${built.pieces.map((p) => p.label).join("、")}` : undefined,
       });
     } else {
-      this.card({ kind: "user", text });
+      this.card({
+        kind: "user",
+        text,
+        author: { kind: "user" },
+        mentions: mentions.length ? mentions : undefined,
+      });
     }
+    // 巡检轮（心跳/卡住处置）：消息只用于这一轮，结束后从 history 摘掉、不写时间线。
+    // 否则每 5 分钟一次巡检会把上下文越撑越大（token 与延迟都跟着涨）。
+    if (opts?.ephemeral) this.ephemeralFrom = this.history.length;
     this.history.push({ role: "user", content: fullText });
-    this.persist("user", fullText);
+    if (!opts?.ephemeral) this.persist("user", fullText);
     this.busy = true;
     this.l1.setBusy(true);
     this.abortRequested = false;
@@ -3658,12 +4986,25 @@ export class Kernel {
     if (!opts?.internal) this.threads.autoTitle(this.currentThreadId, text);
     this.checkpoints.begin(`turn-${Date.now()}`);
     this.setTurn({ phase: "accepted", busy: true, startedAt: new Date().toISOString(), canUndo: false, changedFiles: [] });
-    void this.runChat(fullText).finally(() => {
+    // 群内定向说明只拼当轮（尾部）：历史前缀原样，前缀缓存不被 @ 抖动打穿
+    const ctxText = mentions.length ? `${fullText}\n\n${this.groupDirective(mentions)}` : fullText;
+    void this.runChat(ctxText).finally(() => {
+      // 巡检轮收尾：把这轮消息（含工具往返）从 history 摘掉，上下文回到巡检前
+      if (this.ephemeralFrom >= 0) {
+        this.history.splice(this.ephemeralFrom);
+        this.ephemeralFrom = -1;
+      }
       this.busy = false;
       this.l1.setBusy(false);
       const phase: TurnPhase = this.turn.phase === "failed" ? "failed" : "idle";
       this.setTurn({ phase, busy: false, startedAt: undefined });
       this.drainQueue();
+      // 忙时被挡下的心跳事件：这一轮（或队列）收尾后再评估一次；闸仍然生效，不会补成刷屏
+      if (this.heartbeatPending) {
+        const pending = this.heartbeatPending;
+        this.heartbeatPending = null;
+        this.requestHeartbeat(`resume:${pending}`);
+      }
     });
   }
 
@@ -3675,7 +5016,7 @@ export class Kernel {
       return;
     }
     this.setTurn({ pending: this.queue.length, phase: "accepted" });
-    this.submitTurn(next.text, next.attachments);
+    this.submitTurn(next.text, next.attachments, { mentions: next.mentions });
   }
 
   /** 插话：只对当前回合生效，不另起回合 */
@@ -3743,7 +5084,7 @@ export class Kernel {
         try {
           await this.runChatRpc(userText);
         } catch (err) {
-          if (this.abortRequested) return; // 用户点了停止：不要再降级重跑
+          if (this.abortRequested || this.repetitionAborted) return; // 用户停止 / 复读熔断：不要再降级重跑同一轮
           // 运行时不可用：明确告知已降级（不静默），本轮仍能答完
           const fail = this.classifyError(err);
           this.card({
@@ -3752,12 +5093,13 @@ export class Kernel {
             code: fail.code,
             action: "reload",
           });
-          await this.runChatDirect(cfg, apiKey);
+          await this.runChatDirect(cfg, apiKey, userText);
         }
       } else {
-        await this.runChatDirect(cfg, apiKey);
+        await this.runChatDirect(cfg, apiKey, userText);
       }
     } catch (err) {
+      if (this.repetitionAborted) return; // 熔断已落卡说明，不再叠一张「端点错误」
       const fail = this.classifyError(err);
       this.failTurn(fail.code, fail.message, fail.action);
     }
@@ -3888,6 +5230,27 @@ export class Kernel {
     return teams;
   }
 
+  /**
+   * 卷宗时间线尾部 → 详情区「第几轮 / 状态时间线」。
+   * 只读：不迁移状态、不改写卷宗；全量事件始终留在磁盘 timeline.jsonl。
+   * 也是阶段状态机的数据底座——阶段进度由代码持有，不再让模型在压缩后的上下文里自己记。
+   */
+  private trackTimeline(taskId: string): { round: number; timeline: { at: string; kind: string; text: string }[] } {
+    let events: TimelineEvent[] = [];
+    try {
+      events = this.taskCase.readTimeline(taskId);
+    } catch {
+      return { round: 1, timeline: [] };
+    }
+    const round = Math.max(1, events.filter((e) => e.kind === "assign").length);
+    const timeline = events.slice(-6).map((e) => ({
+      at: e.at,
+      kind: e.kind,
+      text: String(e.text ?? "").replace(/\s+/g, " ").slice(0, 120),
+    }));
+    return { round, timeline };
+  }
+
   private buildTrack(): BoardData["track"] {
     const dir = path.join(this.dataRoot, "team");
     const track: BoardData["track"] = [];
@@ -3923,7 +5286,7 @@ export class Kernel {
             teamId: task.teamId,
             title: task.title,
             status: task.status,
-            statusNote: `${task.status} · ${task.member ?? "风铃"} · 证据 ${task.evidence.length}`,
+            statusNote: task.statusNote ?? `${task.status} · ${task.member ?? "风铃"} · 证据 ${task.evidence.length}`,
             member: task.member ?? last.member,
             at: task.updatedAt,
             threadId: task.threadId,
@@ -3973,7 +5336,7 @@ export class Kernel {
         teamId: task.teamId,
         title: task.title,
         status: task.status,
-        statusNote: `${task.status} · ${task.member ?? "风铃"} · 证据 ${task.evidence.length}`,
+        statusNote: task.statusNote ?? `${task.status} · ${task.member ?? "风铃"} · 证据 ${task.evidence.length}`,
         member: task.member,
         at: task.updatedAt,
         threadId: task.threadId,
@@ -3988,7 +5351,8 @@ export class Kernel {
         deliverables: task.deliverables?.map((d) => ({ path: d.path, ref: d.ref, bytes: d.bytes })),
       });
     }
-    return track.reverse();
+    // 只读派生：轮次与状态时间线供详情区展示；不改变任何工单状态，也不写卷宗。
+    return track.reverse().map((t) => ({ ...t, ...this.trackTimeline(t.id) }));
   }
 
   /** 工单标题：优先用派单简报首行，退化到工单号（不编造） */
@@ -3997,7 +5361,7 @@ export class Kernel {
     try {
       const parsed = JSON.parse(briefJson) as { brief?: string };
       const first = (parsed.brief ?? "").split("\n")[0]?.trim();
-      return first ? first.slice(0, 40) : taskId;
+      return first ? cleanTaskTitle(first, taskId) : taskId;
     } catch {
       return taskId;
     }
@@ -4027,6 +5391,69 @@ export class Kernel {
   noteKernelStart(): { safeMode: boolean; starts: number; fingerprint: string } {
     const r = this.pluginSet.noteStart();
     return { ...r, fingerprint: this.pluginSet.fingerprint().fingerprint };
+  }
+
+  /** 本机免费/本地网关探测：只读 /models，不启动任何进程，不向公网发请求 */
+  async listGateways(): Promise<RpcContracts["gateway.list"]["result"]> {
+    return { gateways: await probeGateways() };
+  }
+
+  /**
+   * 自定义端点模型发现（异步；handle 是同步路由，壳层单独 await 这两个方法）。
+   * 本机/局域网/非 HTTPS 必须显式确认风险，避免把 Key 静默发给本地免费网关。
+   */
+  async modelDiscover(params: RpcContracts["model.discover"]["params"]): Promise<RpcContracts["model.discover"]["result"]> {
+    const baseUrl = params.baseUrl?.trim() ?? "";
+    if (!baseUrl) return { ok: false, error: "Base URL 要填。" };
+    let apiKey = params.apiKey?.trim() ?? "";
+    if (!apiKey && params.id) apiKey = loadApiKey(this.settings, (b) => this.decryptBlob(b), params.id) ?? "";
+    if (!apiKey) return { ok: false, error: "请先填写这个端点的 API Key。" };
+    const risk = endpointRiskLevel(baseUrl);
+    if (risk !== "remote" && !params.riskAccepted) {
+      return {
+        ok: false,
+        error:
+          risk === "local"
+            ? "这是本机/局域网网关：探测会把 Key 发给该端点，且可能复用第三方免费额度。请勾选风险确认后再发现模型。"
+            : "这个端点不是 HTTPS：探测会把 Key 明文发出去。请勾选风险确认后再发现模型。",
+      };
+    }
+    try {
+      const r = await discoverModels(baseUrl, apiKey);
+      return { ok: true, models: r.models, latencyMs: r.latencyMs, url: r.url };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  /** 端点健康检查：/models 优先（不花 token），端点不实现时退回一次最小 chat 探针 */
+  async modelHealth(params: RpcContracts["model.health"]["params"]): Promise<RpcContracts["model.health"]["result"]> {
+    let baseUrl = params.baseUrl?.trim() ?? "";
+    let model = params.model?.trim() ?? "";
+    let apiKey = params.apiKey?.trim() ?? "";
+    if (params.id) {
+      const cfg = this.settings.getModel(params.id);
+      if (!cfg) return { ok: false, error: "模型不存在" };
+      baseUrl = baseUrl || cfg.baseUrl;
+      model = model || cfg.model;
+      if (!apiKey) apiKey = loadApiKey(this.settings, (b) => this.decryptBlob(b), params.id) ?? "";
+    }
+    if (!baseUrl) return { ok: false, error: "Base URL 要填。" };
+    if (!apiKey) return { ok: false, error: "Key 无法读取，请重新填一次。" };
+    try {
+      const r = await discoverModels(baseUrl, apiKey, 6000);
+      return { ok: true, latencyMs: r.latencyMs, modelCount: r.models.length, via: "models" };
+    } catch (modelsErr) {
+      if (!model) {
+        return {
+          ok: false,
+          error: `${modelsErr instanceof Error ? modelsErr.message : String(modelsErr)}（该端点没有 /models，且未指定模型，无法做 chat 探针）`,
+        };
+      }
+      const probe = await probeEndpoint({ baseUrl, apiKey, model });
+      if (probe.ok) return { ok: true, latencyMs: probe.latencyMs, via: "chat" };
+      return { ok: false, error: probe.error };
+    }
   }
 
   handle<M extends RpcMethod>(method: M, params: unknown): RpcContracts[M]["result"] {
@@ -4108,14 +5535,24 @@ export class Kernel {
       }
 
       case "feed.send": {
-        const { text, mode = "queue", attachments } = params as {
+        const { text, mode = "queue", attachments, mentions: mentionHint } = params as {
           text: string;
           mode?: "steer" | "queue";
           attachments?: TurnAttachments;
+          mentions?: { name: string }[];
         };
         const trimmed = text.trim();
         if (!trimmed) return { ok: true, queued: false } as RpcContracts[M]["result"];
         const hasAtt = Boolean(attachments && (attachments.files?.length || attachments.images?.length));
+        // 群内 @（2026-11-12）：只认本群成员，陌生名字丢弃并如实说清——@ 谁由内核定，不信前端
+        const { mentions, unknown } = this.resolveMentions(trimmed, mentionHint);
+        if (unknown.length) {
+          this.card({
+            kind: "system",
+            systemTone: "notice",
+            text: `群里没有 ${unknown.map((n) => `@${n}`).join("、")}：@ 只能点名本群成员，这句按普通消息处理。`,
+          });
+        }
         if (this.busy) {
           if (mode === "steer") {
             let steerText = trimmed;
@@ -4129,10 +5566,17 @@ export class Kernel {
               steerText = built.fullText;
               if (built.pieces.length) meta = `插话 · 随附 ${built.pieces.map((p) => p.label).join("、")}`;
             }
-            this.card({ kind: "user", text: trimmed, meta });
+            this.card({
+              kind: "user",
+              text: trimmed,
+              meta,
+              author: { kind: "user" },
+              mentions: mentions.length ? mentions : undefined,
+            });
             this.history.push({ role: "user", content: steerText });
             this.persist("user", steerText);
-            void this.steerTurn(steerText);
+            // 定向说明只进当轮插话，不进历史（历史前缀原样，缓存命中不受影响）
+            void this.steerTurn(mentions.length ? `${steerText}\n\n${this.groupDirective(mentions)}` : steerText);
             return { ok: true, queued: false } as RpcContracts[M]["result"];
           }
           const item: QueuedInput = {
@@ -4141,12 +5585,13 @@ export class Kernel {
             at: new Date().toISOString(),
             mode: "queue",
             ...(hasAtt ? { attachments } : {}),
+            ...(mentions.length ? { mentions } : {}),
           };
           this.queue.push(item);
           this.setTurn({});
           return { ok: true, queued: true, queueId: item.id } as RpcContracts[M]["result"];
         }
-        this.submitTurn(trimmed, attachments);
+        this.submitTurn(trimmed, attachments, { mentions });
         return { ok: true, queued: false } as RpcContracts[M]["result"];
       }
 
@@ -4191,7 +5636,7 @@ export class Kernel {
         this.assertMemoryKind(kind);
         const versionId = this.memory.save(kind, text);
         const hot = this.hotSyncSystemPrompt();
-        this.log("memory_save", { kind, chars: text.length, versionId, hot });
+        this.log("memory_save", { scope: kind, chars: text.length, versionId, hot });
         return { ok: true, versionId, hot } as RpcContracts[M]["result"];
       }
 
@@ -4487,6 +5932,16 @@ export class Kernel {
         }
       }
 
+      // 成员战绩：按需拉，不进每轮快照（快照很频繁，扫 assignments 太贵）
+      case "team.member.record": {
+        const { teamId, name } = params as { teamId: string; name: string };
+        try {
+          return this.teamStore.memberRecord(teamId, name) as RpcContracts[M]["result"];
+        } catch {
+          return { tasks: 0, accepted: 0, rejected: 0, escalations: 0 } as RpcContracts[M]["result"];
+        }
+      }
+
       // 编制管理（用户手动）：列 / 改岗位 / 删成员 / 解散
       case "team.list": {
         try {
@@ -4534,6 +5989,16 @@ export class Kernel {
             ...(body !== undefined ? { body: String(body) } : {}),
             ...(avatarId !== undefined ? { avatarId } : {}),
           });
+          // 手改同样过规范，但只记审计不阻断：历史档案（含任务化名字）要能继续编辑。
+          // 新增入口 create_member 是硬闸；这里给的是可回查的偏离记录。
+          const profileIssues = validateMemberProfile(updated, { skipName: true });
+          if (profileIssues.length) {
+            this.log("member_profile_warning", {
+              teamId,
+              member: updated.name,
+              rules: [...new Set(profileIssues.map((i) => i.rule))],
+            });
+          }
           this.card({ kind: "system", text: `已更新成员「${updated.name}」的岗位（${updated.role}）：下一单按新说明执行。` });
           return { ok: true } as RpcContracts[M]["result"];
         } catch (err) {
@@ -4615,8 +6080,11 @@ export class Kernel {
         this.abortRequested = true;
         this.queue = [];
         this.setTurn({ pending: 0 });
-        const aborted = Boolean(this.host?.isRunning());
-        if (aborted) {
+        // 直连路径：立即断开 fetch/SSE；Pi 路径：让 worker 自己中止。
+        const directAborted = Boolean(this.chatAbort && !this.chatAbort.signal.aborted);
+        this.chatAbort?.abort();
+        const aborted = Boolean(this.host?.isRunning()) || directAborted;
+        if (this.host?.isRunning()) {
           // 不等 RPC 回执：停止要立刻可见；失败由看门狗对账兜住
           void this.host!.abort().catch(() => undefined);
         }
@@ -4655,6 +6123,8 @@ export class Kernel {
         const d = this.decisions.find((x) => x.id === id);
         if (!d) return { ok: false, error: "这个问题已经处理过了" } as RpcContracts[M]["result"];
         this.decisions = this.decisions.filter((x) => x.id !== id);
+        // 处理掉一条就同步落盘：重启后不该再弹一张已经拍过的问询
+        this.persistPending();
 
         if (d.kind === "approval") {
           const pending = this.pendingApprovals.get(id);
@@ -4669,21 +6139,28 @@ export class Kernel {
         if (d.kind === "plan") {
           const plan = this.pendingPlans.get(id);
           this.pendingPlans.delete(id);
+          this.persistPending();
           if (action === "start" && plan) {
             const r = this.startAssignment(plan);
             // 契约一确认就从右栏消失，目标/验收/截止不该跟着没：落一张带 jobId 的卡，
             // 图纸「往来」能回看，跨会话的 task.feed 也读得到
-            this.card({
-              kind: "tool",
-              badge: "派单",
-              title: `${plan.member} · ${plan.taskId} · 契约`,
-              jobId: plan.taskId,
-              body: [
+            const atPlan = this.atMember(
+              plan.member,
+              [
                 `目标：${d.plan?.goal ?? plan.brief.split("\n")[0] ?? ""}`,
                 `验收：${(d.plan?.acceptance ?? []).join("；") || "（未写）"}`,
                 `截止：${d.plan?.deadline ?? plan.deadline}`,
                 `团队：${plan.teamId}`,
               ].join("\n"),
+            );
+            this.card({
+              kind: "tool",
+              badge: "派单",
+              title: `${plan.member} · ${plan.taskId} · 契约`,
+              jobId: plan.taskId,
+              body: atPlan.body,
+              author: { kind: "lynn", name: "风铃" },
+              mentions: atPlan.mentions,
             });
             this.card({ kind: "system", text: `计划已确认。${r}` });
             return { ok: true } as RpcContracts[M]["result"];
@@ -4769,6 +6246,7 @@ export class Kernel {
               jobId: p.taskId,
               at: new Date().toISOString(),
             });
+            this.persistPending();
           }
           return { ok: true, status: r.record.status, escalated: r.escalated } as RpcContracts[M]["result"];
         } catch (err) {
@@ -4963,6 +6441,8 @@ export class Kernel {
             isDefault: e.id === defaultId,
             isThreadModel: !!threadId && e.id === threadId,
             updatedAt: e.updatedAt,
+            riskLevel: endpointRiskLevel(e.baseUrl),
+            riskAccepted: Boolean(e.riskAcceptedAt),
           })),
           defaultModelId: defaultId,
           threadModelId: threadId,
@@ -4972,9 +6452,21 @@ export class Kernel {
       }
 
       case "model.save": {
-        const p = params as { id?: string; label: string; provider: string; baseUrl: string; model: string; apiKey?: string };
+        const p = params as { id?: string; label: string; provider: string; baseUrl: string; model: string; apiKey?: string; riskAccepted?: boolean };
         if (!p.baseUrl?.trim() || !p.model?.trim()) {
           return { ok: false, error: "Base URL 和模型都要填。" } as RpcContracts[M]["result"];
+        }
+        const risk = endpointRiskLevel(p.baseUrl);
+        const previous = p.id ? this.settings.getModels().find((e) => e.id === p.id) : undefined;
+        const sameEndpoint = previous && normalizeBaseUrl(previous.baseUrl) === normalizeBaseUrl(p.baseUrl);
+        if (risk !== "remote" && !p.riskAccepted && !(sameEndpoint && previous?.riskAcceptedAt)) {
+          return {
+            ok: false,
+            error:
+              risk === "local"
+                ? "这是本机/局域网网关：可能复用第三方免费额度，prompt 可能被上游记录，且随时可能限流或下线。请勾选风险确认后再保存。"
+                : "这个端点不是 HTTPS：API Key 与内容会明文传输。请勾选风险确认后再保存。",
+          } as RpcContracts[M]["result"];
         }
         try {
           const entry = this.settings.upsertModel({
@@ -4984,6 +6476,7 @@ export class Kernel {
             baseUrl: p.baseUrl,
             model: p.model,
             apiKey: p.apiKey,
+            riskAcceptedAt: p.riskAccepted ? new Date().toISOString() : undefined,
           });
           return { ok: true, id: entry.id } as RpcContracts[M]["result"];
         } catch (err) {

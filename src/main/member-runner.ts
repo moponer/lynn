@@ -10,7 +10,7 @@ import { Toolkit, TOOLKIT_SCHEMAS, resolveReadable, resolveWithin, type ToolkitO
  * 真实的工具循环。硬约束在代码里，不靠提示词自律（§4.10.3）：
  *  - 成员可用的执行工具 = 本次分配 ∩ 内置执行工具（管理型 8 件套永远进不来）
  *  - 文件读写被钉死在任务工作区（workspace 逃逸在工具层直接拒绝）
- *  - submit_report 无证据不收（§4.10.5 证据原则前置到成员侧）
+ *  - submit_report 证据可选；提供了就必须真实存在（关键任务的强制点在任务层 evidencePolicy）
  *  - 轮次上限来自档案 limits.maxTurns，超限如实报「未完成」
  *
  * 注：run_command 目前只做 cwd 钉扎 + 超时 + 截断，OS 级隔离是 M1-11
@@ -24,6 +24,7 @@ export const MEMBER_EXEC_TOOLS = [
   "run_command",
   "office_read_table",
   "office_write_table",
+  "office_write_docx",
   "browser_navigate",
   "browser_snapshot",
   "browser_click",
@@ -91,15 +92,32 @@ export interface MemberRunInput {
   readRoots?: string[] | (() => string[]);
   /** 用户授权的可写附加根：只影响命令 cwd；文件写入仍只走工作区 */
   writableRoots?: string[] | (() => string[]);
-  /** 删除类命令的审批闸：成员能改代码，但删除必须用户点头 */
+  /** 删除类命令的审批闸：成员能改代码，但删除必须用户点头（低风险自清理工具层会自己放行） */
   onBeforeCommand?: (command: string) => Promise<{ ok: boolean; reason?: string }>;
+  /** 本单开工时间（ms）：用于判定"这些删除目标是不是本单自己造的" */
+  runStartedAt?: number;
+  /** 权限档=全权时，工作区内删除不再逐次点头（壳注入） */
+  autoDeleteInWorkspace?: () => boolean;
   model: { baseUrl: string; apiKey: string; model: string };
   /** 测试注入；默认真流式 */
   chatFn?: MemberChatFn;
-  /** 进度回调（内核用来发工具卡） */
-  onEvent?: (ev: { kind: "tool" | "note" | "turn"; text: string; progress?: number }) => void;
+  /**
+   * 进度回调（内核用来发工具卡）。
+   * `tool-start` 在工具**开始**时就发——长命令跑 100s 期间界面不能一动不动（实机把"在跑"看成"卡死"）。
+   */
+  onEvent?: (ev: { kind: "tool" | "tool-start" | "note" | "turn"; text: string; progress?: number }) => void;
   /** 命令审计回调（M1-11：壳写 audit.jsonl） */
-  onAudit?: (ev: { kind: "cmd_blocked" | "cmd_net" | "cmd_run"; command: string; why?: string; cwd: string }) => void;
+  onAudit?: (ev: {
+    kind: "cmd_blocked" | "cmd_net" | "cmd_run" | "cmd_auto";
+    command: string;
+    why?: string;
+    cwd: string;
+  }) => void;
+  /**
+   * 工具调用审计（2026-11-11）：只给内核按类别记日志用，不改变执行语义。
+   * 实机「成员跑完未交付」时，只能看到没交回报，看不到它到底调没调工具、调成什么样。
+   */
+  onToolCall?: (ev: { name: string; args: string; outcome: string; ok: boolean; ms: number }) => void;
   /** 写前通知（M1-12 检查点） */
   onBeforeWrite?: (rel: string, full: string, existed: boolean) => void;
   /** office 能力桥接（M2-06）：壳按引擎健康注入；不注入时成员调 office 工具会得到如实提示 */
@@ -142,12 +160,16 @@ const SUBMIT_REPORT_SCHEMA: ToolSchema = {
   function: {
     name: "submit_report",
     description:
-      "把这一单的结论交回给风铃：text 开头标状态（【完成】/【完成有保留】/【受阻】/【缺上下文】），写结论与未完成项；evidence 列真实存在的证据文件（至少 1 个，没有证据不收）；deliverables 列用户要带走的交付物（会永久保留）。",
+      "把这一单的结果交回给风铃：text 开头标状态（【完成】/【完成有保留】/【受阻】/【缺上下文】），写结论、交付了什么与未完成项；deliverables 列用户要带走的产物（会永久保留）；evidence 只做内部核对，可不填。",
     parameters: {
       type: "object",
       properties: {
         text: { type: "string", description: "结论 / 未完成 / 需要升级的说明" },
-        evidence: { type: "array", items: { type: "string" }, description: "工作区或只读根里的真实文件路径，至少 1 个" },
+        evidence: {
+          type: "array",
+          items: { type: "string" },
+          description: "可选：工作区或只读根里真实存在的文件路径；关键任务风铃会要求，普通任务不强制",
+        },
         deliverables: {
           type: "array",
           items: { type: "string" },
@@ -187,7 +209,15 @@ export function memberSystemPrompt(input: MemberRunInput): string {
     "【你的工具】",
     `- 执行工具：${input.tools.filter((t) => (MEMBER_EXEC_TOOLS as readonly string[]).includes(t)).join("、") || "（本次未分配执行工具，只能靠推理完成）"}`,
     "- submit_report：回报通道（终局）。**剩最后 2 轮时必须停手交回**，哪怕没做完也要交：写清做到哪一步、卡在哪、需要什么。不交 = 这张单白跑。",
+    // 实机事故：简报给了 `src/components`，成员却用 `Get-ChildItem -Recurse` 扫整个仓库找 components，
+    // 一条命令跑 100s 无输出，用户以为成员死了。
+    "- 找东西先看路径：简报给了目录就直接 list_dir 那个目录（必要时逐层往下）；要按模式找文件用 glob（如 `src/**/*.tsx`）。**不要用 Get-ChildItem -Recurse / dir /s 扫整个仓库**——node_modules、target 动辄几万文件，一条命令能跑一两分钟，白烧轮次和预算。",
+    "- 命令行工具要窄：限定目录、只读、一次说清目的；单条命令超过 60s 还没输出就会被当「可能卡住」，超过 120s 直接超时终止——超时的命令不算证据。",
     "- 你没有 ask_user，不能问用户；口径拿不准就选一种并写明理由。需要升级时在回报正文里标 ESCALATE: 并说明。",
+    // 实机事故：用户要 Word，主代理说「没装 python-docx 就做不了」并反问路径。
+    // 文档产出是成员能干的活：写脚本 + 跑命令，零依赖也能生成最小 docx。
+    "- 文档产出：**Word 优先用 office_write_docx**（结构化标题/段落/列表/表格，进程内零依赖，毫秒级；表格列宽按内容自动分配）；图片、公式、目录域这类复杂排版再用 python-docx 脚本（先写脚本再执行）。python-docx 也没装就如实说做不到，**不要自己手写 OOXML**。Excel 用 office_write_table，PDF 用脚本或 html 转换。",
+    "- **内容型产物不许交骨架**：每个章节至少 2~3 句实质内容（结论、依据、具体处置）。只给章节标题加一句概括＝骨架稿，风铃会打回；宁可少写两章，也不要每章空的。拼接正文时检查有没有 undefined / 空字段——模板变量没取到值会原样印进文档。",
     "",
     "【工作区与文件去向】",
     `工作区：${input.workdir}（**可读可写**）。写文件用工作区内相对路径。`,
@@ -216,11 +246,11 @@ export function memberSystemPrompt(input: MemberRunInput): string {
     ...p.outputContract.evidence.map((e) => `- 证据要求：${e}`),
     ...p.outputContract.acceptance.map((a) => `- 验收标准：${a}`),
     "",
-    "【回报纪律（§4.10.5 证据原则）】",
-    "- 完成后必须调用 submit_report；evidence 至少 1 项，且必须是你真实写进工作区的文件路径——空口不算完成。",
+    "【回报纪律】",
+    "- 完成后必须调用 submit_report；evidence 可选：有真实产物就列文件路径，没有也能交，如实写「无附证据」。风铃要核验会在简报里说明。",
     "- 回报开头标状态，四选一：【完成】做好了且核对过；【完成有保留】做完了但有疑虑，写明疑虑；【受阻】卡住了，写清卡在哪、缺什么；【缺上下文】简报信息不够，写清缺什么——风铃会补了重派。",
     "- 缺关键材料、目标互相矛盾、工具不够用：**第一轮就停手回报**，不要猜着做、不要自行脑补——烂交付不如不交付，停下不会怪你。",
-    "- 交回报前自审三问：①简报里的完成标准逐条过了吗？②evidence 里的文件真的存在且是本次产出的吗？③有没有「我觉得应该没问题」但没验证的地方？有就改成【完成有保留】并写明。",
+    "- 交回报前自审三问：①简报里的完成标准逐条过了吗？②交付物与证据里的文件真的存在、是本次产出的吗？③有没有「我觉得应该没问题」但没验证的地方？有就改成【完成有保留】并写明。",
     "- 没做完也要回报：写清楚做到了哪一步、卡在哪里。不要为了好看而虚报。",
   ].join("\n");
 }
@@ -236,6 +266,11 @@ export async function runMemberTask(input: MemberRunInput): Promise<MemberRunRes
     browser: input.browser,
     kb: input.kb,
     readRoots: input.readRoots,
+    // 自清理分级：本单开工后新造的文件删除不打扰用户；全权档连工作区内删除也放行
+    runStartedAt: input.runStartedAt,
+    autoDeleteInWorkspace: input.autoDeleteInWorkspace,
+    // 停机要能连正在跑的命令一起杀，否则最长等满 120s 超时
+    signal: () => input.signal,
     writableRoots: input.writableRoots,
     onBeforeCommand: input.onBeforeCommand,
   });
@@ -282,9 +317,8 @@ export async function runMemberTask(input: MemberRunInput): Promise<MemberRunRes
       if (missing.length) {
         return `以下证据文件既不在工作区、也不在已授权的只读目录里，不能提交：${missing.join("、")}。先落盘再回报（证据原则 §4.10.5）。`;
       }
-      if (!evidence.length) {
-        return "evidence 不能为空：至少给 1 个真实文件路径作为证据（§4.10.5）。";
-      }
+      // 2026-11-11：证据改为可选——普通任务不再因为没交文件被挡在回报门外；
+      // 关键任务的强制点在任务层 evidencePolicy（无证据不进审查），不在这里重复卡一次。
       // 交付物同样要真实存在；证据与交付物分开记，验收时只固化交付物
       const deliverables = (Array.isArray(args.deliverables) ? args.deliverables : []).map(String).filter(Boolean);
       const missingDeliverables = deliverables.filter((e) => {
@@ -308,7 +342,15 @@ export async function runMemberTask(input: MemberRunInput): Promise<MemberRunRes
     if (!input.tools.includes(name)) {
       return `工具 ${name} 不在本次分配清单里（本次只有：${input.tools.join("、")}）。需要的话在回报里写 ESCALATE 说明原因。`;
     }
-        try {
+    try {
+      // 先报"开始"：一条命令跑 100s 时，只在返回后打点会让界面完全静止（实机被当成卡死）
+      const head =
+        name === "run_command"
+          ? String(args.command ?? "")
+          : name.startsWith("browser_")
+            ? String(args.url ?? args.target ?? args.selector ?? "")
+            : String(args.path ?? args.name ?? "");
+      input.onEvent?.({ kind: "tool-start", text: `${name}${head ? "：" + head.slice(0, 400) : ""}` });
       const out = await toolkit.execute(name, args);
       if (name === "write_file" || name === "edit_file") {
         const ch = toolkit.changes().at(-1);
@@ -321,11 +363,10 @@ export async function runMemberTask(input: MemberRunInput): Promise<MemberRunRes
         // 用户根本看不出它在干什么
         input.onEvent?.({ kind: "tool", text: "执行：" + String(args.command).slice(0, 500) });
       } else {
-        const head = name.startsWith("browser_") ? String(args.url ?? args.target ?? args.selector ?? "") : String(args.path ?? args.name ?? "");
         input.onEvent?.({ kind: "tool", text: `${name}${head ? "：" + head.slice(0, 200) : ""}` });
       }
       return out;
-} catch (err) {
+    } catch (err) {
       return `工具执行失败：${err instanceof Error ? err.message : String(err)}`;
     }
   };
@@ -345,8 +386,9 @@ export async function runMemberTask(input: MemberRunInput): Promise<MemberRunRes
         progress: Math.min(95, Math.round((turns / maxTurns) * 100)),
       });
       turns += 1;
-      // 逼近上限就强制收口：不给"再探一轮"的机会，否则 40 轮烧完一张回报都没有
-      if (finalReport === null && maxTurns - turns <= 2) {
+      const lastTurn = maxTurns - turns <= 0;
+      // 逼近上限就强制收口：不给"再探一轮"的机会，否则轮次烧完一张回报都没有
+      if (finalReport === null && !lastTurn && maxTurns - turns <= 2) {
         messages.push({
           role: "user",
           content:
@@ -359,13 +401,19 @@ export async function runMemberTask(input: MemberRunInput): Promise<MemberRunRes
         apiKey: input.model.apiKey,
         model: input.model.model,
         messages,
-        tools,
+        // 最后一轮只留回报通道：逼它收口（此前最后一轮还能跑工具，轮次用尽就一条回报都没有）
+        tools: lastTurn ? tools.filter((t) => t.function.name === "submit_report") : tools,
         onDelta: () => {},
         signal: input.signal,
       });
       promptTokens += result.promptTokens;
       completionTokens += result.completionTokens;
       if (result.toolCalls.length === 0) {
+        if (lastTurn && result.content.trim()) {
+          // 最后一轮它选择了口述：这段就是它的回报，别丢（丢了等于这一单白跑）
+          finalReport = result.content.trim();
+          break;
+        }
         // 模型直接说话不调工具：把话喂回去，要求走 submit_report
         messages.push({ role: "assistant", content: result.content });
         messages.push({
@@ -385,7 +433,24 @@ export async function runMemberTask(input: MemberRunInput): Promise<MemberRunRes
       });
       for (const tc of result.toolCalls) {
         if (input.signal?.aborted) break;
+        const startedAt = Date.now();
         const outcome = await execTool(tc.name, tc.arguments);
+        if (input.onToolCall) {
+          const text = String(outcome ?? "");
+          // 返回值以这些开头就算被拒/失败；其余按成功记。日志只做定位，不承担判定。
+          const ok = !/^(?:已拒绝|失败|错误|工具执行失败|路径越界|未知工具)/.test(text.trim());
+          try {
+            input.onToolCall({
+              name: tc.name,
+              args: String(tc.arguments ?? ""),
+              outcome: text,
+              ok,
+              ms: Date.now() - startedAt,
+            });
+          } catch {
+            /* 审计失败不能影响执行 */
+          }
+        }
         if (finalReport !== null) {
           return {
             status: "reported",
@@ -399,6 +464,18 @@ export async function runMemberTask(input: MemberRunInput): Promise<MemberRunRes
         }
         messages.push({ role: "tool", tool_call_id: tc.id, name: tc.name, content: outcome });
       }
+    }
+    if (finalReport !== null) {
+      // 最后一轮口述收口（没走 submit_report）：照样算交回，证据/交付物为空
+      return {
+        status: "reported",
+        report: finalReport,
+        evidence: finalEvidence,
+        deliverables: finalDeliverables,
+        turns,
+        promptTokens,
+        completionTokens,
+      };
     }
     if (input.signal?.aborted) {
       return {

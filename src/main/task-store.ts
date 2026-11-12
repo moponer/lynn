@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { TaskStatus } from "../shared/contract";
 import type { Root } from "./roots";
+import type { EvidencePolicy } from "./task-scale";
 
 /**
  * 工单实体（计划书 §4.8 / §4.10.4 / §4.10.5）。
@@ -105,6 +106,23 @@ export interface TaskRecord {
   workspace?: TaskWorkspaceRecord;
   /** 验收固化的交付物清单（与证据分开；交付物永久保留） */
   deliverables?: DeliverableRef[];
+  /**
+   * 为什么停在当前状态（人话）。blocked 有四种成因——用户手动停机、成员没交回报、
+   * 打回 3 轮、进程重启对账——界面上不能再一律显示"连续两个节点没有新证据"。
+   */
+  statusNote?: string;
+  /**
+   * 卡住的成因（机读）。statusNote 是给人看的一句话，这里是给统计/筛选/巡检分桶用的：
+   * 只有分开才知道"是系统崩了"还是"用户自己停的"还是"质量不达标"，不能一锅算"卡住 N"。
+   * 离开 blocked 时清空，避免陈旧的成因跟着工单走。
+   */
+  blockedReason?: "user_stop" | "no_report" | "reject_limit" | "reconcile" | "crash";
+  /**
+   * 证据策略（2026-11-11）：
+   * - optional（缺省）：无证据也能进审查/归档，只标注「无证据回报」——避免小任务被证据卡死；
+   * - required：关键任务（审计/对账/安全/可复跑）仍强制 ≥1 项已验证证据。
+   */
+  evidencePolicy?: EvidencePolicy;
 }
 
 export class TaskConflictError extends Error {
@@ -154,7 +172,11 @@ function evId(): string {
 }
 
 export class TaskStore {
-  constructor(readonly dataRoot: string) {}
+  /**
+   * `onChange`：工单落盘后的回调（2026-11-11）。Kernel 用它做事件驱动心跳——
+   * 工单状态一变就评估一次，不用等分钟级定时器；测试里不传，行为不变。
+   */
+  constructor(readonly dataRoot: string, private readonly hooks?: { onChange?: () => void }) {}
 
   private dir(id: string): string {
     return path.join(this.dataRoot, "tasks", id);
@@ -170,6 +192,8 @@ export class TaskStore {
     const tmp = path.join(dir, "task.json.tmp");
     fs.writeFileSync(tmp, JSON.stringify(rec, null, 2), "utf-8");
     fs.renameSync(tmp, this.file(rec.id));
+    // 落盘后通知（Kernel 用来做秒级事件心跳；测试不传则完全无副作用）
+    this.hooks?.onChange?.();
   }
 
   get(id: string): TaskRecord | null {
@@ -258,6 +282,7 @@ export class TaskStore {
     threadId?: string;
     workspaceRoot?: string;
     workspace?: TaskWorkspaceRecord;
+    evidencePolicy?: EvidencePolicy;
   }): TaskRecord {
     if (this.get(input.id)) throw new TaskRuleError(`工单已存在: ${input.id}`);
     if (input.parentId) {
@@ -284,6 +309,7 @@ export class TaskStore {
       threadId: input.threadId,
       workspaceRoot: input.workspaceRoot ?? input.workspace?.root,
       ...(input.workspace ? { workspace: input.workspace } : {}),
+      ...(input.evidencePolicy ? { evidencePolicy: input.evidencePolicy } : {}),
     };
     this.write(rec);
     return rec;
@@ -326,7 +352,16 @@ export class TaskStore {
   transition(
     id: string,
     to: TaskStatus,
-    opts: { expectedVersion?: number; member?: string; sessionId?: string; threadId?: string } = {},
+    opts: {
+      expectedVersion?: number;
+      member?: string;
+      sessionId?: string;
+      threadId?: string;
+      /** 这次迁移的人话原因（界面按它区分"卡住"的成因），写进 TaskRecord.statusNote */
+      note?: string;
+      /** 迁移到 blocked 时的机读成因（统计/巡检分桶用）；离开 blocked 时自动清空 */
+      blockedReason?: TaskRecord["blockedReason"];
+    } = {},
   ): TaskRecord {
     const rec = this.mustGet(id);
     if (opts.expectedVersion !== undefined && rec.version !== opts.expectedVersion) {
@@ -336,9 +371,11 @@ export class TaskStore {
     if (!LEGAL[rec.status].includes(to)) {
       throw new TaskRuleError(`不允许的迁移：${rec.status} → ${to}（七态见 §4.10.4）`);
     }
-    if (to === "in_review") {
+    // 证据策略（2026-11-11）：只有关键任务强制；普通任务无证据也能进审查，
+    // 由界面标注「无证据回报」，不再因为缺一项证据把整张单堵死在执行中。
+    if (to === "in_review" && rec.evidencePolicy === "required") {
       const ok = rec.evidence.filter((e) => e.verified);
-      if (ok.length === 0) throw new TaskRuleError("进审查前必须附 ≥1 项已验证证据（无证据不算完成，§4.10.5）");
+      if (ok.length === 0) throw new TaskRuleError("关键任务进审查前必须附 ≥1 项已验证证据（审计/对账/安全类，§4.10.5）");
     }
     if (to === "done") {
       if (!rec.approvals.some((a) => a.action === "approve")) {
@@ -346,6 +383,13 @@ export class TaskStore {
       }
     }
     rec.status = to;
+    // 卡住成因只在 blocked 上成立；一经离开就清掉，避免旧成因挂在新状态上被误统计
+    if (to === "blocked") {
+      if (opts.blockedReason) rec.blockedReason = opts.blockedReason;
+    } else {
+      rec.blockedReason = undefined;
+    }
+    if (opts.note) rec.statusNote = opts.note;
     if (opts.member) rec.member = opts.member;
     if (opts.sessionId) rec.sessionId = opts.sessionId;
     if (opts.threadId) rec.threadId = opts.threadId;
@@ -380,6 +424,14 @@ export class TaskStore {
   setReadRoots(id: string, roots: string[]): TaskRecord {
     const rec = this.mustGet(id);
     rec.readRoots = roots.length ? [...new Set(roots)] : undefined;
+    return this.commit(rec);
+  }
+
+  /** 调整证据策略：关键任务事后可升 required，普通任务可降 optional（不改其它状态） */
+  setEvidencePolicy(id: string, policy: EvidencePolicy): TaskRecord {
+    const rec = this.mustGet(id);
+    if (rec.evidencePolicy === policy) return rec;
+    rec.evidencePolicy = policy;
     return this.commit(rec);
   }
 
@@ -427,14 +479,19 @@ export class TaskStore {
     });
     const escalated = rec.rejectRounds >= rec.rejectLimit;
     rec.status = escalated ? "blocked" : "in_progress";
+    // 满额升级才叫"质量不达标卡住"；没满额是重做，成因清空
+    rec.blockedReason = escalated ? "reject_limit" : undefined;
+    rec.statusNote = escalated
+      ? `打回 ${rec.rejectRounds} 轮仍未达标（上限 ${rec.rejectLimit}）：${reason.what}`
+      : `打回第 ${rec.rejectRounds} 轮重做：${reason.what}`;
     return { record: this.commit(rec, opts.expectedVersion), escalated };
   }
 
   /** 用户拍板：只记审批，不改状态；随后由 transition(...,"done") 生效 */
   approve(id: string, by = "user", note?: string, opts: { expectedVersion?: number } = {}): TaskRecord {
     const rec = this.mustGet(id);
-    if (!rec.evidence.some((e) => e.verified)) {
-      throw new TaskRuleError("无证据不能拍板归档（§4.10.5）");
+    if (rec.evidencePolicy === "required" && !rec.evidence.some((e) => e.verified)) {
+      throw new TaskRuleError("关键任务无证据不能拍板归档（§4.10.5）");
     }
     rec.approvals.push({ by, action: "approve", at: new Date().toISOString(), note });
     return this.commit(rec, opts.expectedVersion);

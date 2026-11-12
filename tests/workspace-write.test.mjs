@@ -46,6 +46,10 @@ test("Toolkit：删除命令走审批；没有审批通道一律拒绝；.git/.l
   fs.mkdirSync(ws, { recursive: true });
 
   const noHook = new Toolkit(ws);
+  // 既有文件（不是本单刚造的）删除必须走审批；没有通道就如实拒绝
+  fs.writeFileSync(path.join(ws, "a.txt"), "x", "utf-8");
+  const old = new Date(Date.now() - 3_600_000);
+  fs.utimesSync(path.join(ws, "a.txt"), old, old);
   assert.match(await noHook.runCommand({ command: "del a.txt" }), /需要用户点头|已拒绝/);
 
   const asked = [];
@@ -55,6 +59,12 @@ test("Toolkit：删除命令走审批；没有审批通道一律拒绝；.git/.l
       return { ok: false, reason: "测试拒绝" };
     },
   });
+  // 目录里有开工前就存在的文件 → 不算自清理，仍要问人
+  const build = path.join(ws, "build");
+  fs.mkdirSync(build, { recursive: true });
+  fs.writeFileSync(path.join(build, "x.js"), "x", "utf-8");
+  fs.utimesSync(path.join(build, "x.js"), old, old);
+  fs.utimesSync(build, old, old);
   assert.match(await gated.runCommand({ command: "rm -rf build" }), /用户拒绝/);
   assert.deepEqual(asked, ["rm -rf build"]);
 
@@ -90,6 +100,7 @@ test("派单：成员工作区 = 会话项目目录（可写），简报不污�
   });
 
   const kernel = new Kernel(root);
+  kernel.handle("config.prefs", { autoStart: false });
   try {
     await kernel.init();
     kernel.handle("project.setRoot", { root: proj });

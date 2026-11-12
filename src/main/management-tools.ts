@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { generateTeamId, type TeamStore, type MemberProfile } from "./team-store";
 import { avatarFor, isAvatarId } from "../shared/avatars";
 import { MEMBER_EXEC_TOOLS } from "./member-runner";
+import { validateMemberProfile, memberProfileRejection } from "./member-profile";
 
 /**
  * 风铃的管理型工具 8 件套（§3.1 / §4.10.3）。
@@ -65,6 +66,8 @@ export const MANAGEMENT_ONLY_TOOLS = [
   "assign_task",
   "check_progress",
   "check_roster",
+  // 验收前读产物正文：成员不能自己读自己的卷宗去自证（审查归风铃）
+  "read_artifact",
   "review_result",
   "accept_or_reject",
   "report_to_user",
@@ -129,12 +132,21 @@ export class ManagementTools {
 
   /** 1. create_member —— 书面招募；>6 人必须给理由（§4.10.6 组织膨胀防线） */
   createMember(teamId: string, profile: MemberProfile, staffingJustification?: string): string {
+    // 档案闸早于一切副作用（人数/工具/写盘/审计）：不合格就不留半个人。
+    // 覆盖所有入口，包括模板导入与用户手改之外的直调路径。
+    const issues = validateMemberProfile(profile);
+    if (issues.length) throw new Error(memberProfileRejection(issues));
     this.assertTeamActive(teamId);
     const existing = this.store.listMembers(teamId).length;
-    if (existing >= MEMBER_CAP && !staffingJustification) {
+    // 2026-11-11：小任务起手就招 3~8 人是实机最大浪费（一次长任务曾招 16 人、重派 24 次）。
+    // 第 3 人起必须写明分工；1~2 人直接放行，6 人以上仍要理由（硬上限见 MEMBER_CAP）。
+    if (existing >= 2 && !staffingJustification) {
       throw new Error(
-        `编制已达 ${MEMBER_CAP} 人上限；如确需扩编，请在派单记录里写明理由（组织膨胀防线 §4.10.6）`,
+        `起手编制先控制在 2 人（当前 ${existing} 人）：小任务 1 人足够；确需第 3 人请在 justification 写明各人分工（组织膨胀防线 §4.10.6）`,
       );
+    }
+    if (existing >= MEMBER_CAP && !staffingJustification) {
+      throw new Error(`编制已达 ${MEMBER_CAP} 人上限；如确需扩编，请在派单记录里写明理由（组织膨胀防线 §4.10.6）`);
     }
     if (!profile.tools.length) throw new Error("成员岗位必须有至少一个工具白名单项");
     const managementTools = profile.tools.filter((t) =>
@@ -239,17 +251,16 @@ export class ManagementTools {
     });
   }
 
-  /** 4. review_result —— 审查回报；无证据不算完成（§4.10.5 证据原则） */
+  /**
+   * 4. review_result —— 登记回报。
+   * 2026-11-11：证据改为可选（普通任务不再因为缺证据被拒登）；是否有证据由卷宗与
+   * 界面如实标注，关键任务的强制点下沉到 task.evidencePolicy + accept 前的拍板闸。
+   */
   reviewResult(
     teamId: string,
     taskId: string,
     opts: { member: string; text: string; evidence: string[]; sessionId?: string },
   ): { verdict: "logged" } {
-    if (opts.evidence.length === 0) {
-      throw new Error(
-        `成员自述"已完成"但没有证据（文件路径/命令输出/测试结果/抓取快照）——按证据原则判未完成（§4.10.5）`,
-      );
-    }
     this.store.appendAssignment(teamId, {
       taskId,
       at: new Date().toISOString(),
@@ -300,7 +311,7 @@ export class ManagementTools {
       member: opts.member,
       text:
         verdict === "accept"
-          ? "验收通过：证据齐全且可复跑"
+          ? `验收通过${opts.evidence?.length ? "：证据齐全且可复跑" : "（无附证据，按普通任务放行）"}`
           : JSON.stringify(opts.rejectReason),
       evidence: opts.evidence,
       rejectReason: verdict === "reject" ? opts.rejectReason : undefined,

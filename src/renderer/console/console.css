@@ -512,11 +512,14 @@
 .cs-task:hover {
   box-shadow: inset 0 0 0 1px var(--blue-line);
 }
+/* 选中/告警只用淡染底色，不再往左边缘刷一条彩色竖条 */
 .cs-task.on {
-  box-shadow: inset 0 0 0 1px var(--blue-line), inset 3px 0 0 var(--blue);
+  background: var(--blue-wash);
+  box-shadow: inset 0 0 0 1px var(--blue-line);
 }
 .cs-task.alert {
-  box-shadow: inset 0 0 0 1px var(--seal-wash), inset 3px 0 0 var(--seal);
+  background: var(--seal-wash);
+  box-shadow: inset 0 0 0 1px var(--seal-wash);
 }
 /* 主干轨 + 节点圆点：命令支线从这条轨上分出去 */
 .cs-task::before {
@@ -781,7 +784,7 @@
 }
 .cs-ar-row {
   display: grid;
-  grid-template-columns: 54px minmax(0, 1fr) auto;
+  grid-template-columns: 54px minmax(0, 1fr) auto auto;
   gap: 10px;
   align-items: center;
   width: 100%;
@@ -811,6 +814,15 @@
   color: var(--ink-3);
   white-space: nowrap;
 }
+/* 归档清单也能逐条收尾（两段确认，与值台归档带一致） */
+.cs-ar-del {
+  background: none; color: var(--ink-4); opacity: .4;
+  font: inherit; font-size: var(--fs-label); padding: 2px 6px;
+  border-radius: var(--r-s); cursor: pointer; white-space: nowrap;
+}
+.cs-ar-row:hover .cs-ar-del, .cs-ar-del:focus-visible { opacity: 1; }
+.cs-ar-del:hover { color: var(--seal); background: var(--seal-wash); }
+.cs-ar-del.sure { color: var(--seal); background: var(--seal-wash); opacity: 1; font-weight: 600; }
 
 /* ---------------- 中列：态势球 ---------------- */
 .cs-map-wrap {
@@ -1118,26 +1130,6 @@
   box-shadow: 0 0 0 4px var(--desk), 0 0 20px var(--seal-wash), inset 0 0 0 1px var(--seal);
   animation: cs-ah-in .4s var(--ease-out), cs-ah-pulse 1.6s ease-in-out .4s infinite;
 }
-/* 四角制图语法：只在告警上用，属制图标记不是描边 */
-.cs-alert::before,
-.cs-alert::after {
-  content: '';
-  position: absolute;
-  width: 9px;
-  height: 9px;
-  pointer-events: none;
-  box-shadow: inset 0 0 0 2px var(--seal);
-}
-.cs-alert::before {
-  left: -2px;
-  top: -2px;
-  clip-path: polygon(0 0, 100% 0, 100% 22%, 22% 22%, 22% 100%, 0 100%);
-}
-.cs-alert::after {
-  right: -2px;
-  bottom: -2px;
-  clip-path: polygon(100% 100%, 0 100%, 0 78%, 78% 78%, 78% 0, 100% 0);
-}
 .cs-alert-top {
   display: flex;
   align-items: center;
@@ -1268,6 +1260,7 @@
 }
 .cs-focus-acts {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   padding: 9px 12px 11px;
   box-shadow: inset 0 1px 0 var(--rule);
@@ -1616,101 +1609,46 @@
   transform: translateY(-2px);
   box-shadow: inset 0 0 0 1px var(--blue-line), 0 0 14px var(--blue-wash);
 }
+/* 卡面缩略：放真内容（图片 / 文本摘要 / 类型牌），不画随机骨架条 */
 .cs-thumb {
   display: flex;
-  flex-direction: column;
-  gap: 3px;
-  height: 50px;
-  padding: 6px;
+  align-items: center;
+  justify-content: center;
+  height: 52px;
   overflow: hidden;
   border-radius: 2px;
   background: var(--desk);
   box-shadow: inset 0 0 0 1px var(--rule);
 }
-.cs-thumb i {
+.cs-thumb-img {
   display: block;
-  height: 2px;
-  background: var(--rule);
-  border-radius: 1px;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
-.cs-thumb.code i:nth-child(odd) {
-  background: var(--ink-3);
+.cs-thumb-txt {
+  display: -webkit-box;
+  width: 100%;
+  padding: 6px 7px;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  font-size: 9px;
+  line-height: 1.45;
+  color: var(--ink-3);
+  white-space: pre-wrap;
+  word-break: break-all;
 }
-.cs-thumb.code i:nth-child(3n) {
-  margin-left: 12px;
-  width: 55%;
+.cs-thumb-ext {
+  font-size: var(--fs-label);
+  letter-spacing: .1em;
+  color: var(--ink-3);
 }
-.cs-thumb.code i:nth-child(2) {
-  width: 80%;
-}
-.cs-thumb.sheet {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  grid-template-rows: repeat(4, 1fr);
-  gap: 2px;
-  padding: 5px;
-}
-.cs-thumb.sheet i {
-  width: auto;
-  height: auto;
-  border-radius: 0;
-  background: var(--rule);
-}
-.cs-thumb.sheet i:nth-child(4n + 1) {
-  background: var(--ink-3);
-}
-.cs-thumb.image {
-  flex-direction: row;
-  align-items: flex-end;
-  gap: 4px;
-}
-.cs-thumb.image i {
-  flex: 1;
-  width: auto;
-  height: 40%;
-  border-radius: 0;
-  background: var(--rule);
-}
-.cs-thumb.image i:nth-child(2) {
-  height: 72%;
-  background: var(--seal);
-}
-.cs-thumb.image i:nth-child(3) {
-  height: 54%;
-}
-.cs-thumb.image i:nth-child(4) {
-  height: 88%;
-}
-.cs-thumb.slides {
-  flex-direction: row;
-  align-items: stretch;
-  gap: 4px;
-}
-.cs-thumb.slides i {
-  flex: 1;
-  width: auto;
-  height: auto;
-  border-radius: 0;
-  background: var(--rule);
-}
-.cs-thumb.slides i:first-child {
-  flex: 1.5;
-  background: var(--seal);
-}
-.cs-thumb.link {
-  flex-direction: row;
-  align-items: center;
-  justify-content: center;
-}
-.cs-thumb.link i {
-  width: 24px;
-  height: 8px;
-  background: transparent;
-  border-radius: 5px;
-  box-shadow: inset 0 0 0 1px var(--ink-3);
-}
-.cs-thumb.link i + i {
-  margin-left: -8px;
+.cs-out.k-doc .cs-thumb-ext,
+.cs-out.k-sheet .cs-thumb-ext,
+.cs-out.k-slides .cs-thumb-ext,
+.cs-out.k-pdf .cs-thumb-ext {
+  color: var(--ink-2);
 }
 .cs-oname {
   display: -webkit-box;
@@ -1721,11 +1659,12 @@
   font-size: var(--fs-label);
   line-height: 1.35;
   color: var(--ink);
+  word-break: break-all;
 }
 .cs-ometa {
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
   margin-top: 4px;
 }
 .cs-otype {
@@ -1733,10 +1672,16 @@
   color: var(--ink-3);
   letter-spacing: .04em;
 }
-.cs-osrc {
-  margin-left: auto;
+.cs-osize {
   font-size: var(--fs-label);
   color: var(--ink-3);
+  white-space: nowrap;
+}
+/* 同一份文件在多张单里都存了副本：卡面上只标张数，不重复铺卡 */
+.cs-ojobs {
+  margin-left: auto;
+  font-size: var(--fs-label);
+  color: var(--blue);
   white-space: nowrap;
 }
 
@@ -1773,6 +1718,13 @@
   background: var(--desk-3);
   color: var(--blue);
   box-shadow: inset 0 0 0 1px var(--blue-line);
+}
+/* 全权是撤门禁，常态就给朱砂系警告色，选中时再加重 */
+.cs-modes button.danger { color: var(--red); }
+.cs-modes button.danger[aria-pressed="true"] {
+  background: var(--seal-wash);
+  color: var(--seal);
+  box-shadow: inset 0 0 0 1px var(--seal-wash);
 }
 .cs-cmdline {
   display: flex;
@@ -2001,6 +1953,16 @@
 .cs-ev-row + .cs-ev-row {
   box-shadow: inset 0 1px 0 var(--rule);
 }
+/* 可点开的产物行：整行是按钮，hover 才给一点反馈，不常驻描边 */
+.cs-ev-btn {
+  width: 100%;
+  text-align: left;
+  background: none;
+  transition: background var(--dur-fast) var(--ease-out);
+}
+.cs-ev-btn:hover {
+  background: var(--blue-wash);
+}
 .cs-ev-row.on {
   background: var(--blue-wash);
 }
@@ -2111,7 +2073,7 @@
   margin-bottom: 10px;
   border-radius: var(--r-s);
   background: var(--desk-3);
-  box-shadow: inset 3px 0 0 var(--brass);
+  box-shadow: inset 0 0 0 1px var(--rule);
 }
 .cs-orphan-t {
   font-size: var(--fs-body);
@@ -2137,10 +2099,11 @@
   margin-bottom: 9px;
   border-radius: var(--r-s);
   background: var(--desk-3);
-  box-shadow: inset 0 0 0 1px var(--rule), inset 3px 0 0 var(--brass);
+  box-shadow: inset 0 0 0 1px var(--rule);
 }
 .cs-dec.kind-approval {
-  box-shadow: inset 0 0 0 1px var(--rule), inset 3px 0 0 var(--seal);
+  background: var(--seal-wash);
+  box-shadow: inset 0 0 0 1px var(--seal-wash);
 }
 .cs-dec-top {
   display: flex;
@@ -2201,6 +2164,8 @@
   padding: 7px 14px;
   border-radius: var(--r-s);
   box-shadow: inset 0 0 0 1px var(--rule);
+  white-space: nowrap;
+  flex: 0 0 auto;
   transition: color var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out);
 }
 .cs-act:hover {

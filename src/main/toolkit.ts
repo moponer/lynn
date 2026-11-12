@@ -6,6 +6,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { exec } from "node:child_process";
+import { normalizeTargetPath } from "./member-path";
+import { buildDocx, type DocxBlock } from "./docx";
 
 export interface FileChange {
   path: string;
@@ -22,7 +24,12 @@ export interface ToolkitOptions {
   /** 单次命令输出上限（默认 8000 字符） */
   outputCap?: number;
   /** 审计回调：命中/放行命令都留痕（M1-11，壳写 audit.jsonl） */
-  onAudit?: (ev: { kind: "cmd_blocked" | "cmd_net" | "cmd_run"; command: string; why?: string; cwd: string }) => void;
+  onAudit?: (ev: {
+    kind: "cmd_blocked" | "cmd_net" | "cmd_run" | "cmd_auto";
+    command: string;
+    why?: string;
+    cwd: string;
+  }) => void;
   /** 写之前通知壳（M1-12 检查点）：existed=false 表示这轮新建 */
   onBeforeWrite?: (rel: string, full: string, existed: boolean) => void;
   /** office 能力注入（M2-06）：csv 永远可用；xlsx 由壳按引擎健康决定（缺引擎如实报） */
@@ -56,8 +63,21 @@ export interface ToolkitOptions {
   /**
    * 删除类命令的审批闸：成员可以改文件，但不能悄悄删。
    * 返回 ok=false 时命令不执行；未注入时一律拒绝（宁可做不了，也不给无审批的删除）。
+   * 注意：工具层会先做"低风险自清理"分级（见 runCommand），能自证风险的不会再打扰这里。
    */
   onBeforeCommand?: (command: string) => Promise<{ ok: boolean; reason?: string }>;
+  /**
+   * 本单开始时间（ms）。删除目标如果是这之后才出现的文件/目录，说明是成员自己刚造的，
+   * 属于"自清理"——不弹审批卡（实机事故：成员 `echo probe> x.txt & del x.txt` 也要用户点头）。
+   */
+  runStartedAt?: number;
+  /**
+   * 工作区内删除是否免审批（权限档=全权时由壳注入 true）。
+   * 工作区外仍然一律拒绝，与档位无关。
+   */
+  autoDeleteInWorkspace?: () => boolean;
+  /** 中止信号：用户点「停」时连正在跑的命令一起杀（否则最长要等 120s 超时） */
+  signal?: () => AbortSignal | undefined;
 }
 
 /** 删除类命令：一律要用户点头（含"移动/改名"——原位置等于删掉） */
@@ -83,13 +103,38 @@ export function destructiveReason(command: string): string | null {
   return null;
 }
 
+/**
+ * 纯函数：删除类命令真正要动哪些路径（相对/绝对均可）。
+ * 解析不出来（通配符、变量、管道里拼出来的路径）一律返回 null = 看不懂，按高风险走人工审批。
+ */
+export function destructiveTargets(command: string): string[] | null {
+  const re = /(?:^|[\s;&|(])(?:del|erase|rd|rmdir|rm|remove-item|mv|move|ren|rename)\s+([^;&|)]+)/gi;
+  const out: string[] = [];
+  let m: RegExpExecArray | null = re.exec(command);
+  while (m) {
+    for (const token of m[1].trim().split(/\s+/)) {
+      if (!token) continue;
+      const bare = token.replace(/^["']|["']$/g, "");
+      // 开关：-r / -rf / /s / /q / -Recurse …
+      if (/^[-/][A-Za-z]+$/i.test(bare)) continue;
+      if (!bare) continue;
+      out.push(bare);
+    }
+    m = re.exec(command);
+  }
+  if (!out.length) return null;
+  // 通配符 / 环境变量 / PowerShell 子表达式：具体删哪些文件说不清，交给用户
+  if (out.some((t) => /[*?%$`]/.test(t))) return null;
+  return out;
+}
+
 const READ_CAP = 200_000;
 const DIFF_CAP = 1_200;
 
 /** 解析路径：必须落在 root 内 */
 export function resolveWithin(root: string, target: string): string {
   const base = path.resolve(root);
-  const full = path.resolve(base, target);
+  const full = normalizeTargetPath(base, target);
   if (full !== base && !full.startsWith(base + path.sep)) {
     throw new Error(`路径越界：${target} 不在工作区内。只能访问工作区里的文件。`);
   }
@@ -99,6 +144,8 @@ export function resolveWithin(root: string, target: string): string {
 /**
  * 读路径解析：工作区 → 直接用；只读授权目录 → 允许读（`outside = true`）；其余拒绝。
  * **写路径绝不能用这个函数**——审计与越界拦截都靠"写只走 resolveWithin"这条铁律。
+ * 归一化放在解析前：`/F:/repo/x` 这类伪 POSIX 写法不归一就会解析成 `C:\F:\repo\x`，
+ * 明明已授权 `F:\repo` 也判越界（2026-11-11 长任务实测，诱发 20+ 次无效重派）。
  */
 export function resolveReadable(
   root: string,
@@ -106,7 +153,7 @@ export function resolveReadable(
   target: string,
 ): { full: string; outside: boolean; root?: string } {
   const base = path.resolve(root);
-  const full = target === "" || target === "." ? base : path.resolve(base, target);
+  const full = target === "" || target === "." ? base : normalizeTargetPath(base, target);
   const rel = path.relative(base, full);
   if (!rel.startsWith("..") && !path.isAbsolute(rel)) return { full, outside: false };
   for (const r of readRoots) {
@@ -183,8 +230,13 @@ const OUTBOUND = /\b(curl|wget|ssh|scp|sftp|ftp|telnet|nc|ncat|Invoke-WebRequest
 // 这里做字面量绝对路径识别（拼出来的路径拦不住，OS 级隔离是 M1-11 的活，不谎报沙箱）。
 const PATH_BOUNDARY = "[\\s\"'=()`;,|&]";
 const ABS_WIN = new RegExp(`(?:^|${PATH_BOUNDARY})([A-Za-z]:[\\\\/][^\\s"'\`;|&)]*)`, "g");
-const ABS_UNC = new RegExp(`(?:^|${PATH_BOUNDARY})(\\\\\\\\[^\\s"'\`;|&)]+)`, "g");
-const ABS_POSIX = new RegExp(`(?:^|${PATH_BOUNDARY})(/[A-Za-z0-9._-][^\\s"'\`;|&)]*)`, "g");
+// UNC 只认 `\\host\share` 这种**两级**形态：命令里的正则字面量 `\\.cargo`、`\target\`
+// 以前被当成 UNC 路径拦下（实机误报 5 次，成员被迫改写命令重试）。
+const ABS_UNC = new RegExp(`(?:^|${PATH_BOUNDARY})(\\\\\\\\[^\\\\\\s"'\`;|&)]+\\\\[^\\s"'\`;|&)]+)`, "g");
+// POSIX 只认**带路径段**的绝对路径：`dir /s /b`、`cmd /c` 这类 Windows 单字母开关不是路径。
+const ABS_POSIX = new RegExp(`(?:^|${PATH_BOUNDARY})(/(?:[A-Za-z0-9._-]+/)+[A-Za-z0-9._-]*)`, "g");
+/** Windows 命令开关（/s /b /c …）：单字母或双字母，不可能是文件路径 */
+const CMD_SWITCH = /^\/[A-Za-z]{1,2}$/;
 const HOME_VARS = /(%USERPROFILE%|\$env:USERPROFILE|\$HOME|(^|[\s"'=])~[\\/])/i;
 
 /**
@@ -206,6 +258,7 @@ export function findPathEscape(command: string, root: string, extraRoots: string
   }
   for (const raw of targets) {
     const clean = raw.replace(/[.,;:]+$/, "");
+    if (CMD_SWITCH.test(clean)) continue; // /s /b /c：命令开关，不是路径
     let abs: string;
     try {
       abs = path.resolve(rootAbs, clean);
@@ -237,6 +290,9 @@ export class Toolkit {
   private readonly readRootsSource: () => string[];
   private readonly writableRootsSource: () => string[];
   private readonly onBeforeCommand?: ToolkitOptions["onBeforeCommand"];
+  private readonly runStartedAt: number;
+  private readonly autoDeleteInWorkspace?: () => boolean;
+  private readonly signalSource?: () => AbortSignal | undefined;
 
   constructor(root: string, opts: ToolkitOptions = {}) {
     this.root = path.resolve(root);
@@ -253,6 +309,53 @@ export class Toolkit {
     const wsrc = opts.writableRoots;
     this.writableRootsSource = typeof wsrc === "function" ? wsrc : () => wsrc ?? [];
     this.onBeforeCommand = opts.onBeforeCommand;
+    this.runStartedAt = opts.runStartedAt ?? Date.now();
+    this.autoDeleteInWorkspace = opts.autoDeleteInWorkspace;
+    this.signalSource = opts.signal;
+  }
+
+  /**
+   * 删除类命令的低风险判定：这一单开工**之后**才出现的文件/目录 = 成员自己造的，
+   * 删掉它没有损失，不该打断用户。任一目标说不清（工作区外、启动前就有、目录里混了老文件）
+   * 就返回 null，照旧走人工审批。
+   */
+  private selfCleanupReason(command: string): string | null {
+    const targets = destructiveTargets(command);
+    if (!targets) return null;
+    const notes: string[] = [];
+    for (const t of targets) {
+      const full = path.resolve(this.root, t);
+      const rel = path.relative(this.root, full);
+      if (rel.startsWith("..") || path.isAbsolute(rel)) return null; // 越界交给路径守卫
+      if (!fs.existsSync(full)) {
+        notes.push(`${t}（已不存在）`);
+        continue;
+      }
+      if (!this.freshSinceStart(full, 0)) return null;
+      notes.push(t);
+    }
+    return notes.length ? notes.join("、") : null;
+  }
+
+  /** 目录递归判定：子项必须全是本单开工后产生的（最多看 200 项，超了就当说不清） */
+  private freshSinceStart(target: string, depth: number): boolean {
+    let st: fs.Stats;
+    try {
+      st = fs.statSync(target);
+    } catch {
+      return false;
+    }
+    if (st.mtimeMs + 2_000 < this.runStartedAt) return false;
+    if (!st.isDirectory()) return true;
+    if (depth >= 3) return false;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(target, { withFileTypes: true });
+    } catch {
+      return false;
+    }
+    if (entries.length > 200) return false;
+    return entries.every((e) => this.freshSinceStart(path.join(target, e.name), depth + 1));
   }
 
   /** 本单授权的只读目录（界面/提示词要如实说明"能读哪儿"） */
@@ -498,37 +601,61 @@ export class Toolkit {
         return `已拒绝执行：${d.why}。这类命令不会自动执行（纵深防御规则，不是 OS 沙箱）。`;
       }
     }
-    // 2) 删除类命令：成员可以改文件，但删除必须用户点头
-    const destructive = destructiveReason(command);
-    if (destructive) {
-      if (!this.onBeforeCommand) {
-        this.onAudit?.({ kind: "cmd_blocked", command, why: `删除需要用户点头（${destructive}），当前没有审批通道`, cwd });
-        return `已拒绝：删除类命令（${destructive}）需要用户点头，这次没有审批通道。请改成可撤销的写法（write_file 覆盖），或在回报里说明为什么必须删。`;
-      }
-      const verdict = await this.onBeforeCommand(command);
-      if (!verdict.ok) {
-        this.onAudit?.({ kind: "cmd_blocked", command, why: `用户拒绝删除：${verdict.reason ?? destructive}`, cwd });
-        return `用户拒绝了这次删除（${destructive}）：${verdict.reason ?? "这个目录里的文件不能删"}。改用可撤销的写法（write_file 覆盖），或先交回报让用户决定。`;
-      }
-    }
-    // 路径逃逸：文件工具钉在工作区，命令却能随手读全盘——这是"探针摸进你别的仓库"的直接原因
-    const escape = findPathEscape(command, this.root, this.getWritableRoots());
+    // 2) 路径逃逸：**先判边界再问人**。越界的命令根本不会执行，
+    //    以前顺序反过来，先弹一张审批卡、用户点了头再拒——白打扰一次。
+    // 只读授权根也算"命令可引用的路径"：2026-11-11 长任务里成员已获 F:\TMP-RU~1 只读授权，
+    // 守卫却只认可写根，整条命令被拒 → 主风铃误判"没授权" → 反复重派同一阶段。
+    // cwd 仍钉在工作区/可写根，写侧 resolveWithin 铁律不变；这里只放开路径字面量。
+    const allowedRoots = [...this.getWritableRoots(), ...this.getReadRoots()];
+    const escape = findPathEscape(command, this.root, allowedRoots);
     if (escape) {
       this.onAudit?.({ kind: "cmd_blocked", command, why: escape, cwd });
-      return Promise.resolve(
-        `已拒绝执行：${escape}。命令只能用任务工作区内的路径（工作区：${this.root}）。` +
-          `需要工作区外的数据时，在回报里写 ESCALATE 说明，由人决定。`,
-      );
+      return `已拒绝执行：${escape}。命令里的路径只能落在任务工作区、已授权可写根或已授权只读根内（工作区：${this.root}）。` +
+        `需要别的目录时在回报里写 ESCALATE 说明，由人决定。`;
+    }
+    // 3) 删除类命令：先做低风险分级，再决定要不要打扰用户
+    const destructive = destructiveReason(command);
+    if (destructive) {
+      // 本单开工后才出现的文件/目录 = 成员自己造的，删它没有损失（实机：`echo probe> x & del x` 也要点头）
+      const cleanup = this.selfCleanupReason(command);
+      const freeInWorkspace = !cleanup && this.autoDeleteInWorkspace?.() === true;
+      if (cleanup) {
+        this.onAudit?.({ kind: "cmd_auto", command, why: `自清理本单新建的文件：${cleanup}`, cwd });
+      } else if (freeInWorkspace) {
+        this.onAudit?.({ kind: "cmd_auto", command, why: "全权档：工作区内删除，自动放行", cwd });
+      } else if (!this.onBeforeCommand) {
+        this.onAudit?.({ kind: "cmd_blocked", command, why: `删除需要用户点头（${destructive}），当前没有审批通道`, cwd });
+        return `已拒绝：删除类命令（${destructive}）需要用户点头，这次没有审批通道。请改成可撤销的写法（write_file 覆盖），或在回报里说明为什么必须删。`;
+      } else {
+        const verdict = await this.onBeforeCommand(command);
+        if (!verdict.ok) {
+          this.onAudit?.({ kind: "cmd_blocked", command, why: `用户拒绝删除：${verdict.reason ?? destructive}`, cwd });
+          return `用户拒绝了这次删除（${destructive}）：${verdict.reason ?? "这个目录里的文件不能删"}。改用可撤销的写法（write_file 覆盖），或先交回报让用户决定。`;
+        }
+      }
     }
     if (OUTBOUND.test(command)) this.onAudit?.({ kind: "cmd_net", command, cwd });
     this.onAudit?.({ kind: "cmd_run", command, cwd });
+    const signal = this.signalSource?.();
+    if (signal?.aborted) return "已被停止：用户点了「停」，这条命令不再执行。";
     const cap = this.outputCap;
     return new Promise((resolve) => {
       exec(
         command,
-        { cwd, timeout: this.commandTimeoutMs, maxBuffer: 4 * 1024 * 1024, windowsHide: true, env: { ...process.env } },
+        {
+          cwd,
+          timeout: this.commandTimeoutMs,
+          maxBuffer: 4 * 1024 * 1024,
+          windowsHide: true,
+          env: { ...process.env },
+          signal,
+        },
         (err, stdout, stderr) => {
           const cut = (s: string) => ((s ?? "").length > cap ? (s ?? "").slice(0, cap) + `…（截断，共 ${(s ?? "").length} 字符）` : (s ?? ""));
+          if (signal?.aborted) {
+            resolve(`命令已被用户停止（点「停」）：${command}`);
+            return;
+          }
           if (err && !stdout && !stderr) {
             if ((err as Error & { killed?: boolean }).killed) {
               resolve(`命令超时（${this.commandTimeoutMs / 1000}s）被终止：${command}`);
@@ -567,6 +694,8 @@ export class Toolkit {
       case "office_read_table":
       case "office_write_table":
         return this.officeTool(name, args);
+      case "office_write_docx":
+        return this.officeDocx(args);
       case "browser_navigate":
       case "browser_snapshot":
       case "browser_click":
@@ -628,6 +757,38 @@ export class Toolkit {
       rows: (args.rows as string[][]) ?? [],
     });
     return JSON.stringify(w, null, 2);
+  }
+
+  /**
+   * Word 产出（2026-11-11）：进程内零依赖生成，不依赖机器装 Python / python-docx。
+   * 只接受结构化 blocks，不让模型自己拼 XML；路径仍然钉在工作区。
+   */
+  private officeDocx(args: Record<string, unknown>): string {
+    const rel = String(args.path ?? "").trim();
+    if (!rel) return "path 不能为空：给工作区内的 .docx 相对路径。";
+    if (!/\.docx$/i.test(rel)) return "path 必须以 .docx 结尾（例如 reports/漏洞管理.docx）。";
+    const blocks = Array.isArray(args.blocks) ? (args.blocks as DocxBlock[]) : [];
+    if (!blocks.length) return "blocks 不能为空：至少一个 heading / paragraph / bullet / table。";
+    let full: string;
+    try {
+      full = resolveWithin(this.root, rel);
+    } catch (err) {
+      return err instanceof Error ? err.message : String(err);
+    }
+    try {
+      const buf = buildDocx({
+        title: args.title ? String(args.title) : undefined,
+        author: args.author ? String(args.author) : undefined,
+        blocks,
+        footerText: args.footerText ? String(args.footerText) : undefined,
+        pageNumbers: args.pageNumbers !== false,
+      });
+      fs.mkdirSync(path.dirname(full), { recursive: true });
+      fs.writeFileSync(full, buf);
+      return `已写入 ${rel}（${buf.length} 字节，${blocks.length} 个内容块）。`;
+    } catch (err) {
+      return `生成 docx 失败：${err instanceof Error ? err.message : String(err)}`;
+    }
   }
 }
 
@@ -723,6 +884,40 @@ export const TOOLKIT_SCHEMAS = [
           rows: { type: "array", items: { type: "array", items: { type: "string" } } },
         },
         required: ["path", "headers", "rows"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "office_write_docx",
+      description:
+        "生成 Word（.docx），进程内零依赖，不依赖本机 Python。用结构化 blocks：heading（level 1-3）/ paragraph / bullet / table（headers+rows）；可给 title、footerText、pageNumbers。表格列宽按内容自动分配并撑满页宽、表头跨页重复。heading/paragraph/bullet 必须有非空 text（空值或 undefined 占位会直接报错）。复杂排版（图片、公式、目录域）再用 python-docx 脚本兜底。",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "工作区内相对路径，必须以 .docx 结尾" },
+          title: { type: "string", description: "文档标题（可选）" },
+          author: { type: "string", description: "页脚署名（可选）" },
+          footerText: { type: "string", description: "页脚文字（可选）" },
+          pageNumbers: { type: "boolean", description: "页脚是否带页码（默认 true）" },
+          blocks: {
+            type: "array",
+            description: "内容块数组",
+            items: {
+              type: "object",
+              properties: {
+                type: { type: "string", enum: ["heading", "paragraph", "bullet", "table"] },
+                level: { type: "number", description: "heading 级别：1~3" },
+                text: { type: "string" },
+                headers: { type: "array", items: { type: "string" } },
+                rows: { type: "array", items: { type: "array", items: { type: "string" } } },
+              },
+              required: ["type"],
+            },
+          },
+        },
+        required: ["path", "blocks"],
       },
     },
   },

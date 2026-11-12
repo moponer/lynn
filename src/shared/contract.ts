@@ -107,6 +107,24 @@ export interface ModelEntryView {
   isDefault: boolean;
   isThreadModel: boolean;
   updatedAt: string;
+  /** 端点风险：本机/局域网、非 HTTPS、普通远程 */
+  riskLevel: "local" | "insecure" | "remote";
+  /** 用户是否已勾选风险确认（本机/非 HTTPS 保存前必须） */
+  riskAccepted: boolean;
+}
+
+/** 本机免费/本地网关探测结果 */
+export interface GatewayView {
+  id: string;
+  name: string;
+  baseUrl: string;
+  needsKey: boolean;
+  docsUrl: string;
+  note: string;
+  status: "running" | "down" | "needs_key";
+  latencyMs?: number;
+  modelCount?: number;
+  error?: string;
 }
 
 // ---------- 成员（书面岗位，§4.10.2） ----------
@@ -197,6 +215,37 @@ export type CardKind =
   | "tool" // 工具调用卡（组队/派单/回报/审查/汇报/问询）
   | "system"; // 系统提示（未配置模型等）
 
+// ---------- 群聊：谁在说话、@了谁（2026-11-12） ----------
+
+/**
+ * 卡片作者：群里"谁在说话"。
+ * 与 kind 正交——kind 说的是"这是一类什么消息"（你/她/工具/系统），
+ * author 说的是"这一条具体是谁说的"（成员有名字、有脸、有岗位）。
+ * 旧卡没有 author，渲染层按 kind 回退旧语义（向后兼容，不改既有行为）。
+ */
+export type AuthorKind = "user" | "lynn" | "member" | "system";
+
+export interface FeedAuthor {
+  kind: AuthorKind;
+  /** 成员名（member）/ "风铃"（lynn） */
+  name?: string;
+  /** 成员唯一键 = 名字（team-store 的派单匹配键与战绩主键） */
+  memberId?: string;
+  teamId?: string;
+  /** 岗位（能力域），显示在成员名下 */
+  role?: string;
+  /** 头像库 id（a01…），没存的老档案按名字兜底 */
+  avatarId?: string;
+}
+
+/** 被 @ 的人：群里定向诉求的落点（"不 @" = 只有风铃看见） */
+export interface FeedMention {
+  kind: "member" | "lynn";
+  name: string;
+  memberId?: string;
+}
+
+
 /** 回合阶段（唯一真相源：前端只渲染它，不自己推） */
 export type TurnPhase =
   | "idle"
@@ -238,8 +287,10 @@ export interface UsageView {
   sessionOut: number;
   /** 缓存命中 token（复用已有缓存，不再重新计费） */
   cacheRead: number;
-  /** 缓存写入 token（本次新写入缓存，下一轮可复用） */
+  /** 缓存写入 token（本次新写入缓存，下一轮可复用；不含 DeepSeek 的 miss，它已在 sessionIn 里） */
   cacheWrite: number;
+  /** 本轮缓存命中率（%）：只算这一轮的 prompt，不拿会话累计值冒充 */
+  turnHitRate?: number | null;
   /** 累计费用（模型定价货币；未知价时为 0，不估假费用） */
   cost: number;
   contextTokens: number;
@@ -271,6 +322,8 @@ export interface TaskPlan {
   acceptance: string[];
   member?: string;
   tools?: string[];
+  /** 证据策略：required 才强制；缺省 optional（2026-11-11，普通任务不再被证据卡死） */
+  evidencePolicy?: "required" | "optional";
   budgetTokens?: number;
   deadline?: string;
 }
@@ -289,7 +342,7 @@ export type ToolCardBadge =
   | "出站"
   /** 日程到点提醒（M2-01） */
   | "提醒"
-  /** 成员执行中的聚合进度卡（一张单一张卡，就地更新） */
+  /** 成员执行中的跟踪进度（按时间追加到对话流底部，20 秒内折成一张卡） */
   | "进度"
   /** 成员被用户停掉 */
   | "已停止"
@@ -300,7 +353,29 @@ export type ToolCardBadge =
   /** 风铃沉淀记忆（M3-01） */
   | "记忆"
   /** 成员执行崩溃 */
-  | "崩溃";
+  | "崩溃"
+  /** 删除类命令的低风险自清理：系统自动放行，不需要用户点头（留痕可回看） */
+  | "放行";
+
+/** 内置预览读文件的结果：kind 决定渲染层走哪条视图，永远不把路径交回前端 */
+export interface PreviewReadResult {
+  ok: boolean;
+  /**
+   * office：docx/xlsx/pptx 的原始字节（base64），渲染层用开源库
+   * （docx-preview / @js-preview/excel / pptx-preview，全部懒加载）保真渲染。
+   */
+  kind: "text" | "image" | "binary" | "empty" | "missing" | "office" | "pdf";
+  text?: string;
+  /** 图片走 data URL，避免Electron file:// 协议与 CSP 打架 */
+  dataUrl?: string;
+  /** office：文件原始字节（base64），渲染层解码后交给对应开源库 */
+  dataBase64?: string;
+  ext?: string;
+  bytes?: number;
+  /** 超大文本只取开头一段，界面要如实标注 */
+  truncated?: boolean;
+  error?: string;
+}
 
 export interface FeedCard {
   id: string;
@@ -323,6 +398,8 @@ export interface FeedCard {
   /** tool 卡 */
   badge?: ToolCardBadge;
   title?: string;
+  /** 系统消息类别：标签、图标与底色各不同（2026-11-12）；缺省 notice */
+  systemTone?: "cleanup" | "budget" | "recover" | "patrol" | "auth" | "notice" | "error";
   meta?: string;
   body?: string;
   members?: { name: string; role: string; color: string; avatarId?: string }[];
@@ -334,6 +411,18 @@ export interface FeedCard {
   action?: "settings" | "retry" | "logs" | "reload" | "stopRunning" | "none";
   /** 汇报卡的四段（一段不省） */
   report?: { conclusion: string; evidence: string; unfinished: string; decision: string };
+  /**
+   * 谁在说话（群聊模式）。缺省时按 kind 回退旧语义：
+   * user → 你、lynn → 风铃、tool → 工具卡、system → 系统提示。
+   */
+  author?: FeedAuthor;
+  /** 这条消息 @ 了谁（群里定向）。空 = 没有定向诉求 */
+  mentions?: FeedMention[];
+  /**
+   * 产物清单（验收/汇报卡）：ref 指向卷宗里的副本，点一下走内置预览。
+   * 只有 ref 不点开就等于让用户自己去找文件——实机她只给了绝对路径字符串。
+   */
+  artifacts?: { label: string; ref: string; bytes?: number }[];
 }
 
 // ---------- 指挥板（§3.8） ----------
@@ -369,6 +458,10 @@ export interface TaskTrackItem {
   rejectDraft?: { what: string; expect: string; deadline: string };
   /** 这张单是在哪个会话里派的（跨会话追溯） */
   threadId?: string;
+  /** 本单第几轮：由卷宗派单/重做事件推导，只读展示（阶段状态机的数据底座） */
+  round?: number;
+  /** 卷宗时间线尾部（最新若干条）；全量仍在磁盘 timeline.jsonl，这里只供展示 */
+  timeline?: { at: string; kind: string; text: string }[];
   /** 本单的只读授权目录（用户显式授予；空 = 只能读工作区） */
   readRoots?: string[];
   /** 成员的读写工作区（= 派单时会话的项目目录；可写，删除需用户点头） */
@@ -479,6 +572,11 @@ export type KernelEvent =
       members?: FeedCard["members"];
       jobId?: string;
       report?: FeedCard["report"];
+      artifacts?: FeedCard["artifacts"];
+      /** 群聊：这张动作卡是谁做的（风铃派单 / 成员回报） */
+      author?: FeedAuthor;
+      /** 群聊：这张动作卡点名了谁（工具层强制 @，模型忘了写也补上） */
+      mentions?: FeedMention[];
     }
   | { type: "turn"; turn: TurnState }
   /** 另一个会话有新动静（后台成员回报写回了它的出发会话）：前端只刷新，不 upsert */
@@ -507,6 +605,11 @@ export interface RpcContracts {
       mode?: "steer" | "queue";
       /** 本轮随附（M1-16）：文件为项目工作区相对路径，图片为 data URL */
       attachments?: { files?: string[]; images?: { name: string; data: string }[] };
+      /**
+       * 群内 @成员（名字）。只是提示：内核按"本群成员名单"二次校验，
+       * 陌生名字一律丢弃（防模型/前端报一个不存在的人）。
+       */
+      mentions?: { name: string }[];
     };
     result: { ok: true; queued: boolean; queueId?: string };
   };
@@ -815,6 +918,11 @@ export interface RpcContracts {
     params: void;
     result: { teams: TeamAdminView[]; error?: string };
   };
+  /** 单个成员战绩：成员卡按需拉，不塞进每轮快照（快照每几秒一次，扫卷宗太贵） */
+  "team.member.record": {
+    params: { teamId: string; name: string };
+    result: { tasks: number; accepted: number; rejected: number; escalations: number };
+  };
   /** 改成员岗位：角色 / 单一目标 / 提示词正文 / 头像库 id（不给扩工具权限） */
   "team.member.save": {
     params: { teamId: string; name: string; role?: string; goal?: string; body?: string; avatarId?: string };
@@ -959,6 +1067,19 @@ export interface RpcContracts {
     params: { taskId: string; ref: string };
     result: { ok: boolean; error?: string };
   };
+  /**
+   * 内置预览：主进程读文件内容，渲染层自己排版/高亮，不启动外部关联程序。
+   * 路径守卫与 evidence.open 一致：只在 tasks/<taskId>/ 内解析。
+   */
+  "preview.read": {
+    params: { taskId: string; ref: string };
+    result: PreviewReadResult;
+  };
+  /** PDF 预览：在应用内开一个独立窗口用内置阅读器看（路径守卫与 preview.read 一致） */
+  "preview.pdfWindow": {
+    params: { taskId: string; ref: string };
+    result: { ok: boolean; error?: string };
+  };
   /** 打开数据目录 / 日志目录（系统文件管理器） */
   "app.openData": {
     params: { kind: "data" | "logs" };
@@ -1017,7 +1138,16 @@ export interface RpcContracts {
   };
   "model.save": {
     /** 不带 id = 新增；带 id = 编辑那条。apiKey 留空 = 沿用该条已保存的 Key */
-    params: { id?: string; label: string; provider: string; baseUrl: string; model: string; apiKey?: string };
+    params: {
+      id?: string;
+      label: string;
+      provider: string;
+      baseUrl: string;
+      model: string;
+      apiKey?: string;
+      /** 本机/局域网/非 HTTPS 端点必须显式勾选 */
+      riskAccepted?: boolean;
+    };
     result: { ok: true; id: string } | { ok: false; error: string };
   };
   "model.remove": {
@@ -1037,6 +1167,36 @@ export interface RpcContracts {
     /** 传 id 测已保存的 Key；不传 id 用表单里临时填的 Key 测 */
     params: { id?: string; baseUrl?: string; apiKey?: string; model?: string };
     result: { ok: true; latencyMs: number } | { ok: false; error: string };
+  };
+  /** 自定义 OpenAI 兼容端点：拉 /v1/models，不消耗 token */
+  "model.discover": {
+    params: {
+      id?: string;
+      baseUrl: string;
+      apiKey?: string;
+      /** 本机/局域网/非 HTTPS 端点必须显式确认风险，才允许把 Key 发过去探测 */
+      riskAccepted?: boolean;
+    };
+    result:
+      | { ok: true; models: { id: string; ownedBy?: string; created?: number }[]; latencyMs: number; url: string }
+      | { ok: false; error: string };
+  };
+  /** 端点健康检查：/models 优先，失败再退回一次最小 chat 探针 */
+  "model.health": {
+    params: { id?: string; baseUrl?: string; apiKey?: string; model?: string };
+    result:
+      | { ok: true; latencyMs: number; modelCount?: number; via: "models" | "chat" }
+      | { ok: false; error: string; latencyMs?: number };
+  };
+  /** 本机常见免费/本地网关探测（只 GET /models，不发 Key，不自动启动进程） */
+  "gateway.list": {
+    params: void;
+    result: { gateways: GatewayView[] };
+  };
+  /** 打开外部说明页（只允许 http/https） */
+  "app.openExternal": {
+    params: { url: string };
+    result: { ok: boolean; error?: string };
   };
 
   /** 偏好设置（M2-11 加软预算与备用模型；M3-08 加界面语言；截图加快捷键；M3-01 加心跳） */

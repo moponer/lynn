@@ -44,7 +44,7 @@ test("composeSystemPrompt：persona 夹中间，安全尾段强制后置", () =>
   const p = composeSystemPrompt("叫我老板，说话带点幽默。");
   assert.ok(p.indexOf("叫我老板") > p.indexOf("指挥者"), "persona 在固定头之后");
   assert.ok(p.indexOf("叫我老板") < p.indexOf("安全边界"), "persona 在安全尾段之前");
-  assert.ok(p.trimEnd().endsWith("不要假装执行。"), "安全边界是最后一段（强制后置）");
+  assert.ok(p.trimEnd().endsWith("当做不到的理由。"), "安全边界是最后一段（强制后置）");
   // 空 persona 回落默认
   const d = composeSystemPrompt("   ");
   assert.ok(d.includes("语气与人设"));

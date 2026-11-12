@@ -50,18 +50,26 @@ test("七态完整流转：受理→派单→执行→审查→归档（每步 v
   assert.equal(done.version, 7, "建单 + 5 次迁移 + 1 次登记证据");
 });
 
-test("进审查必须带已验证证据：无证据 / 未验证都不可达", () => {
+test("证据策略：普通任务无证据可进审查，关键任务仍强制已验证证据", () => {
+  // 默认 optional：不再因为缺一项证据把整张单堵死在执行中
   const store = newStore();
   store.create({ id: "WO-3", title: "x", teamId: "t1" });
   store.transition("WO-3", "todo");
   store.transition("WO-3", "in_progress");
-  assert.throws(() => store.transition("WO-3", "in_review"), /≥1 项已验证证据/);
+  assert.equal(store.transition("WO-3", "in_review").status, "in_review", "普通任务无证据也能进审查");
 
-  store.addEvidence("WO-3", ev({ verified: false }));
-  assert.throws(() => store.transition("WO-3", "in_review"), /≥1 项已验证证据/);
+  // required：审计/对账/安全类仍拦
+  const strict = newStore();
+  strict.create({ id: "WO-3R", title: "x", teamId: "t1", evidencePolicy: "required" });
+  strict.transition("WO-3R", "todo");
+  strict.transition("WO-3R", "in_progress");
+  assert.throws(() => strict.transition("WO-3R", "in_review"), /关键任务.*≥1 项已验证证据/);
 
-  store.addEvidence("WO-3", ev());
-  assert.equal(store.transition("WO-3", "in_review").status, "in_review");
+  strict.addEvidence("WO-3R", ev({ verified: false }));
+  assert.throws(() => strict.transition("WO-3R", "in_review"), /≥1 项已验证证据/);
+
+  strict.addEvidence("WO-3R", ev());
+  assert.equal(strict.transition("WO-3R", "in_review").status, "in_review");
 });
 
 test("进归档必须有用户拍板记录", () => {

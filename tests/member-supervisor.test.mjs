@@ -39,7 +39,9 @@ function setup() {
     escalateWhen: "卡住",
     body: "",
   });
-  return { root, kernel: new Kernel(root) };
+  const kernel = new Kernel(root);
+  kernel.handle("config.prefs", { autoStart: false });
+  return { root, kernel };
 }
 
 const tc = (id, name, args) => ({ id, name, arguments: JSON.stringify(args) });

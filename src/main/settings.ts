@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { LogPrefs } from "./log-policy";
 
 /**
  * 设置与数据根（§4.7）：一切落 `~/.lynn/`（可用 LYNN_HOME 覆盖，单测用）。
@@ -20,11 +21,15 @@ export interface StoredModelConfig {
 export interface StoredModelEntry extends StoredModelConfig {
   id: string;
   label: string;
+  /** 风险确认时间：本机/局域网网关或非 HTTPS 端点首次保存时由用户勾选 */
+  riskAcceptedAt?: string;
 }
 
 export interface Prefs {
-  /** 任务契约默认自动开始（关闭时每次动手前都要用户点"开始"） */
+  /** 任务契约默认自动开始（默认开；关掉时每次动手前都要用户点"开始"） */
   autoStart: boolean;
+  /** 2026-11-11 一次性迁移标记：升级后默认自主，之后尊重用户在设置里的显式选择 */
+  autonomyMigrated?: boolean;
   /** 关窗进托盘而不是退出（M1-18） */
   trayOnClose: boolean;
   /** 窗口隐藏时用系统通知触达（M1-18） */
@@ -45,6 +50,18 @@ export interface Prefs {
   disabledSkills: string[];
   /** 心跳最小间隔（分钟，默认 5）：同一批事实 30 分钟内不重复注入，token 消耗有事才有 */
   heartbeatMinutes: number;
+  /** 秒级探针间隔（ms；0 = 关掉探针，只保留事件驱动与分钟级巡检） */
+  heartbeatProbeMs?: number;
+  /** 事件驱动唤醒的最小合并间隔（ms）：同一波事件只叫醒一次 */
+  heartbeatWakeMinMs?: number;
+  /** 事件驱动唤醒的每小时配额：防异常刷屏打穿预算 */
+  heartbeatWakePerHour?: number;
+  /**
+   * 日志分类与限流（2026-11-11）：`enabled: false` 一条都不写；
+   * `categories.member/tool/task/heartbeat/system` 可单独关；`perMinute` 控频。
+   * 缺省：heartbeat 关，其余开（tool 每分钟 120 条，单条字段截断 400 字符）。
+   */
+  log?: LogPrefs;
   /** 区域截图的全局快捷键（Electron Accelerator，如 Alt+Shift+S）；被占用可在设置里改 */
   captureHotkey: string;
   /** 默认工作区（2026-11-10）：新会话/无会话发消息的落点；空 = 按平台默认解析 */
@@ -56,7 +73,8 @@ export interface Prefs {
 }
 
 const DEFAULT_PREFS: Prefs = {
-  autoStart: false,
+  // 2026-11-11 默认自主：用户只提需求，契约直接开工；要逐步确认可在设置里关掉
+  autoStart: true,
   trayOnClose: true,
   notify: true,
   softBudgetTokens: 0,
@@ -66,6 +84,10 @@ const DEFAULT_PREFS: Prefs = {
   supervisor: true,
   heartbeat: true,
   heartbeatMinutes: 5,
+  // 秒级心跳（2026-11-11）：探针只读内存态，唤醒仍受合并窗口与每小时配额约束
+  heartbeatProbeMs: 1000,
+  heartbeatWakeMinMs: 20_000,
+  heartbeatWakePerHour: 12,
   disabledSkills: [],
   captureHotkey: "Alt+Shift+S",
   defaultWorkspace: "",
@@ -95,7 +117,25 @@ export class SettingsStore {
     /** safeStorage 的两个函数由 main.ts 注入（便于单测替换） */
     private readonly encrypt: (plain: string) => Buffer,
     private readonly isEncryptionAvailable: () => boolean,
-  ) {}
+  ) {
+    this.migrateAutonomy();
+  }
+
+  /**
+   * 2026-11-11：默认自主。历史上 autoStart 默认 false，每张单都要用户点「开始」，
+   * 与「用户只提需求、只要结果」冲突。升级时迁移一次并把标记写盘；
+   * 之后用户在设置里显式关掉会保留 autonomyMigrated，不再被覆盖。
+   */
+  private migrateAutonomy(): void {
+    try {
+      const s = this.read();
+      if (s.prefs?.autonomyMigrated) return;
+      s.prefs = { ...DEFAULT_PREFS, ...(s.prefs ?? {}), autoStart: true, autonomyMigrated: true };
+      this.write(s);
+    } catch {
+      /* 迁移失败不阻断启动；getPrefs 仍按默认值走 */
+    }
+  }
 
   private get file(): string {
     return path.join(this.dataRoot, "settings.json");
@@ -179,6 +219,8 @@ export class SettingsStore {
     baseUrl: string;
     model: string;
     apiKey?: string;
+    /** 风险确认时间；不传 = 沿用该条旧值（换端点时由内核清空/拒绝） */
+    riskAcceptedAt?: string;
   }): StoredModelEntry {
     const s = this.normalize(this.read());
     const entries = s.models!;
@@ -190,6 +232,7 @@ export class SettingsStore {
       ...cfg,
       id,
       label: (input.label?.trim() || previous?.label || cfg.provider || cfg.model || "未命名模型").slice(0, 40),
+      riskAcceptedAt: input.riskAcceptedAt ?? previous?.riskAcceptedAt,
     };
     if (idx >= 0) entries[idx] = entry;
     else entries.push(entry);

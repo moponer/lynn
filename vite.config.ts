@@ -18,6 +18,10 @@ export default defineConfig({
         // 主 bundle 不跟着膨胀，浏览器也能长期缓存这一块不常变的美术资源。
         manualChunks(id) {
           if (id.includes("node_modules/@dicebear/")) return "avatars";
+          // Markdown / 语法高亮是一条独立的重活：单独成块，主聊天 bundle 不背它。
+          if (/node_modules\/(react-markdown|remark-|rehype-|micromark|mdast|hast|unist|vfile|unified|highlight\.js|property-information|space-separated-tokens|comma-separated-tokens|zwitch|longest-streak|ccount|trim-lines|bail|is-plain-obj|trough|character-entities|decode-named-character-reference)/.test(id)) {
+            return "rich-text";
+          }
         },
       },
     },

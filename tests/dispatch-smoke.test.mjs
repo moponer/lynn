@@ -11,6 +11,7 @@ import { TaskStore } from "../dist/main/task-store.js";
 function setup() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "lynn-dispatch-"));
   const kernel = new Kernel(root);
+  kernel.handle("config.prefs", { autoStart: false });
   const teams = new TeamStore(root);
   teams.createTeam("t1", "冒烟组");
   teams.writeMember("t1", {

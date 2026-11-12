@@ -233,7 +233,7 @@ export function Wizard({
                 <div className="wiz-h1">
                   她能替你做主，<span>但不替你签字</span>
                 </div>
-                <div className="wiz-sub">动手前先给你看任务契约；交付要看证据；验收与打回都由你按章。</div>
+                <div className="wiz-sub">动手前先给你看任务契约；交付看结果；验收与打回都由你按章。</div>
 
                 <div className="wiz-caps">
                   <div className="wiz-cap">
@@ -415,10 +415,10 @@ export function Wizard({
                 <div className="idtile">
                   <div className="k">
                     <Icon name="target" size="sm" />
-                    <span>证据</span>
+                    <span>结果</span>
                   </div>
                   <div className="d" style={{ marginTop: 5 }}>
-                    没有证据就不算完成
+                    交付才算完成
                   </div>
                 </div>
                 <div className="idtile">

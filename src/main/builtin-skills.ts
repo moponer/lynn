@@ -32,7 +32,7 @@ allowed-tools: [create_plugin_draft, assign_task, create_member, check_progress,
 ## 3. 工坊流程（五步，全程留痕）
 
 1. **开草稿**：create_plugin_draft（title/kind/spec）。spec 四段写全：解决什么、输入输出、边界（不许做什么）、验收用例。
-2. **招人派单**：create_member 招插件工程师 → assign_task，**workspace 必须填返回的 draftDir**（产物只能写进草稿区，永不自动生效）。简报里带上：本手册的对应档位规范 + 用户的原始需求 + spec。
+2. **招人派单**：create_member 招插件工程师 → assign_task，**workspace 必须填返回的 draftDir**（产物只能写进草稿区，永不自动生效）。岗位档案只写能力域与做事风格，draftDir、本次路径、档位与验收用例一律放简报；简报里带上：本手册的对应档位规范 + 用户的原始需求 + spec。
 3. **跟进**：check_progress / nudge_member 常规管理。
 4. **验收**：成员回报后按 §4 清单验收 → ship_plugin 走准入审查（自动：manifest 校验、id 冲突、L1 禁项扫描、L2 命令形状）。
 5. **启用**：L0 过审可自启用（会记审计并告知用户）；**L1/L2 过审后必须请用户在插件面板点启用**——你不能给自己的产物提权。
