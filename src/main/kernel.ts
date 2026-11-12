@@ -275,6 +275,22 @@ const TOOL_JSON: ToolSchema[] = [
           deadline: { type: "string", description: "具体时间（如「2026-11-10 18:00」「2小时后」），不要写「尽快」" },
           tools: { type: "array", items: { type: "string" }, description: "本次分配工具集，必须 ⊆ 岗位白名单" },
           acceptance: { type: "array", items: { type: "string" }, description: "验收标准（可验证；写进任务契约，用户点开始后生效）" },
+          forbidden: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "本次禁区（法：违反即不合格，不是建议）：点名不许做的事，并写清具体姿势。例如「不许把测试 skip 掉」「不许 mock 被测对象」「不许改断言或放宽阈值」。别写「认真一点」这种没法验的话。",
+          },
+          priority: {
+            type: "string",
+            description: "取舍口径：冲突时保什么。例如「算得对 > 做得全 > 做得快」。不给成员就自己猜。",
+          },
+          mode: {
+            type: "string",
+            enum: ["execute", "explore"],
+            description:
+              "任务型态：execute=要有可交付产物（缺省）；explore=调研/选型/找方案，要的是结论+依据+不确定性，别硬凑产物。",
+          },
           workspace: {
             type: "string",
             description:
@@ -586,6 +602,12 @@ interface PendingPlan {
   evidencePolicy?: EvidencePolicy;
   /** 派单时的完成标准（冻结版；落单时写进 TaskRecord） */
   acceptance?: string[];
+  /** 本次禁区（法）：点名不许做的事，违反即不合格 */
+  forbidden?: string[];
+  /** 取舍口径：冲突时保什么 */
+  priority?: string;
+  /** 任务型态：execute 要产物 / explore 要结论与依据 */
+  mode?: "execute" | "explore";
   /** M3-07：插件工坊草稿 id——成员工作区即草稿区（产物只能写进草稿） */
   draftId?: string;
 }
@@ -2571,12 +2593,17 @@ export class Kernel {
     }, 15_000);
     stallTimer.unref?.();
 
+    // 禁区与取舍口径随单走（2026-11-12）：派单时定的法，成员第一眼就要看见
+    const recNow = this.taskStore.get(taskId);
     const run: Promise<MemberRunResult> = runMemberTask({
       profile,
       brief,
       deadline,
       tools: allowed,
       maxTurns,
+      forbidden: recNow?.forbidden,
+      priority: recNow?.priority,
+      mode: recNow?.mode,
       signal: controller.signal,
       workdir,
       scratchDir,
@@ -3749,6 +3776,14 @@ export class Kernel {
         // 规模与证据策略（2026-11-11）：小任务 8 轮 / 120K、证据可选；关键任务
         // （审计/对账/安全/可复跑）才强制证据。显式参数优先，其余按简报自动判定。
         const acceptanceList = (Array.isArray(args.acceptance) ? args.acceptance : []).map(String);
+        // 禁区（法）与取舍口径（2026-11-12 借 leader）：都是可选参数——
+        // 不给就不拦退回（简报硬闸维持四段，不打断既有节奏），给了就一路带到成员眼前
+        const forbiddenList = (Array.isArray(args.forbidden) ? args.forbidden : [])
+          .map((x) => String(x).trim())
+          .filter(Boolean)
+          .slice(0, 8);
+        const priority = String(args.priority ?? "").trim().slice(0, 200);
+        const taskMode: "execute" | "explore" = args.mode === "explore" ? "explore" : "execute";
         const scale = estimateTaskScale(brief, acceptanceList);
         const scaleBudget = scaleLimits(scale);
         // 用户要的是结果，不看证据：默认 optional；只有显式 required 才做内部核验闸。
@@ -3896,6 +3931,9 @@ export class Kernel {
           maxTurns,
           evidencePolicy: evPolicy,
           acceptance: acceptanceList.length ? acceptanceList : undefined,
+          forbidden: forbiddenList.length ? forbiddenList : undefined,
+          priority: priority || undefined,
+          mode: taskMode,
         };
         // 重做：复用原单，只改状态 + 追加卷宗；新任务才 create。
         // blocked→todo / in_review→in_progress 都是状态机允许的迁移（task-store LEGAL）。
@@ -3920,6 +3958,9 @@ export class Kernel {
             evidencePolicy: evPolicy,
             brief,
             ...(acceptanceList.length ? { acceptance: acceptanceList } : {}),
+            ...(forbiddenList.length ? { forbidden: forbiddenList } : {}),
+            ...(priority ? { priority } : {}),
+            mode: taskMode,
           });
           this.taskStore.transition(taskId, "todo");
         }
@@ -3937,11 +3978,16 @@ export class Kernel {
         const decisionId = `plan-${taskId}-${Date.now().toString(36)}`;
         this.pendingPlans.set(decisionId, { ...ctx, decisionId });
         const permNote = readRoots?.length ? `\n\n只读授权申请（点「开始」即批准）：${readRoots.join("、")}` : "";
+        // 禁区 / 取舍 / 型态也上契约卡：用户点「开始」前就该看见这次的红线
+        const methodNote =
+          (forbiddenList.length ? `\n\n禁区（不许做）：${forbiddenList.join("；")}` : "") +
+          (priority ? `\n取舍口径：${priority}` : "") +
+          (taskMode === "explore" ? `\n型态：探索型（要结论与依据，不硬凑产物）` : "");
         this.decisions.push({
           id: decisionId,
           from: "计划",
           title: `任务契约 · ${title}`,
-          detail: `${brief}\n\n工作区（可读写）：${wsFinal}${permNote}${scaleNote}`,
+          detail: `${brief}\n\n工作区（可读写）：${wsFinal}${permNote}${methodNote}${scaleNote}`,
           kind: "plan",
           jobId: taskId,
           at: new Date().toISOString(),
@@ -6380,6 +6426,10 @@ export class Kernel {
               [
                 `目标：${d.plan?.goal ?? plan.brief.split("\n")[0] ?? ""}`,
                 `验收：${(d.plan?.acceptance ?? []).join("；") || "（未写）"}`,
+                // 禁区与取舍也上契约卡：用户点「开始」前就该看见这次的红线
+                ...(plan.forbidden?.length ? [`禁区（不许做）：${plan.forbidden.join("；")}`] : []),
+                ...(plan.priority ? [`取舍口径：${plan.priority}`] : []),
+                ...(plan.mode === "explore" ? ["型态：探索型（要结论与依据，不硬凑产物）"] : []),
                 `截止：${d.plan?.deadline ?? plan.deadline}`,
                 `团队：${plan.teamId}`,
               ].join("\n"),

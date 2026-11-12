@@ -131,6 +131,16 @@ export interface TaskRecord {
   brief?: string;
   /** 派单时的完成标准（冻结版） */
   acceptance?: string[];
+  /**
+   * 本次禁区（法，2026-11-12 借 leader 的"法与情报分家"）：
+   * 点名不许做的事，违反即不合格。与档案里的通用边界分开——档案是岗位说明书，
+   * 禁区是这次任务的硬红线（不许 skip 测试、不许 mock 被测对象…）。
+   */
+  forbidden?: string[];
+  /** 取舍口径：冲突时保什么（如"算得对 > 做得全 > 做得快"） */
+  priority?: string;
+  /** 任务型态：execute=要有产物；explore=要结论与依据（调研/选型） */
+  mode?: "execute" | "explore";
 }
 
 export class TaskConflictError extends Error {
@@ -295,6 +305,12 @@ export class TaskStore {
     brief?: string;
     /** 派单时的完成标准（冻结版） */
     acceptance?: string[];
+    /** 本次禁区（法） */
+    forbidden?: string[];
+    /** 取舍口径 */
+    priority?: string;
+    /** 任务型态 */
+    mode?: "execute" | "explore";
   }): TaskRecord {
     if (this.get(input.id)) throw new TaskRuleError(`工单已存在: ${input.id}`);
     if (input.parentId) {
@@ -324,6 +340,9 @@ export class TaskStore {
       ...(input.evidencePolicy ? { evidencePolicy: input.evidencePolicy } : {}),
       ...(input.brief ? { brief: input.brief } : {}),
       ...(input.acceptance?.length ? { acceptance: input.acceptance } : {}),
+      ...(input.forbidden?.length ? { forbidden: input.forbidden } : {}),
+      ...(input.priority ? { priority: input.priority } : {}),
+      ...(input.mode ? { mode: input.mode } : {}),
     };
     this.write(rec);
     return rec;

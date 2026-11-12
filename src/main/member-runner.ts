@@ -82,6 +82,16 @@ export interface MemberRunInput {
   deadline: string;
   /** 本次分配的工具集（调用方已按「只能收窄」校验过与岗位白名单的包含关系） */
   tools: string[];
+  /**
+   * 本次禁区（2026-11-12，借 leader 的"法与情报分家"）：
+   * 点名不许做的事——"不许把测试 skip 掉""不许 mock 被测对象"。
+   * 这是**法**：违反即不合格，不是建议。与岗位档案的通用边界区分开。
+   */
+  forbidden?: string[];
+  /** 取舍口径：冲突时保什么（如"算得对 > 做得全 > 做得快"）。不给成员就自己猜。 */
+  priority?: string;
+  /** 任务型态：execute = 要产物；explore = 要结论与依据（调研/选型，别硬凑产物） */
+  mode?: "execute" | "explore";
   /** 轮次上限覆盖（派单时指定）；缺省用岗位档案 limits.maxTurns */
   maxTurns?: number;
   /** 任务工作区：成员一切文件活动的边界（绝对路径） */
@@ -237,6 +247,22 @@ export function memberSystemPrompt(input: MemberRunInput): string {
         ]
       : []),
     "",
+    ...(input.forbidden?.length
+      ? [
+          "【本次禁区（法：违反即不合格，不是建议）】",
+          ...input.forbidden.map((f) => `- ${f}`),
+          "- 这些是这次任务的硬红线：别用「绕过」的方式凑指标（例如改断言、加 skip、放宽阈值、mock 被测对象）。",
+        ]
+      : []),
+    ...(input.priority?.trim() ? ["", `【取舍口径（冲突时保什么）】${input.priority.trim()}`] : []),
+    ...(input.mode === "explore"
+      ? [
+          "",
+          "【本次是探索型任务（调研/选型/找方案）】",
+          "- 要的是**结论 + 依据 + 不确定性**，不是「产物齐全」：别为了交差硬凑文件。",
+          "- 别把猜测写成事实：不确定的地方明说「未验证」，比编一个像样的答案有用。",
+        ]
+      : []),
     `【本次任务简报（截止：${input.deadline}）】`,
     input.brief,
     "",
