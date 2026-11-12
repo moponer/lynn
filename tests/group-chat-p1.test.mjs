@@ -70,12 +70,12 @@ const start = (kernel, taskId) => {
   assert.equal(kernel.handle("decision.resolve", { id: plan.id, action: "start" }).ok, true);
 };
 
-const assign = (kernel, taskId, teamId = "t1", who = "林工") =>
+const assign = (kernel, taskId, teamId = "t1", who = "林工", brief = BRIEF) =>
   kernel.runTool("assign_task", {
     teamId,
     taskId,
     member: who,
-    brief: BRIEF,
+    brief,
     deadline: "30 分钟",
     acceptance: ["数字可对账"],
   });
@@ -215,6 +215,71 @@ test("右键菜单的数据源：成员档案 / 工单详情 / 催办", async ()
     const nudge = kernel.handle("task.nudge", { taskId: "task-1" });
     assert.equal(nudge.ok, false);
     assert.match(nudge.error, /没有在跑/);
+  } finally {
+    await kernel.dispose();
+  }
+});
+
+test("多群：切回一个群不丢上下文，且各群互不串", async () => {
+  const { kernel } = setup();
+  try {
+    await kernel.init();
+    const A = kernel.handle("session.snapshot").thread.id;
+    kernel.handle("feed.send", { text: "群 A 的事：核 Q3 订单" });
+    const B = kernel.handle("session.new").threadId;
+    kernel.handle("feed.send", { text: "群 B 的事：写周报" });
+
+    // 切回 A：上下文要续上（Pi 侧 --continue），别让风铃"忘了"之前聊过什么
+    kernel.handle("thread.switch", { id: A });
+    assert.equal(kernel.createFreshSession, false, "切回有历史的群要能续上，不能强制新会话");
+    assert.ok(kernel.history.length > 0, "上下文要恢复");
+    assert.match(kernel.history.at(-1).content, /群 A/, "恢复的是这个群自己的上下文");
+    assert.doesNotMatch(kernel.history.at(-1).content, /群 B/, "别的群的上下文不能串进来");
+
+    // 切到空的新群：才开新会话（Pi 的 --continue 在空目录里可能报错）
+    const C = kernel.handle("session.new").threadId;
+    assert.equal(kernel.createFreshSession, true, "空群才开新会话");
+    assert.equal(kernel.history.length, 0, "空群没有历史");
+    assert.ok(C);
+  } finally {
+    await kernel.dispose();
+  }
+});
+
+test("多群并行：群 A 的成员在跑时，群 B 照样能派单——两边同时在跑", async () => {
+  const { kernel } = setup();
+  try {
+    await kernel.init();
+    // 成员的模型慢一点，好让两个群的任务同时挂着
+    kernel.memberChatFn = async (input) => {
+      await new Promise((r) => setTimeout(r, 400));
+      const step = { toolCalls: [tc("1", "write_file", { path: "out.md", content: "x" })] };
+      input.messages.push({ role: "assistant", content: null, tool_calls: step.toolCalls });
+      for (const call of step.toolCalls) {
+        input.messages.push({ role: "tool", tool_call_id: call.id, name: call.name, content: "（占位）" });
+      }
+      return { content: "", toolCalls: step.toolCalls, promptTokens: 5, completionTokens: 5 };
+    };
+
+    const A = kernel.handle("session.snapshot").thread.id;
+    assign(kernel, "task-A");
+    start(kernel, "task-A");
+
+    // 群 A 的成员还在跑，切到群 B 再派一张（各群各用自己的班底：一支队不能跨群同时干两件事）
+    const B = kernel.handle("session.new").threadId;
+    assign(
+      kernel,
+      "task-B",
+      "t2",
+      "阿明",
+      "【目标】写 10 月周报\n【完成标准】出周报文件\n【材料与位置】工作区\n【限制】只写周报",
+    );
+    start(kernel, "task-B");
+
+    const running = kernel.runningTaskIds();
+    assert.ok(running.includes("task-A"), "群 A 的成员还在跑");
+    assert.ok(running.includes("task-B"), "群 B 的成员同时在跑——多群不是只能有一个");
+    assert.equal(kernel.currentThreadId, B, "当前站在群 B，但群 A 的活没停");
   } finally {
     await kernel.dispose();
   }

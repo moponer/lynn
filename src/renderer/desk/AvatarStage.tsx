@@ -83,6 +83,11 @@ export function AvatarStage({
     drag.current = null;
   };
 
+  // 桌宠（minimal）不转 3D：平面精灵转 90° 会变薄片消失；移动交给系统窗体拖拽
+  const rotateHandlers = minimal
+    ? {}
+    : { onPointerDown: onDown, onPointerMove: onMove, onPointerUp: onUp, onPointerLeave: onUp };
+
   const cls = `av-sprite${mood ? " mood-on" : ""}${animUrl ? " av-anim" : ""}`;
 
   return (
@@ -90,11 +95,8 @@ export function AvatarStage({
       <div
         className="av-stage"
         style={{ height }}
-        onPointerDown={onDown}
-        onPointerMove={onMove}
-        onPointerUp={onUp}
-        onPointerLeave={onUp}
-        title="拖动旋转 · 三视图"
+        {...rotateHandlers}
+        title={minimal ? undefined : "拖动旋转 · 三视图"}
       >
         <div className="av-rotor" style={{ transform: `rotateY(${yaw}deg)` }}>
           {animUrl ? (

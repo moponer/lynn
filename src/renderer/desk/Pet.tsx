@@ -4,7 +4,8 @@ import { POSE_IMG, type PoseName } from "./pet-assets";
 
 /**
  * 桌宠模式（P2）：独立透明置顶小窗里只有她。
- * 不抢电影；单击唤回主界面（主进程负责 show/focus 并关掉小窗）。
+ * 窗体可拖动（CSS -webkit-app-region: drag 交给系统移动），不再"点一下就关 / 拖一下转没"。
+ * 右上角「收起」单独关窗（no-drag，不影响拖动）。
  */
 export function Pet() {
   useEffect(() => {
@@ -19,11 +20,21 @@ export function Pet() {
   const mood = moodParam && moodParam in POSE_IMG ? (moodParam as PoseName) : undefined;
 
   return (
-    <div className="pet" onClick={() => void window.lynn.rpc("pet.focus")} title="单击唤回风铃">
+    <div className="pet">
+      <button
+        type="button"
+        className="pet-close"
+        title="收起桌宠"
+        onClick={(e) => {
+          e.stopPropagation();
+          void window.lynn.rpc("pet.close");
+        }}
+      >
+        ×
+      </button>
       <div className="pet-figure">
-        <AvatarStage state="idle" mood={mood} minimal height={248} />
+        <AvatarStage state="idle" mood={mood} minimal height={388} />
       </div>
-      <div className="pet-hint">单击唤回</div>
     </div>
   );
 }

@@ -1857,7 +1857,10 @@ export class Kernel {
       void this.reloadMcp();
       this.watchMcpConfig();
     }
-    this.createFreshSession = true;
+    // 切群不丢上下文（2026-11-12 实测后修）：该群有历史就让 Pi 续上（--continue +
+    // 按群独立的 sessionDir，天然不串）；空群才开新会话（Pi 的 --continue 在空目录里可能报错）。
+    // 原来这里一律 createFreshSession = true —— 切回一个群，风铃就"忘了"之前聊过什么。
+    this.createFreshSession = st.history.length === 0;
     void this.resetAgentHost();
     this.checkpoints.discard();
     this.setTurn({ phase: "idle", busy: false, pending: 0, taskId: undefined, startedAt: undefined, canUndo: false, changedFiles: [] });

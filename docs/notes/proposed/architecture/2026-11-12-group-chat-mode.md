@@ -367,6 +367,7 @@ lastReadAt?: string;
 | 取舍口径 | `assign_task.priority` + `TaskRecord.priority` | 冲突时保什么（如"算得对 > 做得全 > 做得快"）。不给成员就自己猜 |
 | 执行型 / 探索型 | `assign_task.mode` + `TaskRecord.mode` | explore = 调研/选型，要结论 + 依据 + 不确定性，别硬凑产物（leader 的硬指标只会收到凑数的答案） |
 | 判卷口径冻结 | `TaskRecord.brief/acceptance` | 派单时的简报与完成标准存单上 → 事后不能改口径 |
+| 群公告（全局段） | `ThreadMeta.announcement` + `thread.announcement` RPC + `kernel.groupContext()` | 整体干什么 / 谁管哪段 / **接缝在哪** / 共享写入点归谁。leader 那句「接缝没人接是头号事故」——接缝得是群级可见、能改的事实。群公告与本群成员名单进 system prompt 的本群上下文段（切群本就换 Pi 会话，前缀缓存本就要重置，放这里安全）；右栏顶部「群公告」块可写可存 |
 
 **验证**：`npm run typecheck` 0 错；`npm run lint:design` 过；`npm test` **564/564 绿**（新增 `tests/assign-brief-method.test.mjs` 2 条 + `tests/group-chat-p1.test.mjs` 未读用例 1 条）。走查：`atPending:["待风铃处理"]`。
 
@@ -375,10 +376,9 @@ lastReadAt?: string;
 
 ### 10.6 遗留（下一轮）
 
-1. **群名/群公告**：一个群 = 一件事的名字；目前群名沿用会话自动命名（首条消息前 20 字），也没有群公告。
+1. **群名**：一个群该有个像样的名字；目前沿用会话自动命名（首条消息前 20 字）。改名入口已有（左栏 hover 的改名钮），但新群默认名该是"新群"而不是"新会话"。
 2. **多群并发**：切群即换 Pi 会话（`threads/<id>/pi/`），多群常驻成本未测。
-3. **`TaskRecord.member` 单值 → 多承办人**：仅当出现"一单多人协作"真需求时做。
-4. **成员侧也该有"接缝"概念**：多成员一单时，接缝归谁（leader 的"接缝没人接是头号事故"）——目前只在单成员成立。
+3. **`TaskRecord.member` 单值 → 多承办人**：仅当出现"一单多人协作"真需求时做（群公告已经把分工与接缝写下来了，差的是一张单能挂几个人）。
 
 
 

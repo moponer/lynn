@@ -392,10 +392,10 @@ function createPet(): void {
   }
   const { workArea } = screen.getPrimaryDisplay();
   pet = new BrowserWindow({
-    width: 240,
-    height: 300,
-    x: workArea.x + workArea.width - 260,
-    y: workArea.y + workArea.height - 320,
+    width: 300,
+    height: 450,
+    x: workArea.x + workArea.width - 320,
+    y: workArea.y + workArea.height - 470,
     frame: false,
     transparent: true,
     alwaysOnTop: true,
