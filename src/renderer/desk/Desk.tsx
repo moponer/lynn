@@ -435,6 +435,8 @@ function Ledger({
   const [hits, setHits] = useState<{ id: string; title: string; hits: string[] }[]>([]);
   const [renaming, setRenaming] = useState<{ id: string; title: string } | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
+  /** 群操作菜单（群列表行尾的 ⋯ 或右键群行都走它） */
+  const [threadMenu, setThreadMenu] = useState<{ id: string; x: number; y: number } | null>(null);
   /** 工单卡右键菜单：卡住的单原来只能在台账里干瞪眼 */
   const [menu, setMenu] = useState<{ job: DeskJob; x: number; y: number } | null>(null);
   const t = useT();
@@ -567,6 +569,10 @@ function Ledger({
                           type="button"
                           className={`thread-row${on ? " on" : ""}`}
                           onClick={() => onThread?.(th.id)}
+                          onContextMenu={(e) => {
+                            e.preventDefault();
+                            setThreadMenu({ id: th.id, x: e.clientX, y: e.clientY });
+                          }}
                         >
                           <span className="thread-av" aria-hidden>
                             {(th.title || "群").slice(0, 1)}
@@ -593,33 +599,15 @@ function Ledger({
                         <span className="thread-acts">
                           <button
                             type="button"
-                            className="thread-act"
-                            title={th.pinned ? "取消置顶" : "置顶"}
-                            onClick={() => onThreadPin?.(th.id, !th.pinned)}
-                          >
-                            <Icon name="target" size="sm" />
-                          </button>
-                          <button
-                            type="button"
-                            className="thread-act"
-                            title={t("ledger.threadRename")}
-                            onClick={() => {
-                              setDeleting(null);
-                              setRenaming({ id: th.id, title: th.title });
+                            className="thread-act thread-more"
+                            title="群操作"
+                            aria-haspopup="menu"
+                            onClick={(e) => {
+                              const r = e.currentTarget.getBoundingClientRect();
+                              setThreadMenu({ id: th.id, x: r.left, y: r.bottom });
                             }}
                           >
-                            <Icon name="pen" size="sm" />
-                          </button>
-                          <button
-                            type="button"
-                            className="thread-act"
-                            title={t("ledger.threadDelete")}
-                            onClick={() => {
-                              setRenaming(null);
-                              setDeleting(deleting === th.id ? null : th.id);
-                            }}
-                          >
-                            <Icon name="x" size="sm" />
+                            ⋯
                           </button>
                         </span>
                       </>
@@ -798,6 +786,29 @@ function Ledger({
       </div>
         </>
       )}
+      {threadMenu &&
+        (() => {
+          const th = desk.threads.find((x) => x.id === threadMenu.id);
+          if (!th) return null;
+          return (
+            <ThreadMenu
+              title={th.title || t("ledger.untitled")}
+              pinned={th.pinned}
+              x={threadMenu.x}
+              y={threadMenu.y}
+              onClose={() => setThreadMenu(null)}
+              onPin={(p) => onThreadPin?.(th.id, p)}
+              onRename={() => {
+                setDeleting(null);
+                setRenaming({ id: th.id, title: th.title });
+              }}
+              onDelete={() => {
+                setRenaming(null);
+                setDeleting(th.id);
+              }}
+            />
+          );
+        })()}
       {menu && (
         <JobMenu
           job={menu.job}
@@ -1686,6 +1697,7 @@ function Roster({
   /** @某人：把名字插进输入框（群聊模式） */
   onAt,
   onAnnounce,
+  onDraftNotice,
   open,
   onClose,
 }: {
@@ -1714,6 +1726,8 @@ function Roster({
   onAt?: (name: string) => void;
   /** 写群公告（全局段）：保存后风铃下一轮就看得见 */
   onAnnounce?: (text: string) => void;
+  /** 请风铃起草群公告（用户不该只能自己写） */
+  onDraftNotice?: () => void;
 }) {
   const t = useT();
   // 成员状态由成员卡自己表达（排序 + 状态色），标题栏不再报两套互相打架的总数
@@ -1749,6 +1763,13 @@ function Roster({
   const [memberMenu, setMemberMenu] = useState<{ member: DeskMember; x: number; y: number } | null>(null);
   const [detail, setDetail] = useState<MemberDetailState | null>(null);
   const [rosterNote, setRosterNote] = useState<string | null>(null);
+  /** 群公告起草中（风铃写好了就停） */
+  const [draftingNotice, setDraftingNotice] = useState(false);
+  const noticeText = desk.threads.find((x) => x.id === desk.thread.id)?.announcement;
+  useEffect(() => {
+    // 公告内容变了 = 起草完成
+    if (noticeText) setDraftingNotice(false);
+  }, [noticeText]);
   /** 本群的队伍：本会话工单所属的队（他群折叠在下面） */
   const groupTeamIds = useMemo(() => {
     const s = new Set<string>();
@@ -1914,6 +1935,8 @@ function Roster({
           <GroupNotice
             text={desk.threads.find((x) => x.id === desk.thread.id)?.announcement}
             onSave={(text) => onAnnounce(text)}
+            onDraft={onDraftNotice ? () => { setDraftingNotice(true); onDraftNotice(); } : undefined}
+            drafting={draftingNotice}
           />
         )}
         {rosterNote && (
@@ -2654,133 +2677,198 @@ function MemberMenu({
 }
 
 /**
- * 成员详情（群聊模式）：右键成员后在右栏顶部展开。
- * 资料看"他是谁"，目标看"他被要求做什么"，进度看"他最近在干什么"。
+ * 群操作菜单（群列表）：置顶 / 改名 / 删除。
+ * 一个入口就够——原来三个小图标散在行尾，越窄越挤，还占掉摘要的宽度。
+ */
+function ThreadMenu({
+  title,
+  pinned,
+  x,
+  y,
+  onClose,
+  onPin,
+  onRename,
+  onDelete,
+}: {
+  title: string;
+  pinned?: boolean;
+  x: number;
+  y: number;
+  onClose: () => void;
+  onPin: (pinned: boolean) => void;
+  onRename: () => void;
+  onDelete: () => void;
+}) {
+  const t = useT();
+  const box = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const onDown = (e: MouseEvent) => {
+      if (box.current && !box.current.contains(e.target as Node)) onClose();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [onClose]);
+  const style = {
+    left: Math.max(8, Math.min(x, (window.innerWidth || 1200) - 220)),
+    top: Math.max(8, Math.min(y, (window.innerHeight || 800) - 170)),
+  };
+  return createPortal(
+    <div className="jobmenu" ref={box} style={style} role="menu" aria-label={title}>
+      <div className="jobmenu-h">
+        <span className="jobmenu-title">{title}</span>
+      </div>
+      <button
+        type="button"
+        className="jobmenu-item"
+        onClick={() => {
+          onPin(!pinned);
+          onClose();
+        }}
+      >
+        {pinned ? "取消置顶" : "置顶"}
+      </button>
+      <button
+        type="button"
+        className="jobmenu-item"
+        onClick={() => {
+          onRename();
+          onClose();
+        }}
+      >
+        {t("ledger.threadRename")}
+      </button>
+      <button
+        type="button"
+        className="jobmenu-item danger"
+        onClick={() => {
+          onDelete();
+          onClose();
+        }}
+      >
+        {t("ledger.threadDelete")}
+      </button>
+    </div>,
+    document.body,
+  );
+}
+
+/**
+ * 成员资料卡（群聊模式：右键成员 → 弹出卡片）。
+ * 分层：他是谁 / 他能干什么 / 战绩 / 手上的活——一层一件事，别糊成一张表。
+ * 用 portal 挂到 body：右栏窄屏态是 transform 定位的，fixed 会被它当包含块裁掉。
  */
 function MemberDetail({ data, onClose }: { data: MemberDetailState; onClose: () => void }) {
   const t = useT();
   const m = data.member;
-  return (
-    <div className="mdetail">
-      <div className="mdetail-h">
-        <MemberAvatar name={m.name} avatarId={m.avatarId} size={28} />
-        <div className="mdetail-name">
-          <b>{m.name}</b>
-          <span className="mdetail-role">{m.role}</span>
-        </div>
-        <button type="button" className="icon-btn" onClick={onClose} aria-label={t("common.close")}>
-          <Icon name="x" size="sm" />
-        </button>
-      </div>
-      {data.kind === "profile" ? (
-        data.profile ? (
-          <div className="mdetail-body">
-            <div className="mdetail-row">
-              <span className="k">目标</span>
-              <span className="v">{data.profile.goal || "（未写）"}</span>
-            </div>
-            <div className="mdetail-row">
-              <span className="k">边界</span>
-              <span className="v">{data.profile.boundaries.join("、") || "（未写）"}</span>
-            </div>
-            <div className="mdetail-row">
-              <span className="k">工具</span>
-              <span className="v mono">{data.profile.tools.join("、") || "（无）"}</span>
-            </div>
-            <div className="mdetail-row">
-              <span className="k">上限</span>
-              <span className="v mono">
-                {data.profile.limits.maxTurns} 轮 · {data.profile.limits.budgetTokens} tok · {data.profile.limits.wallClockMin} 分
-              </span>
-            </div>
-            <div className="mdetail-row">
-              <span className="k">产出</span>
-              <span className="v">{data.profile.outputContract.deliverable || "（未写）"}</span>
-            </div>
-            <div className="mdetail-row">
-              <span className="k">何时升级</span>
-              <span className="v">{data.profile.escalateWhen || "（未写）"}</span>
-            </div>
-            {data.profile.body && (
-              <div className="mdetail-row">
-                <span className="k">做事方式</span>
-                <span className="v">{data.profile.body}</span>
-              </div>
-            )}
-            {data.record && (
-              <div className="mdetail-row">
-                <span className="k">战绩</span>
-                <span className="v mono">
-                  参与 {data.record.tasks} · 通过 {data.record.accepted} · 打回 {data.record.rejected} · 升级 {data.record.escalations}
-                </span>
-              </div>
-            )}
-            {data.job && (
-              <div className="mdetail-row">
-                <span className="k">手上</span>
-                <span className="v mono">
-                  {data.job.id} · {data.job.title}
-                </span>
-              </div>
-            )}
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const profile = data.kind === "profile" ? data.profile : undefined;
+  const detail = data.kind === "job" ? data.detail : undefined;
+  const record = data.kind === "profile" ? data.record : undefined;
+  const job = data.kind === "profile" ? data.job : undefined;
+
+  const sections: { title: string; rows: { k: string; v: string }[] }[] = [];
+  if (profile) {
+    sections.push({
+      title: "他是谁",
+      rows: [
+        { k: "目标", v: profile.goal || "（未写）" },
+        { k: "边界", v: profile.boundaries.join("、") || "（未写）" },
+        ...(profile.body ? [{ k: "做事方式", v: profile.body }] : []),
+      ],
+    });
+    sections.push({
+      title: "他能干什么",
+      rows: [
+        { k: "工具", v: profile.tools.join("、") || "（无）" },
+        {
+          k: "上限",
+          v: `${profile.limits.maxTurns} 轮 · ${profile.limits.budgetTokens} tok · ${profile.limits.wallClockMin} 分`,
+        },
+        { k: "交付物", v: profile.outputContract.deliverable || "（未写）" },
+        { k: "何时升级", v: profile.escalateWhen || "（未写）" },
+      ],
+    });
+  }
+  if (detail) {
+    sections.push({
+      title: "手上的活",
+      rows: [
+        { k: "单", v: `${detail.id} · ${detail.title}` },
+        ...(detail.goal ? [{ k: "目标", v: detail.goal }] : []),
+        { k: "完成标准", v: detail.acceptance.join("；") || "（未写）" },
+        { k: "状态", v: `${detail.status}${detail.statusNote ? ` · ${detail.statusNote}` : ""}` },
+        ...(detail.workspaceRoot ? [{ k: "工作区", v: detail.workspaceRoot }] : []),
+        ...(detail.deliverables.length ? [{ k: "产物", v: detail.deliverables.map((d) => d.label).join("、") }] : []),
+        ...(detail.timeline.length
+          ? [{ k: "最近", v: detail.timeline.slice(-3).reverse().map((e) => e.text).join(" / ") }]
+          : []),
+      ],
+    });
+  }
+  if (job && data.kind === "profile") {
+    sections.push({ title: "手上的活", rows: [{ k: "单", v: `${job.id} · ${job.title}` }] });
+  }
+  if (record) {
+    sections.push({
+      title: "战绩",
+      rows: [
+        {
+          k: "统计",
+          v: `参与 ${record.tasks} · 通过 ${record.accepted} · 打回 ${record.rejected} · 升级 ${record.escalations}`,
+        },
+      ],
+    });
+  }
+
+  return createPortal(
+    <div className="mdetail-overlay" onClick={onClose} role="presentation">
+      <div className="mdetail-card" role="dialog" aria-label={`${m.name} 的资料`} onClick={(e) => e.stopPropagation()}>
+        <header className="mdetail-hd">
+          <MemberAvatar name={m.name} avatarId={m.avatarId} size={40} />
+          <div className="mdetail-id">
+            <b>{m.name}</b>
+            <span className="mdetail-role">{m.role}</span>
           </div>
-        ) : (
-          <p className="mdetail-empty">没有读到这份档案。</p>
-        )
-      ) : data.detail ? (
+          <span className="mdetail-state" data-state={m.status}>
+            {m.statusLabel}
+          </span>
+          <button type="button" className="icon-btn" onClick={onClose} aria-label={t("common.close")}>
+            <Icon name="x" size="sm" />
+          </button>
+        </header>
         <div className="mdetail-body">
-          <div className="mdetail-row">
-            <span className="k">单</span>
-            <span className="v mono">
-              {data.detail.id} · {data.detail.title}
-            </span>
-          </div>
-          {data.detail.goal && (
-            <div className="mdetail-row">
-              <span className="k">目标</span>
-              <span className="v">{data.detail.goal}</span>
-            </div>
-          )}
-          <div className="mdetail-row">
-            <span className="k">完成标准</span>
-            <span className="v">{data.detail.acceptance.join("；") || "（未写）"}</span>
-          </div>
-          <div className="mdetail-row">
-            <span className="k">状态</span>
-            <span className="v">
-              {data.detail.status}
-              {data.detail.statusNote ? ` · ${data.detail.statusNote}` : ""}
-            </span>
-          </div>
-          {data.detail.workspaceRoot && (
-            <div className="mdetail-row">
-              <span className="k">工作区</span>
-              <span className="v mono">{data.detail.workspaceRoot}</span>
-            </div>
-          )}
-          {data.detail.deliverables.length > 0 && (
-            <div className="mdetail-row">
-              <span className="k">产物</span>
-              <span className="v mono">{data.detail.deliverables.map((d) => d.label).join("、")}</span>
-            </div>
-          )}
-          {data.detail.timeline.length > 0 && (
-            <div className="mdetail-row">
-              <span className="k">最近</span>
-              <span className="v">
-                {data.detail.timeline
-                  .slice(-4)
-                  .reverse()
-                  .map((e) => e.text)
-                  .join(" / ")}
-              </span>
-            </div>
-          )}
+          {sections.length === 0 && <p className="mdetail-empty">没读到这份资料。</p>}
+          {sections.map((sec) => (
+            <section className="mdetail-sec" key={sec.title}>
+              <h4 className="mdetail-sec-h">{sec.title}</h4>
+              <dl className="mdetail-dl">
+                {sec.rows.map((r) => (
+                  <div className="mdetail-row" key={r.k}>
+                    <dt>{r.k}</dt>
+                    <dd>{r.v}</dd>
+                  </div>
+                ))}
+              </dl>
+            </section>
+          ))}
         </div>
-      ) : (
-        <p className="mdetail-empty">没有读到这张单。</p>
-      )}
-    </div>
+      </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -2788,7 +2876,18 @@ function MemberDetail({ data, onClose }: { data: MemberDetailState; onClose: () 
  * 群公告 = 这个群的全局段（整体干什么 / 谁管哪段 / 接缝在哪 / 共享写入点归谁）。
  * leader 那句「接缝没人接是头号事故」——所以接缝得是群级可见、能改的事实。
  */
-function GroupNotice({ text, onSave }: { text?: string; onSave: (t: string) => void }) {
+function GroupNotice({
+  text,
+  onSave,
+  onDraft,
+  drafting,
+}: {
+  text?: string;
+  onSave: (t: string) => void;
+  /** 让风铃起草（用户不该只能自己写） */
+  onDraft?: () => void;
+  drafting?: boolean;
+}) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(text ?? "");
   useEffect(() => {
@@ -2798,9 +2897,16 @@ function GroupNotice({ text, onSave }: { text?: string; onSave: (t: string) => v
     <div className="gnotice">
       <div className="gnotice-h">
         <span className="k">群公告</span>
-        <button type="button" className="gnotice-toggle" onClick={() => setEditing((v) => !v)}>
-          {editing ? "收起" : text ? "改" : "写"}
-        </button>
+        <span className="gnotice-btns">
+          {onDraft && (
+            <button type="button" className="gnotice-toggle" onClick={onDraft} disabled={drafting}>
+              {drafting ? "起草中…" : "让风铃起草"}
+            </button>
+          )}
+          <button type="button" className="gnotice-toggle" onClick={() => setEditing((v) => !v)}>
+            {editing ? "收起" : text ? "改" : "我自己写"}
+          </button>
+        </span>
       </div>
       {editing ? (
         <>
@@ -2829,7 +2935,7 @@ function GroupNotice({ text, onSave }: { text?: string; onSave: (t: string) => v
       ) : (
         <p className="gnotice-t">
           {text ||
-            "还没写：这个群整体干什么、谁管哪段、接缝在哪——写一句，风铃派单就会照着它分工（它每轮都看得见）。"}
+            "还没写：这个群整体干什么、谁管哪段、接缝在哪——让风铃起草一版，或者你自己写一句（它每轮都看得见，会照着它分工）。"}
         </p>
       )}
     </div>
@@ -3786,6 +3892,7 @@ export function DeskView({
   onThreadRemove,
   onThreadPin,
   onAnnounce,
+  onDraftNotice,
   onTaskFeed,
   onCreateTeam,
   onManageTeam,
@@ -3834,6 +3941,8 @@ export function DeskView({
   onThreadPin?: (id: string, pinned: boolean) => void;
   /** 写群公告（全局段） */
   onAnnounce?: (text: string) => void;
+  /** 请风铃起草群公告 */
+  onDraftNotice?: () => void;
   /** 工单往来（跨会话追溯）：工单出发会话 ≠ 当前会话时按 threadId 回读 */
   onTaskFeed?: (taskId: string) => Promise<{ cards: FeedCard[]; threadId?: string; threadTitle?: string }>;
   /** 建团队（§4.10.3 修正）：用户只给名字，ID 由系统生成 */
@@ -4043,6 +4152,7 @@ export function DeskView({
           onManageTeam={onManageTeam}
           onAt={(name) => setAtTarget({ name, nonce: Date.now() })}
           onAnnounce={(text) => onAnnounce?.(text)}
+          onDraftNotice={() => onDraftNotice?.()}
           onThread={(id) => {
             setRightOpen(false);
             onThread?.(id);

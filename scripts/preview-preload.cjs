@@ -885,6 +885,53 @@ contextBridge.exposeInMainWorld("lynn", {
     if (method === "team.member.record") {
       return { tasks: 7, accepted: 5, rejected: 1, escalations: 1 };
     }
+    // 群聊走查：成员资料卡（右键成员 → 查看资料）
+    if (method === "team.member.detail") {
+      return {
+        ok: true,
+        profile: {
+          name: String(params?.name || "顾明"),
+          role: "数据整理",
+          goal: "把源数据整理成可核对的周报",
+          boundaries: ["只动工作区", "不碰源材料"],
+          tools: ["read_file", "write_file", "run_command"],
+          model: "deepseek-chat",
+          limits: { maxTurns: 12, budgetTokens: 300000, wallClockMin: 30 },
+          outputContract: {
+            deliverable: "report_0914.md",
+            evidence: ["报告文件", "行数对账日志"],
+            acceptance: ["条数对得上", "每条有来源"],
+          },
+          escalateWhen: "材料缺失或口径冲突",
+          body: "先对账，再出稿；条数对不上就上报，不自行补数。",
+          avatarId: "a01",
+        },
+        record: { tasks: 7, accepted: 5, rejected: 1, escalations: 1 },
+        job: { id: "WO-2418", title: "把 issues_0914.csv 整理成周报第 3 节", status: "in_review" },
+      };
+    }
+    // 群聊走查：工单详情（右键成员 → 任务目标 / 进度）
+    if (method === "task.detail") {
+      return {
+        ok: true,
+        detail: {
+          id: String(params?.taskId || "WO-2418"),
+          title: "把 issues_0914.csv 整理成周报第 3 节",
+          member: "顾明",
+          teamId: "t1",
+          status: "in_review",
+          statusNote: "in_review · 顾明 · 证据 2",
+          goal: "把 issues_0914.csv 整理成周报第 3 节",
+          acceptance: ["条数从 1284 对到 1284", "每条都有来源"],
+          workspaceRoot: "F:/spiker/lynn",
+          deliverables: [{ label: "report_0914.md", ref: "artifacts/report_0914.md", bytes: 2048 }],
+          timeline: [
+            { at: "14:31", kind: "report", text: "成员回报：第 3 节已写完" },
+            { at: "14:30", kind: "step", text: "写入 report_0914.md" },
+          ],
+        },
+      };
+    }
     // 编制页：预览给一队两成员（含岗位提示词），便于设计走查
     if (method === "team.list") {
       return {

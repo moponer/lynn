@@ -860,6 +860,15 @@ export default function App() {
             .then(() => refresh())
             .catch((err) => setNotice(`群公告没存上：${err instanceof Error ? err.message : String(err)}`));
         }}
+        onDraftNotice={() => {
+          setNotice(null);
+          const id = desk.thread.id;
+          void rpc("thread.draftNotice", { id })
+            .then((r) => {
+              if (!r.ok) setNotice(r.error ?? "风铃这会儿正忙，等它闲下来再起草");
+            })
+            .catch((err) => setNotice(`起草没发起：${err instanceof Error ? err.message : String(err)}`));
+        }}
         onThreadRemove={(id) => {
           setNotice(null);
           void rpc("thread.remove", { id })

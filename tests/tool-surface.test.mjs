@@ -33,6 +33,8 @@ const LYNN_TOOLS = [
   "report_to_user",
   "review_result",
   "save_memory",
+  // 2026-11-12：群公告（全局段）只有风铃能写——成员看不到群，也不该改群的分工
+  "set_group_notice",
   "ship_plugin",
   "stop_task",
 ];

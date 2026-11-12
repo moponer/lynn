@@ -449,6 +449,24 @@ const TOOL_JSON: ToolSchema[] = [
   {
     type: "function",
     function: {
+      name: "set_group_notice",
+      description:
+        "写本群公告（全局段）：整体干什么、谁管哪段、接缝在哪、共享写入点归谁。用户点「让风铃起草」时用它落草稿；分工或接缝变了也用它更新。写完群里每个人看得见，你每轮也看得见（接缝没人接是并行协作的头号事故，所以它得是群级事实）。",
+      parameters: {
+        type: "object",
+        required: ["text"],
+        properties: {
+          text: {
+            type: "string",
+            description: "群公告正文，几行就够：整体目标 / 谁管哪段 / 接缝（谁的产出交给谁）/ 共享写入点归谁",
+          },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "ask_user",
       description: "向用户提问（口径、超预算、连续打回升级）。成员没有问用户的通道，问题由你归集转呈。",
       parameters: {
@@ -744,6 +762,8 @@ export class Kernel {
   private wakeGate: WakeGateState = { lastWakeAt: 0, windowStart: 0, windowCount: 0, lastSig: "", lastSigAt: 0 };
   /** busy 时被挡下的心跳事件：收尾后补评估一次，别让「成员退出」白白蒸发 */
   private heartbeatPending: string | null = null;
+  /** 成员交回报后待风铃验收的队列（2026-11-12）：忙时先挂着，收尾再叫 */
+  private reviewPending: { taskId: string; member: string; text: string }[] = [];
   /** 探针已报过的「沉默成员」，避免每秒重复触发 */
   private silentNoted = new Map<string, number>();
   private lastHeartbeatAt = Date.now(); // init 后先静默一个间隔，不抢启动窗口
@@ -2269,6 +2289,12 @@ export class Kernel {
      * 只读根里的文件只登记引用（不把用户项目整份拷走，2026-11-10）。
      */
     copyRoot?: string,
+    /**
+     * 是不是"成员真交回报"（2026-11-12）。
+     * 成员自己跑完交上来的 → 要立刻叫醒风铃去验收；
+     * 风铃自己调 review_result 登记的 → 不用叫（她自己就在这一轮里）。
+     */
+    notifyLynn = false,
   ): string {
     this.tools.reviewResult(teamId, taskId, { member, text, evidence, sessionId: sessionId ?? this.host?.sessionId });
     this.taskCase.append(taskId, { kind: "report", member, text, meta: { evidence } });
@@ -2349,13 +2375,41 @@ export class Kernel {
       // 群聊：成员第一次以自己的身份在群里发言（带头像、岗位、名字）
       author: this.memberAuthor(teamId, member),
     });
-    // 成员交回结果：立即评估一次心跳，让风铃尽快验收/收尾（有闸，不会每次回报都烧上下文）
+    // 成员交回结果：立即评估一次心跳（有闸），并**直接叫醒风铃**去验收——
+    // 2026-11-12 用户实测：光靠心跳闸，风铃要等下一轮才知道有人交了活，闭环断了。
     this.requestHeartbeat("report");
+    if (notifyLynn) this.wakeLynnForReview(taskId, member, text);
     return moved
       ? evidence.length
         ? `回报已登记，${verified} 项证据已验证并收入卷宗，工单进入待审查。`
         : "回报已登记（未附证据，本单证据可选），工单进入待审查。"
       : "回报已登记（含证据索引）。";
+  }
+
+  /**
+   * 成员交回报 = 闭环的关键节点：立刻叫醒风铃去验收（2026-11-12 用户实测发现）。
+   * 此前只有心跳巡检（默认 5 分钟一闸）或用户主动问，风铃才知道有人交了活——闭环断了。
+   * 忙的时候先挂着，别打断正在跑的活。
+   */
+  private wakeLynnForReview(taskId: string, member: string, text: string): void {
+    this.reviewPending.push({ taskId, member, text: text.slice(0, 300) });
+    this.drainReviewPending();
+  }
+
+  /** 忙、或用户正在拍板契约时先挂着：这轮收尾再叫 */
+  private drainReviewPending(): void {
+    if (!this.reviewPending.length) return;
+    if (this.busy) return; // 别打断正在跑的活
+    if (this.turn.phase === "awaiting_plan") return; // 用户正在拍板，别插队
+    const item = this.reviewPending.shift();
+    if (!item) return;
+    this.submitTurn(
+      `【成员回报】${item.member} 交了 ${item.taskId}：${item.text}\n` +
+        "现在验收：先 read_artifact 读产物正文（没读过正文不许点头），再逐条对完成标准 → " +
+        "合格就 accept_or_reject 验收，不合格就打回并写清改什么、期望什么；缺材料就如实说缺什么。",
+      undefined,
+      { internal: true, ephemeral: true },
+    );
   }
 
   /** 没在跑就立刻提交，在跑就进队列（用户确认计划/回答问题时用） */
@@ -2749,7 +2803,7 @@ export class Kernel {
           // 不先解析到工作区，真文件也会被判成"验不了"，工单停在执行中（C1 实机验暴露的真 bug）。
           const rootsForEvidence = this.effectiveReadRoots(taskId, teamId);
           const evidence = result.evidence.map((e) => this.resolveMemberPath(e, workdir, rootsForEvidence));
-          this.registerReport(teamId, taskId, member, result.report, evidence, undefined, runThreadId, result.evidence, workdir);
+          this.registerReport(teamId, taskId, member, result.report, evidence, undefined, runThreadId, result.evidence, workdir, true);
           // 交付物与证据分开：交付物永久固化，过程证据只登记
           if (result.deliverables.length) {
             this.solidifyDeliverables(
@@ -4296,6 +4350,19 @@ export class Kernel {
               : `验收结论已记录，但没能归档（${whyNot}）。先补齐可说清的证据，或确认这张单确实在待验状态。`
             : `已打回，并写清了改什么、期望什么、时限。让 ${args.taskId ?? "这张单"} 的原成员重做时，用 assign_task 带 reworkTaskId=${String(args.taskId ?? "")} 在同一张单上重派（状态与卷宗都留在这张单里），不要新开工单。`;
       }
+      case "set_group_notice": {
+        // 群公告（全局段）：只有风铃能写。落一张她的话的卡，让群里看得见是谁写的。
+        const text = String(args.text ?? "").trim();
+        if (!text) return "群公告不能空：写清整体干什么、谁管哪段、接缝在哪。";
+        if (!this.currentThreadId) return "现在没有群（会话）：先开一个群再写公告。";
+        this.threads.setAnnouncement(this.currentThreadId, text);
+        this.card({
+          kind: "lynn",
+          text: `群公告写好了：\n${text}`,
+          author: { kind: "lynn", name: "风铃" },
+        });
+        return "群公告已写好（群里每个人都能看见，我每轮也看得见）。";
+      }
       case "report_to_user": {
         // 汇报里也不许反问产出细节（放哪/叫什么/什么格式/让用户自己存）——那会把活推回用户
         const reportText = `${String(args.conclusion ?? "")} ${String(args.unfinished ?? "")} ${String(args.decisionsNeeded ?? "")}`;
@@ -5195,6 +5262,8 @@ export class Kernel {
       const phase: TurnPhase = this.turn.phase === "failed" ? "failed" : "idle";
       this.setTurn({ phase, busy: false, startedAt: undefined });
       this.drainQueue();
+      // 成员回报后要验收的：这轮收尾了就叫醒风铃（不等心跳闸）
+      this.drainReviewPending();
       // 忙时被挡下的心跳事件：这一轮（或队列）收尾后再评估一次；闸仍然生效，不会补成刷屏
       if (this.heartbeatPending) {
         const pending = this.heartbeatPending;
@@ -7027,6 +7096,28 @@ export class Kernel {
         } catch {
           return { ok: false, text: "" } as RpcContracts[M]["result"];
         }
+      }
+
+      /**
+       * 请风铃起草本群公告（2026-11-12）：
+       * 公告不该只能由用户写——风铃更清楚这个群在干什么、分工与接缝在哪。
+       */
+      case "thread.draftNotice": {
+        const id = String((params as { id?: string }).id ?? this.currentThreadId);
+        if (!id || id !== this.currentThreadId) {
+          return { ok: false, error: "只能给当前群起草" } as RpcContracts[M]["result"];
+        }
+        if (this.busy) {
+          return { ok: false, error: "风铃这会儿正忙，等它闲下来再起草" } as RpcContracts[M]["result"];
+        }
+        this.submitTurn(
+          "【起草群公告】给这个群写一段公告，写完用 set_group_notice 落盘（群里每个人都会看见）。\n" +
+            "必须写清四件事：①整体要干什么 ②谁管哪段（按成员名字）③接缝在哪（谁的产出交给谁，别两边各做一半）④共享写入点归谁。\n" +
+            "几行就够，写人话；别写「认真一点」这种没法验的话。",
+          undefined,
+          { internal: true, ephemeral: true },
+        );
+        return { ok: true } as RpcContracts[M]["result"];
       }
 
       case "thread.remove": {

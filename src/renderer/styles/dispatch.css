@@ -215,7 +215,6 @@ svg.ic.lg { width: 20px; height: 20px; }
 .win-ctl {
   display: flex; align-items: center; gap: 1px;
   margin-left: 6px; padding-left: 6px;
-  box-shadow: inset 1px 0 0 var(--rule-soft);
 }
 .win-btn {
   width: 34px; height: 30px; display: grid; place-items: center;
@@ -1983,6 +1982,8 @@ button.ev:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
   border-radius: var(--r-s); background: none; color: var(--ink-3); cursor: pointer;
 }
 .thread-act:hover { color: var(--ink); background: var(--hover-bg-2); }
+/* 群操作收成一个入口：⋯ 按钮（原来三个小图标挤在行尾，还吃摘要的宽度） */
+.thread-more { font-size: var(--fs-body); line-height: 1; padding-bottom: 4px; }
 .thread-act:focus-visible { outline: 1.5px solid var(--blue); outline-offset: 1px; }
 .thread-rename { flex: 1; min-width: 0; }
 .thread-ask {
@@ -2457,8 +2458,8 @@ html[data-mode="light"] { color-scheme: light; }
    仍然是不带圆角气泡的直角块——层级靠归属与色条，不靠微信那套气泡尾巴（规范 §2.1 不做聊天气泡） */
 .feed-item.user { align-self: flex-end; max-width: 80%; }
 .feed-item.talk { padding: 10px 12px 11px 12px; }
-/* 零描边规则（无例外）：成员色条用内阴影画，不用 border */
-.feed-item.talk.author-member { box-shadow: inset 2px 0 0 var(--brass); }
+/* 全局禁令（2026-11-12 用户定）：任何元素都不许有左侧竖线。
+   层级靠底色、字距、留白与左侧标签表达，不用描边。 */
 .fv-who.member { color: var(--ink); }
 .fv-who .fv-role { font-size: var(--fs-meta); color: var(--ink-4); font-weight: 400; }
 .talk-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
@@ -2488,16 +2489,36 @@ html[data-mode="light"] { color-scheme: light; }
   font-family: var(--f-mono); font-size: var(--fs-label); letter-spacing: 0;
   color: var(--ink-4); padding: 2px 2px 6px;
 }
-.mdetail { background: var(--sheet-2); border-radius: var(--r-m); padding: 10px 12px; margin-bottom: 10px; }
-.mdetail-h { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
-.mdetail-name { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
-.mdetail-name b { font-size: var(--fs-body); color: var(--ink); }
+/* 成员资料卡（弹出）：遮罩 + 居中卡片，分层展示 */
+.mdetail-overlay {
+  position: fixed; inset: 0; z-index: 60;
+  background: rgba(0, 0, 0, .42);
+  display: grid; place-items: center; padding: 24px;
+}
+.mdetail-card {
+  width: min(520px, 92vw); max-height: 78vh; overflow: auto;
+  background: var(--sheet-2); border-radius: var(--r-m);
+  padding: 16px 18px 18px; box-shadow: 0 18px 48px rgba(0, 0, 0, .45);
+}
+.mdetail-hd { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+.mdetail-id { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.mdetail-id b { font-size: var(--fs-body); color: var(--ink); }
 .mdetail-role { font-size: var(--fs-meta); color: var(--ink-3); }
-.mdetail-h .icon-btn { margin-left: auto; }
-.mdetail-body { display: flex; flex-direction: column; gap: 6px; }
-.mdetail-row { display: grid; grid-template-columns: 56px 1fr; gap: 8px; align-items: start; }
-.mdetail-row .k { font-size: var(--fs-meta); color: var(--ink-4); }
-.mdetail-row .v { font-size: var(--fs-meta); color: var(--ink-2); overflow-wrap: anywhere; }
+.mdetail-state { font-size: var(--fs-label); color: var(--ink-3); margin-left: auto; }
+.mdetail-state[data-state="running"] { color: var(--blue); }
+.mdetail-state[data-state="delivered"] { color: var(--brass); }
+.mdetail-state[data-state="stuck"] { color: var(--red); }
+.mdetail-hd .icon-btn { flex: none; }
+.mdetail-body { display: flex; flex-direction: column; gap: 14px; }
+.mdetail-sec { display: flex; flex-direction: column; gap: 6px; }
+.mdetail-sec-h {
+  margin: 0; font-family: var(--f-mono); font-size: var(--fs-label); letter-spacing: 0;
+  color: var(--ink-3); font-weight: 500;
+}
+.mdetail-dl { margin: 0; display: flex; flex-direction: column; gap: 6px; }
+.mdetail-row { display: grid; grid-template-columns: 64px 1fr; gap: 10px; align-items: start; }
+.mdetail-row dt { font-size: var(--fs-meta); color: var(--ink-4); }
+.mdetail-row dd { margin: 0; font-size: var(--fs-meta); color: var(--ink-2); overflow-wrap: anywhere; line-height: 1.6; }
 .mdetail-empty { font-size: var(--fs-meta); color: var(--ink-3); margin: 0; }
 .roster-note {
   font-size: var(--fs-meta); color: var(--blue); background: var(--blue-wash);
@@ -2507,6 +2528,7 @@ html[data-mode="light"] { color-scheme: light; }
 .gnotice { background: var(--sheet-2); border-radius: var(--r-m); padding: 10px 12px; margin-bottom: 10px; }
 .gnotice-h { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; }
 .gnotice-h .k { font-size: var(--fs-meta); color: var(--ink-4); }
+.gnotice-btns { margin-left: auto; display: flex; align-items: baseline; gap: 10px; }
 .gnotice-toggle {
   margin-left: auto; padding: 0; border: 0; background: none; cursor: pointer;
   font-size: var(--fs-label); color: var(--blue);
@@ -2598,7 +2620,7 @@ html[data-mode="light"] { color-scheme: light; }
 .md a { color: var(--blue); text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
 .md del { color: var(--ink-4); }
 .md img { max-width: 100%; height: auto; border-radius: var(--r-s); }
-.md blockquote { padding-left: 12px; box-shadow: inset 2px 0 0 var(--rule); color: var(--ink-3); }
+.md blockquote { padding-left: 12px; color: var(--ink-3); }
 .md input[type="checkbox"] { accent-color: var(--blue); margin-right: 6px; }
 .md table { width: 100%; border-collapse: collapse; font-size: var(--fs-meta); }
 .md th, .md td { padding: 6px 10px; text-align: left; background: var(--sheet-2); }

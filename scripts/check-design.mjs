@@ -48,6 +48,10 @@ function scanCss(file) {
           const isReset = /^(0|none)(\s|!important|$)/i.test(value);
           if (!isReset) fail(file, declLine, `描边（零描边规则）：${sel} { ${d} }`);
         }
+        // 左侧竖线禁令（2026-11-12 用户定）：inset 左侧内阴影也是竖线，一律不许
+        if (/^box-shadow\s*:\s*inset\s+[\d.]+px\s+0\s+0/i.test(d)) {
+          fail(file, declLine, `左侧竖线（全局禁令）：${sel} { ${d} }`);
+        }
       }
     }
     i = j;

@@ -1067,6 +1067,11 @@ export interface RpcContracts {
     params: { id: string; text: string };
     result: { ok: boolean; text: string };
   };
+  /** 请风铃起草本群公告（用户不想自己写时用） */
+  "thread.draftNotice": {
+    params: { id?: string };
+    result: { ok: boolean; error?: string };
+  };
   /**
    * 成员档案全量（群聊模式：右键成员看"他是谁"）。
    * 岗位说明书 + 战绩 + 手上那张单。

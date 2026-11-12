@@ -71,6 +71,8 @@ export const MANAGEMENT_ONLY_TOOLS = [
   "review_result",
   "accept_or_reject",
   "report_to_user",
+  // 群公告（全局段）：只有风铃能写——成员看不到群，也不该改群的分工
+  "set_group_notice",
   "ask_user",
   "dissolve_team",
   "ship_plugin",
