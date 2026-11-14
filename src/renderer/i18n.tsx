@@ -3,7 +3,7 @@
 //  缺 key 时绝不能把 `menu.open` 这种内部键名露给用户；英文缺词条也按设计回退中文。
 import { createContext, useContext, type ReactNode } from "react";
 import { mergeStrings, translate } from "../shared/i18n";
-import { ZH_STRINGS } from "../shared/i18n-strings";
+import { ZH_STRINGS, type I18nKey } from "../shared/i18n-strings";
 
 const I18nContext = createContext<Record<string, string>>({});
 
@@ -13,7 +13,11 @@ export function I18nProvider({ strings, children }: { strings: Record<string, st
   return <I18nContext.Provider value={dict}>{children}</I18nContext.Provider>;
 }
 
-export type TFn = (key: string, params?: Record<string, string | number>) => string;
+/**
+ * key 是编译期校验的：拼错、或写了中文没有的键（英文包不能凭空造键），`tsc` 直接报错。
+ * 需要拼动态 key 时别绕成 string —— 把候选 key 列成常量表并给它标 I18nKey。
+ */
+export type TFn = (key: I18nKey, params?: Record<string, string | number>) => string;
 
 export function useT(): TFn {
   const strings = useContext(I18nContext);

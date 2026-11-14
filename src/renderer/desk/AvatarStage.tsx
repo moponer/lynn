@@ -16,14 +16,15 @@ import { POSE_IMG, WALK_ANIM, BLINK_ANIM, type PoseName } from "./pet-assets";
  * 渲染契约（U 插件位 `avatar.driver`）：内置驱动把**生成的短发女生 PNG** 当精灵渲染，
  * 按运行态切姿态；VRM 驱动之后按同一接口替换，界面不用改。
  *
- * 姿态来源：assets/pet-dafeiyu（19 静帧 + walk/blink 两段 webp 循环），见 pet-assets.ts。
+ * 姿态来源：assets/pet-dafeiyu（19 静帧 × 三视图 + walk/blink 两段 webp 循环），见 pet-assets.ts。
  * - idle / 眨眼：播 BLINK_ANIM（自带呼吸感）
  * - running：播 WALK_ANIM（在跑 = 走动）
  * - thinking/success/failed/waiting/standby：静态姿态 + 克制 CSS 状态表达
  * - mood 直接指定任一 19 姿态（演示 / 之后运行时表情系统用），优先于 state
  *
- * 三视图：素材目前只有正面；侧/背沿用 `rotateY` 3D 占位（转到侧面时精灵自然变薄片），
- * 真·侧背图之后随 VRM 或三视图姿态包补齐。
+ * 三视图：正/侧/背各有真实素材（见 pet-assets.POSE_IMG），按当前 view（由 yaw 推导）
+ * 直接选对应视图素材渲染，不再用 `rotateY` 占位（避免转侧面精灵变薄片、背面是镜像）。
+ * 拖动只改变 yaw → 在 正/侧/背 阈值间离散切换；webp 动画仅正面视图播放。
  */
 
 const VIEW_LABEL: Record<AvatarView, string> = { front: "正", side: "侧", back: "背" };
@@ -69,6 +70,9 @@ export function AvatarStage({
 
   const pose: PoseName = mood ?? POSE_BY_STATE[state];
   const animUrl = !mood ? ANIM_BY_STATE[state] : undefined;
+  // 按当前视图选素材；非正面视图不播 webp 动画（动画仅正面）
+  const useAnim = !!animUrl && view === "front";
+  const poseImg = POSE_IMG[view]?.[pose] ?? POSE_IMG.front[pose];
 
   const onDown = (e: React.PointerEvent) => {
     drag.current = { x: e.clientX, yaw };
@@ -98,25 +102,24 @@ export function AvatarStage({
         {...rotateHandlers}
         title={minimal ? undefined : "拖动旋转 · 三视图"}
       >
-        <div className="av-rotor" style={{ transform: `rotateY(${yaw}deg)` }}>
-          {animUrl ? (
-            <img
-              className={cls}
-              src={animUrl}
-              alt={`风铃 · ${AVATAR_STATE_LABEL[state]}`}
-              draggable={false}
-            />
-          ) : (
-            <img
-              className={cls}
-              data-pose={pose}
-              data-state={state}
-              src={POSE_IMG[pose]}
-              alt={`风铃 · ${AVATAR_STATE_LABEL[state]}`}
-              draggable={false}
-            />
-          )}
-        </div>
+        {useAnim ? (
+          <img
+            className={cls}
+            src={animUrl}
+            alt={`风铃 · ${AVATAR_STATE_LABEL[state]}`}
+            draggable={false}
+          />
+        ) : (
+          <img
+            className={cls}
+            data-pose={pose}
+            data-view={view}
+            data-state={state}
+            src={poseImg}
+            alt={`风铃 · ${AVATAR_STATE_LABEL[state]} · ${view}`}
+            draggable={false}
+          />
+        )}
 
         {bubble && <div className="av-bubble">{bubble}</div>}
 

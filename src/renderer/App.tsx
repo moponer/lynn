@@ -22,6 +22,7 @@ import { Standby } from "./desk/Standby";
 import { Pet } from "./desk/Pet";
 import { ambientForTheme, type AmbientMode } from "../shared/ambient";
 import { ZH_STRINGS } from "../shared/i18n-strings";
+import { useVoicePlayer } from "./voice/useVoicePlayer";
 
 /** 舞台视图选择（跨会话记住）：值台 = 原来的桌面，控制台 = stage.console 视图 */
 const STAGE_KEY = "lynn.stage.view";
@@ -47,6 +48,8 @@ async function rpc<M extends RpcMethod>(
 
 /** 前端构建时间（vite define 注入）：与内核的 buildAt 比对，发现"界面新、内核旧" */
 declare const __LYNN_BUILD_AT__: string;
+/** 前端构建号（vite define 注入，git 提交计数）：优先用它判新旧（审计 #19） */
+declare const __LYNN_BUILD_ID__: string;
 
 /**
  * RPC 失败的可读文案：后端是旧版本时别把 `unknown rpc method: task.remove` 直接甩给用户，
@@ -75,6 +78,8 @@ function upsertCard(feed: FeedCard[], card: FeedCard): FeedCard[] {
 }
 
 export default function App() {
+  // 语音播报：只订阅一次，桌宠窗口收不到 lynn:voice（主进程只投主窗）
+  useVoicePlayer();
   /** 桌宠小窗：同一个渲染层，只挂形象 */
   const isPet = typeof location !== "undefined" && new URLSearchParams(location.search).get("pet") === "1";
   const [snap, setSnap] = useState<SessionSnapshot | null>(null);
@@ -91,6 +96,17 @@ export default function App() {
   const [avatar, setAvatar] = useState(() => localStorage.getItem("lynn.avatar") !== "0");
   const [notice, setNotice] = useState<string | null>(null);
   const [fullAsk, setFullAsk] = useState(false);
+  /**
+   * 信任询问（2026-11-13）：用户刚选了一个目录，那目录里带项目级 MCP/技能。
+   * 在这一当场问「信任并加载 / 先不信任」——此前只甩一句"没被信任"，
+   * 用户既不知道在哪点、也不知道那里到底有什么被拦着。
+   */
+  const [trustAsk, setTrustAsk] = useState<{
+    root: string;
+    withheld: string[];
+    /** 项目级 MCP server 清单全文（审计 #7：信任前让用户看到会跑什么命令） */
+    servers: { id: string; command: string; args: string[]; envKeys: string[] }[];
+  } | null>(null);
   /**
    * `stage.console` 卡槽：哪个插件占了它、用注册表里的哪个视图。
    * 启用状态来自主进程（_state.json），不在本地记「当前是不是大屏」——
@@ -146,15 +162,31 @@ export default function App() {
     };
   }, [lang]);
 
-  // 版本握手：旧内核没有 app.info（返回 {error}）或构建时间落后于界面 → 顶部提示「重启应用」
+  // 版本握手：旧内核没有 app.info（返回 {error}）或构建落后于界面 → 顶部提示「重启应用」。
+  // 审计 #19：优先比构建号（git 计数，单调可靠）；两侧任一不是 git-N 形状才退回时间戳。
   useEffect(() => {
     let dead = false;
+    const isGitId = (s: string | undefined): s is string => !!s && /^git-\d+$/.test(s);
+    const staleByTimestamp = (): boolean => {
+      const fe = typeof __LYNN_BUILD_AT__ === "string" ? Date.parse(__LYNN_BUILD_AT__) : Number.NaN;
+      return Number.isFinite(fe); // 后端连可比时间都没有 → 当作旧
+    };
     rpc("app.info")
       .then((r) => {
         if (dead) return;
-        const res = r as { buildAt?: string; error?: string };
-        if (res.error || !res.buildAt) {
+        const res = r as { buildAt?: string; buildId?: string; error?: string };
+        if (res.error) {
           setStaleBackend(true);
+          return;
+        }
+        const feId = typeof __LYNN_BUILD_ID__ === "string" ? __LYNN_BUILD_ID__ : undefined;
+        if (isGitId(feId) && isGitId(res.buildId)) {
+          if (Number(res.buildId.slice(4)) < Number(feId.slice(4))) setStaleBackend(true);
+          return;
+        }
+        // 回落：旧内核没有 buildId / 无 git 环境——按时间戳比（旧行为）
+        if (!res.buildAt) {
+          if (staleByTimestamp()) setStaleBackend(true);
           return;
         }
         const fe = typeof __LYNN_BUILD_AT__ === "string" ? Date.parse(__LYNN_BUILD_AT__) : Number.NaN;
@@ -585,6 +617,53 @@ export default function App() {
     [refresh],
   );
 
+  /** 交付物右键菜单（2026-11-13）：打开文件 / 打开所在目录 / 移除 */
+  const onOpenDeliverable = useCallback(
+    async (taskId: string, ref: string) => {
+      setNotice(null);
+      try {
+        const r = await rpc("evidence.open", { taskId, ref });
+        if (!r.ok) setNotice(rpcResultError(r, "打开失败"));
+      } catch (err) {
+        setNotice(rpcErrorText(err, "打开失败"));
+      }
+    },
+    [],
+  );
+
+  const onRevealDeliverable = useCallback(
+    async (taskId: string, ref: string) => {
+      setNotice(null);
+      try {
+        const r = await rpc("app.revealPath", { taskId, ref });
+        if (!r.ok) setNotice(rpcResultError(r, "定位失败"));
+      } catch (err) {
+        setNotice(rpcErrorText(err, "定位失败"));
+      }
+    },
+    [],
+  );
+
+  const onRemoveDeliverable = useCallback(
+    async (taskId: string, ref: string, deleteFile: boolean) => {
+      setNotice(null);
+      // 连文件一起删是不可恢复的：先让用户明确点头（不是靠菜单里的那一句）
+      if (deleteFile) {
+        const ok = window.confirm("删除磁盘上的这个文件？此操作不可恢复。");
+        if (!ok) return;
+      }
+      try {
+        const r = await rpc("task.removeDeliverable", { taskId, ref, deleteFile });
+        if (!r.ok) setNotice(rpcResultError(r, "移除失败"));
+        else setNotice(r.removedFile ? "已移除并删除文件。" : "已从交付箱移除（文件保留）。");
+        await refresh();
+      } catch (err) {
+        setNotice(rpcErrorText(err, "移除失败"));
+      }
+    },
+    [refresh],
+  );
+
   const onRemoveReadRoot = useCallback(
     async (p: string) => {
       setNotice(null);
@@ -599,20 +678,74 @@ export default function App() {
     [refresh],
   );
 
-  /** 换当前会话的工作区（点顶栏面包屑里的项目名） */
+  /** 换当前会话的工作区（点顶栏面包屑里的项目名）
+   *
+   * 2026-11-13：不再甩一句"这个目录还没被信任"就完事。
+   * 信任闸门只管两样东西（项目级 MCP 配置与项目级技能）——
+   *  目录里两样都没有 → 信任与否毫无区别 → 什么都不用说；
+   *  有 → 当场问一句「信任并加载 / 先不信任」，让用户在这一步就决定完。
+   */
   const onPickProject = useCallback(async () => {
     setNotice(null);
     try {
       const picked = await rpc("app.pickDir", { title: "选择这个会话的工作区" });
       if (!picked?.path) return;
       const r = await rpc("project.setRoot", { root: picked.path });
-      if (!r.ok) setNotice(r.error ?? "换工作区失败");
-      else if (!r.trusted) setNotice("工作区已切换；这个目录还没被信任，项目级插件与 MCP 不会加载。");
-      await refresh();
+      if (!r.ok) {
+        setNotice(r.error ?? "换工作区失败");
+        return;
+      }
+      const gated = r.gated ?? { mcp: false, skills: false };
+      const withheld: string[] = [];
+      if (gated.mcp) withheld.push("项目级 MCP 配置");
+      if (gated.skills) withheld.push("项目级技能");
+      if (r.trusted || !withheld.length) {
+        // 已信任，或这个目录压根没有要闸的东西 → 不用打扰
+        await refresh();
+        return;
+      }
+      setTrustAsk({ root: r.root ?? picked.path, withheld, servers: r.mcpServers ?? [] });
     } catch (err) {
       setNotice(rpcErrorText(err, "换工作区失败"));
     }
   }, [refresh]);
+
+  /** 信任当前项目：加载项目级 MCP 与技能 */
+  const onTrustProject = useCallback(
+    async (trusted: boolean) => {
+      setTrustAsk(null);
+      setNotice(null);
+      try {
+        const r = await rpc("trust.set", { trusted });
+        if (!r.ok) setNotice(r.error ?? "设置信任失败");
+        else setNotice(trusted ? "已信任当前项目：项目级 MCP 与技能已加载。" : "已取消信任：项目级 MCP 与技能不再加载。");
+        await refresh();
+      } catch (err) {
+        setNotice(rpcErrorText(err, "设置信任失败"));
+      }
+    },
+    [refresh],
+  );
+
+  /** 改项目显示名（改的是项目：绑在它上面的群一起变） */
+  const onRenameProject = useCallback(
+    async (name: string) => {
+      setNotice(null);
+      const id = desk?.workspaceProjectId;
+      if (!id) {
+        setNotice("还没有项目可改名：先选一个工作目录。");
+        return;
+      }
+      try {
+        const r = await rpc("project.rename", { id, name });
+        if (!r.ok) setNotice(r.error ?? "改名失败");
+        await refresh();
+      } catch (err) {
+        setNotice(rpcErrorText(err, "改名失败"));
+      }
+    },
+    [desk?.workspaceProjectId, refresh],
+  );
 
   /** 撤销上一轮文件改动（M1-12）：改过的还原、新建的删掉，结果必须可见 */
   const onUndo = useCallback(async () => {
@@ -648,9 +781,9 @@ export default function App() {
   );
 
   const onDecisionResolve = useCallback(
-    async (id: string, action: "answer" | "start" | "revise" | "reject", text?: string) => {
+    async (id: string, action: "answer" | "start" | "revise" | "reject", text?: string, always?: boolean) => {
       try {
-        const r = await rpc("decision.resolve", { id, action, text });
+        const r = await rpc("decision.resolve", { id, action, text, always });
         if (!r.ok) setNotice(r.error);
       } catch (err) {
         setNotice(`处理失败：${err instanceof Error ? err.message : String(err)}`);
@@ -827,11 +960,16 @@ export default function App() {
           setSettingsOpen(true);
         }}
         onPickProject={() => void onPickProject()}
+        onTrustProject={(trusted) => void onTrustProject(trusted)}
+        onRenameProject={(name) => void onRenameProject(name)}
         onClearWorkspace={() => void onClearWorkspace()}
         onAddReadRoots={() => void onAddReadRoots()}
         onRemoveReadRoot={(p) => void onRemoveReadRoot(p)}
         onSnapshotProject={(id) => void onSnapshotProject(id)}
         onExportTask={(id) => void onExportTask(id)}
+        onOpenDeliverable={(id, ref) => void onOpenDeliverable(id, ref)}
+        onRevealDeliverable={(id, ref) => void onRevealDeliverable(id, ref)}
+        onRemoveDeliverable={(id, ref, del) => void onRemoveDeliverable(id, ref, del)}
         onStandby={() => setStandby(true)}
         onNew={() => void onNew()}
         onUndo={() => void onUndo()}
@@ -980,6 +1118,50 @@ export default function App() {
           </div>
         </div>
       )}
+      {/* 信任询问（2026-11-13）：选完目录当场问，不把用户扔去设置里自己找 */}
+      {trustAsk && (
+        <div
+          className="perm-overlay"
+          onClick={(e) => e.target === e.currentTarget && setTrustAsk(null)}
+        >
+          <div className="perm-ask" role="dialog" aria-modal="true" aria-label="信任这个项目？">
+            <div className="perm-ask-head">
+              <Icon name="shield" size="sm" />
+              <span>{i18nStrings["trust.askTitle"] ?? "信任这个项目？"}</span>
+            </div>
+            <p className="perm-ask-body">
+              {i18nStrings["trust.askBody"]?.replace("{root}", trustAsk.root).replace(
+                "{items}",
+                trustAsk.withheld.join("与"),
+              ) ??
+                `这个目录里有${trustAsk.withheld.join("与")}。信任后会加载它们（项目级 MCP 会启动外部进程）；不信任也能干活，只是这些不会生效。`}
+            </p>
+            {/* 审计 #7：信任前让用户看到到底会跑什么命令，别闭眼点头 */}
+            {trustAsk.servers.length > 0 && (
+              <div className="perm-ask-servers">
+                <div className="perm-ask-servers-cap">
+                  {i18nStrings["trust.askServers"] ?? "信任后将启动这些外部进程："}
+                </div>
+                {trustAsk.servers.map((s) => (
+                  <div key={s.id} className="perm-ask-server">
+                    <span className="mono">{s.id}</span>
+                    <span className="mono">{[s.command, ...s.args].join(" ")}</span>
+                    {s.envKeys.length > 0 && <span className="perm-ask-env">env: {s.envKeys.join(", ")}</span>}
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="perm-ask-acts">
+              <button type="button" className="perm-btn" onClick={() => setTrustAsk(null)}>
+                {i18nStrings["trust.askSkip"] ?? "先不信任"}
+              </button>
+              <button type="button" className="perm-btn go" onClick={() => void onTrustProject(true)}>
+                {i18nStrings["trust.askAccept"] ?? "信任并加载"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {settingsOpen && (
         <SettingsModal
           current={snap.model}
@@ -992,6 +1174,14 @@ export default function App() {
           trayOnClose={snap.prefs.trayOnClose}
           notify={snap.prefs.notify}
           lang={snap.prefs.lang}
+          voiceEnabled={snap.prefs.voiceEnabled ?? true}
+          voiceId={snap.prefs.voiceId ?? "zh-CN-XiaoxiaoNeural"}
+          voiceRate={snap.prefs.voiceRate ?? "+0%"}
+          voiceVolume={snap.prefs.voiceVolume ?? "+0%"}
+          voiceScope={snap.prefs.voiceScope ?? "brief"}
+          voiceMaxChars={snap.prefs.voiceMaxChars ?? 120}
+          voiceWhenHidden={snap.prefs.voiceWhenHidden ?? false}
+          voiceProxy={snap.prefs.voiceProxy ?? ""}
           project={snap.project}
           usage={snap.usage}
           onTheme={changeTheme}

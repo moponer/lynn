@@ -110,7 +110,41 @@ function ThinkingBlock({ text, live }: { text: string; live: boolean }) {
   );
 }
 
-/** 谁在说话：图标 + 名字 + 时间，五种对象各有各的记号，不靠猜 */
+/**
+ * 长正文折叠（2026-11-13）：成员回报动辄 1000+ 字，全铺开时一屏就只剩这张卡，
+ * 后面的动作全被挤到看不见。超过一屏的量先收成前几行，要读全文再点开。
+ */
+function FoldBody({ text }: { text: string }) {
+  const [open, setOpen] = useState(false);
+  const LIMIT = 420;
+  if (text.length <= LIMIT) {
+    return (
+      <div className="feed-body md-wrap">
+        <RichText text={text} />
+      </div>
+    );
+  }
+  return (
+    <div className="feed-fold">
+      <div className={`feed-body md-wrap${open ? " open" : ""}`}>
+        <RichText text={open ? text : `${text.slice(0, LIMIT)}…`} />
+      </div>
+      {/* 开关放在正文框外：放在里面会被 260px 的滚动框吞掉，用户根本看不到「展开」 */}
+      <button type="button" className="feed-more" onClick={() => setOpen((v) => !v)}>
+        {open ? "收起" : `展开全文（${text.length} 字）`}
+      </button>
+    </div>
+  );
+}
+
+/**
+ * 谁在说话：**一行**说完（2026-11-13）。
+ *
+ * 用户的对照是对的：飞书群、微信群一条消息只有「名字 + 时间」一行头，然后是正文。
+ * 我们此前一条成员消息要占三行头——头像/名字/岗位/时间、徽标/标题/轮次、@提及，
+ * 正文还没开始半屏就没了。现在合成一行：头像 · 名字 · 动作标签 · 做什么/多久 · 时间，
+ * 岗位降级进 tooltip（它本来就和名字经常重复）。
+ */
 function Who({
   icon,
   name,
@@ -118,6 +152,8 @@ function Who({
   meta,
   avatarId,
   role,
+  tag,
+  sub,
 }: {
   icon: IconName;
   name: string;
@@ -125,14 +161,26 @@ function Who({
   meta?: string;
   /** 成员头像（群里成员有自己的脸，不再只是一行标题） */
   avatarId?: string;
-  /** 岗位（能力域），显示在成员名后面 */
+  /** 岗位（能力域）：只在 tooltip 里出现，不再单独占位 */
   role?: string;
+  /** 动作标签（派单/回报/汇报…）：一行头的中间段，弱化着色 */
+  tag?: string;
+  /** 这件事叫什么/多久（任务号、轮次、耗时）：一行头的尾部，可省略号截断 */
+  sub?: string;
 }) {
+  const hint = role && role !== name ? `${name} · ${role}` : name;
   return (
     <div className={`fv-who ${tone}`}>
       {avatarId ? <MemberAvatar name={name} avatarId={avatarId} size={20} /> : <Icon name={icon} size="sm" />}
-      <span className="fv-name">{name}</span>
-      {role && <span className="fv-role">{role}</span>}
+      <span className="fv-name" title={hint}>
+        {name}
+      </span>
+      {tag && <span className="fv-tag">{tag}</span>}
+      {sub && (
+        <span className="fv-sub mono" title={sub}>
+          {sub}
+        </span>
+      )}
       {meta && <span className="fv-time mono">{meta}</span>}
     </div>
   );
@@ -158,19 +206,35 @@ function Mentions({ mentions, pending }: { mentions?: FeedMention[]; pending?: b
   );
 }
 
-/** 跟踪进度按步骤逐行排，最新一行落在最下面（不再是一坨挤在顶部的纯文本） */
+/**
+ * 跟踪进度按步骤逐行排，最新一行落在最下面。
+ *
+ * 2026-11-13：跑到后期一张进度卡能铺七八行，把整段对话顶下去。
+ * 默认只留**最新一步**，要复盘再展开——进度是"她现在在哪"，不是工作日志。
+ */
 function TrackLines({ text }: { text: string }) {
+  const [open, setOpen] = useState(false);
   const lines = String(text ?? "").split(/\r?\n/).filter((l) => l.trim());
   if (!lines.length) return null;
+  const many = lines.length > 2;
+  const last = lines.length - 1;
+  const shown = open || !many ? lines.map((line, i) => ({ line, now: i === last })) : [{ line: lines[last], now: true }];
   return (
-    <ol className="track-lines">
-      {lines.map((line, i) => (
-        <li className={`track-line${i === lines.length - 1 ? " now" : ""}`} key={i}>
-          <span className="track-dot" />
-          <span className="track-text">{line}</span>
-        </li>
-      ))}
-    </ol>
+    <>
+      <ol className="track-lines">
+        {shown.map((s, i) => (
+          <li className={`track-line${s.now ? " now" : ""}`} key={i}>
+            <span className="track-dot" />
+            <span className="track-text">{s.line}</span>
+          </li>
+        ))}
+      </ol>
+      {many && (
+        <button type="button" className="feed-more" onClick={() => setOpen((v) => !v)}>
+          {open ? "只看最新一步" : `展开全部 ${lines.length} 步`}
+        </button>
+      )}
+    </>
   );
 }
 
@@ -182,7 +246,7 @@ function fmtBytes(n?: number): string {
 
 const BADGE_ICON: Record<string, IconName> = {
   进度: "target", 回报: "pkg", 派单: "send", 组队: "users", 审查: "check",
-  汇报: "clip", "需要你拍板": "warn", 工具: "term", 已拦截: "shield",
+  顾问: "eye", 汇报: "clip", "需要你拍板": "warn", 工具: "term", 已拦截: "shield",
   出站: "globe", 提醒: "clock", 心跳: "clock", 记忆: "brain",
   已停止: "x", 未完成: "warn", 崩溃: "warn", 放行: "check",
 };
@@ -199,6 +263,7 @@ export function FeedView({
   collapseHistory,
   runningIds,
   onPreview,
+  onRefMenu,
 }: {
   cards: FeedCard[];
   empty?: React.ReactNode;
@@ -209,6 +274,8 @@ export function FeedView({
   runningIds?: string[];
   /** 汇报卡上的产物：点一下进内置预览（taskId 取自卡片的 jobId） */
   onPreview?: (taskId: string, ref: string) => void;
+  /** 右键产物：打开所在目录 / 复制路径（2026-11-13） */
+  onRefMenu?: (taskId: string, ref: string, label: string, x: number, y: number) => void;
 }) {
   const [showHistory, setShowHistory] = useState(false);
   const t = useT();
@@ -328,32 +395,35 @@ export function FeedView({
         // 群里有作者的动作卡 = 群里的一次发言（成员的交付、风铃的调度）：不折叠，带头像
         if (c.author) {
           const a = c.author;
+          const speaker = a.name ?? (a.kind === "member" ? "成员" : a.kind === "lynn" ? "风铃" : "系统");
+          /**
+           * 标题里常把「谁 + 动作」又写一遍（"代码审计员 回报 · task-x"），
+           * 而这两件事一行头已经说了 → 剥掉前缀，只留真正的新信息（任务号/多久）。
+           */
+          let what = (c.title ?? "").trim();
+          if (what.startsWith(speaker)) what = what.slice(speaker.length).trim();
+          if (badge && what.startsWith(badge)) what = what.slice(badge.length).trim();
+          what = what.replace(/^[·\-—:：\s]+/, "");
+          const tail = [what, c.meta].filter(Boolean).join(" · ");
+          const headTag = `${badge}${c.count && c.count > 1 ? ` ×${c.count}` : ""}`;
           return (
             <div className={`feed-item talk author-${a.kind}`} key={c.id}>
               <Who
                 icon={a.kind === "member" ? "users" : a.kind === "lynn" ? "bell" : "term"}
-                name={a.name ?? (a.kind === "member" ? "成员" : a.kind === "lynn" ? "风铃" : "系统")}
+                name={speaker}
                 tone={a.kind === "member" ? "member" : a.kind === "lynn" ? "lynn" : "system"}
                 meta={c.createdAt}
                 avatarId={a.avatarId}
                 role={a.role}
+                tag={headTag}
+                sub={tail}
               />
-              <div className="talk-head">
-                <span className="feed-badge">
-                  <Icon name={BADGE_ICON[badge] ?? "term"} size="sm" />
-                  {badge}
-                  {c.count && c.count > 1 ? ` ×${c.count}` : ""}
-                </span>
-                {c.title && <span className="feed-title">{c.title}</span>}
-                {c.meta && <span className="feed-meta mono">{c.meta}</span>}
-              </div>
-              <Mentions mentions={c.mentions} />
               {c.report ? (
-                <ReportBlock card={c} onPreview={onPreview} />
+                <ReportBlock card={c} onPreview={onPreview} onRefMenu={onRefMenu} />
               ) : c.body ? (
-                <div className="feed-body md-wrap"><RichText text={c.body} /></div>
+                <FoldBody text={c.body} />
               ) : (
-                <ReportBlock card={c} onPreview={onPreview} />
+                <ReportBlock card={c} onPreview={onPreview} onRefMenu={onRefMenu} />
               )}
             </div>
           );
@@ -386,11 +456,11 @@ export function FeedView({
               </div>
             )}
             {c.report ? (
-              <ReportBlock card={c} onPreview={onPreview} />
+              <ReportBlock card={c} onPreview={onPreview} onRefMenu={onRefMenu} />
             ) : progress ? (
               <TrackLines text={c.body ?? ""} />
             ) : (
-              c.body && <div className="feed-body md-wrap"><RichText text={c.body} /></div>
+              c.body && <FoldBody text={c.body} />
             )}
           </details>
         );
@@ -413,9 +483,12 @@ const REPORT_ROWS: [string, "conclusion" | "unfinished" | "decision"][] = [
 function ReportBlock({
   card,
   onPreview,
+  onRefMenu,
 }: {
   card: FeedCard;
   onPreview?: (taskId: string, ref: string) => void;
+  /** 右键产物：打开所在目录 / 复制路径（2026-11-13） */
+  onRefMenu?: (taskId: string, ref: string, label: string, x: number, y: number) => void;
 }) {
   const hasReport = Boolean(card.report);
   const hasFiles = Boolean(card.artifacts?.length);
@@ -441,9 +514,14 @@ function ReportBlock({
                   type="button"
                   key={a.ref}
                   className="rp-file"
-                  title={`${a.ref}${a.bytes ? `\n${fmtBytes(a.bytes)}` : ""}\n点击内置预览`}
+                  title={`${a.ref}${a.bytes ? `\n${fmtBytes(a.bytes)}` : ""}\n点击内置预览 · 右键可定位文件`}
                   onClick={() => {
                     if (card.jobId) onPreview?.(card.jobId, a.ref);
+                  }}
+                  onContextMenu={(ev) => {
+                    if (!card.jobId || !onRefMenu) return;
+                    ev.preventDefault();
+                    onRefMenu(card.jobId, a.ref, a.label, ev.clientX, ev.clientY);
                   }}
                 >
                   <Icon name="eye" size="sm" />

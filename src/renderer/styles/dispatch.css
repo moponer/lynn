@@ -546,6 +546,32 @@ svg.ic.lg { width: 20px; height: 20px; }
 }
 .sheet-sub { font-size: var(--fs-meta); color: var(--ink-3); margin-top: 6px; }
 
+/* 项目条（2026-11-12）：这段对话在动哪个项目——名字可改，路径是事实 */
+.proj-bar {
+  display: flex; align-items: center; gap: 8px;
+  margin-top: 10px; padding-bottom: 10px;
+  font-size: var(--fs-label); color: var(--ink-3); min-width: 0;
+}
+.proj-bar .ic { flex: none; opacity: .75; color: var(--ink-4); }
+.proj-name {
+  flex: none; max-width: 220px; background: none; border: 0; padding: 0; cursor: pointer;
+  font-family: var(--f-cjk); font-size: var(--fs-meta); font-weight: 500; letter-spacing: 0;
+  color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.proj-name:hover { color: var(--blue); }
+.proj-input {
+  flex: none; width: 200px; background: var(--sheet-2); border: 0; border-radius: var(--r-s);
+  font-family: var(--f-cjk); font-size: var(--fs-meta); color: var(--ink); padding: 2px 6px;
+}
+.proj-path { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-4); }
+.proj-extra { flex: none; color: var(--ink-4); }
+.proj-none { color: var(--ink-3); }
+.proj-act {
+  flex: none; background: none; border: 0; cursor: pointer;
+  font-family: var(--f-cjk); font-size: var(--fs-label); letter-spacing: 0; color: var(--ink-3); padding: 2px 0;
+}
+.proj-act:hover { color: var(--blue); }
+
 /* 阶段 + 页签合成一条导航带：窄窗允许换行，不再挤成两行碎块 */
 .sheet-toolbar {
   display: flex; align-items: center; flex-wrap: wrap; gap: 12px 24px;
@@ -749,6 +775,14 @@ svg.ic.lg { width: 20px; height: 20px; }
   font-family: var(--f-mono); font-size: var(--fs-label); color: var(--ink-4);
   font-variant-numeric: tabular-nums;
 }
+/* 模块标题右侧的动作（2026-11-13）：图标按钮，不抢标题的视线，hover 才显形 */
+.panel-h-acts { display: flex; align-items: center; gap: 2px; flex: none; }
+.icon-btn-quiet {
+  width: 24px; height: 24px; border-radius: var(--r-s);
+  background: transparent; box-shadow: none; color: var(--ink-4);
+}
+.icon-btn-quiet:hover { background: var(--hover-bg); color: var(--ink-2); }
+.icon-btn-quiet .ic { width: 14px; height: 14px; }
 /* 右栏两个动作是纯文字：去掉全局 ghost-btn 的白底 + 阴影那层壳 */
 .roster-actions { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
 .roster-actions .ghost-btn {
@@ -773,16 +807,44 @@ svg.ic.lg { width: 20px; height: 20px; }
 .mcard[data-state="running"] .mcard-avatar { box-shadow: 0 0 0 2px var(--blue); animation: live-ring 2.2s ease-in-out infinite; }
 .mcard[data-state="running"] .mcard-name { color: var(--blue); }
 .mcard-live { width: 6px; height: 6px; border-radius: 50%; background: var(--blue); margin-left: 5px; flex: none; animation: live-pulse 1.6s ease-in-out infinite; }
+
+/* ---------- 在跑成员：动态信号（2026-11-13） ----------
+   用户要“看得出在跑”。这里只做两件事，都是信息不是装饰：
+   ①头像外一圈**雷达扩散环**（1.8s 一轮，扩到 1.5 倍淡出）——她此刻正在动手；
+   ②卡底一条**真实进度线**：进度 0 时来回扫描，>0 时按真实百分比填充并平滑过渡。 */
+.mcard-face { position: relative; flex: none; display: block; line-height: 0; }
+.mcard-ping {
+  position: absolute; inset: 0; border-radius: var(--r-m);
+  box-shadow: 0 0 0 1.5px var(--blue);
+  pointer-events: none; will-change: transform, opacity;
+  animation: mcard-ping 1.8s ease-out infinite;
+}
+@keyframes mcard-ping {
+  0% { opacity: .85; transform: scale(1); }
+  70%, 100% { opacity: 0; transform: scale(1.5); }
+}
+.mcard-prog {
+  position: absolute; left: 0; right: 0; bottom: 0; height: 2px;
+  background: var(--blue-wash); overflow: hidden;
+}
+.mcard-prog i { display: block; height: 100%; background: var(--blue); transition: width .6s ease; }
+/* 刚开工还没有百分比：来回扫描，避免“一条 0% 的空槽”看起来像卡死 */
+.mcard-prog.indet i { width: 38%; animation: mcard-sweep 1.3s ease-in-out infinite; }
+@keyframes mcard-sweep {
+  0% { transform: translateX(-120%); }
+  100% { transform: translateX(300%); }
+}
 /* 手上有单的成员卡可以点开工单：给手型与 hover，否则它就是一张纸 */
 .mcard.linkable { cursor: pointer; }
 .mcard.linkable:hover { background: var(--hover-bg); }
 .mcard.linkable:focus-visible { outline: 1.5px solid var(--blue); outline-offset: 1px; }
-/* 成员头像是 SVG 工牌照：容器只管尺寸与裁切，颜色由组件按岗位色画 */
+/* 成员头像：容器只管尺寸与裁切 */
 .mcard-avatar {
   flex: none; border-radius: var(--r-m); overflow: hidden;
   display: block; line-height: 0;
 }
 .mcard-avatar img { display: block; width: 100%; height: 100%; object-fit: cover; }
+
 .mcard-txt { min-width: 0; flex: 1; }
 .mcard-name {
   font-size: var(--fs-body); color: var(--ink); font-weight: 500;
@@ -836,12 +898,14 @@ svg.ic.lg { width: 20px; height: 20px; }
 }
 .seal-source b { color: var(--ink-2); font-weight: 500; }
 .seal-source .strip-link { margin-left: auto; }
-/* 多条挂起裁决的翻页条：计数 + 下一条（A5） */
+/* 挂起裁决的头部行：计数 + 来源群 + 下一条（2026-11-13 合并，不再各占一行） */
 .seal-pager {
-  display: flex; align-items: center; justify-content: space-between;
+  display: flex; align-items: center; gap: 8px;
   margin-bottom: 6px;
 }
-.seal-pager .icon-btn { font-size: var(--fs-body); line-height: 1; }
+.seal-pager .icon-btn { font-size: var(--fs-body); line-height: 1; margin-left: auto; }
+.seal-origin { color: var(--ink-4); }
+.seal-origin:hover { color: var(--blue); }
 /* E3：印章就地展开的打回三要素 */
 .seal-reject { margin-top: 10px; }
 .seal-field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
@@ -871,6 +935,21 @@ svg.ic.lg { width: 20px; height: 20px; }
 .perm-ask-body {
   margin: 0; font-size: var(--fs-body); line-height: 1.7; color: var(--ink-2);
 }
+/* 信任确认页的项目级 MCP 清单（审计 #7：信任前让用户看到会跑什么命令） */
+.perm-ask-servers {
+  display: flex; flex-direction: column; gap: 6px;
+  max-height: 180px; overflow-y: auto;
+}
+.perm-ask-servers-cap {
+  font-size: var(--fs-label); color: var(--ink-3);
+}
+.perm-ask-server {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px;
+  padding: 6px 10px; border-radius: var(--r-s);
+  background: var(--desk-3); font-size: var(--fs-label); color: var(--ink-2);
+}
+.perm-ask-server .mono { color: var(--ink); word-break: break-all; }
+.perm-ask-env { color: var(--ink-3); }
 .perm-ask-acts { display: flex; justify-content: flex-end; gap: 8px; }
 .perm-btn {
   padding: 7px 14px; border-radius: var(--r-m);
@@ -928,6 +1007,10 @@ svg.ic.lg { width: 20px; height: 20px; }
 .sealcard-text .who { font-size: var(--fs-meta); color: var(--ink-3); }
 .sealcard-text .who b { color: var(--ink); font-weight: 600; }
 .sealcard-text .ask { font-size: var(--fs-body); color: var(--ink); margin-top: 5px; line-height: 1.55; }
+/* 契约卡上的项目与落点（2026-11-12）：点「开始」前就知道这单动的是哪个项目 */
+.seal-proj { display: flex; align-items: baseline; gap: 8px; margin-top: 6px; font-size: var(--fs-label); color: var(--ink-3); }
+.seal-proj .mono { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-4); }
+.seal-proj-name { color: var(--ink-2); }
 /* 卡住的真实成因（用户手动停机 / 没交回报 / 打回 3 轮 / 进程重启对账）：比正文弱一级 */
 .sealcard-text .ask-sub { font-size: var(--fs-meta); color: var(--ink-3); margin-top: 4px; }
 .accept { margin-top: 12px; }
@@ -1030,6 +1113,8 @@ svg.ic.lg { width: 20px; height: 20px; }
 }
 .composer-hint .k { color: var(--ink-3); }
 .composer-hint .sep { color: var(--ink-4); opacity: .5; }
+/* 没有状态时只剩「截图」一个小按钮：靠右、贴近输入框，别占出一行字号 */
+.composer-hint.quiet { justify-content: flex-end; padding-top: 6px; }
 
 /* ============================ SCENE 3 : WIZARD ============================ */
 
@@ -1186,6 +1271,13 @@ textarea.composer-in::placeholder { color: var(--ink-4); }
 }
 .sealcard-empty b { font-size: var(--fs-body); color: var(--ink-2); font-weight: 500; }
 .sealcard-empty p { margin: 4px 0 0; font-size: var(--fs-meta); line-height: 1.6; color: var(--ink-4); }
+/* 没活要拍板时：一行字就够，不占一整块灰卡（编制区才是这一栏的主体） */
+.sealcard-empty-quiet {
+  margin: 0 0 10px; padding: 0 2px; background: none;
+  align-items: center; gap: 7px;
+  font-size: var(--fs-label); color: var(--ink-4);
+}
+.sealcard-empty-quiet .ic { opacity: .7; }
 
 /* 启动态 */
 .boot {
@@ -1266,7 +1358,6 @@ input, textarea { font: inherit; }
 .av { display: flex; flex-direction: column; gap: 8px; width: 100%; }
 .av-stage {
   position: relative;
-  perspective: 700px;
   border-radius: 8px;
   background:
     radial-gradient(120% 90% at 50% 10%, rgba(94, 169, 201, .10), transparent 60%),
@@ -1280,12 +1371,6 @@ input, textarea { font: inherit; }
   touch-action: none;
 }
 .av-stage:active { cursor: grabbing; }
-.av-rotor {
-  position: absolute; inset: 0;
-  display: grid; place-items: center;
-  transform-style: preserve-3d;
-  transition: transform .18s ease-out;
-}
 .av-sprite {
   width: 100%; height: 100%;
   object-fit: contain;
@@ -1319,6 +1404,8 @@ input, textarea { font: inherit; }
   .st-live .pip,
   .mcard[data-state="running"] .mcard-avatar,
   .mcard-live,
+  .mcard-ping,
+  .mcard-prog.indet i,
   .job[data-running="1"],
   .job[data-running="1"] .job-mark,
   .live-dot,
@@ -1745,6 +1832,14 @@ button:disabled,
 /* 工具行是"日志"，不是"消息"：meta 跟在标题后面，不再右浮制造锯齿状视线 */
 .feed-meta { font-size: var(--fs-label); color: var(--ink-4); margin-left: 0; }
 .feed-body { margin: 8px 0 0; padding: 8px 10px; border-radius: var(--r-s); background: var(--desk); color: var(--ink-2); font-family: var(--f-mono); font-size: var(--fs-meta); line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 260px; overflow: auto; }
+/* 展开全文后不再限高：否则"展开"了还是被 260px 的框截住，等于没展开 */
+.feed-body.open { max-height: none; }
+/* 长正文折叠开关（2026-11-13）：回报动辄千字，全铺开时一屏只剩这一张卡 */
+.feed-more {
+  display: block; margin-top: 6px; padding: 0; border: 0; background: none; cursor: pointer;
+  font-family: var(--f-cjk); font-size: var(--fs-label); color: var(--blue);
+}
+.feed-more:hover { text-decoration: underline; }
 .feed-report { margin-top: 8px; }
 .feed-report p { margin: 0 0 8px; font-size: var(--fs-body); color: var(--ink-2); line-height: 1.6; white-space: pre-wrap; }
 .feed-empty { color: var(--ink-3); font-size: var(--fs-body); line-height: 1.7; padding: 8px 2px; display: flex; flex-direction: column; gap: 10px; }
@@ -1957,6 +2052,13 @@ button.ev:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 }
 .thread-pin { font-family: var(--f-mono); font-size: var(--fs-label); color: var(--brass); flex: none; }
 .thread-prev { font-size: var(--fs-label); color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 群列表里的项目名（2026-11-12）：一眼看出这个群在做哪个项目 */
+.thread-proj {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: var(--fs-label); color: var(--ink-4);
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.thread-proj .ic { flex: none; opacity: .8; }
 .thread-badge {
   flex: none; min-width: 16px; height: 16px; padding: 0 5px; border-radius: 8px;
   background: var(--seal-wash); color: var(--seal);
@@ -1964,6 +2066,18 @@ button.ev:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 }
 .thread-row b { font-weight: 500; color: var(--ink); font-size: var(--fs-body); }
 .thread-row small { color: var(--ink-3); font-size: var(--fs-label); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 交付箱行（2026-11-13）：文件名独占一行并截断，下面两行说明"这是什么/多大"。
+   此前是横向 flex（名称 + 任务号），窄栏里 "audit-report.md" 被挤成 "audit-" / "report.md"。 */
+.out-row {
+  display: flex; flex-direction: column; align-items: stretch; gap: 1px;
+  width: 100%; min-width: 0;
+}
+.out-row b {
+  display: block; min-width: 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.out-row small { display: block; min-width: 0; }
+.out-row .out-meta { color: var(--ink-4); }
 /* C3：时间与"在办/归档"分两段，各自截断——挤在一起时两样都读不出来 */
 .thread-meta { display: flex; justify-content: space-between; gap: 8px; }
 .thread-meta > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -2027,13 +2141,20 @@ button.ev:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 .jobmenu-sub { padding: 0 6px 6px; color: var(--ink-4); font-size: var(--fs-label); opacity: .7; }
 .jobmenu-ask { margin: 4px 6px 6px; font-size: var(--fs-meta); color: var(--ink-2); line-height: 1.5; }
 .jobmenu-item {
-  text-align: left; padding: 6px 8px; border-radius: var(--r-s);
+  display: flex; align-items: center; gap: 9px; text-align: left; padding: 6px 8px; border-radius: var(--r-s);
   background: none; color: var(--ink-2); font: inherit; font-size: var(--fs-meta); cursor: pointer;
 }
+.jobmenu-item .ic { flex: none; color: var(--ink-4); }
 .jobmenu-item:hover { background: var(--hover-bg); color: var(--ink); }
+.jobmenu-item:hover .ic { color: var(--ink-2); }
 .jobmenu-item.danger { color: var(--seal); }
+.jobmenu-item.danger .ic { color: var(--seal); }
 .jobmenu-item.danger:hover { background: var(--seal-wash); color: var(--seal); }
 .jobmenu-item:focus-visible { outline: 1.5px solid var(--blue); outline-offset: -1px; }
+/* 菜单头：标题行左对齐，图标与文字成组，状态/关闭推到右侧 */
+.jobmenu-h { gap: 7px; }
+.jobmenu-h .ic { flex: none; color: var(--ink-4); }
+.jobmenu-h .jobmenu-title { margin-left: 0; }
 
 /* ---------- 顶栏工作区菜单（换目录 / 不用工作区 / 可读目录） ---------- */
 .wsmenu-wrap { position: relative; display: flex; align-items: center; }
@@ -2041,6 +2162,8 @@ button.ev:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
   font-family: var(--f-mono); font-size: var(--fs-label); color: var(--ink-3);
   background: var(--sheet-3); border-radius: 99px; padding: 0 5px; line-height: 16px;
 }
+/* 工作区菜单里的信任入口（2026-11-13）：右边小标说明"信任会放行什么" */
+.wsmenu .jobmenu-item .wsmenu-badge { margin-left: auto; }
 /* fixed：顶栏与图纸各自有 overflow / 层叠上下文，absolute 下拉会被裁掉或压到图纸下面 */
 .wsmenu {
   position: fixed; z-index: 200; width: 286px; padding: 6px;
@@ -2281,7 +2404,7 @@ html[data-mode="light"] { color-scheme: light; }
 .team-av-btn:hover { transform: translateY(-1px); }
 .team-av-btn:disabled { cursor: default; }
 .team-av-pick {
-  /* 6×2 相册：开源线稿是半身像，12 格挤一排只有 30px 会把五官压没 */
+  /* 6×2 相册：12 个槽位各是一款画风，挤一排只有 30px 会把五官压没 */
   display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 6px;
   margin: 4px 0 8px; padding: 10px 12px; border-radius: var(--r-m); background: var(--desk);
 }
@@ -2325,12 +2448,35 @@ html[data-mode="light"] { color-scheme: light; }
 .tgroup-list { display: flex; flex-direction: column; gap: 6px; padding-bottom: 8px; }
 
 /* 编制规模（2026-11-12）：先按状态筛、团队可折、同岗位空闲成员收成「岗位 ×N」。
-   26 人平铺时，用户是在滚动里找人；这里把「重复的同岗成员」先收起来。 */
+   26 人平铺时，用户是在滚动里找人；这里把「重复的同岗成员」先收起来。
+   chip 带计数：点了才知道会剩几个（此前筛完才发现是空的）。 */
 .roster-filter { display: flex; gap: 4px; padding: 0 12px 8px; flex-wrap: wrap; }
 .rf-chip {
   padding: 3px 9px; border-radius: 999px;
   font-size: var(--fs-label); color: var(--ink-4);
   background: var(--sheet-3); cursor: pointer;
+  display: inline-flex; align-items: baseline; gap: 4px;
+}
+.rf-chip .n { font-family: var(--f-mono); font-variant-numeric: tabular-nums; opacity: .75; }
+.rf-chip.zero { opacity: .5; }
+
+/* ---------- 消耗看板（2026-11-13）：风铃上下文/命中率 + 本群成员 token 消耗。
+   没人跑过活就整块不渲染（JSX 侧控制），这里只管有数时的节奏。 ---------- */
+.usage-board { padding: 2px 12px 8px; }
+.usage-cap {
+  font-family: var(--f-mono); font-size: var(--fs-label); color: var(--ink-4);
+  padding: 4px 0 2px;
+}
+.usage-row {
+  display: flex; align-items: baseline; gap: 8px;
+  padding: 3px 0; font-size: var(--fs-label);
+}
+.usage-row .usage-name { flex: none; color: var(--ink-2); }
+.usage-row.lynn .usage-name { color: var(--ink); }
+.usage-row .usage-vals {
+  margin-left: auto; color: var(--ink-3);
+  font-family: var(--f-mono); font-variant-numeric: tabular-nums;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .rf-chip:hover { color: var(--ink-2); }
 .rf-chip.on { color: var(--ink); background: var(--hover-bg); }
@@ -2462,6 +2608,26 @@ html[data-mode="light"] { color-scheme: light; }
    层级靠底色、字距、留白与左侧标签表达，不用描边。 */
 .fv-who.member { color: var(--ink); }
 .fv-who .fv-role { font-size: var(--fs-meta); color: var(--ink-4); font-weight: 400; }
+/* 一行头（2026-11-13）：头像 · 名字 · 动作 · 做什么/多久 · 时间。
+   飞书/微信群只有「名字 + 时间」一行；我们此前一条成员消息占三行头，正文还没开始半屏就没了。 */
+.fv-who { min-width: 0; }
+.fv-who .fv-name {
+  flex: none; max-width: 42%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.fv-tag {
+  flex: none;
+  font-family: var(--f-mono); font-size: var(--fs-label); letter-spacing: 0;
+  color: var(--brass);
+}
+.fv-who.lynn .fv-tag { color: var(--blue); }
+.fv-who.system .fv-tag { color: var(--ink-3); }
+/* 任务号 / 轮次 / 耗时：属于"调试细节"，压成弱化尾注，能省则省、长了就截 */
+.fv-sub {
+  flex: 1 1 auto; min-width: 0;
+  font-size: var(--fs-label); color: var(--ink-4);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .talk-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
 .feed-at { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 6px; }
 .at-chip {
@@ -2489,6 +2655,16 @@ html[data-mode="light"] { color-scheme: light; }
   font-family: var(--f-mono); font-size: var(--fs-label); letter-spacing: 0;
   color: var(--ink-4); padding: 2px 2px 6px;
 }
+/* 他群组头可点：点一下切到那个群（一个群 = 一件事） */
+.tg-goto {
+  display: inline-flex; align-items: baseline; gap: 6px;
+  background: none; border: 0; padding: 0; cursor: pointer;
+  font-family: var(--f-mono); font-size: var(--fs-label); letter-spacing: 0;
+  color: var(--ink-4); text-align: left;
+}
+.tg-goto .n { color: var(--ink-4); opacity: .8; }
+.tg-goto:hover { color: var(--blue); }
+.tg-goto:hover .n { color: var(--blue); }
 /* 成员资料卡（弹出）：遮罩 + 居中卡片，分层展示 */
 .mdetail-overlay {
   position: fixed; inset: 0; z-index: 60;
@@ -2509,7 +2685,8 @@ html[data-mode="light"] { color-scheme: light; }
 .mdetail-id { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .mdetail-id b { font-size: var(--fs-body); color: var(--ink); }
 .mdetail-role { font-size: var(--fs-meta); color: var(--ink-3); }
-.mdetail-state { font-size: var(--fs-label); color: var(--ink-3); margin-left: auto; }
+.mdetail-state { display: flex; align-items: center; gap: 5px; font-size: var(--fs-label); color: var(--ink-3); margin-left: auto; }
+.mdetail-state .ic { flex: none; }
 .mdetail-state[data-state="running"] { color: var(--blue); }
 .mdetail-state[data-state="delivered"] { color: var(--brass); }
 .mdetail-state[data-state="stuck"] { color: var(--red); }
@@ -2543,6 +2720,8 @@ html[data-mode="light"] { color-scheme: light; }
   font-size: var(--fs-meta); color: var(--blue); background: var(--blue-wash);
   border-radius: var(--r-s); padding: 4px 8px; margin: 0 0 8px; cursor: pointer;
 }
+/* 空场提示：只是说明，不是可点的通知 */
+.roster-note-quiet { color: var(--ink-4); background: none; cursor: default; line-height: 1.6; }
 /* 群公告（全局段：整体 / 分工 / 接缝） */
 .gnotice { background: var(--sheet-2); border-radius: var(--r-m); padding: 10px 12px; margin-bottom: 10px; }
 .gnotice-h { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; }
@@ -2558,6 +2737,9 @@ html[data-mode="light"] { color-scheme: light; }
   font: inherit; font-size: var(--fs-meta); color: var(--ink);
 }
 .gnotice-t { margin: 0; font-size: var(--fs-meta); color: var(--ink-2); line-height: 1.6; white-space: pre-wrap; }
+/* 长公告折叠：只露前两行，避免顶着右栏（2026-11-13） */
+.gnotice-t.clamp { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.gnotice-more { display: block; text-align: right; margin: 2px 0 0; }
 .gnotice-acts { display: flex; gap: 6px; justify-content: flex-end; margin-top: 6px; }
 .gnotice-acts .ghost-btn { padding: 3px 9px; font-size: var(--fs-label); }
 .feed-item.system .feed-text { font-size: var(--fs-meta); color: var(--ink-3); }
@@ -2788,3 +2970,13 @@ html[data-mode="light"] { color-scheme: light; }
 .feed-item.system.tone-budget .ic { color: var(--brass); }
 .feed-item.system.tone-recover .ic,
 .feed-item.system.tone-patrol .ic { color: var(--blue); }
+
+/* 审批卡第三个按钮独占一行（2026-11-14）：三个按钮挤一行会把「这类以后都允许」压成两行。
+   必须同时允许换行——只给 100% basis 而不 wrap，flex 会把三个按钮压成等宽三列，文字竖排。 */
+.seal-actions {
+  flex-wrap: wrap;
+}
+.seal-actions .seal-allow-family {
+  flex: 1 0 100%;
+  margin-top: 2px;
+}

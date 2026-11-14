@@ -75,7 +75,7 @@ export interface DeskJob {
   evidenceCount: number;
   evidence: DeskEvidence[];
   /** 交付物（用户要带走的东西；与证据分开，验收后永久保留） */
-  deliverables?: { path: string; ref: string; bytes?: number }[];
+  deliverables?: { path: string; ref: string; bytes?: number; at?: string }[];
   artifact?: DeskArtifact;
   diff?: DeskDiff;
   version: number;
@@ -89,6 +89,8 @@ export interface DeskJob {
   report?: { conclusion: string; evidence: string; unfinished: string; decision: string };
   /** 这张单是在哪个会话里派的（换会话后回原会话读往来） */
   threadId?: string;
+  /** 这张单所属的项目名（2026-11-13：交付物「查看所属」要报项目） */
+  projectName?: string;
   /** 用户授予的只读目录（写仍限工作区） */
   readRoots?: string[];
   /** 成员的读写工作区（= 派单时会话的项目目录） */
@@ -104,6 +106,8 @@ export interface DeskMember {
   /** 归属团队：跨团队平铺时，同名的两个成员必须能区分 */
   teamId: string;
   teamName?: string;
+  /** 这支队属于哪个群（2026-11-12）：右栏按群分家、群名可跳转 */
+  teamThreadId?: string;
   role: string;
   model: string;
   /** 岗位档案里选中的头像库 id（没存的老档案按名字兜底） */
@@ -122,6 +126,11 @@ export interface DeskMember {
   /** 最近一步动作（进度条答不了"在干什么"） */
   lastStep?: string;
   foot: string;
+  /** 累计消耗（K token）：看板行 */
+  budgetUsed?: number;
+  /** 累计命中缓存（K token）与命中率（%）：消耗看板 */
+  cacheUsed?: number;
+  hitRate?: number;
   rejections: number;
   rejectLimit: number;
 }
@@ -135,6 +144,8 @@ export interface DeskDecision {
   question: string;
   checks: { ok: boolean; text: string }[];
   plan?: Decision["plan"];
+  /** 只对 approval：这条审批属于哪一族删除（有才显示"这类以后都允许"） */
+  family?: Decision["family"];
 }
 
 /** 归档带一条记录（展示层）；threadId 只用于分组，不参与任何数据操作 */
@@ -151,6 +162,13 @@ export interface Desk {
   subdir: string;
   /** 会话主根（空 = 这次不用工作区） */
   workspacePrimary?: string;
+  /** 项目身份（2026-11-12）：显示名可改；改名跟着项目走 */
+  workspaceProjectId?: string;
+  workspaceProjectName?: string;
+  /** 当前目录是否被信任（2026-11-13）：项目级 MCP/技能只在信任时生效 */
+  projectTrusted?: boolean;
+  /** 这个目录里"被信任才生效"的东西：两项都 false = 无所谓信不信，不该报警 */
+  projectGated?: { mcp: boolean; skills: boolean };
   /** 会话附加根（只读/可写） */
   workspaceExtras: { path: string; mode: "rw" | "ro"; label?: string }[];
   jobs: DeskJob[];
@@ -192,6 +210,9 @@ export interface Desk {
     unread?: number;
     /** 群公告（全局段：整体 / 分工 / 接缝） */
     announcement?: string;
+    /** 这个群在做哪个项目（2026-11-12） */
+    projectId?: string;
+    projectName?: string;
   }[];
 }
 
@@ -238,6 +259,7 @@ function toJob(job: TaskTrackItem, teamName?: string, member?: Member, feed: Fee
     member: job.member,
     memberRole: member?.role,
     at: job.at,
+    projectName: job.projectName,
     statusNote: job.statusNote,
     evidenceCount: job.evidenceCount ?? 0,
     evidence: evidenceOf(job),
@@ -268,6 +290,7 @@ function toDecision(d: Decision): DeskDecision {
     question: d.title + (d.detail ? `——${d.detail}` : ""),
     checks: d.checks ?? [],
     plan: d.plan,
+    ...(d.family ? { family: d.family } : {}),
   };
 }
 
@@ -296,6 +319,7 @@ export function deskFromSnapshot(snap: SessionSnapshot): Desk {
           name: m.name,
           teamId: t.id,
           teamName: t.name,
+          teamThreadId: t.threadId,
           role: m.role,
           model: m.model ?? "未指定",
           color: m.color,
@@ -321,6 +345,9 @@ export function deskFromSnapshot(snap: SessionSnapshot): Desk {
                 ? `预算 ${m.budgetUsed}/${m.budgetTotal}K`
                 : `预算上限 ${m.budgetTotal}K`
               : "保留编制",
+          budgetUsed: m.budgetUsed,
+          cacheUsed: m.cacheUsed,
+          hitRate: m.hitRate,
           rejections: m.rejections,
           rejectLimit: m.rejectionLimit,
         };
@@ -334,6 +361,10 @@ export function deskFromSnapshot(snap: SessionSnapshot): Desk {
     project: snap.workspace.project,
     subdir: snap.workspace.subdir,
     workspacePrimary: snap.workspace.primary,
+    workspaceProjectId: snap.workspace.projectId,
+    workspaceProjectName: snap.workspace.projectName,
+    projectTrusted: snap.project?.trusted,
+    projectGated: snap.project?.gated,
     workspaceExtras: snap.workspace.extras ?? [],
     jobs,
     archived: jobs
@@ -360,4 +391,40 @@ export function deskFromSnapshot(snap: SessionSnapshot): Desk {
     thread: snap.thread ?? { id: "", title: "新群" },
     threads: snap.threads ?? [],
   };
+}
+
+/**
+ * 交付箱里的一行（2026-11-13）：**同一物理文件**被多张单更新过时合并成一条。
+ * 行上的右键菜单与「查看所属」资料卡都用它。
+ */
+export interface DeskOutput {
+  /** 成员交上来的原始路径（可能相对工作区） */
+  path: string;
+  /** 解析后的绝对路径：去重键与"复制路径"都用它 */
+  abs: string;
+  ref: string;
+  bytes?: number;
+  /** 最近一次更新它的那张单 */
+  job: DeskJob;
+  /** 总共被几张单产出/更新过 */
+  jobs: number;
+  updatedAt?: string;
+}
+
+export function statusChipClass(job: DeskJob): string {
+  // A6：朱砂只留给右栏印章；台账里"等你拍板"用蓝（st-hold），blocked 仍朱砂（要你止损，印章同样会出现）
+  // 派给成员的活正在等风铃验：对你是"有人在弄"，按执行中上色，别冒充你的待办
+  if (job.status === "in_review") return job.reviewer === "lynn" ? "st-live" : "st-hold";
+  if (job.status === "blocked") return "st-wait";
+  if (job.status === "in_progress") return "st-live";
+  if (job.status === "done") return "st-done";
+  return "st-idle";
+}
+
+/** 点交付物 / 证据：一律进内置预览，不再拉起外部关联程序 */
+export type OpenPreview = (taskId: string, ref: string) => void;
+
+export function fmtTokens(n: number): string {
+  if (n <= 0) return "0";
+  return n >= 1000 ? `${(n / 1000).toFixed(1)}K` : String(n);
 }

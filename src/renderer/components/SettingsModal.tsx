@@ -11,6 +11,7 @@ import { AMBIENT_MODE_LABEL, type AmbientMode } from "../../shared/ambient";
 import { AVATARS, avatarById, avatarFor } from "../../shared/avatars";
 import { MemberAvatar } from "../desk/MemberAvatar";
 import { useT } from "../i18n";
+import type { I18nKey } from "../../shared/i18n-strings";
 import { Icon, type IconName } from "./Icon";
 
 const BUBBLE: Record<AvatarState, string> = {
@@ -56,7 +57,7 @@ type McpRow = {
 };
 
 /** 设置导航：三组（她本人 / 干活能力 / 权限与扩展），组帽让"哪页管什么"一眼可查 */
-const NAV_GROUPS: { capKey: string; items: { k: Tab; labelKey: string; icon: IconName }[] }[] = [
+const NAV_GROUPS: { capKey: I18nKey; items: { k: Tab; labelKey: I18nKey; icon: IconName }[] }[] = [
   {
     capKey: "nav.capHer",
     items: [
@@ -100,6 +101,14 @@ export function SettingsModal({
   trayOnClose,
   notify,
   lang,
+  voiceEnabled,
+  voiceId,
+  voiceRate,
+  voiceVolume,
+  voiceScope,
+  voiceMaxChars,
+  voiceWhenHidden,
+  voiceProxy,
   project,
   usage,
   onPrefs,
@@ -128,9 +137,31 @@ export function SettingsModal({
   notify: boolean;
   /** 界面语言（M3-08） */
   lang: "zh" | "en";
-  project?: { root: string; trusted: boolean; hasMcp: boolean };
+  /** 语音播报偏好（2026-11-13）：全部由快照传入，旧内核缺字段时 App 已兜底 */
+  voiceEnabled: boolean;
+  voiceId: string;
+  voiceRate: string;
+  voiceVolume: string;
+  voiceScope: "brief" | "detail";
+  voiceMaxChars: number;
+  voiceWhenHidden: boolean;
+  voiceProxy: string;
+  project?: { root: string; trusted: boolean; hasMcp: boolean; gated?: { mcp: boolean; skills: boolean } };
   usage: UsageView;
-  onPrefs: (p: { trayOnClose: boolean; notify: boolean; lang?: "zh" | "en"; captureHotkey?: string }) => void;
+  onPrefs: (p: {
+    trayOnClose: boolean;
+    notify: boolean;
+    lang?: "zh" | "en";
+    captureHotkey?: string;
+    voiceEnabled?: boolean;
+    voiceId?: string;
+    voiceRate?: string;
+    voiceVolume?: string;
+    voiceScope?: "brief" | "detail";
+    voiceMaxChars?: number;
+    voiceWhenHidden?: boolean;
+    voiceProxy?: string;
+  }) => void;
   onTheme: (id: ThemeId, mode: ThemeMode) => void;
   onAvatar: (on: boolean) => void;
   onPack: (p: LynnPack) => void;
@@ -159,9 +190,12 @@ export function SettingsModal({
     threadModelId: string | null;
     activeModelId: string | null;
     threadTitle: string;
-  }>({ defaultModelId: null, threadModelId: null, activeModelId: null, threadTitle: "新群" });
+    canEncrypt: boolean;
+  }>({ defaultModelId: null, threadModelId: null, activeModelId: null, threadTitle: "新群", canEncrypt: true });
   /** 自定义端点风险确认：本机/局域网/非 HTTPS 保存或探测前必须勾选 */
   const [riskAck, setRiskAck] = useState(false);
+  /** 明文存储确认（审计 #9）：safeStorage 不可用时，保存 Key 必须显式勾选 */
+  const [plaintextAck, setPlaintextAck] = useState(false);
   /** 从 /v1/models 发现模型（批量导入） */
   const [discover, setDiscover] = useState<{
     open: boolean;
@@ -270,7 +304,7 @@ export function SettingsModal({
         return;
       }
       setAvatarPick(null);
-      setTeamMsg(`「${name}」的头像已换。`);
+      setTeamMsg(`「${name}」的头像底色已换。`);
       await refreshTeams();
       onSaved();
     } finally {
@@ -429,11 +463,53 @@ export function SettingsModal({
     }
   };
 
+  /** 语音播报（2026-11-13）：音色清单由主进程给，读不到就只留默认音色 + 自定义输入 */
+  const [voiceOptions, setVoiceOptions] = useState<{ id: string; label: string; locale: string }[]>([
+    { id: "zh-CN-XiaoxiaoNeural", label: "晓晓 · 温柔女声", locale: "zh-CN" },
+  ]);
+  const [customVoiceId, setCustomVoiceId] = useState("");
+  const [proxyDraft, setProxyDraft] = useState(voiceProxy);
+  const [voiceMsg, setVoiceMsg] = useState("");
+  const [voiceBusy, setVoiceBusy] = useState(false);
+  type VoicePatch = Omit<Parameters<typeof onPrefs>[0], "trayOnClose" | "notify">;
+  const refreshVoices = async () => {
+    try {
+      const r = await window.lynn.rpc("voice.voices");
+      if (Array.isArray(r.voices) && r.voices.length) setVoiceOptions(r.voices);
+    } catch {
+      /* 旧内核没有这个 RPC：保留默认音色与自定义输入，不假装有很多可选 */
+    }
+  };
+  const saveVoice = (patch: VoicePatch) => {
+    onPrefs({ trayOnClose, notify, lang, ...patch });
+    if (patch.voiceEnabled === false) void window.lynn.rpc("voice.stop");
+  };
+  const previewVoice = async () => {
+    if (voiceBusy) return;
+    setVoiceBusy(true);
+    setVoiceMsg(t("voice.previewing"));
+    try {
+      const r = await window.lynn.rpc("voice.preview", {
+        text: t("voice.previewText"),
+        voiceId,
+        rate: voiceRate,
+        volume: voiceVolume,
+        proxy: proxyDraft,
+      });
+      setVoiceMsg(r.ok ? t("voice.previewOk") : `${t("voice.previewFailed")}${r.error ?? ""}`);
+    } catch (err) {
+      setVoiceMsg(`${t("voice.previewFailed")}${String(err)}`);
+    } finally {
+      setVoiceBusy(false);
+    }
+  };
+
   useEffect(() => {
     if (tab === "persona" && personaText === null) void refreshPersona();
     if (tab === "memory" && memText === null) void refreshMemory(memKind);
     if (tab === "skills") void refreshSkills();
     if (tab === "safety" && heartbeat === null) void refreshHeartbeat();
+    if (tab === "look") void refreshVoices();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab]);
 
@@ -445,13 +521,24 @@ export function SettingsModal({
   >([]);
   /** 心跳巡检开关（M3-01）：null = 还没读到；开关走 config.prefs 即时生效 */
   const [heartbeat, setHeartbeat] = useState<boolean | null>(null);
+  /** 顾问审阅开关（2026-11-14）：成员交回报后另一个模型独立审一遍 */
+  const [advisor, setAdvisor] = useState<boolean | null>(null);
   const refreshHeartbeat = async () => {
     try {
       const r = await window.lynn.rpc("config.prefs", { autoStart });
       setHeartbeat(r.heartbeat);
+      // 同一次调用顺带读顾问开关（都是 prefs，不用多打一次 RPC）
+      setAdvisor(r.advisorEnabled ?? true);
     } catch {
       setHeartbeat(null);
     }
+  };
+  const toggleAdvisor = () => {
+    const next = !(advisor ?? true);
+    void window.lynn.rpc("config.prefs", { autoStart, advisorEnabled: next }).then((r) => {
+      setAdvisor(r.advisorEnabled);
+      setResult({ ok: true, text: r.advisorEnabled ? t("safety.advisorOn") : t("safety.advisorOff") });
+    });
   };
   const toggleHeartbeat = () => {
     const next = !(heartbeat ?? true);
@@ -588,6 +675,7 @@ export function SettingsModal({
         threadModelId: r.threadModelId,
         activeModelId: r.activeModelId,
         threadTitle: r.threadTitle,
+        canEncrypt: r.canEncrypt !== false,
       });
     } catch (err) {
       setResult({ ok: false, text: `读取模型列表失败：${err instanceof Error ? err.message : String(err)}` });
@@ -623,6 +711,7 @@ export function SettingsModal({
     setModel(m?.model ?? "deepseek-chat");
     setApiKey("");
     setRiskAck(Boolean(m?.riskAccepted));
+    setPlaintextAck(false);
     setDiscover({ open: false, busy: false, models: [], selected: new Set() });
     setResult(null);
   };
@@ -631,6 +720,7 @@ export function SettingsModal({
     setEditingId(null);
     setApiKey("");
     setRiskAck(false);
+    setPlaintextAck(false);
     setDiscover({ open: false, busy: false, models: [], selected: new Set() });
     setResult(null);
   };
@@ -665,6 +755,11 @@ export function SettingsModal({
       });
       return;
     }
+    // 审计 #9：safeStorage 不可用时，明文落盘必须显式确认（内核同样会拦，这里先给友好提示）
+    if (apiKey.trim() && !modelMeta.canEncrypt && !plaintextAck) {
+      setResult({ ok: false, text: "本机不支持安全加密存储（系统密钥环不可用），API Key 将以明文写入磁盘。请先勾选「明文存储，我知晓风险」。" });
+      return;
+    }
     setBusy("save");
     setResult(null);
     try {
@@ -676,6 +771,7 @@ export function SettingsModal({
         model: model.trim(),
         apiKey: apiKey.trim() || undefined,
         ...(ack ? { riskAccepted: true } : {}),
+        ...(plaintextAck ? { plaintextOk: true } : {}),
       });
       if (!r.ok) {
         setResult({ ok: false, text: r.error });
@@ -792,6 +888,11 @@ export function SettingsModal({
       setResult({ ok: false, text: "本机/非 HTTPS 端点批量导入前要先勾选风险确认。" });
       return;
     }
+    // 审计 #9：批量导入同样受明文确认约束
+    if (apiKey.trim() && !modelMeta.canEncrypt && !plaintextAck) {
+      setResult({ ok: false, text: "本机不支持安全加密存储（系统密钥环不可用），API Key 将以明文写入磁盘。请先勾选「明文存储，我知晓风险」。" });
+      return;
+    }
     setBusy("save");
     setResult(null);
     try {
@@ -811,6 +912,7 @@ export function SettingsModal({
           model: m.id,
           apiKey: apiKey.trim(),
           riskAccepted: risk !== "remote" ? true : undefined,
+          ...(plaintextAck ? { plaintextOk: true } : {}),
         });
         if (!r.ok) {
           setResult({ ok: false, text: `导入 ${m.id} 失败：${r.error}` });
@@ -1246,7 +1348,7 @@ export function SettingsModal({
                       <button
                         type="button"
                         className="team-av-btn"
-                        title="换一张头像"
+                        title="换头像底色"
                         disabled={teamBusy || tm.status !== "active"}
                         onClick={() => setAvatarPick(avatarPick === avKey ? null : avKey)}
                       >
@@ -1291,13 +1393,14 @@ export function SettingsModal({
                       </div>
                     </div>
                     {avatarPick === avKey && (
-                      <div className="team-av-pick" role="group" aria-label={`${m.name} 的头像库`}>
+                      <div className="team-av-pick" role="group" aria-label={`${m.name} 的头像`}>
+                        {/* 12 个槽位各是一款画风（2026-11-13）：选的是"哪张脸"，不是底色 */}
                         {AVATARS.map((a) => (
                           <button
                             type="button"
                             key={a.id}
                             className={`team-av-opt${a.id === currentAvatar ? " on" : ""}`}
-                            title={a.label}
+                            title={`${a.label}（${a.style} 画风）`}
                             disabled={teamBusy}
                             onClick={() => void chooseAvatar(tm.id, m.name, a.id)}
                           >
@@ -1503,6 +1606,20 @@ export function SettingsModal({
                     {risk === "local"
                       ? "我了解：这是本机/局域网网关，可能复用第三方免费额度，prompt 可能被上游记录，且随时限流或下线；只会在非敏感数据上使用。"
                       : "我了解：这个端点不是 HTTPS，API Key 与内容会明文传输；只会在可信网络里使用。"}
+                  </span>
+                </label>
+              )}
+              {/* 审计 #9：safeStorage 不可用（系统密钥环缺失）时，明文落盘必须显式确认 */}
+              {!modelMeta.canEncrypt && (
+                <label className="sf-field" style={{ flexDirection: "row", alignItems: "flex-start", gap: 8 }}>
+                  <input
+                    type="checkbox"
+                    checked={plaintextAck}
+                    onChange={(e) => setPlaintextAck(e.target.checked)}
+                    style={{ marginTop: 3 }}
+                  />
+                  <span className="sf-hint">
+                    明文存储，我知晓风险：本机不支持安全加密存储（系统密钥环不可用），API Key 将以**明文**写入 settings.json。
                   </span>
                 </label>
               )}
@@ -2135,27 +2252,46 @@ export function SettingsModal({
                 {heartbeat === false ? t("common.enable") : t("plugins.disable")}
               </button>
             </div>
+            <div className="sf-row">
+              <div className="sf-row-main">
+                <b>{t("safety.advisorTitle")}</b>
+                <small>{t("safety.advisorHint")}</small>
+              </div>
+              <button type="button" className={`sf-btn${advisor === false ? "" : " primary"}`} onClick={toggleAdvisor}>
+                {advisor === false ? t("common.enable") : t("plugins.disable")}
+              </button>
+            </div>
           </div>
           <div className="sf-group">
             <div className="sf-group-head">
               <b>{t("safety.trustTitle")}</b>
               <small>{t("safety.permHint")}</small>
             </div>
+            {/* 2026-11-13：只有目录里真有"被信任才生效"的东西，信任才是件需要决定的事 */}
+            {(() => {
+              const gated = !!(project?.gated?.mcp || project?.gated?.skills);
+              return (
             <div className="sf-row">
               <div className="sf-row-main">
                 <b>
                   {t("safety.project")}
-                  <span className={`sf-badge ${project?.trusted ? "ok" : "warn"}`}>
-                    {project?.trusted ? t("safety.trusted") : t("safety.untrusted")}
+                  <span className={`sf-badge ${project?.trusted || !gated ? "ok" : "warn"}`}>
+                    {project?.trusted ? t("safety.trusted") : gated ? t("safety.untrusted") : t("safety.trustNoop")}
                   </span>
                 </b>
                 <small className="mono">{project?.root ?? "—"}</small>
                 <small>{project?.hasMcp ? t("safety.hasMcp") : t("safety.noMcp")}</small>
               </div>
-              <button type="button" className="sf-btn" onClick={() => onTrust?.(!project?.trusted)}>
-                {project?.trusted ? t("safety.untrust") : t("safety.trust")}
-              </button>
+              {gated ? (
+                <button type="button" className="sf-btn" onClick={() => onTrust?.(!project?.trusted)}>
+                  {project?.trusted ? t("safety.untrust") : t("safety.trust")}
+                </button>
+              ) : (
+                <span className="sf-badge ok">{t("safety.trustNoop")}</span>
+              )}
             </div>
+              );
+            })()}
           </div>
           <div className="sf-group">
             <div className="sf-group-head">
@@ -2320,6 +2456,143 @@ export function SettingsModal({
             </div>
           </div>
           {captureMsg && <p className="sf-result">{captureMsg}</p>}
+          </div>
+          <div className="sf-group">
+            <div className="sf-group-head">
+              <b>{t("look.voice")}</b>
+              <small>{t("look.voiceHint")}</small>
+            </div>
+            <div className="sf-row">
+              <div className="sf-row-main">
+                <b>{t("voice.enabled")}</b>
+                <small>{t("voice.enabledHint")}</small>
+              </div>
+              <button
+                type="button"
+                className={`sf-btn${voiceEnabled ? " primary" : ""}`}
+                onClick={() => saveVoice({ voiceEnabled: !voiceEnabled })}
+              >
+                {voiceEnabled ? t("common.on") : t("common.off")}
+              </button>
+            </div>
+            <div className="sf-row">
+              <div className="sf-row-main">
+                <b>{t("voice.timbre")}</b>
+                <small className="mono">{voiceId}</small>
+              </div>
+              <select
+                className="sf-input"
+                style={{ width: 200 }}
+                aria-label={t("voice.timbre")}
+                value={voiceOptions.some((v) => v.id === voiceId) ? voiceId : "__custom__"}
+                onChange={(e) => {
+                  if (e.target.value === "__custom__") setCustomVoiceId(voiceId);
+                  else saveVoice({ voiceId: e.target.value });
+                }}
+              >
+                {voiceOptions.map((v) => (
+                  <option key={v.id} value={v.id}>{v.label}</option>
+                ))}
+                <option value="__custom__">{t("voice.custom")}</option>
+              </select>
+            </div>
+            {!voiceOptions.some((v) => v.id === voiceId) && (
+              <div className="sf-row">
+                <div className="sf-row-main"><b>{t("voice.custom")}</b></div>
+                <div className="sf-inline">
+                  <input
+                    className="sf-input"
+                    style={{ width: 200 }}
+                    aria-label={t("voice.custom")}
+                    value={customVoiceId}
+                    onChange={(e) => setCustomVoiceId(e.target.value)}
+                  />
+                  <button type="button" className="sf-btn" onClick={() => saveVoice({ voiceId: customVoiceId.trim() })}>
+                    {t("voice.customApply")}
+                  </button>
+                </div>
+              </div>
+            )}
+            <div className="sf-sub" style={{ padding: "10px 0 6px" }}>
+              <span className="sf-label">{t("voice.prosody")}</span>
+              <div className="sf-inline">
+                <select className="sf-input" aria-label={t("voice.rate")} value={voiceRate} onChange={(e) => saveVoice({ voiceRate: e.target.value })}>
+                  <option value="-10%">{t("voice.rateSlow")}</option>
+                  <option value="+0%">{t("voice.rateNormal")}</option>
+                  <option value="+10%">{t("voice.rateFast")}</option>
+                  <option value="+20%">{t("voice.rateFaster")}</option>
+                </select>
+                <select className="sf-input" aria-label={t("voice.volume")} value={voiceVolume} onChange={(e) => saveVoice({ voiceVolume: e.target.value })}>
+                  <option value="-30%">{t("voice.volumeLow")}</option>
+                  <option value="+0%">{t("voice.volumeNormal")}</option>
+                  <option value="+20%">{t("voice.volumeHigh")}</option>
+                </select>
+                <input
+                  className="sf-input"
+                  style={{ width: 80 }}
+                  type="number"
+                  min={30}
+                  max={300}
+                  aria-label={t("voice.maxChars")}
+                  title={t("voice.maxChars")}
+                  value={voiceMaxChars}
+                  onChange={(e) => saveVoice({ voiceMaxChars: Number(e.target.value) })}
+                />
+              </div>
+            </div>
+            <div className="sf-row">
+              <div className="sf-row-main">
+                <b>{t("voice.scope")}</b>
+                <small>{t("voice.scopeHint")}</small>
+              </div>
+              <select className="sf-input" aria-label={t("voice.scope")} value={voiceScope} onChange={(e) => saveVoice({ voiceScope: e.target.value as "brief" | "detail" })}>
+                <option value="brief">{t("voice.scopeBrief")}</option>
+                <option value="detail">{t("voice.scopeDetail")}</option>
+              </select>
+            </div>
+            <div className="sf-row">
+              <div className="sf-row-main">
+                <b>{t("voice.hidden")}</b>
+                <small>{t("voice.hiddenHint")}</small>
+              </div>
+              <button
+                type="button"
+                className={`sf-btn${voiceWhenHidden ? " primary" : ""}`}
+                onClick={() => saveVoice({ voiceWhenHidden: !voiceWhenHidden })}
+              >
+                {voiceWhenHidden ? t("common.on") : t("common.off")}
+              </button>
+            </div>
+            <div className="sf-row">
+              <div className="sf-row-main">
+                <b>{t("voice.proxy")}</b>
+                <small>{t("voice.proxyHint")}</small>
+              </div>
+              <div className="sf-inline">
+                <input
+                  className="sf-input"
+                  style={{ width: 160 }}
+                  aria-label={t("voice.proxy")}
+                  placeholder="http://127.0.0.1:7890"
+                  value={proxyDraft}
+                  onChange={(e) => setProxyDraft(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") saveVoice({ voiceProxy: proxyDraft.trim() }); }}
+                />
+                <button type="button" className="sf-btn" onClick={() => saveVoice({ voiceProxy: proxyDraft.trim() })}>
+                  {t("voice.proxyApply")}
+                </button>
+              </div>
+            </div>
+            <div className="sf-row">
+              <div className="sf-row-main">
+                <b>{t("voice.preview")}</b>
+                <small>{t("voice.privacy")}</small>
+              </div>
+              <button type="button" className="sf-btn" disabled={voiceBusy} onClick={() => void previewVoice()}>
+                {voiceBusy ? t("voice.previewing") : t("voice.preview")}
+              </button>
+            </div>
+            {voiceMsg && <p className="sf-result">{voiceMsg}</p>}
           </div>
         </div>
       );
