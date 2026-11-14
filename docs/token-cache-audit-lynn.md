@@ -122,6 +122,25 @@ MiniMax 上结论明确：旧方案改一次公告，缓存命中从 451 掉到 
 
 新增埋点还有 `cacheBreakReason`（切群 / 运行时重建 / 冷启动），下次再出现 50.3% 那种断点可以直接回查原因，不用猜。
 
+**5. 真 Pi 会话路径对照（针对「直连 fetch 不等于生产路径」的质疑）**
+
+第 3 点的 A/B 是自己拼 `messages` 走直连 `fetch`，**没有走 Pi 的 system prompt 设置、会话累积与请求构造**，只能证明机制，不能证明生产路径。补测脚本 `scripts/live-pi-usage-probe.cjs`（`npm run probe:pi`）：实例化真 `Kernel` + 真 `PiRpcHost` 子进程（`piReady=true`），完整走 `host.updateSystemPrompt(systemPrompt()) → host.prompt(turnFacts + 原话) → host.stats() → usage_round`；临时数据根 + 临时 userData，不碰用户 `.lynn`。
+
+6 轮同一问题，只改公告落点 / persona，跑了两遍：
+
+| 轮次 | 动作 | 第 1 次 turnHitRate | 第 2 次 | system 变 |
+|---|---|---|---|---|
+| r1 | 冷启动 | 0% | 43.4% | 否 |
+| r2 | 稳定前缀 | 96.2% | 96.1% | 否 |
+| r3 | 改群公告（新方案） | 94.8% | 94.7% | 否 |
+| r4 | 再改公告（新方案） | 98.1% | 97.1% | 否 |
+| **r5** | **改 persona（system 变，阳性对照）** | **0%** | **3.4%** | **是** |
+| r6 | 稳定 | 96.8% | 98.6% | 否 |
+
+结论：真 Pi 路径下改群公告（走 `turnFacts`、system 不变）命中率维持 **94.7–98.1%**，与基线同水平；system prompt 内容一变立刻掉到 **0–3.4%**。**阳性对照证明 Pi 路径确实会因 system 变化断前缀，缓存分层的收益在生产主力路径上成立**，不再只是直连 fetch 的推断。
+
+附带验证：`source="pi"` 的 `usage.jsonl` 行确实落盘（新埋点在真实路径生效）；`cacheBreakReason=cold_start` 只标在 r1 —— 首轮没命中时，原判定会把第 2 轮（已 96%）也误标成冷启动，已改为按「会话输入累计是否为 0」判定。
+
 ## 五、口径建议
 
 - 定义：**token 缓存命中率 = cacheRead / (sessionIn + cacheRead + cacheWrite)**。

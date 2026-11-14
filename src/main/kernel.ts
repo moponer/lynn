@@ -5611,8 +5611,10 @@ export class Kernel {
           const prompt = stats.tokens.input + (stats.tokens.cacheRead ?? 0) + (stats.tokens.cacheWrite ?? 0);
           const dOut = Math.max(0, stats.tokens.output - beforeOut);
           // 命中率掉下来时，能分清是切群/重建进程/冷启动，还是"原因不明"
+          // 冷启动只在「会话一条输入都没记过」时判定：用 beforeCacheRead===0 会把
+          // 第 2 轮（首轮没命中、次轮已 96%）也误标成 cold_start，回查时误导。
           const breakReason =
-            this.cacheBreakReason ?? (beforeCacheRead === 0 && stats.tokens.input > 0 ? "cold_start" : null);
+            this.cacheBreakReason ?? (beforeIn === 0 && beforeOut === 0 && stats.tokens.input > 0 ? "cold_start" : null);
           this.log("usage_round", {
             in: stats.tokens.input,
             out: stats.tokens.output,
