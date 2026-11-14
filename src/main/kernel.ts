@@ -854,6 +854,8 @@ export class Kernel {
    * 否则她清不动时会每 5 分钟空烧一轮 token，用户那边还看不到任何变化。
    */
   private backlogGate = { at: 0, count: 0, waitMin: 0 };
+  /** 本轮前缀可能被打断的原因（2026-11-14）：切群 / 运行时重建 / 冷启动；用完即清 */
+  private cacheBreakReason: string | null = null;
   /** 成员本轮累计 token（`teamId::成员` → tokens）：编制表的预算读数不再是硬编码 0 */
   private memberUsage = new Map<string, number>();
   /** 成员累计命中缓存的输入 token（2026-11-13 看板）：与 memberUsage 同口径累计 */
@@ -2079,6 +2081,8 @@ export class Kernel {
   /** 切线程：先存当前，再装载目标；Pi 会话目录按线程隔离 */
   private switchThread(id: string): void {
     if (id === this.currentThreadId) return;
+    // 切群要换 Pi 会话目录（--continue 指向新目录），前缀必然作废，记下来供命中率回查
+    this.cacheBreakReason = "thread_switch";
     const meta = this.threads.get(id);
     if (!meta) throw new Error(`会话不存在：${id}`);
     this.persistThread();
@@ -3190,6 +3194,19 @@ export class Kernel {
               ? Math.round((result.cacheReadTokens / result.promptTokens) * 1000) / 10
               : null,
           error: result.error,
+        });
+        // 成员侧用量落台账（2026-11-14）：以前只有 member_exit 日志，按次台账查不到成员跑单的命中率。
+        // cacheFieldsReported 拿不到（成员 runner 未透传端点字段），明确记 null，不假装有。
+        appendUsage(this.dataRoot, {
+          at: new Date().toISOString(),
+          kind: "member",
+          in: result.promptTokens,
+          out: result.completionTokens,
+          model: this.activeModelId() ?? "member",
+          cacheRead: result.cacheReadTokens,
+          cacheWrite: result.cacheWriteTokens,
+          source: "member",
+          cacheFieldsReported: null,
         });
         // 只要成员交了回报就登记——**证据可选**（2026-11-11 起普通任务不再强制）。
         // 旧条件要求 evidence.length > 0：交了回报但没附证据的单被当成「没交出回报」，
@@ -5176,7 +5193,10 @@ export class Kernel {
     const host = this.host;
     this.host = null;
     this.hostStamp = "";
-    if (host) await host.stop().catch(() => undefined);
+    if (host) {
+      this.cacheBreakReason = "host_restart";
+      await host.stop().catch(() => undefined);
+    }
   }
 
   /**
@@ -5589,6 +5609,10 @@ export class Kernel {
         // 缓存命中可观测：累计与单轮都落一行，命中率掉时能回查到哪一轮
         {
           const prompt = stats.tokens.input + (stats.tokens.cacheRead ?? 0) + (stats.tokens.cacheWrite ?? 0);
+          const dOut = Math.max(0, stats.tokens.output - beforeOut);
+          // 命中率掉下来时，能分清是切群/重建进程/冷启动，还是"原因不明"
+          const breakReason =
+            this.cacheBreakReason ?? (beforeCacheRead === 0 && stats.tokens.input > 0 ? "cold_start" : null);
           this.log("usage_round", {
             in: stats.tokens.input,
             out: stats.tokens.output,
@@ -5596,7 +5620,26 @@ export class Kernel {
             cacheWrite: stats.tokens.cacheWrite ?? 0,
             hitRate: prompt > 0 ? Math.round(((stats.tokens.cacheRead ?? 0) / prompt) * 1000) / 10 : null,
             turnHitRate,
+            source: "pi",
+            // Pi 只给归一化后的 stats，拿不到"端点有没有回报缓存字段"——明确写 null，不假装知道
+            cacheFieldsReported: null,
+            cacheBreakReason: breakReason,
           });
+          // 按次台账（2026-11-14）：以前只有直连路径写 usage.jsonl，生产主力 Pi 路径线上查不到。
+          // 这里必须记**本轮增量**（dIn/dRead/dWrite），不能把 stats 的会话累计值逐行再写一遍。
+          appendUsage(this.dataRoot, {
+            at: new Date().toISOString(),
+            kind: "turn",
+            in: turnPrompt,
+            out: dOut,
+            model: this.activeModelId() ?? "pi",
+            cacheRead: dRead,
+            cacheWrite: dWrite,
+            source: "pi",
+            cacheFieldsReported: null,
+            cacheBreakReason: breakReason,
+          });
+          this.cacheBreakReason = null;
         }
         // 工单追溯：这一段是哪个 Pi session 跑的
         const taskId = this.turn.taskId;
@@ -5756,6 +5799,9 @@ export class Kernel {
             cacheWrite: write,
             cacheMiss: result.cacheMiss,
             hitRate: turnHitRate,
+            source: "direct",
+            cacheFieldsReported: result.cacheFieldsReported,
+            cacheBreakReason: this.cacheBreakReason,
           });
         }
         // 按次记账（M2-11）+ 软上限检查（达限提示/可切备用模型；不静默停机）
@@ -5767,7 +5813,11 @@ export class Kernel {
           model: usedModel,
           cacheRead: hit,
           cacheWrite: write,
+          source: "direct",
+          cacheFieldsReported: result.cacheFieldsReported,
+          cacheBreakReason: this.cacheBreakReason,
         });
+        this.cacheBreakReason = null;
         this.checkBudget();
         if (result.toolCalls.length > 0) {
           messages.push({

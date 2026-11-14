@@ -23,6 +23,7 @@
     "lint:design": "node scripts/check-design.mjs",
     "lint": "oxlint src",
     "verify": "npm run typecheck && npm run lint && npm run lint:design && npm test",
+    "probe:usage": "electron scripts/live-usage-probe.cjs",
     "check:pi-base": "node scripts/check-pi-base.mjs",
     "live-check": "npm run build:main && electron scripts/live-check.cjs",
     "copy:size": "node scripts/copy-size.mjs"

@@ -69,6 +69,59 @@
 - (e) **无本地响应 / 会话结果缓存**：重复请求全额重算。
 - (f) **分不清「没命中」与「端点没报」**：没有任何埋点能区分这两种 0。
 
+## 四之二 · 2026-11-14 实测补充（本报告部分结论已过时）
+
+> 以下数据来自真模型调用，不是 mock 常量。探针：`scripts/live-usage-probe.cjs`（`npm run probe:usage`），用 Electron `safeStorage` 解密用户已配置的 Key（不打印），`max_tokens=16` 控制成本；结果落在 `shots/live-usage-probe.json`。
+
+**1. 历史台账实测**（`C:\Users\Administrator\.lynn\logs\agent.log`，107 条 `usage_round`，11-10 16:03Z → 11-13 12:20Z）
+
+| 指标 | 值 |
+|---|---|
+| 累计命中率 | p50 48% / 均值 53.3% / 最高 96.3%（被每日冷启动拉低） |
+| 单轮命中率 | p50 47.6% / 最高 99.4%，长会话稳定在 97–99% |
+| `cacheWrite` | **107/107 全为 0**（原因见下） |
+| 11-13 末条累计 | 未命中输入 422,124 / 输出 88,460 / 命中 5,170,496，累计 92.5% |
+| 一次真实断点 | 12:13:58 单轮掉到 50.3%，累计 `in` 一次增加 14 万 |
+
+**2. 7 个已配置模型的端点探针**（每模型 1 次最小请求）
+
+| 模型 | 结果 | prompt | hit | 回报的缓存字段 |
+|---|---|---|---|---|
+| anges-cn · agnes-3.0-flash | OK 775ms | 352 | 0 | `prompt_tokens_details` |
+| MiniMax M3.1 Flash（默认） | OK 1142ms | 452 | 451 | `prompt_tokens_details` |
+| OFM · DeepSeek V4.1 Flash | HTTP 429 | — | — | 免费额度用尽 |
+| OFM · MiMo V2.6 Flash | HTTP 429 | — | — | 同上 |
+| OFM · 推荐免费组 | HTTP 429 | — | — | 同上 |
+| OFM · OpenRouter Free | OK 9327ms | 343 | 0 | `prompt_tokens_details` |
+| OFM · Kilo Auto Free | OK 1839ms | 467 | 0 | `prompt_tokens_details` |
+
+**`cacheWrite` 恒 0 的原因找到了**：所有可达端点都只回报 OpenAI 兼容的 `prompt_tokens_details.cached_tokens`，**没有一家回报** `cache_creation_input_tokens`（Anthropic 语义）或 DeepSeek 的 `prompt_cache_hit_tokens`。`cacheWrite` 为 0 是端点形态，不是缓存没工作；此前"命中率 0 不可判读"的担心对这批端点不成立——它们都报了字段。
+
+**3. 前缀 A/B 对照：缓存分层的收益（真模型验证）**
+
+同一 system（约 450 token）+ 固定历史，只改公告的落点；每轮记录 `cached_tokens`：
+
+| 轮次 | MiniMax hit | anges hit |
+|---|---|---|
+| r1 / r2 稳定前缀 | 451 / 451 | 256 / 256 |
+| **r3 公告进 system（旧方案）** | **128（-71.6%）** | 256 |
+| r4 公告进 user 尾部（新方案） | 446 | 0 |
+| r5 **改公告内容**（新方案） | **464（不掉）** | 256 |
+
+MiniMax 上结论明确：旧方案改一次公告，缓存命中从 451 掉到 128；新方案放回 446/464，**且 r5 改公告文本仍保持命中**——这正是把易变段移出 `systemPrompt()` 要拿到的收益。anges-cn 的 r4 出现 0、r5 又回 256，属该网关缓存实现不稳定，记为端点差异，不拿来下结论。
+
+**4. 本报告需要修正的过时结论**
+
+| 原结论（11-13） | 现状（11-14） |
+|---|---|
+| §三「成员侧没有单独记 cacheRead，永久不可测」 | **已过时**：`MemberRunResult` 已有 `cacheReadTokens/cacheWriteTokens`，`member_exit` 日志带 `hitRate`；本轮再补了按次台账 `kind:"member"` |
+| §4.3(a)「Pi 路径不写 usage 台账」 | **已修**：`usage_round` 处补 `appendUsage`，记**本轮增量**（不是会话累计值，避免逐行重复求和） |
+| §4.3(f)「分不清没命中与端点没报」 | **已修**：`StreamChatResult.cacheFieldsReported` + 台账同名字段，端点报 0 与压根没报可区分 |
+| §4.3(b)「cost 恒 0」 | **仍未修**：`modelsJsonFor()` 定价仍写死 0，金额维度依旧算不出来 |
+| §4.3(e)「无响应缓存」 | **仍未修**：重复问题仍全额重算 |
+
+新增埋点还有 `cacheBreakReason`（切群 / 运行时重建 / 冷启动），下次再出现 50.3% 那种断点可以直接回查原因，不用猜。
+
 ## 五、口径建议
 
 - 定义：**token 缓存命中率 = cacheRead / (sessionIn + cacheRead + cacheWrite)**。

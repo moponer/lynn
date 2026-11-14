@@ -55,6 +55,11 @@ export interface StreamChatResult {
   cacheWrite: number;
   /** DeepSeek 的未命中输入 token：只用于日志，不与 sessionIn 重复记账 */
   cacheMiss: number;
+  /**
+   * 端点这次**有没有回报**缓存字段（2026-11-14）。
+   * 用于区分「真的没命中」与「端点压根没报」——否则 cacheRead=0 的命中率不可判读。
+   */
+  cacheFieldsReported: boolean;
 }
 
 interface SseChunk {
@@ -143,6 +148,7 @@ export async function streamChat(input: StreamChatInput): Promise<StreamChatResu
     let cacheRead = 0;
     let cacheWrite = 0;
     let cacheMiss = 0;
+    let cacheFieldsReported = false;
     const toolAcc = new Map<number, ToolCall>();
     const decoder = new TextDecoder();
     let buffer = "";
@@ -153,6 +159,15 @@ export async function streamChat(input: StreamChatInput): Promise<StreamChatResu
         completionTokens = json.usage.completion_tokens ?? completionTokens;
         // 各家字段名不同：按优先级取，取不到保持 0（不造假命中率）
         const u = json.usage;
+        // 只要 usage 里出现过任一缓存字段（哪怕值为 0）就算"端点报了"。
+        // 这与 cacheRead 的数值无关：报了 0 才说明真的没命中。
+        cacheFieldsReported =
+          cacheFieldsReported ||
+          u.prompt_cache_hit_tokens !== undefined ||
+          u.prompt_cache_miss_tokens !== undefined ||
+          u.cache_read_input_tokens !== undefined ||
+          u.cache_creation_input_tokens !== undefined ||
+          u.prompt_tokens_details?.cached_tokens !== undefined;
         cacheRead = u.prompt_cache_hit_tokens ?? u.cache_read_input_tokens ?? u.prompt_tokens_details?.cached_tokens ?? cacheRead;
         // DeepSeek 的 miss 已经算在 prompt_tokens 里，不能再当 cacheWrite 记一次；
         // cacheWrite 只表示 Anthropic 那种「额外写入缓存」的 token。
@@ -203,6 +218,7 @@ export async function streamChat(input: StreamChatInput): Promise<StreamChatResu
       cacheRead,
       cacheWrite,
       cacheMiss,
+      cacheFieldsReported,
     };
   } finally {
     clearTimeout(timer);

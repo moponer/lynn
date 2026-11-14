@@ -16,7 +16,7 @@ export function evaluateBudget(spentTokens: number, softBudgetTokens: number): {
 
 export interface UsageLine {
   at: string;
-  kind: "turn" | "schedule";
+  kind: "turn" | "schedule" | "member";
   in: number;
   out: number;
   model: string;
@@ -26,6 +26,15 @@ export interface UsageLine {
   cacheRead?: number;
   /** 写入缓存 / 未命中的输入 token */
   cacheWrite?: number;
+  /** 这条读数来自哪条运行路径：直连 / Pi / 成员后台跑单（2026-11-14 补齐） */
+  source?: "direct" | "pi" | "member";
+  /**
+   * 端点是否**回报了**缓存字段。null / 缺省 = 不知道（Pi 只给归一化后的 stats）；
+   * false = 端点根本没报，此时"命中率 0"不可判读为"没命中"。
+   */
+  cacheFieldsReported?: boolean | null;
+  /** 本轮前缀可能被打断的原因（切群 / 运行时重建 / 冷启动）；没有就是 null */
+  cacheBreakReason?: string | null;
 }
 
 const USAGE_FILE = "usage.jsonl";

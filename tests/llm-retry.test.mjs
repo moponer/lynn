@@ -138,3 +138,30 @@ test("DeepSeek 缓存字段：miss 不再重复记到 cacheWrite", async () => {
     await srv.close();
   }
 });
+
+test("端点回报缓存字段（哪怕值为 0）→ cacheFieldsReported=true", async () => {
+  const srv = await startServer([{ text: "ok" }], {
+    prompt_tokens: 500,
+    completion_tokens: 10,
+    prompt_cache_hit_tokens: 0,
+    prompt_cache_miss_tokens: 500,
+  });
+  try {
+    const r = await streamChat(input(srv.baseUrl));
+    assert.equal(r.cacheRead, 0);
+    assert.equal(r.cacheFieldsReported, true, "报了 0 也叫『报了』——这时才能判定真的没命中");
+  } finally {
+    await srv.close();
+  }
+});
+
+test("端点完全不回报缓存字段 → cacheFieldsReported=false（0 命中率不可判读）", async () => {
+  const srv = await startServer([{ text: "ok" }], { prompt_tokens: 500, completion_tokens: 10 });
+  try {
+    const r = await streamChat(input(srv.baseUrl));
+    assert.equal(r.cacheRead, 0);
+    assert.equal(r.cacheFieldsReported, false, "没报就没报，不能把 0 当成『没命中』");
+  } finally {
+    await srv.close();
+  }
+});
