@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { resolveFeedUrl, transition } from "../dist/main/updater.js";
+import { resolveFeedUrl, feedUrlIssue, transition } from "../dist/main/updater.js";
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), "lynn-upd-"));
 
@@ -19,6 +19,13 @@ test("resolveFeedUrl：env 优先，其次 updater.json，都没有 → null", (
 });
 
 const base = () => ({ supported: true, version: "0.1.0", phase: "idle" });
+
+test("feedUrlIssue：更新源必须 HTTPS（审计 #5：generic provider 无签名，http 源拒绝启用）", () => {
+  assert.equal(feedUrlIssue("https://dl.example.com/lynn/"), null);
+  assert.match(feedUrlIssue("http://dl.example.com/lynn/"), /HTTPS/);
+  assert.match(feedUrlIssue("ftp://dl.example.com/"), /https/);
+  assert.match(feedUrlIssue("dl.example.com"), /https/);
+});
 
 test("transition：available → downloading → downloaded；error 如实带 message", () => {
   const a = transition(base(), { type: "available", version: "0.2.0" });

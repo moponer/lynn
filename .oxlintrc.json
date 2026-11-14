@@ -1,0 +1,13 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "categories": {
+    "correctness": "warn"
+  },
+  "ignorePatterns": ["dist/**", "node_modules/**", "experiments/**", "design-previews/**"],
+  "rules": {
+    "unicorn/prefer-string-starts-ends-with": "off",
+    "unicorn/no-useless-fallback-in-spread": "off",
+    "unicorn/no-useless-spread": "off",
+    "eslint/no-control-regex": "off"
+  }
+}

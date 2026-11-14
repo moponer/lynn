@@ -321,10 +321,11 @@ test("群公告（全局段）：写进去 → 风铃每轮都看得见", async 
     assert.equal(r.ok, true);
     assert.match(r.text, /接缝/);
 
-    // 风铃每轮都看得见它（system prompt 的本群上下文）
-    const prompt = kernel.systemPrompt();
-    assert.match(prompt, /本群公告/);
-    assert.match(prompt, /接缝：林工的清洗结果交给小林/);
+    // 风铃每轮都看得见它（当轮消息尾部的「本群当前情况」；2026-11-14 起不再进 system prompt，
+    // 否则改一次公告就废掉整段前缀缓存）
+    const facts = kernel.turnFacts();
+    assert.match(facts, /本群公告/);
+    assert.match(facts, /接缝：林工的清洗结果交给小林/);
 
     // 快照带上（渲染层要显示）
     const snap = kernel.handle("session.snapshot");

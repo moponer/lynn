@@ -1,14 +1,33 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import { execSync } from "node:child_process";
 import { resolve } from "node:path";
+
+/**
+ * 构建号（2026-11-13 审计 #19）：优先 git 提交计数（同一仓库前后端必然一致且单调），
+ * CI/打包环境没有 git 时回落到时间戳（退回旧行为）。时间戳取自构建机时钟，
+ * 跨机器/时钟回拨会把"谁更旧"判错——git 计数才是单调可比的。
+ */
+function computeBuildId(): string {
+  try {
+    const n = execSync("git rev-list --count HEAD", { stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
+    if (/^\d+$/.test(n)) return `git-${n}`;
+  } catch {
+    /* 无 git（打包机/CI shallow 也算有效，count 是同一 commit 的一致值） */
+  }
+  return `t-${Date.now()}`;
+}
 
 // 渲染层构建：产物带相对路径，供 Electron 以 file:// 加载
 export default defineConfig({
   root: ".",
   base: "./",
   plugins: [react()],
-  // 构建时间戳：前端据此判断"内核是不是比我旧"（见 App 的 app.info 握手）
-  define: { __LYNN_BUILD_AT__: JSON.stringify(new Date().toISOString()) },
+  // 构建号 + 时间戳：前端先用 buildId 判"内核是不是比我旧"，buildId 不可比时退回时间戳（见 App 的 app.info 握手）
+  define: {
+    __LYNN_BUILD_ID__: JSON.stringify(computeBuildId()),
+    __LYNN_BUILD_AT__: JSON.stringify(new Date().toISOString()),
+  },
   build: {
     outDir: "dist/renderer",
     emptyOutDir: true,

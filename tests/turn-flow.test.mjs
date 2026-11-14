@@ -124,6 +124,29 @@ test("问答回路：回答写入下一回合的输入（不吞内容）", async
   assert.equal(kernel.handle("session.snapshot").board.decisions.length, 0);
 });
 
+test("用户直接在群里说话 = 回答：挂起的问询拍板卡当场撤掉（契约卡不动）", () => {
+  const { kernel } = setup();
+  // 一张 ask_user 问询 + 一张派单契约（plan 必须点「开始」，打字不算拍板）
+  kernel.runTool("ask_user", { question: "要梳理的「项目」指哪个仓库？", checks: [] });
+  kernel.decisions.push({
+    id: "plan-x-1",
+    from: "派单",
+    title: "整理周报",
+    detail: "",
+    kind: "plan",
+    jobId: "WO-9",
+    at: new Date().toISOString(),
+  });
+
+  kernel.handle("feed.send", { text: "就 lynn，直接开工" });
+
+  const left = kernel.handle("session.snapshot").board.decisions;
+  assert.equal(left.some((d) => d.kind === "question"), false, "问询卡应被撤掉");
+  assert.equal(left.some((d) => d.kind === "plan"), true, "契约卡不该被普通消息冲掉");
+  // 重启也不复活：pending.json 里已不再有这张问询
+  assert.equal(kernel.handle("session.snapshot").board.decisions.some((d) => d.kind === "question"), false);
+});
+
 test("命令审计落 audit.jsonl（拦截也留痕，能回查）", async () => {
   const { root, kernel } = setup();
   kernel.auditTool("t1", "WO-1", "林工", { kind: "cmd_blocked", command: "rm -rf /", why: "递归删除根目录", cwd: root });

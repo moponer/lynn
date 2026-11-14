@@ -60,3 +60,75 @@ test("未信任项目：项目级 mcp.json 不加载；信任后才进工具面"
     await kernel.dispose();
   }
 });
+
+/**
+ * 2026-11-13：用户报"我手动选的目录为什么没被信任"。
+ * 根因不是"信任错了"，是三件事：
+ *  ①空目录也报「项目级插件与 MCP 不会加载」——那里根本没有可拦的东西；
+ *  ②提示是死路：没说在哪点、也没给按钮；
+ *  ③信任后项目级技能不重新发现（只重连了 MCP）——运行时技能表里始终没有它。
+ */
+test("空目录不该报「不会加载」：gated 说清这个目录到底有什么被闸", async () => {
+  const root = tmp();
+  const plain = path.join(root, "plain");
+  fs.mkdirSync(plain, { recursive: true });
+  const kernel = new Kernel(root);
+  try {
+    await kernel.init();
+    const r = kernel.handle("project.setRoot", { root: plain });
+    assert.equal(r.ok, true);
+    assert.deepEqual(r.gated, { mcp: false, skills: false }, "空目录没有任何被信任闸住的东西");
+    const snap = kernel.handle("session.snapshot");
+    assert.deepEqual(snap.project.gated, { mcp: false, skills: false });
+    // 对话流里也不该说「不会加载」——那里无物可拦
+    const said = kernel
+      .handle("session.snapshot")
+      .feed.filter((c) => c.kind === "system")
+      .map((c) => c.text ?? "")
+      .join("\n");
+    assert.ok(!/不会加载/.test(said), `不该报不会加载：${said}`);
+  } finally {
+    await kernel.dispose();
+  }
+});
+
+test("gated：目录里有项目级 MCP / 项目级技能才标出来", async () => {
+  const root = tmp();
+  const withSkill = path.join(root, "with-skill");
+  fs.mkdirSync(path.join(withSkill, ".lynn", "skills", "s1"), { recursive: true });
+  fs.writeFileSync(path.join(withSkill, ".lynn", "skills", "s1", "SKILL.md"), "---\nname: s1\ndescription: d\n---\n\nx\n", "utf-8");
+  const withMcp = path.join(root, "with-mcp");
+  fs.mkdirSync(path.join(withMcp, ".lynn"), { recursive: true });
+  fs.writeFileSync(path.join(withMcp, ".lynn", "mcp.json"), JSON.stringify({ servers: [] }), "utf-8");
+
+  const kernel = new Kernel(root);
+  try {
+    await kernel.init();
+    assert.deepEqual(kernel.handle("project.setRoot", { root: withSkill }).gated, { mcp: false, skills: true });
+    assert.deepEqual(kernel.handle("project.setRoot", { root: withMcp }).gated, { mcp: true, skills: false });
+  } finally {
+    await kernel.dispose();
+  }
+});
+
+test("信任后项目级技能真被重新发现并可激活（此前只重连 MCP，技能表没更新）", async () => {
+  const root = tmp();
+  const project = path.join(root, "project");
+  fs.mkdirSync(path.join(project, ".lynn", "skills", "s1"), { recursive: true });
+  fs.writeFileSync(path.join(project, ".lynn", "skills", "s1", "SKILL.md"), "---\nname: s1\ndescription: 项目技能\n---\n\nx\n", "utf-8");
+
+  const kernel = new Kernel(root);
+  try {
+    await kernel.init();
+    kernel.handle("project.setRoot", { root: project });
+    assert.ok(!kernel.skillEntries.some((s) => s.name === "s1"), "未信任时项目技能不进运行时技能表");
+    kernel.handle("trust.set", { trusted: true });
+    await new Promise((r) => setTimeout(r, 300));
+    assert.ok(
+      kernel.skillEntries.some((s) => s.name === "s1"),
+      "信任后必须重新发现项目级技能（2026-11-13 修：此前只重连 MCP）",
+    );
+  } finally {
+    await kernel.dispose();
+  }
+});

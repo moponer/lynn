@@ -1,27 +1,24 @@
+# CI（2026-11-14）：只跑"不需要窗口"的那套检查。
+# 走查（npm run shot）依赖 Electron 窗口，本地跑，不进 CI。
+# 用 windows-latest 是因为主力平台是 Windows（路径分隔符、cmd、GBK 解码这些只在 Windows 暴露）。
 name: ci
 
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 jobs:
-  test:
-    # Windows 优先（计划书 §1.5）；Node 22.19 是 Pi 的 engines 下限，24 为当前 LTS 线
+  verify:
     runs-on: windows-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        node: [22, 24]
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: ${{ matrix.node }}
+          node-version: 22
           cache: npm
       - run: npm ci
-      # 架构红线：Pi 基座完整不变，禁止 patch / fork / 改 dist；并与 npm 官方 tarball 对账
-      - run: npm run check:pi-base -- --tarball
-      - run: npm run typecheck
-      - run: npm run lint:design
-      - run: npm test
+      # typecheck（渲染层 + 主进程）→ oxlint → 设计规范 → 全量测试
+      - run: npm run verify

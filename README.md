@@ -119,6 +119,12 @@ L0 是纯数据：`plugin.json` 的 `contributes.theme` 指向一个 `theme.json
 | [`../docs/风铃-界面设计规范.md`](../docs/风铃-界面设计规范.md) v1.0 | 界面结构、视觉语言、数据契约、实现路线 |
 | [`../docs/开发任务清单.md`](../docs/开发任务清单.md) v1 | 任务与验收口径（按 M0–M4 + 横切编排） |
 
+## 卸载与数据残留
+
+- 默认**卸载不删数据**（NSIS `deleteAppDataOnUninstall: false`，刻意的）：任务卷宗、团队档案、会话历史都在 `~/.lynn/` 里，重装后原样可用。
+- 里面有凭据（`~/.lynn/settings.json` 的 API Key，safeStorage 可用时为加密存储）。把机器交给他人前，请手动删除 `~/.lynn/` 或至少 `~/.lynn/settings.json`。
+- `electron-builder.yml` 当前未配置代码签名——更新源必须 HTTPS（`updater.ts` 强制），安装包完整性靠传输信道与发布侧约定兜底。
+
 ## 下一步（M4 剩余）
 
 1. **Windows 代码签名**（OV/EV 证书接入后更新发布说明与更新器校验说明）。

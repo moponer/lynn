@@ -23,10 +23,10 @@ test("Toolkit：只读授权目录可读、写入仍被拒、未授权照旧越�
   const tk = new Toolkit(ws, { readRoots: () => roots });
   const target = path.join(proj, "src", "a.md");
 
-  assert.throws(() => tk.readFile({ path: target }), /路径越界/, "没授权时不能读外部目录");
+  await assert.rejects(() => tk.readFile({ path: target }), /路径越界/, "没授权时不能读外部目录");
 
   roots = [proj]; // 用户刚授权（成员还在跑）
-  assert.match(tk.readFile({ path: target }), /hello-project/, "授权后立刻可读");
+  assert.match(await tk.readFile({ path: target }), /hello-project/, "授权后立刻可读");
   assert.match(tk.listDir({ path: proj }), /src/, "授权目录可列目录");
 
   await assert.rejects(

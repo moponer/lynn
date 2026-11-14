@@ -21,7 +21,7 @@ test("写→读→改：diff 可展示，改完内容正确", async () => {
   const w = await t.writeFile({ path: "a/b.md", content: "第一行\n第二行\n" });
   assert.match(w, /已写入 a\/b\.md/);
   assert.match(w, /\+2/);
-  assert.equal(t.readFile({ path: "a/b.md" }), "第一行\n第二行\n");
+  assert.equal(await t.readFile({ path: "a/b.md" }), "第一行\n第二行\n");
 
   const e = await t.editFile({ path: "a/b.md", old_string: "第二行", new_string: "第二行（改）" });
   assert.match(e, /已改 a\/b\.md/);
@@ -65,19 +65,19 @@ test("replace_all 真的全替换", async () => {
   const t = new Toolkit(root);
   await t.writeFile({ path: "r.txt", content: "a a a" });
   await t.editFile({ path: "r.txt", old_string: "a", new_string: "b", replace_all: true });
-  assert.equal(t.readFile({ path: "r.txt" }), "b b b");
+  assert.equal(await t.readFile({ path: "r.txt" }), "b b b");
 });
 
 test("二进制拒读、目录要 list_dir、读超限截断", async () => {
   const root = tmp();
   const t = new Toolkit(root);
   fs.writeFileSync(path.join(root, "bin.dat"), Buffer.from([0, 1, 2, 3]));
-  assert.throws(() => t.readFile({ path: "bin.dat" }), /二进制/);
+  await assert.rejects(() => t.readFile({ path: "bin.dat" }), /二进制/);
   fs.mkdirSync(path.join(root, "dir"));
-  assert.throws(() => t.readFile({ path: "dir" }), /是目录/);
+  await assert.rejects(() => t.readFile({ path: "dir" }), /是目录/);
   assert.match(t.listDir({}), /\[目录\] dir/);
   fs.writeFileSync(path.join(root, "big.txt"), "x".repeat(210_000));
-  assert.match(t.readFile({ path: "big.txt" }), /已截断/);
+  assert.match(await t.readFile({ path: "big.txt" }), /已截断/);
 });
 
 test("glob 与 grep 在边界内工作", async () => {

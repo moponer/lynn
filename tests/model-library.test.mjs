@@ -93,9 +93,10 @@ test("Kernel：model.list/save/setDefault/setThread/remove 闭环，Key 永不�
     await kernel.init();
     assert.equal(kernel.handle("model.list", {}).models.length, 0);
 
-    const a = kernel.handle("model.save", { label: "对话模型 A", provider: "p1", baseUrl: "https://a/v1", model: "m-1", apiKey: "k-a" });
+    // 内核测试环境 safeStorage 恒 false（审计 #9）：明文落盘需显式 plaintextOk
+    const a = kernel.handle("model.save", { label: "对话模型 A", provider: "p1", baseUrl: "https://a/v1", model: "m-1", apiKey: "k-a", plaintextOk: true });
     assert.equal(a.ok, true);
-    const b = kernel.handle("model.save", { label: "对话模型 B", provider: "p2", baseUrl: "https://b/v1", model: "m-2", apiKey: "k-b" });
+    const b = kernel.handle("model.save", { label: "对话模型 B", provider: "p2", baseUrl: "https://b/v1", model: "m-2", apiKey: "k-b", plaintextOk: true });
     assert.equal(b.ok, true);
 
     let list = kernel.handle("model.list", {});

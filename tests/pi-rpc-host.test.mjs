@@ -5,6 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { spawn } from "node:child_process";
 import { PiRpcHost, modelsJsonFor, writeModelsJson, PI_PROVIDER_ID } from "../dist/main/pi-rpc-host.js";
+import { presetContextWindow } from "../dist/main/providers.js";
 
 const FAKE = path.resolve(import.meta.dirname, "fixtures/pi-rpc-fake-worker.mjs");
 const EXTENSION = path.resolve(import.meta.dirname, "../agent/extensions/lynn-bridge.mjs");
@@ -54,6 +55,22 @@ test("models.json 用 Pi 原生 $ENV 插值，绝不落明文 Key", () => {
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("models.json 的 contextWindow 用真实窗口；缺省回落 128K", () => {
+  const withWindow = JSON.parse(modelsJsonFor({ baseUrl: "https://x/v1", apiKey: "k", model: "m", contextWindow: 1000190 }));
+  assert.equal(withWindow.providers[PI_PROVIDER_ID].models[0].contextWindow, 1000190);
+  const without = JSON.parse(modelsJsonFor({ baseUrl: "https://x/v1", apiKey: "k", model: "m" }));
+  assert.equal(without.providers[PI_PROVIDER_ID].models[0].contextWindow, 128000, "未知厂商用安全默认");
+});
+
+test("presetContextWindow：按厂商 ID 或显示名匹配；未知如实 null", () => {
+  assert.equal(presetContextWindow("MiniMax"), 1000190);
+  assert.equal(presetContextWindow("minimax"), 1000190, "大小写不敏感");
+  assert.equal(presetContextWindow("DeepSeek（深度求索）"), 128000);
+  assert.equal(presetContextWindow("OFM 自定义网关"), null, "未知厂商不给猜数");
+  assert.equal(presetContextWindow(undefined), null);
+  assert.equal(presetContextWindow(""), null);
 });
 
 test("启动用官方 CLI 参数与官方扩展，Key 只经 env 下发", async () => {

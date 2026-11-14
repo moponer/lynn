@@ -146,6 +146,36 @@ test("runMemberTask：写文件→带证据回报，全程走通", async () => {
   assert.ok(events.some((e) => e.kind === "tool"));
 });
 
+test("runMemberTask：缓存 token 按轮累计（成员命中率不再是黑盒）", async () => {
+  const wd = tmpWorkdir();
+  let i = 0;
+  const chat = async (input) => {
+    const script = [
+      { toolCalls: [tc("1", "write_file", { path: "out.md", content: "结果" })] },
+      { toolCalls: [tc("2", "submit_report", { text: "完成", evidence: ["out.md"] })] },
+    ];
+    const step = script[Math.min(i++, script.length - 1)];
+    input.messages.push({ role: "assistant", content: step.content ?? null, tool_calls: step.toolCalls ?? [] });
+    for (const call of step.toolCalls ?? []) {
+      input.messages.push({ role: "tool", tool_call_id: call.id, name: call.name, content: "（工具结果占位）" });
+    }
+    // 模拟 DeepSeek 口径：promptTokens 含命中部分，cacheRead 单独报
+    return { content: "", toolCalls: step.toolCalls ?? [], promptTokens: 100, completionTokens: 5, cacheRead: 80, cacheWrite: 0 };
+  };
+  const r = await runMemberTask({
+    profile: profile(),
+    brief: "出报告",
+    deadline: "今天",
+    tools: ["write_file"],
+    workdir: wd,
+    model: { baseUrl: "http://x", apiKey: "k", model: "m" },
+    chatFn: chat,
+  });
+  assert.equal(r.status, "reported");
+  assert.equal(r.cacheReadTokens, 160, "两轮各命中 80");
+  assert.equal(r.cacheWriteTokens, 0);
+});
+
 test("runMemberTask：假证据在成员侧就被拒（证据原则前置），补真证据后可回报", async () => {
   const wd = tmpWorkdir();
   const chat = scriptedChat([

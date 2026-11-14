@@ -18,9 +18,16 @@ files:
   # 官方 RPC 入口与扩展运行时依赖：显式带上，避免依赖自动收集漏掉 bundle/chunks
   - node_modules/@earendil-works/**/*
   - node_modules/typebox/**/*
+  # L1 worker（agent/l1-worker.mjs）用 jiti 编译插件 TS——打包必须带上（审计 #3）
+  - node_modules/jiti/**/*
   # 区域截图：node-screenshots 主包 + 对应平台的 N-API 预编译二进制（asar:false 要显式带上）
   - node_modules/node-screenshots/**/*
   - node_modules/node-screenshots-*/**/*
+  # 语音播报（asar:false 要显式带）：Edge TTS 客户端 + WebSocket / 代理依赖
+  - node_modules/node-edge-tts/**/*
+  - node_modules/ws/**/*
+  - node_modules/https-proxy-agent/**/*
+  - node_modules/agent-base/**/*
   - package.json
   - "!**/*.map"
   - "!**/*.ts"

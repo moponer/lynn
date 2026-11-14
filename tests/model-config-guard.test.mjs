@@ -56,12 +56,13 @@ test("config.save RPC：换端点留空 Key 返回 ok:false + 原因，不静默
   const kernel = new Kernel(root);
   try {
     await kernel.init();
-    assert.equal(kernel.handle("config.save", { provider: "p", baseUrl: "https://a/v1", model: "m-1", apiKey: "k-1" }).ok, true);
+    // 内核测试环境 safeStorage 恒 false（审计 #9）：明文落盘需显式 plaintextOk
+    assert.equal(kernel.handle("config.save", { provider: "p", baseUrl: "https://a/v1", model: "m-1", apiKey: "k-1", plaintextOk: true }).ok, true);
     const rejected = kernel.handle("config.save", { provider: "q", baseUrl: "https://b/v1", model: "m-2" });
     assert.equal(rejected.ok, false);
     assert.match(rejected.error, /API Key|Base URL/);
     assert.equal(kernel.handle("config.get", {}).baseUrl, "https://a/v1", "拒绝后配置不能被改坏");
-    assert.equal(kernel.handle("config.save", { provider: "q", baseUrl: "https://b/v1", model: "m-2", apiKey: "k-2" }).ok, true);
+    assert.equal(kernel.handle("config.save", { provider: "q", baseUrl: "https://b/v1", model: "m-2", apiKey: "k-2", plaintextOk: true }).ok, true);
   } finally {
     await kernel.dispose();
     // 与 vision-config 一致：Windows 上 kernel 的目录句柄释放有延迟，不强删临时目录

@@ -210,3 +210,63 @@ test("scan：entry 跳出插件目录被拒", () => {
   assert.equal(scan.plugins.length, 0);
   assert.ok(scan.errors.some((e) => e.includes("entry")));
 });
+
+// ---------- 超时与并发闸（2026-11-13 审计 #21） ----------
+
+test("execute：悬挂的工具调用超时返回，不占死调用方（同进程无法强杀要如实说）", async () => {
+  const root = tmpRoot();
+  writePlugin(
+    root,
+    "hang",
+    { ...diceManifest("lynn.tool.hang"), contributes: { tools: ["hang"] } },
+    `export default function activate(api) {
+    api.registerTool({
+      name: "hang", description: "永不返回", parameters: { type: "object", properties: {} },
+      execute: async () => new Promise(() => {}),
+    });
+  }`);
+  const l1 = new L1Host({
+    listEntries: () => [],
+    manifestOf: (id) => {
+      const dir = path.join(root, "plugins", "hang");
+      const m = JSON.parse(fs.readFileSync(path.join(dir, "plugin.json"), "utf-8"));
+      return m.id === id ? { dir, manifest: m } : null;
+    },
+    kernelVersion: "0.0.1",
+    toolTimeoutMs: 200,
+  });
+  await l1.activate("lynn.tool.hang");
+  const t0 = Date.now();
+  const out = await l1.execute("lynn_tool_hang_hang", {});
+  assert.ok(Date.now() - t0 < 5000, "超时要按时返回");
+  assert.match(out, /超时/);
+  assert.match(out, /无法强杀|停用该插件/, "不谎报已终止：要告诉用户怎么处理");
+});
+
+test("execute：同一插件并发闸=1，调用排队串行执行", async () => {
+  const root = tmpRoot();
+  writePlugin(
+    root,
+    "slow",
+    { ...diceManifest("lynn.tool.slow"), contributes: { tools: ["slow"] } },
+    `export default function activate(api) {
+    let running = 0; let maxRun = 0;
+    api.registerTool({
+      name: "slow", description: "慢工具", parameters: { type: "object", properties: {} },
+      execute: async () => {
+        running += 1; maxRun = Math.max(maxRun, running);
+        await new Promise((r) => setTimeout(r, 40));
+        running -= 1;
+        return "max=" + maxRun;
+      },
+    });
+  }`);
+  const l1 = makeHost(root);
+  await l1.activate("lynn.tool.slow");
+  const [a, b] = await Promise.all([
+    l1.execute("lynn_tool_slow_slow", {}),
+    l1.execute("lynn_tool_slow_slow", {}),
+  ]);
+  assert.equal(a, "max=1", "并发被串行化：任一时刻最多 1 个在跑");
+  assert.equal(b, "max=1");
+});

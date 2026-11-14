@@ -50,7 +50,22 @@ const feed = [
     badge: "回报",
     title: "顾明 · WO-2418",
     meta: "证据 2 项",
-    body: "已生成第 3 节；附 report_0914.md 与行数对账日志。",
+    // 长回报走查（2026-11-13）：1200+ 字全铺开会把一屏占满 → 应折叠成前几行 + 「展开全文」
+    body:
+      "【完成有保留】报告已写完并写入 audit-report.md，共 19 条隐患。\n" +
+      "覆盖：安全 11 条、性能 3 条、架构 2 条、代码质量 3 条。\n" +
+      "其中 7 条为「待进一步验证」：主要是 src/renderer/ 未覆盖区域与具体实现现状的差异，" +
+      "需要拿到运行期数据或补充动态执行才能定性；本次仅为只读静态通读，未运行构建、未跑测试、未修改源码。\n" +
+      "重点问题（按严重度）：\n" +
+      "1. 主进程 IPC 通道缺少入参校验，渲染层可传入任意路径触发文件读写边界外的读取；\n" +
+      "2. 插件加载器对 L1 入口未做路径逃逸二次校验，依赖了外层 resolveWithin；\n" +
+      "3. 会话落盘为全量重写，崩溃时可能截断 json，缺原子写；\n" +
+      "4. 成员运行的删除类命令审批只做字符串前缀匹配，可被拼接绕过；\n" +
+      "5. run_command 的 120s 超时未杀进程树，超时后子进程仍可能存活；\n" +
+      "6. HTML 预览用 dangerouslySetInnerHTML 渲染产物，未做 CSP 收敛；\n" +
+      "7. electron-builder.yml 未签名，安装包可被替换；\n" +
+      "8. 日志里落过模型 Key 的明文片段，需脱敏。\n" +
+      "建议先修 1、4、8（改动小、收益直接），其余进入专项。",
     jobId: "WO-2418",
     author: { kind: "member", name: "顾明", memberId: "顾明", role: "数据整理员", avatarId: "a01", teamId: "t1" },
     // 战报（report_to_user 落进 feed 的那份）：战果抽屉按 jobId 取最近一条
@@ -60,6 +75,11 @@ const feed = [
       unfinished: "按来源拆分的那张表还差两家",
       decision: "要不要现在补那两家，还是随下期一起",
     },
+    // 产物 chip（2026-11-13）：右键可定位文件 / 复制路径
+    artifacts: [
+      { label: "周报第 3 节", ref: "artifacts/report_0914.md", bytes: 5120 },
+      { label: "行数对账日志", ref: "artifacts/rowcount.log", bytes: 512 },
+    ],
     createdAt: "14:32",
   },
   {
@@ -165,12 +185,42 @@ if (process.env.LYNN_PREVIEW_LONGTHINK) {
   });
 }
 
+// 长回报走查（2026-11-13）：成员回报动辄千字，全铺开会把一屏占满
+// → 应折成前几行 + 「展开全文」。这张卡不带 report 字段，走的就是派单收尾那条真实形状。
+if (process.env.LYNN_PREVIEW_LONGREPORT) {
+  feed.push({
+    id: "c-longreport",
+    kind: "tool",
+    badge: "回报",
+    title: "代码审计员 回报 · task-audit",
+    meta: "9 轮 · 132s",
+    jobId: "WO-2418",
+    author: { kind: "member", name: "代码审计员", memberId: "代码审计员", role: "代码审计", avatarId: "a03", teamId: "t1" },
+    body:
+      "【完成有保留】代码审计报告已完成，已写入 audit-report.md 并回读验证。覆盖 19 条隐患：\n" +
+      "安全 11 条、性能 3 条、架构 2 条、代码质量 3 条。其中 7 条「待进一步验证」：\n" +
+      "主要是 src/renderer/ 未覆盖区域与具体实现现状的差异，需要运行期数据才能定性。\n" +
+      "本次仅为只读静态通读，未运行构建、未跑测试、未修改源码。\n" +
+      "1. IPC 通道缺少入参校验，可触发边界外读取；\n2. 插件加载器未做路径逃逸二次校验；\n" +
+      "3. 会话落盘全量重写、非原子；\n4. 删除类命令审批只做前缀匹配；\n" +
+      "5. run_command 超时不杀进程树；\n6. HTML 预览未收敛 CSP；\n7. 安装包未签名；\n8. 日志落过明文 Key 片段。\n" +
+      "建议先修 1、4、8 三条（改动小、收益直接），其余进入专项：\n" +
+      "1 加一层入参白名单；4 改成解析命令结构再判；8 用脱敏正则兜住日志写入。" +
+      "补证计划：拿到运行期数据后重跑一遍动态检查，把 7 条待验证收敛成结论或排除；" +
+      "预计半天，需要一次构建与一次端到端跑批。",
+    createdAt: "14:36",
+  });
+}
+
 const avatarPicks = {};
 const snapshot = {
   workspace: {
-    project: "my-notes",
+    project: "我的笔记",
     subdir: "值台",
     primary: "F:/spiker/my-notes",
+    // 项目身份（2026-11-12）：走查要看得见项目条与群列表的项目名
+    projectId: "pj-preview-my-notes",
+    projectName: "我的笔记",
     extras: [{ path: "D:/客户资料", mode: "ro", label: "客户资料" }],
   },
   permission: "ask",
@@ -191,6 +241,8 @@ const snapshot = {
         id: "t1",
         name: "月报突击队",
         status: "active",
+        // 队→群归属（2026-11-12）：右栏按群分家，组头可跳过去
+        threadId: "t-main",
         members: [
           // 走查：同岗位空闲成员聚合（4 个「源码审查员」应收成一行 ×4，而不是铺 4 张卡）
           ...[1, 2, 3, 4].map((i) => ({
@@ -219,6 +271,9 @@ const snapshot = {
             progress: 100,
             budgetUsed: 18,
             budgetTotal: 300,
+            // 消耗看板走查（2026-11-13）
+            cacheUsed: 13.1,
+            hitRate: 72.8,
             rejections: 0,
             rejectionLimit: 3,
             toolWhitelist: ["read_file", "write_file"],
@@ -238,6 +293,8 @@ const snapshot = {
             lastStep: "browser_click #submit",
             budgetUsed: 6,
             budgetTotal: 300,
+            cacheUsed: 3.3,
+            hitRate: 55.2,
             rejections: 1,
             rejectionLimit: 3,
             toolWhitelist: [
@@ -275,10 +332,11 @@ const snapshot = {
         ],
       },
       {
-        // 走查：别群的队——右栏应折叠在「其他团队」下面，不与本群混排
+        // 走查：别群的队——右栏应折叠在「其他群」下面，不与本群混排
         id: "t3",
         name: "竞品调研组",
         status: "active",
+        threadId: "t-2",
         members: [
           {
             name: "周禾",
@@ -312,6 +370,8 @@ const snapshot = {
         statusNote: process.env.LYNN_PREVIEW_HEAVY ? "in_review · 探针 · 证据 22" : "in_review · 顾明 · 证据 2",
         member: process.env.LYNN_PREVIEW_HEAVY ? "探针" : "顾明",
         at: now,
+        // 交付物「查看所属」要报项目（2026-11-13）
+        projectName: "我的笔记",
         // C3 演示：这张单是另一个会话派的——眉标出「回到会话」，印章头出「来自会话」
         threadId: "t-2",
         // 只读授权演示：图纸上会显示「只读授权：…」
@@ -420,6 +480,21 @@ const snapshot = {
     decisions: process.env.LYNN_PREVIEW_NO_DECISIONS
       ? []
       : [
+      // LYNN_PREVIEW_APPROVE=1：走查审批卡（带 family 才有「这类以后都允许」）
+      ...(process.env.LYNN_PREVIEW_APPROVE === "1"
+        ? [
+            {
+              id: "dc-approve",
+              from: "顾明",
+              title: "顾明 要删除文件（WO-2418）",
+              detail: "命令：del issues_0914.bak\n工作区：tasks/WO-2418/workspace",
+              kind: "approval",
+              family: "delete",
+              jobId: "WO-2418",
+              at: "11-02 14:40",
+            },
+          ]
+        : []),
       {
         id: "dc-plan",
         from: "顾明",
@@ -459,11 +534,27 @@ const snapshot = {
     tokensUsed: 21400,
   },
   turn: { phase: "review", busy: false, pending: 0, taskId: "WO-2418" },
-  usage: { turnIn: 3120, turnOut: 860, sessionIn: 18400, sessionOut: 3000, contextTokens: 42000, contextWindow: 128000 },
+  // 消耗看板（2026-11-13）：带缓存字段，走查命中率行
+  usage: {
+    turnIn: 3120, turnOut: 860, sessionIn: 18400, sessionOut: 3000,
+    cacheRead: 210000, cacheWrite: 0, turnHitRate: 96.5,
+    contextTokens: 42000, contextWindow: 1000190, contextPercent: 4.2,
+  },
   queue: [],
   // D3：配了软上限才出预算 chip（60000 × 21400 累计 ≈ 36%）
-  prefs: { autoStart: false, trayOnClose: true, notify: true, lang: "zh", softBudgetTokens: 60000 },
-  project: { root: "C:/Users/demo/notes", trusted: true, hasMcp: false },
+  prefs: {
+    autoStart: false, trayOnClose: true, notify: true, lang: "zh", softBudgetTokens: 60000,
+    voiceEnabled: true, voiceId: "zh-CN-XiaoxiaoNeural", voiceRate: "+0%", voiceVolume: "+0%",
+    voiceScope: "brief", voiceMaxChars: 120, voiceWhenHidden: false, voiceProxy: "",
+    advisorEnabled: true,
+  },
+  project: {
+    root: "C:/Users/demo/notes",
+    trusted: true,
+    hasMcp: false,
+    // 信任闸门只管这两样（2026-11-13）：都没有 = 无所谓信不信
+    gated: { mcp: false, skills: false },
+  },
   // LYNN_PREVIEW_EMPTY=1：走查"最后一条会话也删掉"之后的空场
   thread: process.env.LYNN_PREVIEW_EMPTY ? { id: "", title: "" } : { id: "t-main", title: "月报整理" },
   threads: process.env.LYNN_PREVIEW_EMPTY
@@ -477,8 +568,11 @@ const snapshot = {
           pinned: true,
           lastPreview: "顾明：第 3 节已写完，条数从 1284 对到 1284，无缺口。",
           lastAt: "2026-11-02T14:32:00.000Z",
+          // 项目身份（2026-11-12）：群列表里要显示这个群在做哪个项目
+          projectId: "pj-preview-my-notes",
+          projectName: "我的笔记",
           announcement:
-            "整体：把 issues_0914.csv 整理成周报第 3 节\n顾明：清洗源表并出 clean.csv\n周禾：对账并出差异表\n接缝：顾明的清洗结果交给周禾，别两边各做一半\n共享写入点：q3/ 目录归周禾，其他人只读",
+            "整体：把 issues_0914.csv 整理成周报第 3 节，按「问题—处理—结果」三段式排版，正文不少于两千字，数据段必须和计算口径对得上。\n顾明：清洗源表并出 clean.csv，缺失值单列说明，不要随手填零。\n周禾：对账并出差异表，逐条标注差异来源，别只给汇总。\n接缝：顾明的清洗结果交给周禾，别两边各做一半；谁改了共享目录要在这说一声。\n共享写入点：q3/ 目录归周禾，其他人只读；最终稿由风铃汇总后交你拍板。",
         },
         {
           id: "t-2",
@@ -487,9 +581,29 @@ const snapshot = {
           counts: { active: 1, archived: 0 },
           lastPreview: "风铃：草稿已生成，等你点「发布」。",
           lastAt: "2026-11-01T10:05:00.000Z",
+          projectId: "pj-preview-hermix",
+          projectName: "hermix-desktop",
         },
       ],
 };
+
+// 交付箱去重夹具（LYNN_PREVIEW_DUPOUT=1）：后一张单**原地更新了同一个文件**。
+// 实机症状：audit-report.md 在交付箱里出现两次（任务号不同）。
+if (process.env.LYNN_PREVIEW_DUPOUT) {
+  const src = snapshot.board.track.find((t) => t.id === "WO-2418");
+  if (src) {
+    snapshot.board.track.push({
+      ...src,
+      id: "WO-2499",
+      title: "代码审计（二轮深入）",
+      status: "done",
+      statusNote: "done · 顾明",
+      at: "2026-11-13T12:33:00.000Z",
+      // 同一个物理文件：路径一致、内容更新过、体积更大
+      deliverables: [{ path: "report_0914.md", ref: "artifacts/report_0914-v2.md", bytes: 3072 }],
+    });
+  }
+}
 
 // 多任务并行夹具（LYNN_PREVIEW_MULTI=1）：两个团队、两张在跑的单——
 // 用来验「任务总览 / 在跑 N / 右栏按团队分组」，默认截图不受影响。
@@ -684,8 +798,20 @@ if (process.env.LYNN_PREVIEW_EMPTY) {
 }
 
 contextBridge.exposeInMainWorld("lynn", {
+  // 语音播报：设计走查不真合成，也不真播放
+  onVoice: () => () => {},
   rpc: async (method, params) => {
     if (method === "session.snapshot") return snapshot;
+    // 切群（2026-11-12）：右栏「去那个群」组头要真能跳——假桥也得认这件事
+    if (method === "thread.switch") {
+      const id = String(params?.id ?? "");
+      const target = snapshot.threads.find((t) => t.id === id);
+      if (!target) return { ok: false, error: "没有这个群" };
+      snapshot.thread = { id: target.id, title: target.title };
+      // 公告跟着当前群走（否则公告永远停在第一个群）
+      snapshot.announcement = target.announcement ?? "";
+      return { ok: true, thread: { id: target.id, title: target.title } };
+    }
     // 内置预览走查：假桥按后缀给内容，渲染层照常排版/高亮，不启外部程序
     if (method === "preview.pdfWindow") return { ok: true };
     if (method === "preview.read") {
@@ -784,10 +910,39 @@ contextBridge.exposeInMainWorld("lynn", {
     if (method === "app.info") {
       return process.env.LYNN_PREVIEW_STALE ? { ok: true } : { buildAt: new Date().toISOString() };
     }
-    if (method === "app.pickDir") return { canceled: true };
+    if (method === "app.pickDir") {
+      // LYNN_PREVIEW_PICKDIR=1：假装用户真选了一个目录（走查信任询问用）
+      if (process.env.LYNN_PREVIEW_PICKDIR) return { path: process.env.LYNN_PREVIEW_PICKDIR };
+      return { canceled: true };
+    }
     if (method === "app.pickDirs") return { canceled: true };
-    if (method === "project.setRoot") return { ok: true, root: "F:/spiker/hermix-desktop", trusted: false };
+    if (method === "project.setRoot") {
+      return {
+        ok: true,
+        root: "F:/spiker/hermix-desktop",
+        trusted: false,
+        // 这个目录里有项目级技能 → 界面会当场问「信任并加载 / 先不信任」
+        gated: { mcp: true, skills: true },
+        project: { id: "pj-preview-hermix", name: "hermix-desktop" },
+      };
+    }
     if (method === "project.clearRoot") return { ok: true };
+    // 项目身份（2026-11-12）：预览没有真项目库，给一份能改名能切的项目
+    if (method === "project.list") {
+      return {
+        projects: [
+          { id: "pj-preview-my-notes", name: "我的笔记", path: "F:/spiker/my-notes" },
+          { id: "pj-preview-hermix", name: "hermix-desktop", path: "F:/spiker/hermix-desktop" },
+        ],
+        current: { id: "pj-preview-my-notes", name: "我的笔记", path: "F:/spiker/my-notes" },
+      };
+    }
+    if (method === "project.rename") {
+      return { ok: true, id: String(params?.id ?? ""), name: String(params?.name ?? "") };
+    }
+    if (method === "project.use") {
+      return { ok: true, id: String(params?.id ?? ""), name: "我的笔记", root: "F:/spiker/my-notes" };
+    }
     if (method === "workspace.get") {
       return {
         ...(snapshot.workspace.primary ? { primary: snapshot.workspace.primary } : {}),
@@ -846,7 +1001,11 @@ contextBridge.exposeInMainWorld("lynn", {
     }
     if (method === "task.cancelAll") return { ok: true, stopped: 0 };
     if (method === "config.get") return snapshot.model;
-    if (method === "config.prefs") return { ok: true, autoStart: false };
+    if (method === "config.prefs") return { ok: true, autoStart: false, ...snapshot.prefs };
+    if (method === "voice.voices") return { voices: [{ id: "zh-CN-XiaoxiaoNeural", label: "晓晓 · 温柔女声", locale: "zh-CN" }] };
+    if (method === "voice.preview") return { ok: true };
+    if (method === "voice.stop") return { ok: true };
+    if (method === "voice.status") return { enabled: snapshot.prefs.voiceEnabled, queued: 0, lastError: null };
     // 设计走查没有真壳层：截图相关调用给空结果，避免面板 / 输入框按钮读到 undefined
     if (method === "capture.pending") return { shots: [] };
     if (method === "capture.frame") return { ok: false, width: 0, height: 0, view: { width: 0, height: 0 }, windows: [], error: "预览环境没有真实截图能力" };

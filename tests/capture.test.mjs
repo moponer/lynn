@@ -168,7 +168,8 @@ test("接线防漂移：依赖 / 打包白名单 / 契约 / 壳层 / 许可声�
   assert.match(read("src/shared/contract.ts"), /"capture\.pending"/);
   assert.match(read("src/shared/contract.ts"), /type: "capture"/);
   assert.match(read("src/main/main.ts"), /captureHost\.register\(\)/);
-  assert.match(read("src/main/main.ts"), /capture\.pending/);
+  // 2026-11-13 审计 #14：壳层 RPC 分支迁往 shell-rpc.ts 注册表（截图面仍归壳层，不在内核）
+  assert.match(read("src/main/shell-rpc.ts"), /capture\.pending/);
   // 上游 README 实锤：Electron 里不复制输出缓冲区会崩（napi-rs#1346）
   assert.match(read("src/main/capture-host.ts"), /toPngSync\(true\)/);
   assert.match(read("src/main/capture-host.ts"), /clipboard\.write\(\[item\]\)/);

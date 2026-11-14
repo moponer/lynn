@@ -26,10 +26,13 @@ const LYNN_TOOLS = [
   "create_plugin_draft",
   "create_team",
   "dissolve_team",
+  // 2026-11-13：记忆要能删一条（forget_memory）与读清单（read_memory）——归风铃自己管
+  "forget_memory",
   // 2026-11-04：指挥者要能"管"——催办在跑的成员、停掉明显做不到的单
   "nudge_member",
   // 2026-11-12：验收前读产物正文（只看文件在不在会把骨架稿当成品）
   "read_artifact",
+  "read_memory",
   "report_to_user",
   "review_result",
   "save_memory",
@@ -70,7 +73,7 @@ const member = (over = {}) => ({
   ...over,
 });
 
-test("风铃的工具面恰好是 16 件管理工具", () => {
+test("风铃的工具面恰好是 18 件管理工具", () => {
   assert.deepEqual([...AGENT_TOOL_NAMES].sort(), LYNN_TOOLS);
 });
 

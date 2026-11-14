@@ -8,6 +8,7 @@
 |---|---|---|
 | `@earendil-works/pi-agent-core` / `pi-ai` / `pi-coding-agent` | MIT | Pi Agent 运行时（RPC 会话、模型流式、工具协议） |
 | `electron-updater` | MIT | 自动更新（generic feed，用户确认后下载） |
+| `node-edge-tts`（含 `ws` / `https-proxy-agent`） | MIT | 语音播报：调用微软 Edge 大声朗读的在线合成端点，用神经音色（默认 `zh-CN-XiaoxiaoNeural`）生成 MP3；只发送被播报的那句文本 |
 | `jiti` | MIT | L1 进程内扩展的 TypeScript 直跑加载器 |
 | `playwright-core` | Apache-2.0 | 浏览器执行域：驱动**用户本机已安装的 Edge**（`channel: msedge`），不下载浏览器 |
 | `node-screenshots`（含各平台 N-API 二进制包） | Apache-2.0 | 区域截图的原生捕获引擎（Rust XCap，Windows 走 DXGI）：抓屏、裁剪、PNG 编码；缺平台二进制时如实报不可用 |
@@ -23,6 +24,7 @@
 ## 特别披露
 
 - **浏览器能力**：lynn 不捆绑、不下载浏览器，只驱动用户本机 Edge（playwright-core，Apache-2.0）。登录 / 支付 / 验证码类页面在代码层强制拦截，需要用户确认（见隐私说明）。
+- **语音播报**：Edge Read Aloud 是微软的**在线**语音服务，且非官方公开 API（无 SLA）。只有开关打开、且命中播报白名单时才发请求；发送内容仅为被朗读的那一句短文本（汇报结论 / 进度短句 / 提醒），不发送完整会话、工具输出或文件内容。关闭开关后不再发起任何合成请求；合成失败如实回报，不假装播过。参考实现 `rany2/edge-tts` 是 GPL-3.0 的 Python 包，本项目改用同协议、MIT 许可的 Node 实现以避免捆绑 Python 运行时。
 - **遥测**：Pi 生态包 `pi-telemetry` 是上游 `@earendil-works/pi-ai` 的依赖树成员，但 lynn 在运行时以 `PI_TELEMETRY=0` 禁用之，并有自动化测试锁定该行为；应用自身无遥测。
 - **头像**：只用 DiceBear JS 库离线生成 SVG（data-uri），不请求 `api.dicebear.com`，没有外链图片；12 张脸的 seed 固定在 `src/shared/avatars.ts`，同名成员跨会话不换脸。
 - **内置预览**：`preview.read` 只在 `~/.lynn/tasks/<taskId>/` 内读字节，md / html / csv / 代码 / 图片全在渲染层本地排版，不调用 `shell.openPath`；外部程序打开只作为用户显式点击的备选出口。HTML 预览放进 `sandbox=""` 的 iframe，不执行脚本。
@@ -31,7 +33,7 @@
 ## 依赖清单（自动生成）
 
 <!-- AUTO-DEPS START（由 scripts/gen-notices.mjs 生成，勿手改） -->
-共 587 个顶层包（含直接与传递依赖）：
+共 631 个顶层包（含直接与传递依赖）：
 
 ```
 @anthropic-ai/sdk@0.129.0
@@ -158,8 +160,39 @@
 @js-preview/excel@1.7.14
 @malept/cross-spawn-promise@2.0.0
 @malept/flatpak-bundler@0.4.0
+@napi-rs/canvas-android-arm64@1.1.1
+@napi-rs/canvas-darwin-arm64@1.1.1
+@napi-rs/canvas-darwin-x64@1.1.1
+@napi-rs/canvas-linux-arm-gnueabihf@1.1.1
+@napi-rs/canvas-linux-arm64-gnu@1.1.1
+@napi-rs/canvas-linux-arm64-musl@1.1.1
+@napi-rs/canvas-linux-riscv64-gnu@1.1.1
+@napi-rs/canvas-linux-x64-gnu@1.1.1
+@napi-rs/canvas-linux-x64-musl@1.1.1
+@napi-rs/canvas-win32-arm64-msvc@1.1.1
+@napi-rs/canvas-win32-x64-msvc@1.1.1
+@napi-rs/canvas@1.1.1
 @napi-rs/lzma-linux-x64-gnu@1.5.1
 @noble/hashes@1.8.0
+@oxlint/binding-android-arm-eabi@1.93.0
+@oxlint/binding-android-arm64@1.93.0
+@oxlint/binding-darwin-arm64@1.93.0
+@oxlint/binding-darwin-x64@1.93.0
+@oxlint/binding-freebsd-x64@1.93.0
+@oxlint/binding-linux-arm-gnueabihf@1.93.0
+@oxlint/binding-linux-arm-musleabihf@1.93.0
+@oxlint/binding-linux-arm64-gnu@1.93.0
+@oxlint/binding-linux-arm64-musl@1.93.0
+@oxlint/binding-linux-ppc64-gnu@1.93.0
+@oxlint/binding-linux-riscv64-gnu@1.93.0
+@oxlint/binding-linux-riscv64-musl@1.93.0
+@oxlint/binding-linux-s390x-gnu@1.93.0
+@oxlint/binding-linux-x64-gnu@1.93.0
+@oxlint/binding-linux-x64-musl@1.93.0
+@oxlint/binding-openharmony-arm64@1.93.0
+@oxlint/binding-win32-arm64-msvc@1.93.0
+@oxlint/binding-win32-ia32-msvc@1.93.0
+@oxlint/binding-win32-x64-msvc@1.93.0
 @peculiar/asn1-schema@2.11.1
 @peculiar/json-schema@1.1.12
 @peculiar/utils@2.0.3
@@ -300,7 +333,7 @@ delayed-stream@1.0.0
 dequal@2.0.3
 detect-node@2.1.0
 devlop@1.1.0
-diff@8.0.4
+diff@9.0.0
 dir-compare@4.2.0
 dmg-builder@26.18.0
 docx-preview@0.4.1
@@ -331,6 +364,7 @@ esbuild@0.21.5
 escalade@3.2.0
 escape-string-regexp@4.0.0
 estree-util-is-identifier-name@3.0.0
+execa@8.0.1
 exponential-backoff@3.1.3
 extend@3.0.2
 fast-deep-equal@3.1.3
@@ -376,6 +410,8 @@ http-cache-semantics@4.3.0
 http-proxy-agent@9.1.0
 http2-wrapper@1.0.3
 https-proxy-agent@9.1.0
+human-signals@5.0.0
+iconv-lite@0.7.3
 ignore@7.0.8
 immediate@3.0.6
 inflight@1.0.6
@@ -387,6 +423,7 @@ is-decimal@2.0.1
 is-fullwidth-code-point@3.0.0
 is-hexadecimal@2.0.1
 is-plain-obj@4.1.0
+is-stream@3.0.0
 isarray@1.0.0
 isbinaryfile@5.0.7
 isexe@2.0.0
@@ -436,6 +473,7 @@ mdast-util-phrasing@4.1.0
 mdast-util-to-hast@13.2.1
 mdast-util-to-markdown@2.2.3
 mdast-util-to-string@4.0.0
+merge-stream@2.0.0
 micromark-core-commonmark@2.0.4
 micromark-extension-gfm-autolink-literal@2.1.0
 micromark-extension-gfm-footnote@2.1.0
@@ -468,6 +506,7 @@ micromark@4.0.3
 mime-db@1.52.0
 mime-types@2.1.35
 mime@2.6.0
+mimic-fn@4.0.0
 mimic-response@1.0.1
 minimatch@10.2.6
 minimist@1.2.8
@@ -479,6 +518,7 @@ nanoid@3.3.20
 node-abi@4.40.0
 node-api-version@0.2.1
 node-domexception@1.0.0
+node-edge-tts@1.2.12
 node-fetch@3.3.2
 node-gyp@12.4.0
 node-int64@0.4.0
@@ -495,9 +535,12 @@ node-screenshots-win32-x64-msvc@0.2.8
 node-screenshots@0.2.8
 nopt@9.0.0
 normalize-url@6.1.0
+npm-run-path@5.3.0
 object-keys@1.1.1
 once@1.4.0
+onetime@6.0.0
 openai@7.19.0
+oxlint@1.93.0
 p-cancelable@2.1.1
 p-limit@3.1.0
 p-retry@4.6.2
@@ -506,6 +549,7 @@ parse-entities@4.0.2
 partial-json@0.1.7
 path-is-absolute@1.0.1
 path-key@3.1.1
+pdfjs-dist@6.5.438
 pe-library@0.4.1
 picocolors@1.1.1
 picomatch@4.0.7
@@ -548,6 +592,7 @@ rimraf@2.6.3
 roarr@2.15.4
 rollup@4.67.2
 safe-buffer@5.2.1
+safer-buffer@2.1.2
 sanitize-filename@1.6.4
 sax@1.6.1
 scheduler@0.23.2
@@ -570,6 +615,7 @@ string_decoder@1.1.1
 string-width@4.2.3
 stringify-entities@4.0.4
 strip-ansi@6.0.1
+strip-final-newline@3.0.0
 style-to-object@2.0.2
 sumchecker@3.0.1
 supports-color@7.2.0

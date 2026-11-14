@@ -78,6 +78,7 @@ test("model.save / model.list：本机端点必须确认；确认后带 riskLeve
       model: "free-a",
       apiKey: "k",
       riskAccepted: true,
+      plaintextOk: true, // 内核测试环境 safeStorage 恒 false（审计 #9）
     });
     assert.equal(saved.ok, true);
     const list = kernel.handle("model.list", {});
@@ -101,6 +102,7 @@ test("model.health：/models 可用时返回 via=models，不花 token", async (
       model: "free-a",
       apiKey: "k",
       riskAccepted: true,
+      plaintextOk: true, // 内核测试环境 safeStorage 恒 false（审计 #9）
     });
     const r = await kernel.modelHealth({ id: saved.id });
     assert.equal(r.ok, true);

@@ -39,7 +39,24 @@ test("Kernel：config.vision.* RPC 闭环；首次必须给 Key", async () => {
     assert.equal(bad.ok, false, "首次必须给 Key（如实拒绝）");
     assert.ok(bad.error.includes("API Key"));
 
-    const ok = kernel.handle("config.vision.save", { provider: "p", baseUrl: "https://b/v1", model: "vision-1", apiKey: "k" });
+    // 审计 #9（2026-11-13）：测试环境没有 safeStorage（内核注入 isEncryptionAvailable=()=>false），
+    // 带 Key 但没勾「明文存储」也必须拒绝——不许静默把明文写进磁盘。
+    const noPlaintext = kernel.handle("config.vision.save", {
+      provider: "p",
+      baseUrl: "https://b/v1",
+      model: "vision-1",
+      apiKey: "k",
+    });
+    assert.equal(noPlaintext.ok, false, "safeStorage 不可用且未确认明文 → 拒绝");
+    assert.ok(noPlaintext.error.includes("明文"), `应说明明文风险：${noPlaintext.error}`);
+
+    const ok = kernel.handle("config.vision.save", {
+      provider: "p",
+      baseUrl: "https://b/v1",
+      model: "vision-1",
+      apiKey: "k",
+      plaintextOk: true,
+    });
     assert.equal(ok.ok, true);
     const got = kernel.handle("config.vision.get", {});
     assert.equal(got.configured, true);
