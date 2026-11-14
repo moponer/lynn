@@ -2,6 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
+import * as http from "node:http";
 import * as os from "node:os";
 import * as path from "node:path";
 import { sensitiveUrl } from "../dist/main/browser.js";
@@ -77,15 +78,24 @@ test("M2-08：抓取表格 → csv 落盘 → 入知识库可检索（工具组�
   assert.ok(msg.includes("未装配"));
 });
 
-test("真 Edge 冒烟（本机有 Edge 才跑）：导航+快照+关闭", { timeout: 60_000 }, async () => {
+test("真 Edge 冒烟（本地夹具页，不依赖外网）：导航+快照+关闭", { timeout: 60_000 }, async () => {
+  // 2026-11-14 实测：原先导航 https://example.com 时，外网不通会变成
+  // "Navigation ... interrupted by another navigation to chrome-error://chromewebdata/"，
+  // 表现为时好时坏的假红（之前误判成"并行抢 CPU"，重试一次只是掩盖）。
+  // 改成本机临时 HTTP 夹具：零外网依赖、毫秒级返回，仍然真起 Edge + 真走 CDP。
+  const server = http.createServer((_req, res) => {
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    res.end(
+      "<!doctype html><html><head><title>风铃本地夹具</title></head><body>" +
+        "<h1>本地走查页</h1><table><tr><th>月份</th><th>GMV</th></tr><tr><td>9月</td><td>100</td></tr></table>" +
+        "</body></html>",
+    );
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const base = `http://127.0.0.1:${server.address().port}`;
   const ctl = new BrowserController({ headed: false }); // CI/测试用无头
   try {
-    let nav = JSON.parse(await ctl.navigate("https://example.com"));
-    // 全量并行跑批时，Edge 冷启动会被其它测试抢 CPU，偶尔拖过 CDP 的内部超时（实测 14-20s 才失败）。
-    // 这不是回归：单跑稳定 11s。这里对"非 Edge 缺失"的失败重试一次，避免 CI 假红。
-    if (!nav.ok && !/Edge/.test(nav.error ?? "")) {
-      nav = JSON.parse(await ctl.navigate("https://example.com"));
-    }
+    const nav = JSON.parse(await ctl.navigate(`${base}/`));
     if (!nav.ok && /Edge/.test(nav.error ?? "")) {
       console.log(`  skip：${nav.error}`);
       return;
@@ -95,8 +105,10 @@ test("真 Edge 冒烟（本机有 Edge 才跑）：导航+快照+关闭", { time
     const snap = JSON.parse(await ctl.snapshot());
     assert.equal(snap.ok, true);
     assert.ok(snap.snapshot.length > 0, "有可访问性结构");
-    assert.ok(snap.pageUrl.includes("example.com"));
+    assert.ok(snap.pageUrl.includes("127.0.0.1"));
+    assert.match(snap.snapshot, /本地走查页|GMV/, "快照里真有本地页面内容");
   } finally {
     await ctl.close();
+    await new Promise((r) => server.close(r));
   }
 });
