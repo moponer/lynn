@@ -34,6 +34,9 @@ files:
   - "!**/*.md"
 
 win:
+  # 真正的 Windows 图标：build/icon.ico 内含 16/24/32/48/64/128/256 七种尺寸（带 alpha）。
+  # 源图 assets/icon-1024.png，重做用 python scripts/make-icon.py；不引入 SVG。
+  icon: build/icon.ico
   target:
     - target: nsis
       arch:

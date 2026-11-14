@@ -155,6 +155,20 @@ const captureHost = createCaptureHost({
   },
 });
 
+/**
+ * 应用窗口图标（2026-11-14）：assets/icon.png 是真正的 512×512 位图（不是 SVG）。
+ * 打包时 assets/** 会一起带过去；build/icon.ico 只在安装器/快捷方式上用（见 electron-builder.yml）。
+ * 找不到就返回 undefined —— 交给 Electron 默认图标，不假装设置成功。
+ */
+function appIcon(): string | undefined {
+  const candidates = [
+    path.join(app.getAppPath(), "assets", "icon.png"),
+    path.join(__dirname, "..", "..", "assets", "icon.png"),
+    path.join(app.getAppPath(), "build", "icon.ico"),
+  ];
+  return candidates.find((p) => fs.existsSync(p));
+}
+
 /** 托盘图标（M1-18）：assets/tray.png；路径解析失败时内嵌兜底，绝不给空图标 */
 function trayIcon() {
   for (const p of trayIconPaths(app.getAppPath(), __dirname)) {
@@ -390,6 +404,7 @@ function createWindow(): void {
     // 首帧就是上次的主题底色（默认夜航暗色），不闪白也不闪错色
     backgroundColor: lastBackground(),
     show: false,
+    icon: appIcon(),
     title: "风铃 Lynn · 指挥台",
     // 自绘标题栏：不要系统标题栏，最小化/最大化/关闭由渲染层顶栏实现（拖拽走 -webkit-app-region）
     frame: false,
