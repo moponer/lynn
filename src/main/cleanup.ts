@@ -164,6 +164,18 @@ export function runCleanup(
     }
   }
 
+  // 4) 记账历史（usage.1.jsonl）：主文件 usage.jsonl 一直在写，不能删；轮转出来的那份按 TTL 清
+  if (fs.existsSync(logs)) {
+    const p = path.join(logs, "usage.1.jsonl");
+    if (fs.existsSync(p) && olderThan(p, cut(retention.logDays))) {
+      const freed = removePath(p);
+      if (freed > 0) {
+        freedBytes += freed;
+        removed.push(p);
+      }
+    }
+  }
+
   return { freedBytes, removed };
 }
 

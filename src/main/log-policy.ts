@@ -113,3 +113,50 @@ export class LogGate {
     return out;
   }
 }
+
+// ---------- 渲染层日志（logs/renderer.log）限流（2026-11-13 审计 #8） ----------
+// renderer.log 此前是裸 appendFileSync：无轮转、无截断、无限流，渲染进程高频
+// 上报能把磁盘打满并淹没真实错误。这里与 agent.log 的 LogGate 同思路，
+// 单独做一个每分钟窗口的闸（渲染层日志不分 kind 类别，一条闸就够）。
+
+export const RENDERER_LOG_LIMITS = {
+  /** 每分钟最多写入条数；超限丢弃并计数 */
+  maxPerMinute: 120,
+  /** 单条日志行的最大字符数 */
+  entryMaxChars: 16_000,
+  /** 轮转阈值：超过挪到 renderer.old.log（只留一份，最坏两份共 10MB） */
+  rotateBytes: 5 * 1024 * 1024,
+} as const;
+
+export interface RendererLogGateState {
+  windowStart: number;
+  count: number;
+  dropped: number;
+}
+
+export function newRendererLogGate(): RendererLogGateState {
+  return { windowStart: 0, count: 0, dropped: 0 };
+}
+
+/**
+ * 每分钟限流闸：返回是否放行 + 新状态；窗口翻转时若上一窗口有丢弃，
+ * 返回 droppedSummary 让调用方落一条汇总行（丢失多少条要有交代）。
+ */
+export function rendererLogGate(
+  state: RendererLogGateState,
+  now: number,
+  maxPerMinute = RENDERER_LOG_LIMITS.maxPerMinute,
+): { state: RendererLogGateState; write: boolean; droppedSummary?: number } {
+  if (!state.windowStart || now - state.windowStart >= 60_000) {
+    const droppedSummary = state.dropped > 0 ? state.dropped : undefined;
+    return {
+      state: { windowStart: now, count: 1, dropped: 0 },
+      write: true,
+      ...(droppedSummary !== undefined ? { droppedSummary } : {}),
+    };
+  }
+  if (state.count >= maxPerMinute) {
+    return { state: { ...state, dropped: state.dropped + 1 }, write: false };
+  }
+  return { state: { ...state, count: state.count + 1 }, write: true };
+}

@@ -5,7 +5,12 @@
 //   3) 每次写都留 diff（供 M1-12 的 /undo 检查点与界面展示复用，不另写一套）。
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { exec } from "node:child_process";
+import { execa } from "execa";
+import { applyPatch } from "diff";
+import { buildCommandEnv, posixToolDirsCached } from "./cmd-env";
+import { formatCommandResult } from "./cmd-output";
+import { extractPdfText } from "./pdf-text";
+import type { CommandFamily } from "../shared/contract";
 import { normalizeTargetPath } from "./member-path";
 import { buildDocx, type DocxBlock } from "./docx";
 
@@ -32,6 +37,12 @@ export interface ToolkitOptions {
   }) => void;
   /** 写之前通知壳（M1-12 检查点）：existed=false 表示这轮新建 */
   onBeforeWrite?: (rel: string, full: string, existed: boolean) => void;
+  /**
+   * 出站/联网命令闸（2026-11-13 审计 #2）：返回 false = OUTBOUND 命中直接拒。
+   * 内核按权限档接：计划/询问档不自动放行出站；自动/全权档保持"只审计不拦"。
+   * 不传 = 保持旧行为（只审计），测试与直用方不受影响。
+   */
+  outboundAllowed?: () => boolean;
   /** office 能力注入（M2-06）：csv 永远可用；xlsx 由壳按引擎健康决定（缺引擎如实报） */
   office?: {
     read: (file: string) => { table?: { headers: string[]; rows: string[][] }; error?: string };
@@ -81,24 +92,35 @@ export interface ToolkitOptions {
 }
 
 /** 删除类命令：一律要用户点头（含"移动/改名"——原位置等于删掉） */
-const DESTRUCTIVE: { re: RegExp; why: string }[] = [
-  { re: /\bdel\b/i, why: "del 删除文件" },
-  { re: /\berase\b/i, why: "erase 删除文件" },
-  { re: /\brmdir\b/i, why: "rmdir 删除目录" },
-  { re: /(^|[\s;&|(])rd\b/i, why: "rd 删除目录" },
-  { re: /(^|[\s;&|(])rm\b/i, why: "rm 删除文件/目录" },
-  { re: /remove-item/i, why: "Remove-Item 删除" },
-  { re: /(^|[\s;&|(])mv\b/i, why: "mv 移动（原位置即删除）" },
-  { re: /\bmove\b/i, why: "move 移动（原位置即删除）" },
-  { re: /\bren(ame)?\b/i, why: "改名/移动" },
-  { re: /git\s+clean/i, why: "git clean 删未跟踪文件" },
-  { re: /git\s+reset\s+--hard/i, why: "git reset --hard 丢弃改动" },
+const DESTRUCTIVE: { re: RegExp; why: string; fam: CommandFamily }[] = [
+  { re: /\bdel\b/i, why: "del 删除文件", fam: "delete" },
+  { re: /\berase\b/i, why: "erase 删除文件", fam: "delete" },
+  { re: /\brmdir\b/i, why: "rmdir 删除目录", fam: "delete" },
+  { re: /(^|[\s;&|(])rd\b/i, why: "rd 删除目录", fam: "delete" },
+  { re: /(^|[\s;&|(])rm\b/i, why: "rm 删除文件/目录", fam: "delete" },
+  { re: /remove-item/i, why: "Remove-Item 删除", fam: "delete" },
+  { re: /(^|[\s;&|(])mv\b/i, why: "mv 移动（原位置即删除）", fam: "move" },
+  { re: /\bmove\b/i, why: "move 移动（原位置即删除）", fam: "move" },
+  { re: /\bren(ame)?\b/i, why: "改名/移动", fam: "move" },
+  { re: /git\s+clean/i, why: "git clean 删未跟踪文件", fam: "git-clean" },
+  { re: /git\s+reset\s+--hard/i, why: "git reset --hard 丢弃改动", fam: "git-reset" },
 ];
 
 /** 纯函数：命令是否删除类（返回原因；null = 不是） */
 export function destructiveReason(command: string): string | null {
   for (const d of DESTRUCTIVE) {
     if (d.re.test(command)) return d.why;
+  }
+  return null;
+}
+
+/**
+ * 删除类命令的"族"（2026-11-14）：用户可以说"这一类以后都允许"，
+ * 粒度按族而不是按单条命令——否则允许一次 del 就等于允许所有删除，太宽。
+ */
+export function destructiveFamily(command: string): CommandFamily | null {
+  for (const d of DESTRUCTIVE) {
+    if (d.re.test(command)) return d.fam;
   }
   return null;
 }
@@ -128,7 +150,36 @@ export function destructiveTargets(command: string): string[] | null {
   return out;
 }
 
+/** 通配 → 正则（只支持 * / ** / ?；逐字符拼，链式 replace 会把插入的 `.*` 再吃掉） */
+export function globToRegExp(pattern: string): RegExp {
+  let source = "^";
+  for (let i = 0; i < pattern.length; i += 1) {
+    const ch = pattern[i];
+    if (ch === "*") {
+      if (pattern[i + 1] === "*") {
+        i += 1;
+        if (pattern[i + 1] === "/") {
+          i += 1;
+          source += "(?:.*/)?";
+        } else {
+          source += ".*";
+        }
+      } else {
+        source += "[^/]*";
+      }
+    } else if (ch === "?") {
+      source += "[^/]";
+    } else {
+      source += ch.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+    }
+  }
+  return new RegExp(source + "$", "i");
+}
+
 const READ_CAP = 200_000;
+/** 分页读的默认行数 / 单次上限（2026-11-14） */
+const READ_LINES = 400;
+const MAX_READ_LINES = 2_000;
 const DIFF_CAP = 1_200;
 
 /** 解析路径：必须落在 root 内 */
@@ -284,6 +335,7 @@ export class Toolkit {
   private readonly outputCap: number;
   private readonly onAudit?: ToolkitOptions["onAudit"];
   private readonly onBeforeWrite?: ToolkitOptions["onBeforeWrite"];
+  private readonly outboundAllowed?: () => boolean;
   private readonly office?: ToolkitOptions["office"];
   private readonly browser?: ToolkitOptions["browser"];
   private readonly kb?: ToolkitOptions["kb"];
@@ -301,6 +353,7 @@ export class Toolkit {
     this.outputCap = opts.outputCap ?? 8_000;
     this.onAudit = opts.onAudit;
     this.onBeforeWrite = opts.onBeforeWrite;
+    this.outboundAllowed = opts.outboundAllowed;
     this.office = opts.office;
     this.browser = opts.browser;
     this.kb = opts.kb;
@@ -442,7 +495,7 @@ export class Toolkit {
 
   // ---------- 工具实现 ----------
 
-  readFile(args: Record<string, unknown>): string {
+  async readFile(args: Record<string, unknown>): Promise<string> {
     const rel = String(args.path ?? "");
     // 读允许只读授权目录；写永远只走 resolveWithin
     const full = resolveReadable(this.root, this.getReadRoots(), rel).full;
@@ -450,10 +503,50 @@ export class Toolkit {
     const stat = fs.statSync(full);
     if (stat.isDirectory()) throw new Error(`${rel} 是目录，请用 list_dir`);
     const buf = fs.readFileSync(full);
+    // PDF（2026-11-14）：交给 pdfjs 提文本。扫描件提不出来就如实说——别把二进制当文本吐给模型
+    if (buf.length > 5 && buf.subarray(0, 5).toString("latin1") === "%PDF-") {
+      return this.readPdf(rel, buf);
+    }
     if (buf.includes(0)) throw new Error(`${rel} 看起来是二进制文件，不做文本读取。`);
-    let body = buf.toString("utf-8");
-    if (body.length > READ_CAP) body = body.slice(0, READ_CAP) + `\n…（已截断，共 ${stat.size} 字节）`;
-    return body;
+    const text = buf.toString("utf-8");
+    // 分页（2026-11-14）：一次吐 20 万字会把模型上下文直接撑爆，而成员真正需要的
+    // 往往只是其中一段（对表头、查一行、看日志尾部）。默认 400 行，显式传 offset/limit 精读。
+    const lines = text.split("\n");
+    const explicit = args.offset !== undefined || args.limit !== undefined;
+    // 小文件且没点名分页：保持原样返回（不动既有调用方的输出）
+    if (!explicit && lines.length <= READ_LINES && text.length <= READ_CAP) return text;
+
+    const start = Math.max(1, Math.trunc(Number(args.offset ?? 1)) || 1);
+    const wantLimit = Math.trunc(Number(args.limit ?? READ_LINES)) || READ_LINES;
+    const limit = Math.max(1, Math.min(MAX_READ_LINES, wantLimit));
+    if (start > lines.length) {
+      return `${rel} 只有 ${lines.length} 行，offset=${start} 超出范围（要从 1 开始）。`;
+    }
+    const slice = lines.slice(start - 1, start - 1 + limit);
+    const last = start + slice.length - 1;
+    const head = `[${rel} · 第 ${start}-${last} 行 / 共 ${lines.length} 行]`;
+    const tail = last < lines.length ? `\n…（未读完，继续读用 offset=${last + 1}）` : "";
+    let out = `${head}\n${slice.join("\n")}${tail}`;
+    // 单行本身几十万字（压缩过的 JSON、一行 CSV）时按字符兜底：行数分页拦不住它
+    if (out.length > READ_CAP) {
+      out = `${out.slice(0, READ_CAP)}\n…（已截断：这一行本身就超过 ${READ_CAP} 字符，用 offset 换一段或让上游拆行）`;
+    }
+    return out;
+  }
+
+  /** PDF 读取（2026-11-14）：只提文字，不渲染、不 OCR */
+  private async readPdf(rel: string, buf: Buffer): Promise<string> {
+    try {
+      const { text, pages, readPages, emptyPages } = await extractPdfText(buf);
+      if (!text.trim()) {
+        return `${rel} 是 PDF（${pages} 页），但一个字都提取不到——多半是扫描件/图片版。让用户提供文字版或原始文档；不要凭文件名猜内容。`;
+      }
+      const head = `[PDF · ${pages} 页${readPages < pages ? `（只读了前 ${readPages} 页）` : ""}${emptyPages ? `，其中 ${emptyPages} 页没有文字` : ""}]`;
+      const body = text.length > READ_CAP ? `${text.slice(0, READ_CAP)}\n…（已截断，共 ${text.length} 字符）` : text;
+      return `${head}\n${body}`;
+    } catch (err) {
+      return `${rel} 是 PDF，但解析失败（${err instanceof Error ? err.message : String(err)}）。可以让用户导出成文本或 Word 再读。`;
+    }
   }
 
   writeFile(args: Record<string, unknown>): Promise<string> {
@@ -474,6 +567,11 @@ export class Toolkit {
 
   async editFile(args: Record<string, unknown>): Promise<string> {
     const rel = String(args.path ?? "");
+    // patch 模式（2026-11-14）：unified diff 交给 jsdiff 应用。
+    // 比 old_string 稳的地方是补丁带上下文行——行号漂移、同名片段重复时不会改错地方；
+    // 上下文对不上就整条拒（不猜、不模糊匹配到别的段落）。
+    const patch = typeof args.patch === "string" ? args.patch.trim() : "";
+    if (patch) return this.applyPatchEdit(rel, patch);
     const oldStr = String(args.old_string ?? "");
     const newStr = String(args.new_string ?? "");
     const all = Boolean(args.replace_all);
@@ -492,41 +590,53 @@ export class Toolkit {
     });
   }
 
+  /** unified diff 落盘：applyPatch 返回 false = 上下文不匹配（jsdiff 会做有限 fuzz，默认 2 行） */
+  private applyPatchEdit(rel: string, patch: string): Promise<string> {
+    const full = resolveWithin(this.root, rel);
+    this.assertWritable(full);
+    return this.serialize(full, () => {
+      if (!fs.existsSync(full)) throw new Error(`文件不存在：${rel}（新建请用 write_file）`);
+      const before = fs.readFileSync(full, "utf-8");
+      const after = applyPatch(before, patch, { fuzzFactor: 2 });
+      if (after === false) {
+        throw new Error(
+          `补丁的上下文对不上 ${rel}（文件可能已经被改过，或补丁里没有正确的 @@ 头与上下文行）。先 read_file 看清现状再重发。`,
+        );
+      }
+      if (after === before) return `补丁没有产生任何改动：${rel}（检查 @@ 行号与内容是否一致）`;
+      this.onBeforeWrite?.(rel, full, true);
+      fs.writeFileSync(full, after, "utf-8");
+      const c = this.record(rel, before, after);
+      return `已打补丁 ${rel}（+${c.added}/-${c.removed}）\n${c.diff}`;
+    });
+  }
+
   listDir(args: Record<string, unknown>): string {
     const rel = args.path === undefined || args.path === "" ? "." : String(args.path);
     const full = resolveReadable(this.root, this.getReadRoots(), rel).full;
     if (!fs.existsSync(full)) throw new Error(`目录不存在：${rel}`);
     const entries = fs.readdirSync(full, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name));
     if (!entries.length) return "（空目录）";
-    return entries.map((e) => `${e.isDirectory() ? "[目录]" : "      "} ${e.name}`).join("\n");
+    // 带上大小与修改时间（2026-11-14）：成员靠这个判断"哪个是刚改的 / 哪个是空壳"，
+    // 不用再为每个文件单独 stat 一遍（read_file 读全文才知道大小是很贵的）
+    return entries
+      .map((e) => {
+        if (e.isDirectory()) return `[目录] ${e.name}`;
+        try {
+          const st = fs.statSync(path.join(full, e.name));
+          const size = st.size >= 1024 ? `${(st.size / 1024).toFixed(1)}KB` : `${st.size}B`;
+          return `  ${size.padStart(8)}  ${st.mtime.toISOString().slice(0, 16).replace("T", " ")}  ${e.name}`;
+        } catch {
+          return `                   ${e.name}`;
+        }
+      })
+      .join("\n");
   }
 
   glob(args: Record<string, unknown>): string {
     const pattern = String(args.pattern ?? "");
     if (!pattern) throw new Error("pattern 不能为空");
-    // 只支持 * / ** / ? 三种通配。逐字符拼正则：链式 replace 会把插入的 `.*` 再吃掉
-    let source = "^";
-    for (let i = 0; i < pattern.length; i += 1) {
-      const ch = pattern[i];
-      if (ch === "*") {
-        if (pattern[i + 1] === "*") {
-          i += 1;
-          if (pattern[i + 1] === "/") {
-            i += 1;
-            source += "(?:.*/)?";
-          } else {
-            source += ".*";
-          }
-        } else {
-          source += "[^/]*";
-        }
-      } else if (ch === "?") {
-        source += "[^/]";
-      } else {
-        source += ch.replace(/[.+^${}()|[\]\\]/g, "\\$&");
-      }
-    }
-    const re = new RegExp(source + "$", "i");
+    const re = globToRegExp(pattern);
     const out: string[] = [];
     const walk = (dir: string, depth: number) => {
       if (depth > 8 || out.length >= 400) return;
@@ -545,24 +655,31 @@ export class Toolkit {
   grep(args: Record<string, unknown>): string {
     const pattern = String(args.pattern ?? "");
     if (!pattern) throw new Error("pattern 不能为空");
+    const caseSensitive = args.caseSensitive === true;
+    const flags = caseSensitive ? "" : "i";
     let re: RegExp;
     try {
-      re = new RegExp(pattern, "i");
+      re = new RegExp(pattern, flags);
     } catch {
-      re = new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+      re = new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), flags);
     }
+    // include（2026-11-14）：只搜匹配的文件，沿用 glob 的同一套通配语义（`**/*.ts`）
+    const include = typeof args.include === "string" ? args.include.trim() : "";
+    const incRe = include ? globToRegExp(include) : null;
     const scope = args.path === undefined || args.path === "" ? "." : String(args.path);
     const base = resolveWithin(this.root, scope);
+    /** 命中上限：到顶就在结果末尾如实说"可能还有"，不能让成员以为只有这些 */
+    const LIMIT = 120;
     const hits: string[] = [];
     const scan = (file: string) => {
-      if (hits.length >= 120) return;
+      if (hits.length >= LIMIT) return;
       try {
         const buf = fs.readFileSync(file);
         if (buf.includes(0)) return;
         const text = buf.toString("utf-8");
         if (text.length > 2_000_000) return;
         text.split(/\r?\n/).forEach((line, i) => {
-          if (hits.length < 120 && re.test(line)) hits.push(`${path.relative(this.root, file).replace(/\\/g, "/")}:${i + 1}: ${line.slice(0, 200)}`);
+          if (hits.length < LIMIT && re.test(line)) hits.push(`${path.relative(this.root, file).replace(/\\/g, "/")}:${i + 1}: ${line.slice(0, 200)}`);
         });
       } catch {
         /* 跳过读不了的文件 */
@@ -570,19 +687,21 @@ export class Toolkit {
     };
     if (fs.existsSync(base) && fs.statSync(base).isDirectory()) {
       const walk = (dir: string, depth: number) => {
-        if (depth > 8 || hits.length >= 120) return;
+        if (depth > 8 || hits.length >= LIMIT) return;
         for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
           if (e.name === "node_modules" || e.name === ".git") continue;
           const full = path.join(dir, e.name);
           if (e.isDirectory()) walk(full, depth + 1);
-          else scan(full);
+          else if (!incRe || incRe.test(path.relative(this.root, full).replace(/\\/g, "/"))) scan(full);
         }
       };
       walk(base, 0);
     } else {
       scan(base);
     }
-    return hits.length ? hits.join("\n") : "没有匹配行。";
+    if (!hits.length) return "没有匹配行。";
+    const more = hits.length >= LIMIT ? `\n…（已到 ${LIMIT} 行上限，可能还有更多；加 include 或缩小 path 再搜）` : "";
+    return `${hits.join("\n")}${more}`;
   }
 
   async runCommand(args: Record<string, unknown>): Promise<string> {
@@ -634,44 +753,63 @@ export class Toolkit {
         }
       }
     }
-    if (OUTBOUND.test(command)) this.onAudit?.({ kind: "cmd_net", command, cwd });
+    // 4) 出站闸（审计 #2）：OUTBOUND 命中先问权限档——计划/询问档不自动放行
+    //    （成员工作区里的数据可以被 curl 带出本机，这是真实的外泄通道）；
+    //    自动/全权档保持"只审计不拦"。拒了给指路：ESCALATE 让用户决定。
+    const outbound = OUTBOUND.test(command);
+    if (outbound && this.outboundAllowed && !this.outboundAllowed()) {
+      this.onAudit?.({ kind: "cmd_blocked", command, why: "出站/联网命令在当前权限档不自动放行", cwd });
+      return `已拒绝执行：出站/联网命令（curl/wget/ssh/上传类）在当前权限档不自动放行。` +
+        `改用无需联网的做法；确实需要联网时在回报里写 ESCALATE 说明原因，由用户切「自动」档或单独放行。`;
+    }
+    if (outbound) this.onAudit?.({ kind: "cmd_net", command, cwd });
     this.onAudit?.({ kind: "cmd_run", command, cwd });
     const signal = this.signalSource?.();
     if (signal?.aborted) return "已被停止：用户点了「停」，这条命令不再执行。";
-    const cap = this.outputCap;
-    return new Promise((resolve) => {
-      exec(
-        command,
-        {
-          cwd,
-          timeout: this.commandTimeoutMs,
-          maxBuffer: 4 * 1024 * 1024,
-          windowsHide: true,
-          env: { ...process.env },
-          signal,
-        },
-        (err, stdout, stderr) => {
-          const cut = (s: string) => ((s ?? "").length > cap ? (s ?? "").slice(0, cap) + `…（截断，共 ${(s ?? "").length} 字符）` : (s ?? ""));
-          if (signal?.aborted) {
-            resolve(`命令已被用户停止（点「停」）：${command}`);
-            return;
-          }
-          if (err && !stdout && !stderr) {
-            if ((err as Error & { killed?: boolean }).killed) {
-              resolve(`命令超时（${this.commandTimeoutMs / 1000}s）被终止：${command}`);
-            } else {
-              resolve(`命令执行失败：${err.message}`);
-            }
-            return;
-          }
-          resolve(
-            [stdout ? `stdout:\n${cut(stdout)}` : null, stderr ? `stderr:\n${cut(stderr)}` : null, err ? `exit code: ${err.code ?? "非零"}` : "exit code: 0"]
-              .filter(Boolean)
-              .join("\n"),
-          );
-        },
-      );
-    });
+    try {
+      // execa（2026-11-14）：取代 child_process.exec。三处实际差别——
+      // ① encoding:null 拿原始 Buffer，才能按 GBK/UTF-8 正确解码（中文 Windows 老程序）；
+      // ② timeout + killSignal=SIGKILL：超时直接强杀，不留半个进程占着工作区；
+      // ③ 「停」真的杀进程：execa 8 没有 cancelSignal，自己接 AbortSignal。
+      const sub = execa(command, {
+        shell: true,
+        cwd,
+        timeout: this.commandTimeoutMs,
+        // execa 8 没有 forceKillAfterDelay；留优雅窗口的结果往往是子进程把工作区占着，
+        // 下一轮命令跟着失败。Windows 上 SIGKILL 映射成 TerminateProcess。
+        killSignal: "SIGKILL",
+        reject: false,
+        encoding: null,
+        windowsHide: true,
+        stripFinalNewline: false,
+        // 不直接继承 process.env：剔密钥 + 关交互提示（见 cmd-env.ts 头注释）。
+        // toolDirs：Windows 上前置 Git 的 usr/bin，让 `grep -rn` / `sed` 这类命令真的能跑。
+        env: buildCommandEnv(process.env, { toolDirs: posixToolDirsCached() }),
+      });
+      const onAbort = () => {
+        try {
+          sub.kill("SIGKILL");
+        } catch {
+          /* 已经退出 */
+        }
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
+      try {
+        const done = await sub;
+        if (signal?.aborted) return `命令已被用户停止（点「停」）：${command}`;
+        if (done.timedOut) return `命令超时（${this.commandTimeoutMs / 1000}s）被终止：${command}`;
+        return formatCommandResult({
+          stdout: done.stdout as Buffer | undefined,
+          stderr: done.stderr as Buffer | undefined,
+          exitCode: done.exitCode,
+          budget: this.outputCap,
+        });
+      } finally {
+        signal?.removeEventListener("abort", onAbort);
+      }
+    } catch (err) {
+      return `命令执行失败：${err instanceof Error ? err.message : String(err)}`;
+    }
   }
 
   /** 统一入口：名字与 schema 一一对应 */
@@ -925,8 +1063,19 @@ export const TOOLKIT_SCHEMAS = [
     type: "function" as const,
     function: {
       name: "read_file",
-      description: "读取工作区内一个文本文件（超过 200KB 截断；二进制拒读）。",
-      parameters: { type: "object", properties: { path: { type: "string", description: "工作区内相对路径" } }, required: ["path"] },
+      description:
+        "读取工作区内的文件。文本按行分页：默认最多 400 行，头里写清是第几行到第几行、共多少行，没读完会给下一页的 offset；" +
+        "要精确读某一段就传 offset（从 1 开始）与 limit（最多 2000 行）。PDF 会提取文字（扫描件提不出来会如实说，不要凭文件名猜）。" +
+        "其它二进制拒读。",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "工作区内相对路径" },
+          offset: { type: "number", description: "起始行号（1-based，默认 1）" },
+          limit: { type: "number", description: "读多少行（默认 400，上限 2000）" },
+        },
+        required: ["path"],
+      },
     },
   },
   {
@@ -945,16 +1094,23 @@ export const TOOLKIT_SCHEMAS = [
     type: "function" as const,
     function: {
       name: "edit_file",
-      description: "把文件里的一段原文替换成新文本（找不到原文会报错，要求先读后改）。返回 diff 摘要。",
+      description:
+        "改工作区内的文本文件。两种写法二选一：① patch = unified diff（推荐，带上下文行，改多段一次搞定）；" +
+        "② old_string/new_string = 原文精确替换（找不到原文会报错）。都要求先 read_file。返回 diff 摘要。",
       parameters: {
         type: "object",
         properties: {
           path: { type: "string" },
+          patch: {
+            type: "string",
+            description:
+              "unified diff：--- a/路径 / +++ b/路径 / @@ -起,行数 +起,行数 @@ + 上下文行（空格开头）-旧 +新，可多段",
+          },
           old_string: { type: "string", description: "要替换的原文（必须唯一，除非 replace_all）" },
           new_string: { type: "string" },
           replace_all: { type: "boolean", description: "替换所有匹配" },
         },
-        required: ["path", "old_string", "new_string"],
+        required: ["path"],
       },
     },
   },
@@ -978,8 +1134,18 @@ export const TOOLKIT_SCHEMAS = [
     type: "function" as const,
     function: {
       name: "grep",
-      description: "在工作区文本文件里按正则搜行，返回 文件:行号: 内容。",
-      parameters: { type: "object", properties: { pattern: { type: "string" }, path: { type: "string" } }, required: ["pattern"] },
+      description:
+        "在工作区文本文件里按正则搜行，返回 文件:行号: 内容。默认忽略大小写、跳过 node_modules/.git；最多返回 120 行（到上限会在末尾说明）。用 include 限定文件类型比事后过滤省事。",
+      parameters: {
+        type: "object",
+        properties: {
+          pattern: { type: "string", description: "正则（不是通配）；解释不了就当字面量" },
+          path: { type: "string", description: "搜哪个目录/文件（默认工作区根）" },
+          include: { type: "string", description: "只搜匹配的文件，如 **/*.ts、src/**" },
+          caseSensitive: { type: "boolean", description: "区分大小写（默认否）" },
+        },
+        required: ["pattern"],
+      },
     },
   },
   {

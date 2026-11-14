@@ -138,6 +138,10 @@ export interface Member {
   progress: number;
   budgetUsed: number;
   budgetTotal: number;
+  /** 累计命中的缓存输入（K token）；看板用，没跑过就是 0 */
+  cacheUsed?: number;
+  /** 累计缓存命中率（%，prompt 口径）；没数据时缺省 undefined——不造假数 */
+  hitRate?: number;
   rejections: number;
   rejectionLimit: number;
   toolWhitelist: string[];
@@ -159,6 +163,12 @@ export interface Team {
   name: string;
   status: "active" | "paused" | "dissolved";
   members: Member[];
+  /**
+   * 这支队属于哪个群（会话 id）。2026-11-12：右栏要按群分家，
+   * 否则 12 支队平铺成一列，用户看不出哪支队是谁的。
+   * 空 = 游离队（谁都能用）。
+   */
+  threadId?: string;
 }
 
 /** 编制管理（用户手动）：带岗位说明正文，设置页按需拉，不塞进每轮快照 */
@@ -326,6 +336,10 @@ export interface TaskPlan {
   evidencePolicy?: "required" | "optional";
   budgetTokens?: number;
   deadline?: string;
+  /** 派单时所在的项目名（2026-11-12）：契约卡上写「项目 · 名字」 */
+  projectName?: string;
+  /** 成员实际干活的目录（契约卡上让用户看清单子落在哪） */
+  workspaceRoot?: string;
 }
 
 export type ToolCardBadge =
@@ -334,6 +348,8 @@ export type ToolCardBadge =
   | "回报"
   | "审查"
   | "汇报"
+  /** 独立模型的审阅意见（2026-11-14）：只提会返工的问题，不改状态 */
+  | "顾问"
   | "需要你拍板"
   | "工具"
   /** 纵深防御拦下了一条命令 */
@@ -452,8 +468,17 @@ export interface TaskTrackItem {
   reviewer?: "lynn" | "user";
   /** 真实证据索引（可点开验证）；空数组=还没有证据 */
   evidence?: { label: string; ref: string; verified: boolean; at?: string }[];
+  /** 这张单所属的项目名（2026-11-13：交付物"查看所属"要报项目，旧单也查得到） */
+  projectName?: string;
   /** 交付物（用户要带走的东西；验收后永久保留） */
-  deliverables?: { path: string; ref: string; bytes?: number }[];
+  deliverables?: {
+    /** 交付时相对工作区的路径（也可能是成员交上来的绝对路径） */
+    path: string;
+    ref: string;
+    bytes?: number;
+    /** 固化时刻：判断"同一个文件后来被哪张单更新过"用它，比工单时间准（2026-11-13） */
+    at?: string;
+  }[];
   /** 她预填的打回三要素（来自最近一次打回） */
   rejectDraft?: { what: string; expect: string; deadline: string };
   /** 这张单是在哪个会话里派的（跨会话追溯） */
@@ -468,6 +493,9 @@ export interface TaskTrackItem {
   workspaceRoot?: string;
 }
 
+/** 删除类命令的"族"（2026-11-14）：用户可以"这一类以后都允许"，粒度按族不按单条命令 */
+export type CommandFamily = "delete" | "move" | "git-clean" | "git-reset";
+
 export interface Decision {
   id: string;
   from: string;
@@ -479,6 +507,8 @@ export interface Decision {
   at?: string;
   checks?: { ok: boolean; text: string }[];
   plan?: TaskPlan;
+  /** 只对 approval 有意义：这条审批属于哪一族删除（界面据此显示"这类以后都允许"） */
+  family?: CommandFamily;
 }
 
 export interface BoardData {
@@ -509,13 +539,22 @@ export interface SessionSnapshot {
     subdir: string;
     /** 会话主根（空 = 这次不用工作区） */
     primary?: string;
+    /** 项目身份（2026-11-12）：显示名可改，改了跟着项目走 */
+    projectId?: string;
+    projectName?: string;
     /** 会话附加根（只读/可写）；目录名太长，界面显示 label 或末段 */
     extras?: { path: string; mode: "rw" | "ro"; label?: string }[];
   };
   /** 当前项目：项目级扩展只在 trusted 时加载（M1-13） */
-  project: { root: string; trusted: boolean; hasMcp: boolean };
+  project: {
+    root: string;
+    trusted: boolean;
+    hasMcp: boolean;
+    /** 这个目录里"被信任才生效"的东西（2026-11-13）：两项都 false = 无所谓信不信 */
+    gated?: { mcp: boolean; skills: boolean };
+  };
   /** 当前会话线程与线程列表（M1-14） */
-  thread: { id: string; title: string; projectRoot?: string };
+  thread: { id: string; title: string; projectRoot?: string; projectId?: string; projectName?: string };
   /** C3：会话行显示"这个会话派出过多少单"（后端按 task.threadId 汇总） */
   threads: {
     id: string;
@@ -533,6 +572,9 @@ export interface SessionSnapshot {
     unread?: number;
     /** 群公告（全局段） */
     announcement?: string;
+    /** 这个群在做哪个项目（2026-11-12） */
+    projectId?: string;
+    projectName?: string;
   }[];
   /** 真在跑的成员单（不只 status=in_progress：卡住但没在跑的不能算） */
   running?: string[];
@@ -555,6 +597,15 @@ export interface SessionSnapshot {
     lang: "zh" | "en";
     /** D3：会话级软预算（0 = 未配置，界面不假装有预算） */
     softBudgetTokens?: number;
+    /** 语音播报（M4-语音）：旧快照可能没有，渲染层一律按缺省兜底 */
+    voiceEnabled?: boolean;
+    voiceId?: string;
+    voiceRate?: string;
+    voiceVolume?: string;
+    voiceScope?: "brief" | "detail";
+    voiceMaxChars?: number;
+    voiceWhenHidden?: boolean;
+    voiceProxy?: string;
   };
 }
 
@@ -593,6 +644,15 @@ export type KernelEvent =
   | { type: "thread"; threadId: string }
   | { type: "done"; tokens: number }
   | { type: "error"; code?: string; message: string; action?: FeedCard["action"] };
+
+/**
+ * 语音播报走独立 IPC 通道（lynn:voice），不塞进 KernelEvent：
+ * 内核事件有 3 个消费者，加变体会让无关界面无谓重拉快照。
+ * audio 是 MP3 的 data URL，短句合成后直接送渲染层，不落临时文件。
+ */
+export type VoicePlayEvent =
+  | { type: "play"; id: string; audio: string; text: string; priority: "high" | "normal" | "low"; voice: string }
+  | { type: "stop" };
 
 // ---------- RPC 方法表 ----------
 
@@ -765,7 +825,7 @@ export interface RpcContracts {
     result: { ok: boolean };
   };
   "providers.discover": {
-    params: { baseUrl: string; apiKey?: string };
+    params: { baseUrl: string; apiKey?: string; /** 本机/局域网/非 HTTPS 端点必须显式确认（与 model.discover 同一道闸） */ riskAccepted?: boolean };
     result: { models: string[]; error?: string };
   };
   /** 本地日历（M2-01）：自然语言录入；解析不了如实报，不猜 */
@@ -829,7 +889,7 @@ export interface RpcContracts {
     result: { configured: boolean; provider?: string; baseUrl?: string; model?: string; updatedAt?: string };
   };
   "config.vision.save": {
-    params: { provider: string; baseUrl: string; model: string; apiKey?: string };
+    params: { provider: string; baseUrl: string; model: string; apiKey?: string; /** safeStorage 不可用时明文落盘需显式确认 */ plaintextOk?: boolean };
     result: { ok: boolean; error?: string };
   };
   "config.vision.clear": {
@@ -849,7 +909,11 @@ export interface RpcContracts {
   /** 内核构建信息（版本握手：前端据此判断"后台是不是旧版本"） */
   "app.info": {
     params: void;
-    result: { buildAt: string };
+    result: {
+      buildAt: string;
+      /** 构建号（审计 #19）：git 提交计数（git-N）或时间戳回落（t-…）；可单调比较 */
+      buildId?: string;
+    };
   };
   /** 一键重启应用（壳层 app.relaunch）：改了代码没重启时，用户不必自己去托盘翻 */
   "app.restart": {
@@ -1019,10 +1083,10 @@ export interface RpcContracts {
     params: void;
     result: { ok: boolean };
   };
-  /** 项目信任（M1-13）：未信任不加载项目级 mcp.json */
+  /** 项目信任（M1-13）：未信任不加载项目级 mcp.json 与项目级技能 */
   "trust.set": {
     params: { trusted: boolean };
-    result: { ok: boolean; trusted: boolean; root: string; reloading: boolean };
+    result: { ok: boolean; trusted?: boolean; root?: string; reloading?: boolean; error?: string };
   };
   /** 会话线程（M1-14） */
   "thread.list": {
@@ -1118,6 +1182,8 @@ export interface RpcContracts {
         acceptance: string[];
         brief?: string;
         workspaceRoot?: string;
+        /** 派单时所在的项目名（冻结快照，2026-11-12） */
+        projectName?: string;
         deliverables: { label: string; ref: string; bytes?: number }[];
         timeline: { at: string; kind: string; text: string }[];
       };
@@ -1154,6 +1220,24 @@ export interface RpcContracts {
     params: { taskId: string; ref: string };
     result: { ok: boolean; error?: string };
   };
+  /** 在系统文件管理器里定位一个交付物/证据（右键菜单"打开所在目录"，2026-11-13） */
+  "app.revealPath": {
+    params: { taskId: string; ref: string };
+    result: { ok: boolean; error?: string };
+  };
+  /** 把一个卷宗内的 ref 解析成绝对路径（右键"复制路径"用，守卫同 evidence.open） */
+  "app.resolveRef": {
+    params: { taskId: string; ref: string };
+    result: { ok: boolean; path?: string; exists?: boolean; error?: string };
+  };
+  /**
+   * 从交付箱移除一条交付物（2026-11-13）。
+   * deleteFile=true 时连磁盘文件一起删（只允许删本任务工作区内的原件，或本任务卷宗里的副本）。
+   */
+  "task.removeDeliverable": {
+    params: { taskId: string; ref: string; deleteFile?: boolean };
+    result: { ok: boolean; removedFile?: boolean; error?: string };
+  };
   /**
    * 内置预览：主进程读文件内容，渲染层自己排版/高亮，不启动外部关联程序。
    * 路径守卫与 evidence.open 一致：只在 tasks/<taskId>/ 内解析。
@@ -1182,7 +1266,13 @@ export interface RpcContracts {
    * question: answer 必须带 text；plan: start=开工、revise=带 text 改一版、reject=先不做
    */
   "decision.resolve": {
-    params: { id: string; action: "answer" | "start" | "revise" | "reject"; text?: string };
+    params: {
+      id: string;
+      action: "answer" | "start" | "revise" | "reject";
+      text?: string;
+      /** 只对 deletion 审批有意义：批准并把这一族加入"以后都允许"（2026-11-14） */
+      always?: boolean;
+    };
     result: { ok: true } | { ok: false; error: string };
   };
   /** 你对工单的裁决（印章区）：验收归档 / 打回重做（§4.10.5 的"用户显式拍板"） */
@@ -1221,6 +1311,8 @@ export interface RpcContracts {
       threadModelId: string | null;
       activeModelId: string | null;
       threadTitle: string;
+      /** 本机能否安全加密存 Key（false = 界面要展示「明文存储」确认框，审计 #9） */
+      canEncrypt?: boolean;
     };
   };
   "model.save": {
@@ -1234,6 +1326,8 @@ export interface RpcContracts {
       apiKey?: string;
       /** 本机/局域网/非 HTTPS 端点必须显式勾选 */
       riskAccepted?: boolean;
+      /** safeStorage 不可用（系统密钥环缺失）时明文落盘需显式勾选（审计 #9） */
+      plaintextOk?: boolean;
     };
     result: { ok: true; id: string } | { ok: false; error: string };
   };
@@ -1286,10 +1380,67 @@ export interface RpcContracts {
     result: { ok: boolean; error?: string };
   };
 
-  /** 偏好设置（M2-11 加软预算与备用模型；M3-08 加界面语言；截图加快捷键；M3-01 加心跳） */
+  /** 偏好设置（M2-11 加软预算与备用模型；M3-08 加界面语言；截图加快捷键；M3-01 加心跳；语音播报 2026-11-13） */
   "config.prefs": {
-    params: { autoStart: boolean; trayOnClose?: boolean; notify?: boolean; softBudgetTokens?: number; fallbackModel?: string; lang?: "zh" | "en"; captureHotkey?: string; heartbeat?: boolean };
-    result: { ok: true; autoStart: boolean; trayOnClose: boolean; notify: boolean; softBudgetTokens: number; fallbackModel: string; lang: "zh" | "en"; captureHotkey: string; heartbeat: boolean };
+    params: {
+      autoStart: boolean;
+      trayOnClose?: boolean;
+      notify?: boolean;
+      softBudgetTokens?: number;
+      fallbackModel?: string;
+      lang?: "zh" | "en";
+      captureHotkey?: string;
+      heartbeat?: boolean;
+      voiceEnabled?: boolean;
+      voiceId?: string;
+      voiceRate?: string;
+      voiceVolume?: string;
+      voiceScope?: "brief" | "detail";
+      voiceMaxChars?: number;
+      voiceWhenHidden?: boolean;
+      voiceProxy?: string;
+      /** 顾问审阅（2026-11-14）：成员交回报后用另一个模型独立审一遍 */
+      advisorEnabled?: boolean;
+      /** 角色模型：值为模型库条目 id（advisor 已用；worker/smol/tiny 留位） */
+      modelRoles?: Partial<Record<"worker" | "smol" | "advisor" | "tiny", string>>;
+    };
+    result: {
+      ok: true;
+      autoStart: boolean;
+      trayOnClose: boolean;
+      notify: boolean;
+      softBudgetTokens: number;
+      fallbackModel: string;
+      lang: "zh" | "en";
+      captureHotkey: string;
+      heartbeat: boolean;
+      voiceEnabled: boolean;
+      voiceId: string;
+      voiceRate: string;
+      voiceVolume: string;
+      voiceScope: "brief" | "detail";
+      voiceMaxChars: number;
+      voiceWhenHidden: boolean;
+      voiceProxy: string;
+      advisorEnabled: boolean;
+      modelRoles?: Partial<Record<"worker" | "smol" | "advisor" | "tiny", string>>;
+    };
+  };
+  /** 语音：可选音色（Edge 神经音色 ID） */
+  "voice.voices": {
+    params: void;
+    result: { voices: { id: string; label: string; locale: string }[] };
+  };
+  /** 语音：用户主动试听，绕过播报白名单与节流，失败如实回报 */
+  "voice.preview": {
+    params: { text: string; voiceId?: string; rate?: string; volume?: string; proxy?: string };
+    result: { ok: boolean; error?: string };
+  };
+  /** 语音：立刻静音（设置里关开关 / 停止对话时也会自动触发） */
+  "voice.stop": { params: void; result: { ok: boolean } };
+  "voice.status": {
+    params: void;
+    result: { enabled: boolean; queued: number; lastError: string | null };
   };
   /** M3-08：当前界面语言的合并字典（内置 + 启用的语言包插件覆盖），渲染层按 lang 变化拉取 */
   "i18n.get": {
@@ -1314,12 +1465,40 @@ export interface RpcContracts {
   /** 换当前会话的工作区：影响 @ 检索、附件、Pi 的 cwd、项目级插件与 MCP */
   "project.setRoot": {
     params: { root: string };
-    result: { ok: boolean; root?: string; trusted?: boolean; error?: string };
+    result: {
+      ok: boolean;
+      root?: string;
+      trusted?: boolean;
+      /** 这个目录里"被信任才生效"的东西（2026-11-13）：空 = 信任与否无差别，不该报警 */
+      gated?: { mcp: boolean; skills: boolean };
+      /** 未信任且带项目级 MCP 时给出 server 清单全文（审计 #7：信任确认页要展示会跑什么命令，不只说"有配置"） */
+      mcpServers?: { id: string; command: string; args: string[]; envKeys: string[] }[];
+      error?: string;
+      project?: { id: string; name: string };
+    };
   };
   /** 这次不用工作区（临时对话）：主根清空，任务产出落卷宗沙箱 */
   "project.clearRoot": {
     params: void;
     result: { ok: boolean; error?: string };
+  };
+  /** 项目列表（2026-11-12）：同一个目录 = 同一个项目，跨群共享身份 */
+  "project.list": {
+    params: void;
+    result: {
+      projects: { id: string; name: string; path: string }[];
+      current?: { id: string; name: string; path: string };
+    };
+  };
+  /** 改项目显示名：所有绑在它上面的群一起变 */
+  "project.rename": {
+    params: { id: string; name: string };
+    result: { ok: boolean; id?: string; name?: string; error?: string };
+  };
+  /** 当前群切到某个项目：主根跟着项目目录走 */
+  "project.use": {
+    params: { id: string };
+    result: { ok: boolean; id?: string; name?: string; root?: string; error?: string };
   };
   /** 全局工作区偏好：默认主根 + 常用只读根（L0） */
   "workspace.prefs": {
@@ -1525,6 +1704,8 @@ export interface LynnBridge {
   rpc: RpcClient;
   /** 订阅内核事件；返回取消订阅函数 */
   onEvent: (cb: (ev: KernelEvent) => void) => () => void;
+  /** 语音播报专用通道（合成好的 MP3 或停止信号）；返回取消订阅函数 */
+  onVoice: (cb: (ev: VoicePlayEvent) => void) => () => void;
   /**
    * 渲染层异常上报（可选）：白屏时代没有现场，报错只能靠猜。
    * 上报内容落 `<数据根>/logs/renderer.log`，一行一个 JSON。

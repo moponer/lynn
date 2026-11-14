@@ -2,6 +2,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { LogPrefs } from "./log-policy";
+import type { CommandFamily } from "../shared/contract";
+import { VOICE_DEFAULT_PREFS } from "./voice-policy";
 
 /**
  * 设置与数据根（§4.7）：一切落 `~/.lynn/`（可用 LYNN_HOME 覆盖，单测用）。
@@ -70,6 +72,30 @@ export interface Prefs {
   knownReadRoots: string[];
   /** 清理 TTL（天）：只作用于过程文件，交付物与证据永久（2026-11-10 P2-1） */
   retention: { scratchDays: number; checkpointDays: number; logDays: number };
+  /** 语音播报（2026-11-13）：默认只念汇报与进度节点，人不在不念；文本会送微软在线语音服务 */
+  voiceEnabled: boolean;
+  voiceId: string;
+  voiceRate: string;
+  voiceVolume: string;
+  voiceScope: "brief" | "detail";
+  voiceMaxChars: number;
+  voiceWhenHidden: boolean;
+  voiceProxy: string;
+  /**
+   * 顾问（2026-11-14）：成员交回报后，用另一个模型独立审一遍"这份交付会不会返工"。
+   * 每单只审一次、不给工具、不改状态；关掉就完全不调用。
+   */
+  advisorEnabled: boolean;
+  /**
+   * 角色模型（2026-11-14）：值是模型库条目 id，缺省回落当前默认模型。
+   * 目前只有 advisor 在用；worker/smol/tiny 是给「便宜模型干粗活」留的位置。
+   */
+  modelRoles?: Partial<Record<"worker" | "smol" | "advisor" | "tiny", string>>;
+  /**
+   * 已放行的删除命令族（2026-11-14）：用户在审批卡上点过"这类以后都允许"的族。
+   * 只影响"要不要弹卡"，不改变路径守卫——工作区外的删除仍然直接拒。
+   */
+  allowCommandFamilies?: CommandFamily[];
 }
 
 const DEFAULT_PREFS: Prefs = {
@@ -93,6 +119,8 @@ const DEFAULT_PREFS: Prefs = {
   defaultWorkspace: "",
   knownReadRoots: [],
   retention: { scratchDays: 14, checkpointDays: 7, logDays: 7 },
+  advisorEnabled: true,
+  ...VOICE_DEFAULT_PREFS,
 };
 
 interface SettingsFile {
@@ -152,7 +180,19 @@ export class SettingsStore {
 
   private write(s: SettingsFile): void {
     fs.mkdirSync(this.dataRoot, { recursive: true });
-    fs.writeFileSync(this.file, JSON.stringify(s, null, 2), "utf-8");
+    // 0600（审计 #9）：settings.json 里是加密/明文的 API Key，默认权限下同机其它用户可读。
+    // Windows 上 mode 被忽略（NTFS 用 ACL），chmod 对已存在的过宽文件也尽量收紧；失败不挡保存。
+    fs.writeFileSync(this.file, JSON.stringify(s, null, 2), { encoding: "utf-8", mode: 0o600 });
+    try {
+      fs.chmodSync(this.file, 0o600);
+    } catch {
+      /* 非 POSIX 平台/只读介质：尽力而为 */
+    }
+  }
+
+  /** 本机能否安全加密存储 Key（safeStorage 可用性）：界面据此决定要不要展示「明文存储」确认 */
+  encryptionAvailable(): boolean {
+    return this.isEncryptionAvailable();
   }
 
   /** 视觉/OCR 模型（M2-13）：独立配置，与对话模型解耦；未配置返回 null（调用方如实降级） */
@@ -219,6 +259,8 @@ export class SettingsStore {
     baseUrl: string;
     model: string;
     apiKey?: string;
+    /** safeStorage 不可用时允许明文落盘（界面勾选「明文存储，我知晓风险」才传 true） */
+    plaintextOk?: boolean;
     /** 风险确认时间；不传 = 沿用该条旧值（换端点时由内核清空/拒绝） */
     riskAcceptedAt?: string;
   }): StoredModelEntry {
@@ -292,6 +334,8 @@ export class SettingsStore {
     baseUrl: string;
     model: string;
     apiKey?: string;
+    /** safeStorage 不可用时允许明文落盘（界面勾选「明文存储，我知晓风险」才传 true） */
+    plaintextOk?: boolean;
     previous?: StoredModelConfig | null;
   }): StoredModelConfig {
     const cfg = this.buildConfig(input, input.previous ?? null);
@@ -302,13 +346,20 @@ export class SettingsStore {
   }
 
   private buildConfig(
-    input: { provider: string; baseUrl: string; model: string; apiKey?: string },
+    input: { provider: string; baseUrl: string; model: string; apiKey?: string; plaintextOk?: boolean },
     previous: StoredModelConfig | null,
   ): StoredModelConfig {
     let apiKey: StoredModelConfig["apiKey"];
     const hasNewKey = input.apiKey !== undefined && input.apiKey !== "";
     if (hasNewKey) {
       const canEncrypt = this.isEncryptionAvailable();
+      // 审计 #9：safeStorage 不可用时不再静默降级成明文——必须调用方显式确认
+      // （界面勾选「明文存储，我知晓风险」），否则拒绝保存并说清原因。
+      if (!canEncrypt && input.plaintextOk !== true) {
+        throw new Error(
+          "本机不支持安全加密存储（系统密钥环不可用）。API Key 将以明文写入磁盘——在模型设置里勾选「明文存储，我知晓风险」后再保存。",
+        );
+      }
       apiKey = canEncrypt
         ? { encrypted: true, data: this.encrypt(input.apiKey!).toString("base64") }
         : { encrypted: false, data: input.apiKey! };
@@ -338,6 +389,8 @@ export class SettingsStore {
     baseUrl: string;
     model: string;
     apiKey?: string;
+    /** safeStorage 不可用时允许明文落盘（界面勾选「明文存储，我知晓风险」才传 true） */
+    plaintextOk?: boolean;
     previous?: StoredModelConfig | null;
   }): StoredModelConfig {
     const s = this.normalize(this.read());

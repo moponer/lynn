@@ -9,11 +9,60 @@ export type MemoryKind = "user" | "memory";
 
 const FILES: Record<MemoryKind, string> = { user: "USER.md", memory: "MEMORY.md" };
 const MAX_VERSIONS = 20;
+/** 项目记忆的条数上限与注入预算（2026-11-14） */
+const PROJECT_MAX_ENTRIES = 100;
+const PROJECT_PROMPT_BUDGET = 2_000;
+
+/** 写入前脱敏：这些形态基本只会是密钥，被注入到提示词里等于泄露 */
+function redactSecrets(s: string): string {
+  return s
+    .replace(/\b(sk-[A-Za-z0-9_-]{10,}|ghp_[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16})\b/g, "***")
+    .replace(/\b(api[_-]?key|token|secret|password)\s*[:=]\s*\S+/gi, "$1=***");
+}
 
 export interface MemoryVersion {
   id: string;
   savedAt: string;
   chars: number;
+}
+
+/** 一条记忆（行级）：用于定位与删除 */
+export interface MemoryEntry {
+  /** 在文件里的行号（1 起） */
+  line: number;
+  /** 行首时间戳（没有就是空串） */
+  at: string;
+  /** 正文（去掉时间戳后的内容） */
+  text: string;
+}
+
+/**
+ * 解析记忆条目：只认 "- " 开头的条目行。
+ * 模板说明行（"# " 开头）与空行不算条目。
+ */
+export function parseEntries(content: string): MemoryEntry[] {
+  const out: MemoryEntry[] = [];
+  const lines = (content ?? "").split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
+    if (!raw.trimStart().startsWith("- ")) continue;
+    const body = raw.trimStart().slice(2).trim();
+    if (!body) continue;
+    const m = body.match(/^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})\s+(.*)$/);
+    out.push({ line: i + 1, at: m ? m[1] : "", text: m ? m[2] : body });
+  }
+  return out;
+}
+
+export interface ForgetResult {
+  ok: boolean;
+  error?: string;
+  /** 删掉的那一条 */
+  removed?: MemoryEntry;
+  /** 匹配到多条时的候选（让调用方换更具体的关键词） */
+  candidates?: { line: number; text: string }[];
+  /** 这次保存产生的版本 id（可回滚） */
+  versionId?: string;
 }
 
 /** 行级 diff（简单 LCS 不做，够用的顺序对齐）：返回 [状态, 行] 列表，状态 = same/+/− */
@@ -116,6 +165,39 @@ export class MemoryStore {
     return id;
   }
 
+  /**
+   * 删掉一条记忆（2026-11-13）：此前只能追加与整版回滚，"删掉某一条"做不到——
+   * 于是取消掉的事实只能靠追加一条"已作废"糊过去，记忆越滚越绕。
+   *
+   * 语义：
+   *  - 按关键词定位（大小写不敏感；中文按包含匹配）
+   *  - 命中 0 条 = 失败并说清；命中多条 = 失败并列出候选（要求更具体的关键词，不猜哪条）
+   *  - 命中 1 条 = 删掉并落一版（可回滚）
+   */
+  forget(kind: MemoryKind, keyword: string): ForgetResult {
+    const kw = (keyword ?? "").trim().toLowerCase();
+    if (!kw) return { ok: false, error: "关键词不能为空" };
+    const content = this.load(kind);
+    const lines = content.split(/\r?\n/);
+    const entries = parseEntries(content);
+    const hits = entries.filter((e) => e.text.toLowerCase().includes(kw));
+    if (hits.length === 0) {
+      return { ok: false, error: `没有匹配「${keyword}」的记忆条目（当前 ${entries.length} 条）` };
+    }
+    if (hits.length > 1) {
+      return {
+        ok: false,
+        error: `匹配到 ${hits.length} 条，换更具体的关键词再删（我不动手猜删哪条）`,
+        candidates: hits.map((e) => ({ line: e.line, text: e.text.slice(0, 120) })),
+      };
+    }
+    const target = hits[0];
+    const next = lines.filter((_, i) => i !== target.line - 1).join("\n");
+    // save 会把改前的内容归档一版 → 删错了能回滚
+    const versionId = this.save(kind, next);
+    return { ok: true, removed: target, versionId };
+  }
+
   versions(kind: MemoryKind): MemoryVersion[] {
     const dir = this.versionsDir(kind);
     if (!fs.existsSync(dir)) return [];
@@ -176,6 +258,69 @@ export class MemoryStore {
       parts.push(`【助理记忆（MEMORY.md）】\n${mem.trim()}`);
     }
     return parts.length ? `\n${parts.join("\n\n")}\n` : "";
+  }
+
+  // ---------- 项目级记忆（2026-11-14） ----------
+  // 为什么单独一层：USER/MEMORY 是"跨任务的她本人"，项目事实（这个仓库怎么跑测试、谁负责哪块、
+  // 上次为什么这么改）属于**这个项目**，塞进全局记忆会互相污染，换个项目就看到别人的事。
+
+  private projectFile(projectId: string): string {
+    const safe = String(projectId ?? "").replace(/[^a-zA-Z0-9_-]/g, "");
+    if (!safe) throw new Error("项目 id 不合法");
+    return path.join(this.dir, "projects", `${safe}.md`);
+  }
+
+  loadProject(projectId: string): string {
+    try {
+      return fs.readFileSync(this.projectFile(projectId), "utf-8");
+    } catch {
+      return "";
+    }
+  }
+
+  /**
+   * 记一条项目事实（同一项目跨会话可见）。
+   *  - 去重：归一化（小写 + 去掉标点空白）后与已有条目比，重复的不算新增；
+   *  - 脱敏：常见密钥形态写入前替换成 ***（项目记忆会被注入提示词）；
+   *  - 上限 100 条：超出丢最旧的（项目记忆是"当前事实"，不是流水账）。
+   */
+  learnProject(projectId: string, entry: string): { ok: boolean; added?: boolean; error?: string } {
+    const text = redactSecrets(String(entry ?? "").trim().replace(/\s+/g, " ")).slice(0, 500);
+    if (!text) return { ok: false, error: "记忆内容不能为空" };
+    let file: string;
+    try {
+      file = this.projectFile(projectId);
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+    const entries = parseEntries(this.loadProject(projectId));
+    const key = (s: string) => s.toLowerCase().normalize("NFKC").replace(/[^\p{L}\p{N}]+/gu, "");
+    if (entries.some((e) => key(e.text) === key(text))) return { ok: true, added: false };
+
+    const keep = entries.length >= PROJECT_MAX_ENTRIES ? entries.slice(entries.length - PROJECT_MAX_ENTRIES + 1) : entries;
+    const lines = keep.map((e) => `- ${e.at ? `${e.at} ` : ""}${e.text}`);
+    const stamp = new Date().toISOString().slice(0, 16).replace("T", " ");
+    lines.push(`- ${stamp} ${text}`);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, `# 项目记忆\n\n${lines.join("\n")}\n`, "utf-8");
+    return { ok: true, added: true };
+  }
+
+  /** 项目记忆注入段：只取最近若干条（2K 字预算），头里说清这是局部 */
+  projectSection(projectId?: string): string {
+    if (!projectId) return "";
+    const entries = parseEntries(this.loadProject(projectId));
+    if (!entries.length) return "";
+    const picked: string[] = [];
+    let chars = 0;
+    for (let i = entries.length - 1; i >= 0; i -= 1) {
+      const line = `- ${entries[i].text}`;
+      if (chars + line.length > PROJECT_PROMPT_BUDGET && picked.length) break;
+      picked.unshift(line);
+      chars += line.length;
+    }
+    const dropped = entries.length - picked.length;
+    return `\n【项目记忆（这个项目的事实，跨会话保留${dropped ? `；只列最近 ${picked.length} 条` : ""}）】\n${picked.join("\n")}\n`;
   }
 
   private prune(kind: MemoryKind): void {

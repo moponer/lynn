@@ -39,6 +39,20 @@ export function resolveFeedUrl(env: NodeJS.ProcessEnv, dataRoot: string): string
   return null;
 }
 
+/**
+ * 更新源必须是 HTTPS（2026-11-13 审计 #5）：generic provider 下安装包没有签名校验，
+ * http 源等于把"改哪儿装哪儿"的门朝明文信道敞开。返回拒绝原因；null = 可用。
+ * （调用方把原因写进 updateState.reason，界面上看得见为什么更新不可用。）
+ */
+export function feedUrlIssue(url: string): string | null {
+  const u = url.trim();
+  if (/^https:\/\//i.test(u)) return null;
+  if (/^http:\/\//i.test(u)) {
+    return `更新源必须是 HTTPS（当前是 http）：安装包在未配签名时靠传输信道兜底，明文 http 源拒绝启用。`;
+  }
+  return `更新源必须是 https:// 开头（当前：${u.slice(0, 40)}）。`;
+}
+
 /** 状态机迁移：非法迁移保持原状态（不谎报） */
 export function transition(state: UpdateState, event: { type: string; [k: string]: unknown }): UpdateState {
   switch (event.type) {

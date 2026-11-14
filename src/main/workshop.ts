@@ -123,6 +123,18 @@ const FORBIDDEN = [
   { re: /child_process/, why: "child_process" },
   { re: /postinstall/, why: "postinstall 钩子" },
   { re: /node-gyp|\.node['"]\s*\)/, why: "原生模块加载" },
+  // 2026-11-13 审计 #20：此前只有上面 6 条——fs/net/os/http(s)/worker_threads/vm 的
+  // require/import 全不在扫描范围，「任意文件读写与数据外发」直接放行。补上：
+  // 直接 require / 动态 import 两条路径都拦（字符串拼接变体仍属混淆，靠长十六进制规则兜一部分）。
+  {
+    re: /\brequire\s*\(\s*["'](fs|node:fs|net|node:net|os|node:os|http|node:http|https|node:https|dns|node:dns|dgram|node:dgram|tls|node:tls|vm|node:vm|worker_threads|node:worker_threads|inspector|node:inspector)["']/,
+    why: "fs/net/os 等 Node 内置模块（任意读写与外发）",
+  },
+  {
+    re: /\bimport\s*\(\s*["'](fs|node:fs|net|node:net|os|node:os|http|node:http|https|node:https|dns|node:dns|dgram|node:dgram|tls|node:tls|vm|node:vm|worker_threads|node:worker_threads|inspector|node:inspector)["']/,
+    why: "动态 import Node 内置模块",
+  },
+  { re: /process\.binding\s*\(/, why: "process.binding（绕过模块系统拿底层能力）" },
   { re: /[0-9a-fA-F]{64,}/, why: "长十六进制串（混淆/内嵌载荷嫌疑）" },
 ] as const;
 

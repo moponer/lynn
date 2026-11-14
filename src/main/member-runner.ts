@@ -96,6 +96,8 @@ export interface MemberRunInput {
   maxTurns?: number;
   /** 任务工作区：成员一切文件活动的边界（绝对路径） */
   workdir: string;
+  /** 项目名（2026-11-12）：成员要知道自己动的是哪个项目，回报里也得说清 */
+  projectName?: string;
   /** 过程文件目录（永远在数据根内，可被清理）；缺省不提示 */
   scratchDir?: string;
   /** 用户授权的只读目录：读可以进，写仍然只能在工作区（函数 = 每次现取，跑到一半授权也生效） */
@@ -108,6 +110,8 @@ export interface MemberRunInput {
   runStartedAt?: number;
   /** 权限档=全权时，工作区内删除不再逐次点头（壳注入） */
   autoDeleteInWorkspace?: () => boolean;
+  /** 出站闸（审计 #2）：false 时成员的 curl/wget/ssh 类命令直接拒；不传 = 只审计不拦 */
+  outboundAllowed?: () => boolean;
   model: { baseUrl: string; apiKey: string; model: string };
   /** 测试注入；默认真流式 */
   chatFn?: MemberChatFn;
@@ -154,6 +158,10 @@ export interface MemberRunResult {
   turns: number;
   promptTokens: number;
   completionTokens: number;
+  /** 命中缓存的输入 token（端点没报就是 0——不估假命中率，2026-11-13 缓存分析补的可观测） */
+  cacheReadTokens: number;
+  /** 写入缓存 / 未命中的输入 token（Anthropic 语义；DeepSeek 类为 0） */
+  cacheWriteTokens: number;
   error?: string;
 }
 
@@ -163,6 +171,9 @@ export interface MemberRunResult {
 export { resolveWithin };
 
 // ---------- 成员工具 schema（OpenAI 兼容） ----------
+
+/** 骨架稿特征：这些词出现在回报正文且没有交付物时，判定为占位稿（2026-11-14） */
+const PLACEHOLDER = /\b(TODO|FIXME|TBD)\b|待补充|待完善|占位符|占位文本|待填/;
 
 /** 回报通道：不属于执行工具，任何白名单都不能把它剥掉（§4.10.5） */
 const SUBMIT_REPORT_SCHEMA: ToolSchema = {
@@ -184,6 +195,20 @@ const SUBMIT_REPORT_SCHEMA: ToolSchema = {
           type: "array",
           items: { type: "string" },
           description: "交付物路径（用户要带走的东西：报告/表格/图片）；与证据分开，验收后永久保留",
+        },
+        checks: {
+          type: "array",
+          description:
+            "对简报里「完成标准」的逐条核对（可选，但建议给）：每条形如 {name:'数字可对账', pass:true, evidence:'report.md 第 3 节'}。风铃验收先看这张表。",
+          items: {
+            type: "object",
+            properties: {
+              name: { type: "string", description: "对应哪一条完成标准" },
+              pass: { type: "boolean", description: "过了没有" },
+              evidence: { type: "string", description: "在哪能看出来（文件+段落）" },
+            },
+            required: ["name", "pass"],
+          },
         },
       },
       required: ["text", "evidence"],
@@ -230,6 +255,9 @@ export function memberSystemPrompt(input: MemberRunInput): string {
     "- **内容型产物不许交骨架**：每个章节至少 2~3 句实质内容（结论、依据、具体处置）。只给章节标题加一句概括＝骨架稿，风铃会打回；宁可少写两章，也不要每章空的。拼接正文时检查有没有 undefined / 空字段——模板变量没取到值会原样印进文档。",
     "",
     "【工作区与文件去向】",
+    ...(input.projectName
+      ? [`项目：${input.projectName}（这次活属于这个项目；回报和交付物里要让人看得出是哪个项目）。`]
+      : []),
     `工作区：${input.workdir}（**可读可写**）。写文件用工作区内相对路径。`,
     ...(input.scratchDir
       ? [`过程文件（下载/解压/测试输出/缓存）写到：${input.scratchDir}；交付物（用户要带走的报告/表格/图）写到工作区里的 deliverables/ 或简报指定位置。`]
@@ -269,6 +297,7 @@ export function memberSystemPrompt(input: MemberRunInput): string {
     "【产出契约】",
     `- 交付物：${p.outputContract.deliverable}`,
     "- 交付物在 submit_report 的 deliverables 里列出来（与 evidence 分开）：用户要带走的东西会永久保留；只写进证据不算交付。",
+    "- 上面的验收标准，交回报时逐条写进 checks（name=哪条标准，pass=过没过，evidence=在哪能看出来）。风铃先看这张表；没过的如实写 false，不要凑。",
     ...p.outputContract.evidence.map((e) => `- 证据要求：${e}`),
     ...p.outputContract.acceptance.map((a) => `- 验收标准：${a}`),
     "",
@@ -295,6 +324,7 @@ export async function runMemberTask(input: MemberRunInput): Promise<MemberRunRes
     // 自清理分级：本单开工后新造的文件删除不打扰用户；全权档连工作区内删除也放行
     runStartedAt: input.runStartedAt,
     autoDeleteInWorkspace: input.autoDeleteInWorkspace,
+    outboundAllowed: input.outboundAllowed,
     // 停机要能连正在跑的命令一起杀，否则最长等满 120s 超时
     signal: () => input.signal,
     writableRoots: input.writableRoots,
@@ -315,6 +345,8 @@ export async function runMemberTask(input: MemberRunInput): Promise<MemberRunRes
   let turns = 0;
   let promptTokens = 0;
   let completionTokens = 0;
+  let cacheReadTokens = 0;
+  let cacheWriteTokens = 0;
   let finalReport: string | null = null;
   let finalEvidence: string[] = [];
   let finalDeliverables: string[] = [];
@@ -357,7 +389,41 @@ export async function runMemberTask(input: MemberRunInput): Promise<MemberRunRes
       if (missingDeliverables.length) {
         return `以下交付物不存在，不能提交：${missingDeliverables.join("、")}。先落盘再回报。`;
       }
-      finalReport = text;
+      /**
+       * 骨架稿拦截（2026-11-14）：实机出现过"四行标题 + TODO"的稿子被当成交付。
+       * 只在**没有交付物**时判——文档里正常讨论 TODO（写技术文档）不算；
+       * 交不出东西又要说"完成"，才该被挡回去补。
+       */
+      if (PLACEHOLDER.test(text) && deliverables.length === 0) {
+        return (
+          "这看起来还是骨架稿：正文里有占位符（TODO / 待补充 / 占位），而且没有交付物。" +
+          "把内容补全、产出落盘后再交；确实做不完就标【受阻】写清卡在哪，别拿占位稿当完成。"
+        );
+      }
+      // 核对清单的形状校验（2026-11-14）：不合规整条拒，让它按格式重报，而不是收一份乱表
+      // 核对清单（2026-11-14）：把「完成标准逐条过了吗」变成结构化的表，风铃验收先看这张表，
+      // 而不是从一段自然语言里猜。形状固定且极简（name/pass/evidence），所以手写校验——
+      // 为此引入 schema 库不值当；不合规整条拒收，让它按格式重报一次。
+      const rawChecks = Array.isArray(args.checks) ? args.checks : [];
+      if (rawChecks.length > 20) return "核对清单最多 20 条，只留关键的。";
+      const checks: { name: string; pass: boolean; evidence?: string }[] = [];
+      for (const [i, c] of rawChecks.entries()) {
+        if (typeof c !== "object" || c === null || Array.isArray(c)) {
+          return `checks[${i}] 必须是对象 {name, pass, evidence?}。`;
+        }
+        const row = c as Record<string, unknown>;
+        const cname = String(row.name ?? "").trim();
+        const pass = row.pass;
+        const ev = String(row.evidence ?? "").trim();
+        if (!cname) return `checks[${i}] 缺 name（写清对的是哪条完成标准）。`;
+        if (typeof pass !== "boolean") return `checks[${i}].pass 必须是 true 或 false。`;
+        checks.push({ name: cname, pass, ...(ev ? { evidence: ev } : {}) });
+      }
+      finalReport = checks.length
+        ? `${text}\n\n核对清单：\n${checks
+            .map((c) => `- ${c.pass ? "[过]" : "[未过]"} ${c.name}${c.evidence ? `（${c.evidence}）` : ""}`)
+            .join("\n")}`
+        : text;
       finalEvidence = evidence;
       finalDeliverables = deliverables;
       return "回报已收下，本轮执行结束。";
@@ -434,6 +500,8 @@ export async function runMemberTask(input: MemberRunInput): Promise<MemberRunRes
       });
       promptTokens += result.promptTokens;
       completionTokens += result.completionTokens;
+      cacheReadTokens += result.cacheRead ?? 0;
+      cacheWriteTokens += result.cacheWrite ?? 0;
       if (result.toolCalls.length === 0) {
         if (lastTurn && result.content.trim()) {
           // 最后一轮它选择了口述：这段就是它的回报，别丢（丢了等于这一单白跑）
@@ -486,6 +554,8 @@ export async function runMemberTask(input: MemberRunInput): Promise<MemberRunRes
             turns,
             promptTokens,
             completionTokens,
+            cacheReadTokens,
+            cacheWriteTokens,
           };
         }
         messages.push({ role: "tool", tool_call_id: tc.id, name: tc.name, content: outcome });
@@ -501,6 +571,8 @@ export async function runMemberTask(input: MemberRunInput): Promise<MemberRunRes
         turns,
         promptTokens,
         completionTokens,
+        cacheReadTokens,
+        cacheWriteTokens,
       };
     }
     if (input.signal?.aborted) {
@@ -512,6 +584,8 @@ export async function runMemberTask(input: MemberRunInput): Promise<MemberRunRes
         turns,
         promptTokens,
         completionTokens,
+        cacheReadTokens,
+        cacheWriteTokens,
       };
     }
     return {
@@ -522,6 +596,8 @@ export async function runMemberTask(input: MemberRunInput): Promise<MemberRunRes
       turns,
       promptTokens,
       completionTokens,
+      cacheReadTokens,
+      cacheWriteTokens,
       error: "turn_limit",
     };
   } catch (err) {
@@ -533,6 +609,8 @@ export async function runMemberTask(input: MemberRunInput): Promise<MemberRunRes
       turns,
       promptTokens,
       completionTokens,
+      cacheReadTokens,
+      cacheWriteTokens,
       error: err instanceof Error ? err.message : String(err),
     };
   }

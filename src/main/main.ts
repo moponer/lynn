@@ -1,13 +1,13 @@
-import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, nativeImage, Notification, safeStorage, screen, shell, Tray } from "electron";
+import { app, BrowserWindow, globalShortcut, ipcMain, Menu, nativeImage, Notification, safeStorage, screen, shell, Tray } from "electron";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { autoUpdater } from "electron-updater";
-import type { CaptureRect, RpcMethod } from "../shared/contract";
+import type { RpcMethod } from "../shared/contract";
 import { Kernel } from "./kernel";
 import { createCaptureHost } from "./capture-host";
 import { defaultDataRoot } from "./settings";
-import { resolveFeedUrl, transition, type UpdateState } from "./updater";
-import { discoverModels } from "./providers";
+import { resolveFeedUrl, feedUrlIssue, transition, type UpdateState } from "./updater";
+import { newRendererLogGate, RENDERER_LOG_LIMITS, rendererLogGate } from "./log-policy";
 import {
   COMPLIANCE_NOTE,
   configureChannel,
@@ -21,6 +21,8 @@ import {
 } from "./messaging";
 import { trayFallbackBuffer, trayIconPaths } from "./tray-icon";
 import { needsUserAttention } from "./notify-policy";
+import { VoiceService } from "./voice";
+import { handleShellRpc, handleKernelAsync, isKernelAsyncMethod, type ShellRpcCtx } from "./shell-rpc";
 
 /**
  * stdout/stderr 被管道提前关闭时（命令行重定向后管道断、IDE 启动器关流），
@@ -70,6 +72,46 @@ if (process.env.LYNN_LOW_MEMORY === "1") {
   app.commandLine.appendSwitch("disable-software-rasterizer");
 }
 
+/**
+ * 渲染层异常落盘（白屏可见化）：console 的 error/warning、渲染进程崩溃、加载失败、
+ * preload 报错、显式上报全进 logs/renderer.log（审计 #8：此前是裸 appendFileSync，
+ * 无轮转/无截断/无限流，渲染进程高频上报能打满磁盘）。现在：
+ *  - 每分钟 120 条限流，超限丢弃、窗口翻转时落一条汇总；
+ *  - 单条 16K 字符截断；
+ *  - 5MB 轮转到 renderer.old.log（只留一份，最坏两份共 10MB）。
+ */
+let rendererLogGateState = newRendererLogGate();
+const logRenderer = (entry: Record<string, unknown>) => {
+  try {
+    const gate = rendererLogGate(rendererLogGateState, Date.now());
+    rendererLogGateState = gate.state;
+    const dir = path.join(defaultDataRoot(), "logs");
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, "renderer.log");
+    try {
+      if (fs.existsSync(file) && fs.statSync(file).size > RENDERER_LOG_LIMITS.rotateBytes) {
+        fs.renameSync(file, path.join(dir, "renderer.old.log"));
+      }
+    } catch {
+      /* 轮转失败不挡写入 */
+    }
+    let line = JSON.stringify({ at: new Date().toISOString(), ...entry }) + "\n";
+    if (line.length > RENDERER_LOG_LIMITS.entryMaxChars) {
+      line = `${line.slice(0, RENDERER_LOG_LIMITS.entryMaxChars)}…（单条截断，原 ${line.length} 字符）\n`;
+    }
+    fs.appendFileSync(file, line, "utf-8");
+    if (gate.droppedSummary) {
+      fs.appendFileSync(
+        file,
+        JSON.stringify({ at: new Date().toISOString(), kind: "log_throttled", dropped: gate.droppedSummary }) + "\n",
+        "utf-8",
+      );
+    }
+  } catch {
+    /* 日志写不进去不能拖垮界面 */
+  }
+};
+
 const kernel = new Kernel();
 // 用系统凭据库加密 API Key（§4.7：凭据只经内核注入，不下发渲染层）
 kernel.setEncryptors(
@@ -83,6 +125,20 @@ kernel.setNotifier((title, body) => notifyOnce(title, body));
 let win: BrowserWindow | null = null;
 let pet: BrowserWindow | null = null;
 let tray: Tray | null = null;
+
+/**
+ * 语音播报（2026-11-13）：内核只注入「该说什么」，合成与播放都在壳层。
+ * 独立 lynn:voice 通道，不污染内核事件流；音频是 MP3 data URL，不落临时文件。
+ */
+const voice = new VoiceService({
+  getPrefs: () => kernel.getPrefs(),
+  emit: (ev) => {
+    // 只发主窗口：桌宠是同一个渲染层的另一个 BrowserWindow，广播会双份播放
+    if (win && !win.isDestroyed()) win.webContents.send("lynn:voice", ev);
+  },
+  isVisible: () => Boolean(win && !win.isDestroyed() && win.isVisible()),
+});
+kernel.setVoice(voice);
 
 /**
  * 区域截图（M2-13 消费侧）：全局快捷键 / 托盘 / 输入框按钮都能起。
@@ -182,9 +238,10 @@ function bindUpdater(): void {
     return;
   }
   const feed = resolveFeedUrl(process.env, kernel.dataRoot);
-  if (!feed) {
+  const feedIssue = feed ? feedUrlIssue(feed) : null;
+  if (!feed || feedIssue) {
     updateState.supported = false;
-    updateState.reason = "未配置更新源：在 ~/.lynn/updater.json 写 { feedUrl } 或设 LYNN_UPDATE_FEED。";
+    updateState.reason = feedIssue ?? "未配置更新源：在 ~/.lynn/updater.json 写 { feedUrl } 或设 LYNN_UPDATE_FEED。";
     return;
   }
   updateState.supported = true;
@@ -260,12 +317,18 @@ async function handleUpdateRpc(method: string): Promise<unknown> {
     if (method === "update.check") {
       // 每次都重读配置：用户可能刚写好 updater.json
       const feed = resolveFeedUrl(process.env, kernel.dataRoot);
-      if (feed && app.isPackaged) {
+      const feedIssue = feed ? feedUrlIssue(feed) : null;
+      if (feed && !feedIssue && app.isPackaged) {
         updateState.supported = true;
         updateState.reason = undefined;
         updateState.feedUrl = feed;
         autoUpdater.setFeedURL({ provider: "generic", url: feed });
       } else {
+        // 配了但不是 HTTPS：把原因如实写进状态，别让用户对着"不可更新"猜
+        if (feedIssue) {
+          updateState.supported = false;
+          updateState.reason = feedIssue;
+        }
         return { ...updateState, error: updateState.reason ?? "不可更新" };
       }
     } else {
@@ -339,19 +402,7 @@ function createWindow(): void {
     },
   });
 
-  /**
-   * 渲染层异常落盘（白屏可见化）：白屏时没有任何现场，之前只能靠猜。
-   * console 的 error/warning、渲染进程崩溃、加载失败、preload 报错、显式上报全进 logs/renderer.log。
-   */
-  const logRenderer = (entry: Record<string, unknown>) => {
-    try {
-      const dir = path.join(defaultDataRoot(), "logs");
-      fs.mkdirSync(dir, { recursive: true });
-      fs.appendFileSync(path.join(dir, "renderer.log"), JSON.stringify({ at: new Date().toISOString(), ...entry }) + "\n", "utf-8");
-    } catch {
-      /* 日志写不进去不能拖垮界面 */
-    }
-  };
+  // logRenderer 已提升为模块级（createWindow 与 lynn:log-error 上报共用一份限流/轮转状态）
   // Electron 29+ 改成 (event, details) 对象；旧签名是 (event, level:number, message, line, sourceId)。
   // 两种都兜住，免得升级/降级后日志静默失效。
   type ConsoleArgs = [unknown, unknown, unknown?, unknown?, unknown?];
@@ -468,263 +519,28 @@ app.whenReady().then(async () => {
   registerHotkey();
   bindUpdater();
 
-  // 渲染层显式上报（window.onerror / unhandledrejection / React 边界）：只写日志
+  // 渲染层显式上报（window.onerror / unhandledrejection / React 边界）：走统一限流/轮转通道
   ipcMain.on("lynn:log-error", (_event, payload: { kind: string; message: string; stack?: string; source?: string }) => {
-    try {
-      const dir = path.join(defaultDataRoot(), "logs");
-      fs.mkdirSync(dir, { recursive: true });
-      fs.appendFileSync(path.join(dir, "renderer.log"), JSON.stringify({ at: new Date().toISOString(), ...payload }) + "\n", "utf-8");
-    } catch {
-      /* 同上：写不进去不炸 */
-    }
+    logRenderer(payload);
   });
 
-  // 唯一 RPC 通道
+  // 唯一 RPC 通道：壳层方法走注册表（shell-rpc.ts，审计 #14 拆分第一刀），未命中落回内核
+  const shellCtx: ShellRpcCtx = {
+    kernel,
+    getWin: () => win,
+    createPet,
+    closePet: () => pet?.close(),
+    focusMain,
+    captureHost,
+    voice,
+    handleMsg: handleMsgRpc,
+    handleUpdate: handleUpdateRpc,
+  };
   ipcMain.handle("lynn:rpc", async (_event, method: string, params: unknown) => {
     try {
-      // 窗口相关的调用归壳（不进内核）
-      if (method === "pet.open") {
-        createPet();
-        return { ok: true };
-      }
-      if (method === "pet.close") {
-        pet?.close();
-        return { ok: true };
-      }
-      if (method === "pet.focus") {
-        focusMain();
-        return { ok: true };
-      }
-      if (method.startsWith("update.")) {
-        return await handleUpdateRpc(method);
-      }
-      if (method === "providers.discover") {
-        const p = params as { baseUrl: string; apiKey?: string };
-        if (!p.baseUrl) return { models: [], error: "缺 baseUrl" };
-        return await discoverModels(p.baseUrl, p.apiKey);
-      }
-      if (method === "msg.configure" || method === "msg.send") {
-        return await handleMsgRpc(method, params as Record<string, unknown>);
-      }
-      if (method === "plugins.probe") {
-        return kernel.probePlugin((params as { id: string }).id);
-      }
-      // 区域截图：捕获与窗口都在壳层，内核完全不参与（不进模型工具面）
-      if (method === "capture.status") return captureHost.status();
-      if (method === "capture.start") return captureHost.start();
-      if (method === "capture.frame") return captureHost.frame();
-      if (method === "capture.commit") {
-        const p = params as { rect?: Partial<CaptureRect>; dataUrl?: string; action?: string } | undefined;
-        const r = p?.rect;
-        if (!r || ![r.x, r.y, r.width, r.height].every((n) => typeof n === "number" && Number.isFinite(n))) {
-          return { ok: false, error: "选区坐标无效" };
-        }
-        if (typeof p?.dataUrl !== "string" || !["attach", "copy", "save"].includes(p.action ?? "")) {
-          return { ok: false, error: "完成动作或图片数据无效" };
-        }
-        return captureHost.commit({ rect: r as CaptureRect, dataUrl: p.dataUrl, action: p.action as "attach" | "copy" | "save" });
-      }
-      if (method === "capture.cancel") return captureHost.cancel();
-      if (method === "capture.pending") return { shots: captureHost.takePending() };
-      // 改了截图快捷键要立刻重注册全局热键（设置页只跟内核打交道，热键归壳层）
-      if (method === "config.prefs") {
-        const r = kernel.handle("config.prefs", params);
-        const p = params as { captureHotkey?: string };
-        const out = r as { ok?: boolean; captureHotkey?: string };
-        if (p.captureHotkey !== undefined && out.ok && out.captureHotkey) {
-          const changed = captureHost.setHotkey(out.captureHotkey);
-          if (!changed.ok) console.warn(`[capture] ${changed.error ?? "改键没生效"}`);
-        }
-        return r;
-      }
-      // 自绘标题栏：窗口控制归壳（不经过内核）
-      if (method === "window.control") {
-        const p = params as { action: "minimize" | "maximize" | "close" | "query" };
-        if (!win || win.isDestroyed()) return { ok: true, maximized: false };
-        if (p.action === "minimize") {
-          win.minimize();
-        } else if (p.action === "maximize") {
-          if (win.isMaximized()) win.unmaximize();
-          else win.maximize();
-        } else if (p.action === "close") {
-          // 走 close 事件：尊重"关窗进托盘"设置（真退由托盘菜单触发）
-          win.close();
-        }
-        return { ok: true, maximized: win.isMaximized() };
-      }
-      if (method === "app.appearance") {
-        const p = params as { mode?: string; desk?: string };
-        if (typeof p.desk === "string") win?.setBackgroundColor(p.desk);
-        try {
-          fs.writeFileSync(
-            path.join(app.getPath("userData"), "appearance.json"),
-            JSON.stringify({ mode: p.mode, desk: p.desk }),
-            "utf-8",
-          );
-        } catch {
-          /* 写不了就下次再试 */
-        }
-        return { ok: true };
-      }
-      if (method === "evidence.open") {
-        const p = params as { taskId: string; ref: string };
-        const base = path.resolve(kernel.dataRoot, "tasks", p.taskId);
-        const target = path.resolve(base, p.ref);
-        // 目录外的交付物（只读根原件 / 超 10MB 未复制进 artifacts）只登记绝对路径：
-        // 认 task.json 里登记过的那几个，别的一律照旧拒绝。
-        if (!target.startsWith(base + path.sep)) {
-          const abs = path.isAbsolute(String(p.ref ?? ""));
-          if (!abs || !kernel.isTaskDeliverable(p.taskId, String(p.ref ?? ""))) {
-            return { ok: false, error: "证据路径越界，已拒绝" };
-          }
-        }
-        if (!fs.existsSync(target)) return { ok: false, error: "文件不存在（可能已被移动）" };
-        const err = await shell.openPath(target);
-        return err ? { ok: false, error: err } : { ok: true };
-      }
-      if (method === "preview.read") {
-        // 内置预览：只把内容交给渲染层，不调 shell.openPath，外部程序零启动开销。
-        // 路径守卫与 evidence.open 完全一致，前端拿不到工作区之外的字节。
-        const p = params as { taskId: string; ref: string };
-        const base = path.resolve(kernel.dataRoot, "tasks", p.taskId);
-        const target = path.resolve(base, String(p.ref ?? ""));
-        if (!target.startsWith(base + path.sep)) {
-          const abs = path.isAbsolute(String(p.ref ?? ""));
-          if (!abs || !kernel.isTaskDeliverable(p.taskId, String(p.ref ?? ""))) {
-            return { ok: false, kind: "missing", error: "预览路径越界，已拒绝" };
-          }
-        }
-        if (!fs.existsSync(target) || !fs.statSync(target).isFile()) {
-          return { ok: false, kind: "missing", error: "文件不存在（可能已被移动）" };
-        }
-        const ext = path.extname(target).slice(1).toLowerCase();
-        const bytes = fs.statSync(target).size;
-        const mime: Record<string, string> = {
-          png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif",
-          webp: "image/webp", bmp: "image/bmp", svg: "image/svg+xml", avif: "image/avif",
-        };
-        if (mime[ext]) {
-          if (bytes > 8 * 1024 * 1024) return { ok: true, kind: "binary", ext, bytes };
-          const buf = fs.readFileSync(target);
-          return { ok: true, kind: "image", dataUrl: `data:${mime[ext]};base64,${buf.toString("base64")}`, ext, bytes };
-        }
-        // PDF：沙箱 iframe 里开不了 Chromium 阅读器，返回标记由抽屉引导开独立预览窗口
-        if (ext === "pdf") return { ok: true, kind: "pdf", ext, bytes };
-        // Office 三件套（docx/xlsx/pptx）：渲染层用开源库保真渲染（docx-preview /
-        // @js-preview/excel / pptx-preview，懒加载），主进程只递字节。此前自研的
-        // docx→HTML 只能出"素颜正文"，图片样式全丢；正文提取仍走 docx-read（read_artifact）。
-        if (ext === "docx" || ext === "docm" || ext === "xlsx" || ext === "xlsm" || ext === "pptx") {
-          const OFFICE_LIMIT = 16 * 1024 * 1024;
-          if (bytes > OFFICE_LIMIT) {
-            return { ok: true, kind: "binary", ext, bytes, error: "文件超过 16MB，内置预览带不动，请用系统程序打开。" };
-          }
-          return { ok: true, kind: "office", ext, bytes, dataBase64: fs.readFileSync(target).toString("base64") };
-        }
-        const LIMIT = 600_000;
-        const fd = fs.openSync(target, "r");
-        const take = Math.min(bytes, LIMIT);
-        const buf = Buffer.alloc(take);
-        try {
-          fs.readSync(fd, buf, 0, take, 0);
-        } finally {
-          fs.closeSync(fd);
-        }
-        if (bytes === 0) return { ok: true, kind: "empty", ext, bytes };
-        // 二进制（xlsx/pptx/zip…）不做乱码文本预览，如实说清有什么替代路径
-        if (buf.includes(0)) {
-          const hint: Record<string, string> = {
-            xlsx: "Excel 文件暂无内置预览。可以让风铃用 office_read_table 把数据读出来，或转存成 CSV 再看。",
-            pptx: "演示文稿暂无内置预览，可用系统程序打开。",
-            doc: "旧版 .doc 不支持内置预览；让风铃转存成 .docx 就能直接看。",
-            zip: "压缩包不做解包预览，可用系统程序打开。",
-          };
-          return { ok: true, kind: "binary", ext, bytes, error: hint[ext] };
-        }
-        return { ok: true, kind: "text", text: buf.toString("utf8"), ext, bytes, truncated: bytes > LIMIT };
-      }
-      if (method === "preview.pdfWindow") {
-        // PDF 预览：应用内独立窗口，Chromium 自带阅读器（翻页/缩放/搜索都有）。
-        // 路径守卫与 preview.read 完全一致：只放行 tasks/<id>/ 内或已登记的交付物。
-        const p = params as { taskId: string; ref: string };
-        const base = path.resolve(kernel.dataRoot, "tasks", p.taskId);
-        const target = path.resolve(base, String(p.ref ?? ""));
-        if (!target.startsWith(base + path.sep)) {
-          const abs = path.isAbsolute(String(p.ref ?? ""));
-          if (!abs || !kernel.isTaskDeliverable(p.taskId, String(p.ref ?? ""))) {
-            return { ok: false, error: "预览路径越界，已拒绝" };
-          }
-        }
-        if (!fs.existsSync(target) || !fs.statSync(target).isFile()) return { ok: false, error: "文件不存在（可能已被移动）" };
-        if (!win || win.isDestroyed()) return { ok: false, error: "主窗口不在了" };
-        const pdfWin = new BrowserWindow({
-          width: 1080,
-          height: 860,
-          parent: win,
-          autoHideMenuBar: true,
-          title: `${path.basename(target)} · 预览`,
-          backgroundColor: "#26282d",
-        });
-        void pdfWin.loadFile(target);
-        return { ok: true };
-      }
-      if (method === "app.pickDirs") {
-        // 只读授权多选：一次选多个目录（整盘等敏感选择由内核再验）
-        const p = params as { title?: string } | undefined;
-        if (!win || win.isDestroyed()) return { canceled: true };
-        const r = await dialog.showOpenDialog(win, {
-          title: p?.title ?? "选择要授权只读访问的目录（可多选）",
-          properties: ["openDirectory", "multiSelections"],
-        });
-        return r.canceled || !r.filePaths.length ? { canceled: true } : { paths: r.filePaths };
-      }
-      if (method === "app.pickDir") {
-        // 只读授权的目录选择：原生对话框，用户亲手选，模型无法代为选择
-        const p = params as { title?: string } | undefined;
-        if (!win || win.isDestroyed()) return { canceled: true };
-        const r = await dialog.showOpenDialog(win, {
-          title: p?.title ?? "选择要授权只读访问的目录",
-          properties: ["openDirectory"],
-        });
-        return r.canceled || !r.filePaths[0] ? { canceled: true } : { path: r.filePaths[0] };
-      }
-      if (method === "app.restart") {
-        // 一键重启：改了代码 / 内核比界面旧时，用户不必自己去托盘翻「退出」
-        app.relaunch();
-        setTimeout(() => app.exit(0), 80);
-        return { ok: true };
-      }
-      if (method === "app.openPath") {
-        // 只允许打开数据根内的文件（导出包 / 工件），不当前端可调的任意文件执行器
-        const p = params as { path: string };
-        const base = path.resolve(kernel.dataRoot);
-        const target = path.resolve(String(p.path ?? ""));
-        if (!target.startsWith(base + path.sep)) return { ok: false, error: "只能打开风铃数据目录里的文件" };
-        if (!fs.existsSync(target)) return { ok: false, error: "文件不存在" };
-        const err = await shell.openPath(target);
-        return err ? { ok: false, error: err } : { ok: true };
-      }
-      if (method === "app.openData") {
-        const kind = (params as { kind: "data" | "logs" }).kind;
-        const target = kind === "logs" ? path.join(kernel.dataRoot, "logs") : kernel.dataRoot;
-        fs.mkdirSync(target, { recursive: true });
-        void shell.openPath(target);
-        return { ok: true, path: target };
-      }
-      // 端点发现/健康检查/本机网关探测要真发 HTTP，走异步方法，不塞进同步 handle
-      if (method === "model.discover") return kernel.modelDiscover(params as never);
-      if (method === "model.health") return kernel.modelHealth(params as never);
-      if (method === "gateway.list") return kernel.listGateways();
-      if (method === "app.openExternal") {
-        const p = params as { url: string };
-        try {
-          const u = new URL(String(p.url ?? ""));
-          if (u.protocol !== "https:" && u.protocol !== "http:") return { ok: false, error: "只允许打开 http/https 链接" };
-          await shell.openExternal(u.toString());
-          return { ok: true };
-        } catch (err) {
-          return { ok: false, error: err instanceof Error ? err.message : String(err) };
-        }
-      }
+      const handled = await handleShellRpc(method, params, shellCtx);
+      if (handled !== undefined) return handled;
+      if (isKernelAsyncMethod(method)) return handleKernelAsync(method, params, shellCtx);
       return kernel.handle(method as RpcMethod, params);
     } catch (err) {
       return { error: err instanceof Error ? err.message : String(err) };

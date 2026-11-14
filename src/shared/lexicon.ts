@@ -6,6 +6,7 @@
 //  · "轮"同时指回合上限、打回轮次，界面上并排出现会被读成同一个额度。
 
 import type { TaskStatus, TurnPhase } from "./contract";
+import type { I18nKey } from "./i18n-strings";
 
 // ---------- 工单状态（七态，规范 §6.1） ----------
 
@@ -19,8 +20,8 @@ export const STATUS_LABEL: Record<TaskStatus, string> = {
   canceled: "已取消",
 };
 
-/** i18n key（渲染层用 t() 取词；STATUS_LABEL 是中文兜底） */
-export const STATUS_KEY: Record<TaskStatus, string> = {
+/** i18n key（渲染层用 t() 取词；STATUS_LABEL 是中文兜底）。标 I18nKey：拼错 t() 直接编译报错 */
+export const STATUS_KEY: Record<TaskStatus, I18nKey> = {
   backlog: "status.backlog",
   todo: "status.todo",
   in_progress: "status.in_progress",

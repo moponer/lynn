@@ -28,23 +28,53 @@ export interface UsageLine {
   cacheWrite?: number;
 }
 
+const USAGE_FILE = "usage.jsonl";
+const USAGE_ROTATED = "usage.1.jsonl";
+/** 记账文件轮转阈值（2026-11-14）：cleanup 只清 *.log，这个 .jsonl 过去只增不减 */
+const USAGE_MAX_BYTES = 5 * 1024 * 1024;
+
 /** 按次记账：append 一行（损坏不炸，只是这条没记上——如实容忍） */
-export function appendUsage(dataRoot: string, line: UsageLine): void {
+export function appendUsage(dataRoot: string, line: UsageLine, maxBytes = USAGE_MAX_BYTES): void {
   try {
-    fs.mkdirSync(path.join(dataRoot, "logs"), { recursive: true });
-    fs.appendFileSync(path.join(dataRoot, "logs", "usage.jsonl"), JSON.stringify(line) + "\n", "utf-8");
+    const dir = path.join(dataRoot, "logs");
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, USAGE_FILE);
+    // 轮转：只保留一份历史（读侧只取最后 N 行，"最近用量"不受影响）
+    try {
+      if (fs.statSync(file).size > maxBytes) fs.renameSync(file, path.join(dir, USAGE_ROTATED));
+    } catch {
+      /* 首次没有文件 */
+    }
+    fs.appendFileSync(file, JSON.stringify(line) + "\n", "utf-8");
   } catch {
     /* 磁盘问题不阻塞对话 */
   }
 }
 
 export function readUsage(dataRoot: string, lastN = 50): UsageLine[] {
-  try {
-    const lines = fs.readFileSync(path.join(dataRoot, "logs", "usage.jsonl"), "utf-8").split("\n").filter((x) => x.trim());
-    return lines.slice(-lastN).map((l) => JSON.parse(l) as UsageLine);
-  } catch {
-    return [];
+  // lastN<=0 要返回空：`slice(-0)` 等于 `slice(0)`，会返回**全部**（边界探测抓到的）
+  const n = Math.max(0, Math.trunc(lastN) || 0);
+  if (n === 0) return [];
+  const dir = path.join(dataRoot, "logs");
+  const readLines = (name: string): string[] => {
+    try {
+      return fs.readFileSync(path.join(dir, name), "utf-8").split("\n").filter((x) => x.trim());
+    } catch {
+      return [];
+    }
+  };
+  const main = readLines(USAGE_FILE);
+  // 主文件不够 N 行时补上轮转文件的历史（刚轮转过的那一小段不该丢）
+  const lines = main.length >= n ? main : [...readLines(USAGE_ROTATED), ...main];
+  const out: UsageLine[] = [];
+  for (const l of lines.slice(-n)) {
+    try {
+      out.push(JSON.parse(l) as UsageLine);
+    } catch {
+      /* 坏行跳过，不整段失败 */
+    }
   }
+  return out;
 }
 
 /** 降级决策：软超限 + 有备用模型才切；没有备用模型如实返回原因（不静默停机也不假装切换） */

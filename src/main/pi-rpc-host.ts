@@ -34,6 +34,11 @@ export interface PiModelConfig {
   apiKey: string;
   model: string;
   provider?: string;
+  /**
+   * 真实上下文窗口（2026-11-13 缓存审计）：Pi 按它决定压缩时机与上下文占比读数。
+   * 缺省 128000——对百万窗口模型会提前压缩（一次压缩 = 前缀缓存全废 + 全价重读）。
+   */
+  contextWindow?: number;
 }
 
 export interface PiRpcHostOptions {
@@ -79,7 +84,7 @@ export function modelsJsonFor(cfg: PiModelConfig): string {
             reasoning: false,
             input: ["text"],
             cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-            contextWindow: 128000,
+            contextWindow: cfg.contextWindow ?? 128000,
             maxTokens: 8192,
           },
         ],

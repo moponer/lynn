@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
-import type { KernelEvent, RpcContracts, RpcMethod } from "../shared/contract";
+import type { KernelEvent, RpcContracts, RpcMethod, VoicePlayEvent } from "../shared/contract";
 
 /**
  * preload：把类型化 RPC 客户端与事件订阅挂到 window.lynn。
@@ -19,6 +19,11 @@ contextBridge.exposeInMainWorld("lynn", {
     const listener = (_e: unknown, ev: KernelEvent) => cb(ev);
     ipcRenderer.on("lynn:event", listener);
     return () => ipcRenderer.removeListener("lynn:event", listener);
+  },
+  onVoice: (cb: (ev: VoicePlayEvent) => void) => {
+    const listener = (_e: unknown, ev: VoicePlayEvent) => cb(ev);
+    ipcRenderer.on("lynn:voice", listener);
+    return () => ipcRenderer.removeListener("lynn:voice", listener);
   },
   // 渲染层异常上报：只写日志，不暴露任何能力
   logError: (payload: { kind: string; message: string; stack?: string; source?: string }) => {

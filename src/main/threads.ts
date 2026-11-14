@@ -20,6 +20,11 @@ export interface ThreadMeta {
    * 新代码请用 roots。
    */
   projectRoot?: string;
+  /**
+   * 项目身份（2026-11-12）：这个群在做哪个项目。
+   * 项目是跨群的一等实体（同一个目录 = 同一个项目），改名跟着项目走。
+   */
+  projectId?: string;
   /** 这个对话单独指定的模型；不设 = 跟随全局默认模型 */
   modelId?: string;
   /**
@@ -119,12 +124,27 @@ export class ThreadStore {
     return t;
   }
 
-  /** 兼容旧入口：改主根（附加根保留） */
+  /**
+   * 旧入口：改主根（**不是**项目身份——项目身份走 setProjectId）。
+   * 附加根保留；改了主根的群要自己重新绑定项目（内核在切根时做）。
+   */
   setProject(id: string, projectRoot: string): ThreadMeta {
     const t = this.get(id);
     if (!t) throw new Error(`会话不存在：${id}`);
     const base = normalizeRoots(t.roots) ?? { extras: [] };
     return this.setRoots(id, { ...base, primary: path.resolve(projectRoot) });
+  }
+
+  /** 绑定项目身份（传 null = 解绑：这次不用项目） */
+  setProjectId(id: string, projectId: string | null): ThreadMeta {
+    const threads = this.list();
+    const t = threads.find((x) => x.id === id);
+    if (!t) throw new Error(`会话不存在：${id}`);
+    if (projectId) t.projectId = projectId;
+    else delete t.projectId;
+    t.updatedAt = new Date().toISOString();
+    this.writeIndex(threads);
+    return t;
   }
 
   /** 给这个对话单独指定模型；传 null = 跟随全局默认 */

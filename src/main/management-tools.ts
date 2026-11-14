@@ -81,6 +81,9 @@ export const MANAGEMENT_ONLY_TOOLS = [
   "stop_task",
   // 主动工作闭环：沉淀记忆（M2-05 记忆进系统提示词）、自开插件草稿（M3-07 工坊）
   "save_memory",
+  // 2026-11-13：记忆要能"删一条"（此前只能追加与整版回滚，作废事实只能越滚越绕）
+  "read_memory",
+  "forget_memory",
   "create_plugin_draft",
 ] as const;
 
@@ -215,7 +218,21 @@ export class ManagementTools {
     this.audit("assign_task", { teamId, taskId: brief.taskId, member: brief.member });
   }
 
-  /** 3. check_progress —— 她的上下文只保留状态与最新回报索引，不读成员全量日志（§4.10.6） */
+  /**
+   * 3. check_progress —— 她的上下文只保留状态与最新回报索引，不读成员全量日志（§4.10.6）。
+   * 2026-11-13 缓存分析：latest.text 是完整简报 JSON / 回报正文，无上限——她轮询频繁
+   * （实机一张单查过 246 次）+ 心跳每 5 分钟一轮，全文反复进上下文是稳态膨胀的主源之一。
+   * 对齐 Codex/ZCode 的工具结果预算：超过 400 字截头 + 截断声明（原文多少字）+ 指路卷宗，
+   * 细读走 read_artifact / 卷宗，不在轮询里反复付全文的钱。
+   */
+  static readonly PROGRESS_TEXT_CAP = 400;
+  static capProgressText(text: string): string {
+    if (text.length <= ManagementTools.PROGRESS_TEXT_CAP) return text;
+    return (
+      text.slice(0, ManagementTools.PROGRESS_TEXT_CAP) +
+      `\n[已截断：原文 ${text.length} 字，全文在任务卷宗里；要细读就用 read_artifact 读产物或看卷宗 timeline，别靠反复 check_progress 拿全文]`
+    );
+  }
   checkProgress(teamId: string, taskId: string): {
     assigns: number;
     reports: number;
@@ -228,7 +245,9 @@ export class ManagementTools {
       assigns: recs.filter((r) => r.kind === "assign").length,
       reports: recs.filter((r) => r.kind === "report").length,
       rejects: recs.filter((r) => r.kind === "reject").length,
-      latest: latest ? { at: latest.at, kind: latest.kind, member: latest.member, text: latest.text } : null,
+      latest: latest
+        ? { at: latest.at, kind: latest.kind, member: latest.member, text: ManagementTools.capProgressText(latest.text) }
+        : null,
     };
   }
 

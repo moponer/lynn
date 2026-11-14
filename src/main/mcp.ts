@@ -29,6 +29,23 @@ const DEFAULT_TIMEOUT = 15_000;
 
 const sanitize = (s: string) => s.replace(/[^a-zA-Z0-9_]/g, "_");
 
+/**
+ * 子进程环境白名单（2026-11-13 审计 #7）：此前全量继承主进程 env——Electron 主进程
+ * 环境里可能有代理、令牌类变量，MCP server 一启动就全部拿走。现在只给工具链
+ * 跑起来必需的几个键（PATH/PATHEXT/SYSTEMROOT/COMSPEC/TEMP/TMP），其余一律
+ * 用显式声明的 cfg.env 覆盖/补充；没声明的拿不到。
+ */
+const CHILD_ENV_KEYS = ["PATH", "PATHEXT", "SYSTEMROOT", "COMSPEC", "TEMP", "TMP"] as const;
+
+export function mcpChildEnv(cfgEnv: Record<string, string> | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const k of CHILD_ENV_KEYS) {
+    const v = process.env[k];
+    if (v !== undefined) out[k] = v;
+  }
+  return { ...out, ...(cfgEnv ?? {}) };
+}
+
 export function mcpToolName(serverId: string, toolName: string): string {
   return `mcp__${sanitize(serverId)}__${sanitize(toolName)}`;
 }
@@ -87,9 +104,11 @@ export class McpClient {
   private toolDefs: McpToolDef[] = [];
   private stderr = "";
   private readonly cfg: McpServerConfig;
+  private readonly cwd?: string;
 
-  constructor(cfg: McpServerConfig) {
+  constructor(cfg: McpServerConfig, opts?: { cwd?: string }) {
     this.cfg = cfg;
+    this.cwd = opts?.cwd;
   }
 
   get id(): string {
@@ -103,8 +122,10 @@ export class McpClient {
   async start(): Promise<McpToolDef[]> {
     if (this.child) return this.toolDefs;
     const child = spawn(this.cfg.command, this.cfg.args ?? [], {
-      cwd: process.cwd(),
-      env: { ...process.env, ...(this.cfg.env ?? {}) },
+      // cwd 钉到数据根（审计 #7）：GUI 下 process.cwd() 是安装目录或 C:\，
+      // MCP server 相对读写会落到意想不到的地方；显式声明 cwd 的配置仍优先。
+      cwd: this.cwd ?? process.cwd(),
+      env: mcpChildEnv(this.cfg.env),
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
     }) as ChildProcessWithoutNullStreams;
@@ -247,6 +268,12 @@ export class McpRegistry {
   private errors: { id: string; message: string }[] = [];
   /** 懒加载 server：冷启动不连，命中意图才拉起 */
   private lazyCfgs = new Map<string, McpServerConfig>();
+  /** 子进程 cwd 钉扎（审计 #7）：内核传入数据根；不传保持旧行为 */
+  private readonly cwd?: string;
+
+  constructor(opts?: { cwd?: string }) {
+    this.cwd = opts?.cwd;
+  }
 
   async startAll(servers: McpServerConfig[]): Promise<void> {
     // 每次重载重新记账：上一次的失败不该赖在这张表上
@@ -257,7 +284,7 @@ export class McpRegistry {
         this.lazyCfgs.set(cfg.id, cfg);
         continue;
       }
-      const client = new McpClient(cfg);
+      const client = new McpClient(cfg, { cwd: this.cwd });
       try {
         const tools = await client.start();
         this.clients.set(cfg.id, client);
@@ -317,7 +344,7 @@ export class McpRegistry {
       const ids = [...this.lazyCfgs.keys()].sort().join("、") || "无";
       throw new Error(`没有这个按需加载的 server：${serverId}（待命清单：${ids}）`);
     }
-    const client = new McpClient(cfg);
+    const client = new McpClient(cfg, { cwd: this.cwd });
     try {
       const tools = await client.start();
       this.clients.set(cfg.id, client);

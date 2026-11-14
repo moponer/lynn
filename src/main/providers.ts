@@ -59,6 +59,21 @@ export const PRESETS: ProviderPreset[] = [
   },
 ];
 
+/**
+ * 按厂商名/ID 查预设上下文窗口（2026-11-13 缓存审计）：
+ * Pi 的压缩触发时机完全取决于注册给它的 contextWindow——此前硬编码 128000，
+ * 对 MiniMax 这类百万窗口的模型意味着**提前压缩**（每次压缩 = 整段前缀缓存作废 +
+ * 全价重读，实测一次 41 万 token）。未知厂商如实返回 null（调用方用安全默认值）。
+ */
+export function presetContextWindow(provider: string | undefined): number | null {
+  const key = (provider ?? "").trim().toLowerCase();
+  if (!key) return null;
+  for (const p of PRESETS) {
+    if (p.id.toLowerCase() === key || p.name.toLowerCase().includes(key)) return p.contextWindow;
+  }
+  return null;
+}
+
 // ---------- models.yaml（手写 YAML 子集：providers 列表的扁平键值） ----------
 
 export interface ProviderEntry {

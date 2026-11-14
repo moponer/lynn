@@ -5,6 +5,33 @@
 
 export { endpointRiskLevel } from "../shared/endpoint-risk";
 export type { EndpointRisk } from "../shared/endpoint-risk";
+import { endpointRiskLevel } from "../shared/endpoint-risk";
+
+/**
+ * 端点错误响应体脱敏（2026-11-13 审计 #16）：非 2xx 响应体原文会进错误消息 → feed 卡、
+ * agent.log、系统通知。部分网关的 4xx 会回显请求内容（含 Authorization 头或 key 片段）。
+ * 截断只是限长不是脱敏——这里把已知形状的凭据一律打码。
+ */
+export function redactSecrets(text: string): string {
+  return text
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]{6,}/gi, "Bearer ***")
+    .replace(/\bsk-[A-Za-z0-9_-]{8,}/g, "sk-***")
+    .replace(/\b([A-Za-z0-9_-]*(?:api[_-]?key|apikey|token|secret|password)[A-Za-z0-9_-]*)["']?\s*[:=]\s*["']?[^\s"',;}\]]{6,}/gi, "$1=***");
+}
+
+/**
+ * 携带 API Key 的出站探测统一风险闸（2026-11-13 审计 #6）：
+ * 本机/局域网/非 HTTPS 端点必须显式 riskAccepted，否则返回结构化拒绝文案。
+ * 此前只有 kernel.modelDiscover 有这道闸，壳层 providers.discover 分支没走
+ * ——两条路径两套标准，明文 HTTP 端点也能拿到用户 Key。现在都走这一个函数。
+ */
+export function endpointRiskError(baseUrl: string, riskAccepted?: boolean, action = "继续"): string | null {
+  const risk = endpointRiskLevel(baseUrl);
+  if (risk === "remote" || riskAccepted === true) return null;
+  return risk === "local"
+    ? `这是本机/局域网网关：探测会把 Key 发给该端点，且可能复用第三方免费额度。请勾选风险确认后再${action}。`
+    : `这个端点不是 HTTPS：探测会把 Key 明文发出去。请勾选风险确认后再${action}。`;
+}
 
 export interface DiscoveredModel {
   id: string;
@@ -46,7 +73,7 @@ export async function discoverModels(
       });
       const text = await res.text().catch(() => "");
       if (!res.ok) {
-        lastError = `HTTP ${res.status}${text ? `：${text.slice(0, 180)}` : ""}`;
+        lastError = `HTTP ${res.status}${text ? `：${redactSecrets(text).slice(0, 180)}` : ""}`;
         continue;
       }
       let parsed: unknown;

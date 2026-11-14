@@ -3,6 +3,7 @@
  * 只依赖全局 fetch（Node ≥ 18）；解析 SSE 的 chat.completion.chunk。
  * 内核外不存在第二个 HTTP 出口（§4.7 出站白名单）。
  */
+import { redactSecrets } from "./endpoint";
 
 export interface ChatMessage {
   role: "system" | "user" | "assistant" | "tool";
@@ -128,8 +129,9 @@ export async function streamChat(input: StreamChatInput): Promise<StreamChatResu
 
     if (!res.ok || !res.body) {
       const text = await res.text().catch(() => "");
+      // 先脱敏再截断（审计 #16）：部分网关的 4xx 会回显 Authorization/key 片段
       throw new LlmError(
-        `模型请求失败 HTTP ${res.status}${text ? `：${text.slice(0, 300)}` : ""}`,
+        `模型请求失败 HTTP ${res.status}${text ? `：${redactSecrets(text).slice(0, 300)}` : ""}`,
         res.status,
         res.headers.get("retry-after"),
       );
@@ -291,7 +293,7 @@ export async function probeEndpoint(cfg: {
     });
     if (!res.ok) {
       const text = await res.text().catch(() => "");
-      return { ok: false, error: `HTTP ${res.status}${text ? `：${text.slice(0, 200)}` : ""}` };
+      return { ok: false, error: `HTTP ${res.status}${text ? `：${redactSecrets(text).slice(0, 200)}` : ""}` };
     }
     await res.json();
     return { ok: true, latencyMs: Date.now() - started };

@@ -104,6 +104,12 @@ export interface TaskRecord {
   workspaceRoot?: string;
   /** 任务工作区的新形态（2026-11-10）；缺省时由 workspaceRoot 推导（老单） */
   workspace?: TaskWorkspaceRecord;
+  /**
+   * 派单时所在的项目名（2026-11-12，冻结快照）。
+   * 契约卡上写「项目 · 名字」——用户翻旧单也知道这单当初动的是哪个项目，
+   * 即使那个项目后来改名或这个群被删了。
+   */
+  projectName?: string;
   /** 验收固化的交付物清单（与证据分开；交付物永久保留） */
   deliverables?: DeliverableRef[];
   /**
@@ -311,6 +317,8 @@ export class TaskStore {
     priority?: string;
     /** 任务型态 */
     mode?: "execute" | "explore";
+    /** 派单时所在的项目名（冻结快照，2026-11-12） */
+    projectName?: string;
   }): TaskRecord {
     if (this.get(input.id)) throw new TaskRuleError(`工单已存在: ${input.id}`);
     if (input.parentId) {
@@ -343,6 +351,7 @@ export class TaskStore {
       ...(input.forbidden?.length ? { forbidden: input.forbidden } : {}),
       ...(input.priority ? { priority: input.priority } : {}),
       ...(input.mode ? { mode: input.mode } : {}),
+      ...(input.projectName ? { projectName: input.projectName } : {}),
     };
     this.write(rec);
     return rec;
@@ -546,12 +555,18 @@ export class TaskStore {
     member?: string;
     threadId?: string;
     workspaceRoot?: string;
+    /** 派单时所在的项目名（冻结快照） */
+    projectName?: string;
   }): TaskRecord {
     const existing = this.get(input.id);
     if (existing) {
       // 老工单补上会话归属（派单时没记过的，下一次开工补记）
       if (input.threadId && !existing.threadId) {
         existing.threadId = input.threadId;
+        this.commit(existing);
+      }
+      if (input.projectName && !existing.projectName) {
+        existing.projectName = input.projectName;
         this.commit(existing);
       }
       if (existing.status === "backlog" || existing.status === "todo") {
