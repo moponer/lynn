@@ -141,6 +141,23 @@ MiniMax 上结论明确：旧方案改一次公告，缓存命中从 451 掉到 
 
 附带验证：`source="pi"` 的 `usage.jsonl` 行确实落盘（新埋点在真实路径生效）；`cacheBreakReason=cold_start` 只标在 r1 —— 首轮没命中时，原判定会把第 2 轮（已 96%）也误标成冷启动，已改为按「会话输入累计是否为 0」判定。
 
+**6. 真 UI 业务闭环冒烟（`npm run probe:ui`）**
+
+以上探针都绕开了渲染层。补一个真窗口验证：`scripts/live-ui-smoke.cjs` 直接 require `dist/main/main.js`（真主进程 + 真 preload/IPC + 真 Kernel + 真 PiRpcHost），在真实 `.composer-in` 输入框填字、点真实 `button.send`，完整走 `ipcMain → kernel.handle("feed.send") → Pi → 模型 → 卡片`。临时 `LYNN_HOME` + 临时 userData（复制 Local State），既隔离用户数据根，也按 userData 绕开单实例锁，不和用户正开着的 lynn 抢资源。
+
+两轮实测：
+
+| 轮 | usage 行（新埋点） | 顶栏缓存徽章 | 卡片 | 耗时 |
+|---|---|---|---|---|
+| r1 | `source=pi, in=5296, out=3, cacheRead=189, breakReason=cold_start` | 缓存 4% | 用户消息 + 风铃「OK」 | 6.8s |
+| r2 | `source=pi, in=5321, out=3, cacheRead=5296, breakReason=null` | 缓存 52% | 同上 | 1.6s |
+
+第 2 轮 `cacheRead` 从 189 跳到 5296、徽章 4% → 52%，输入框两轮都正常清空、回复卡都出现，说明前缀缓存**在真界面上真的复用了**；`source="pi"` 与 `cold_start` 只出现在首轮，也证明埋点在 UI 路径上生效。截图 `shots/live-ui-smoke.png`、读数 `shots/live-ui-smoke.json`。
+
+环境噪声：全局热键 `Alt+Shift+L` / `Alt+Shift+S` 注册失败（用户正开着 lynn，快捷键被占用），托盘仍可用，不影响本冒烟。
+
+**仍未走**：派单 → 成员执行 → 回报 → 验收的完整工单闭环（临时数据根没有团队配置，右栏是「我的团队 0 人」）。要验这条得复制真实团队配置并让风铃真派单，会产生成员跑单 + 顾问的额外 token。
+
 ## 五、口径建议
 
 - 定义：**token 缓存命中率 = cacheRead / (sessionIn + cacheRead + cacheWrite)**。
