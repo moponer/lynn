@@ -54,6 +54,14 @@ npm run build:renderer  # vite 产物
 
 实测结论见 [`docs/token-cache-audit-lynn.md`](./docs/token-cache-audit-lynn.md)：Pi 路径下改群公告命中率维持 94.7–98.1%，改 system 内容掉到 0–3.4%。
 
+## 打包
+
+```bash
+npm run dist   # electron-builder --win → release/Lynn-0.0.1-setup.exe（NSIS）
+```
+
+本机两个注意点：electron-builder 会先清空旧的 `win-unpacked`，文件数超过本机 safe-delete 阈值时要输出到**全新目录**；GitHub release 下载不稳定时可用 `electronDist: node_modules/electron/dist` 直接复制本地 Electron。安装包目前**未做代码签名**。
+
 ## 结构（2026-11-15）
 
 ```
