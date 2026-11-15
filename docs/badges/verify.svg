@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="111" height="20" role="img" aria-label="verify: passing">
+  <title>verify: passing</title>
+  <clipPath id="r"><rect width="111" height="20" rx="3" fill="#fff"/></clipPath>
+  <g clip-path="url(#r)">
+    <rect width="52" height="20" fill="#0a0d0f"/>
+    <rect x="52" width="59" height="20" fill="#2f9e5f"/>
+  </g>
+  <g text-anchor="middle" font-family="Verdana,DejaVu Sans,sans-serif" font-size="11">
+    <text x="26" y="15" fill="#8b9aa3">verify</text>
+    <text x="81.5" y="15" fill="#ffffff">passing</text>
+  </g>
+</svg>

@@ -1,13 +1,10 @@
-<p>
-  <img src="./assets/icon.png" width="88" alt="Lynn">
-</p>
+<div align="center">
+<h1>风铃 Lynn</h1>
+<p><strong>每个人都该有一只自己的风铃</strong><br><em>A Lynn of your own.</em></p>
+<p><img src="./docs/badges/verify.svg" alt="verify: passing"> <img src="./docs/badges/tests.svg" alt="tests: 700+"> <img src="./docs/badges/license.svg" alt="license: MIT"> <img src="./docs/badges/stack.svg" alt="stack: Electron + TS"> <img src="./docs/badges/platform.svg" alt="platform: Windows"></p>
+</div>
 
-# 风铃 Lynn
-
-**每个人都该有一只自己的风铃。** *A Lynn of your own.*
-
-本地优先的桌面 AI **指挥助理**：她不亲自干活，而是组队、派单、盯进度、核对证据、向你汇报。
-Electron + TypeScript，Windows 优先；数据全部留在本机 `~/.lynn/`。
+本地优先的桌面 AI **指挥助理**：她不亲自干活，而是组队、派单、盯进度、核对证据、向你汇报。Electron + TypeScript，Windows 优先；数据全部留在本机 `~/.lynn/`。
 
 ![值台主界面](./docs/screenshots/desk.png)
 
@@ -80,6 +77,8 @@ Electron + TypeScript，Windows 优先；数据全部留在本机 `~/.lynn/`。
 |---|---|
 | 计划 `plan` / 询问 `ask` | 必须点「开始」才开工 |
 | 自动 `auto` / 全权 `full` | 只读授权直接生效，契约卡只作告知 |
+
+![审批卡：这类以后都允许](./docs/screenshots/approval.png)
 
 ## 基于 Pi agent 开发
 
@@ -184,27 +183,6 @@ tests/                     # 700+ 条 node --test（含整链路模拟任务）
 ```
 
 拆分划线原则：**按数据面 / 编排面拆，不按方法数量拆**。`task.*` 依赖 22 个成员（含可变状态集合），留在 kernel 里只做薄转发，避免状态所有权分裂。
-
-## 图标与启动页
-
-`build/icon.ico` 是含 **16 / 24 / 32 / 48 / 64 / 128 / 256 七帧**的真位图图标（不是 SVG）。字母是**几何构造**出来的，不是排版字体：
-
-- 所有外凸角统一 45° 切角，字母撑到版面边缘；内凹角不切，保住 L 的结构
-- 只用两个 token：底 `--desk #0a0d0f`、形 `--ink #e6ebee`，**零功能色**（黄铜是预算语义、青瓷是结构语义，都不当品牌主色）
-- ≤64px 单独一版：切角比例放大到 10%、笔画加粗、留白收窄，16px 才认得出
-- 托盘 `assets/tray.png`、`tray-icon.ts` 的 base64 兜底、窗口/安装包、顶栏标记（`clip-path` 用同一组坐标）、`public/favicon.ico` **全部同源**（一次定义、四处复用）
-
-![启动页](./docs/screenshots/boot.png)
-
-启动页 `BootScreen.tsx` 按 C 方案：字距 28px→0 收拢 680ms，底部 2px 进度线由 `session.snapshot` **真实就绪**驱动（0→90% 后停住等，就绪才补满并淡出交接）。画面固定夜航底色，不随亮/暗主题变；遵守 `prefers-reduced-motion`。走查时用 `?boot=1` 让启动页常驻：
-
-```bash
-npm run build:renderer && npx electron scripts/shot-boot.cjs
-```
-
-重做图标：`python scripts/make-icon.py`（Pillow + fontTools/brotli）。
-
-![审批卡：这类以后都允许](./docs/screenshots/approval.png)
 
 ## 这一轮加固了什么
 
