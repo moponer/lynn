@@ -29,13 +29,7 @@ src-tauri/resources/dsh-engine/
 # 临时试验文件
 /tmp/
 
-# 桌宠素材：仓库只保留运行时真正加载的两样——
-#   poses/alpha/*.png（57 张三视图）+ anim-walk.webp / anim-blink.webp
-# 顶层 pose-*-base*.png / turnaround-*.png 是重新生成姿态时的锚点，保留。
-/assets/pet-dafeiyu/_gen/
-/assets/pet-dafeiyu/_diag/
-/assets/pet-dafeiyu/_rejected/
-/assets/pet-dafeiyu/_old-long-hair/
-/assets/pet-dafeiyu/poses/final/
-/assets/pet-dafeiyu/poses/export@1x/
-/assets/pet-dafeiyu/poses/export@2x/
+# 桌宠素材（整个目录都不入库）
+# 57 张 300–500KB 的姿态 PNG 重画一次就 20MB，历史里曾占 57MB/189 个版本。
+# 规格与重画口径见 docs/pet-assets.md；本机打包不受影响（electron-builder 读本地目录）。
+/assets/pet-dafeiyu/

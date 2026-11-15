@@ -33,6 +33,8 @@ npm start       # electron .
 
 首次启动点右上角 ⚙ 填 **Base URL / API Key / 模型**，可先「测试连接」再保存。
 
+> **桌宠素材不入库**：`assets/pet-dafeiyu/` 是 20 MB 的 57 张姿态图（重画一次就翻倍），已 `.gitignore`。克隆后 `npm run build` 会在 `@pet/poses/alpha/*.png` 上报错——把素材目录放回原位，或按 [`docs/pet-assets.md`](./docs/pet-assets.md) 的规格与 prompt 约束重画。本机打包不受影响。
+>
 > 想直接看界面而不接模型：`npm run build:renderer && npm run shot -- shots/desk.png`（走查用假桥数据）。
 
 ## 验证链
