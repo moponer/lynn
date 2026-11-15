@@ -1,8 +1,10 @@
 # 桌宠素材规格（人形少女 · A 版短发定稿 v3）
 
-> **这些素材不进仓库。** 57 张姿态 PNG 单张 300–500 KB、重画一次就 20 MB，塞进 git 会让历史迅速膨胀（实测占过 57 MB / 189 个版本）。仓库只留这份规格文档，图本身放在本地素材目录（默认 `assets/pet-dafeiyu/`，已 `.gitignore`）。
+> **桌宠功能暂时停用（2026-11-15）。** 57 张姿态 PNG 单张 300–500 KB、重画一次就 20 MB，塞进 git 会让历史迅速膨胀（实测占过 57 MB / 189 个版本）。
 >
-> 影响：新克隆的仓库**没有这些图**，`npm run build` 会在 `@pet/poses/alpha/*.png` 上失败（`src/renderer/desk/pet-assets.ts` 静态 import 它们）。要么从素材归档拷回 `assets/pet-dafeiyu/`，要么自己按下面的规格重画。
+> **现状**：素材已移出仓库与打包（归档在 `F:\spiker\lynn-archive\2026-11-15-cleanup\pet-dafeiyu-full\`）；`src/renderer/desk/pet-assets.ts` 不再 import 图片、所有映射导出空串；`App.tsx` 的 `?pet=1` 分支返回空；设置页「形象」块与预览、气泡文案均已注释。构建**不再依赖素材**（`dist/renderer` 里 0 张图片）。
+>
+> **恢复三步**：① 把素材放回 `assets/pet-dafeiyu/`；② 用 git 历史里 `pet-assets.ts` 停用前的版本覆盖回来（那里有完整 59 行静态 import）；③ 取消 `App.tsx` 与 `SettingsModal.tsx` 里对应的注释。
 
 ## 目录与文件
 

@@ -15,6 +15,8 @@ files:
   - dist/**/*
   - agent/**/*
   - assets/**/*
+  # 桌宠暂时停用（2026-11-15）：素材已移出仓库，即使本地归档被放回原位也不打进安装包
+  - "!assets/pet-dafeiyu/**"
   # 官方 RPC 入口与扩展运行时依赖：显式带上，避免依赖自动收集漏掉 bundle/chunks
   - node_modules/@earendil-works/**/*
   - node_modules/typebox/**/*

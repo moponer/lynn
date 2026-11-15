@@ -19,7 +19,9 @@ import { applyPluginStyle, applyPluginTokens, applyTheme, loadTheme, normalizeTh
 import type { LynnPack } from "./desk/lynnpack";
 import { Wizard, type WizardResult } from "./desk/Wizard";
 import { Standby } from "./desk/Standby";
-import { Pet } from "./desk/Pet";
+// 桌宠暂时停用（2026-11-15）：素材 20 MB 不入库，渲染一并关掉。
+// 恢复：取消本行注释 + 下方 ?pet=1 分支里的 <Pet /> 注释。
+// import { Pet } from "./desk/Pet";
 import { BootScreen } from "./boot/BootScreen";
 import { ambientForTheme, type AmbientMode } from "../shared/ambient";
 import { ZH_STRINGS } from "../shared/i18n-strings";
@@ -867,7 +869,9 @@ export default function App() {
     [onSend, refresh, snap?.feed],
   );
 
-  if (isPet) return <Pet />;
+  // 桌宠暂时停用（2026-11-15）：?pet=1 不再渲染，返回空（旧链接不会白屏报错）。
+  // 恢复：改回 if (isPet) return <Pet />; 并取消顶部 Pet 的 import 注释。
+  if (isPet) return null;
 
   // ?boot=1 是走查夹具：让启动页常驻（进度停在 90% 等真实快照），方便截图检查版式与动效
   const bootPreview = typeof location !== "undefined" && new URLSearchParams(location.search).get("boot") === "1";

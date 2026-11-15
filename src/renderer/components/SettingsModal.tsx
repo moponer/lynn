@@ -5,7 +5,8 @@ import { THEMES, type ThemeId, type ThemeMode } from "../desk/theme";
 import { fmtTime } from "../desk/model";
 import { buildPack, checkPack, describePack, downloadPack, type LynnPack } from "../desk/lynnpack";
 import { useUiPlugins } from "../desk/ui-host";
-import { AvatarStage } from "../desk/AvatarStage";
+// 桌宠/形象暂时停用（2026-11-15）：预览组件不再挂载。
+// import { AvatarStage } from "../desk/AvatarStage";
 import { endpointRiskLevel } from "../../shared/endpoint-risk";
 import type { AvatarState } from "../../shared/avatar";
 import { AMBIENT_MODE_LABEL, type AmbientMode } from "../../shared/ambient";
@@ -17,15 +18,16 @@ import { useT } from "../i18n";
 import type { I18nKey } from "../../shared/i18n-strings";
 import { Icon, type IconName } from "./Icon";
 
-const BUBBLE: Record<AvatarState, string> = {
-  idle: "我在。今天想先做哪件？",
-  thinking: "先看看这个表有几行…",
-  running: "成员在跑，我盯着证据。",
-  success: "这单可以收，等你盖章。",
-  failed: "这次没过，我把原因写清楚了。",
-  waiting_confirm: "这里要你拍板，我不敢替你定。",
-  standby: "待机中，随时叫我。",
-};
+// 桌宠/形象暂时停用（2026-11-15）：气泡文案随预览一起注释。
+// const BUBBLE: Record<AvatarState, string> = {
+//   idle: "我在。今天想先做哪件？",
+//   thinking: "先看看这个表有几行…",
+//   running: "成员在跑，我盯着证据。",
+//   success: "这单可以收，等你盖章。",
+//   failed: "这次没过，我把原因写清楚了。",
+//   waiting_confirm: "这里要你拍板，我不敢替你定。",
+//   standby: "待机中，随时叫我。",
+// };
 
 const PRESETS = [
   { name: "DeepSeek", baseUrl: "https://api.deepseek.com/v1", model: "deepseek-chat" },
@@ -205,7 +207,8 @@ export function SettingsModal({
   const [gateways, setGateways] = useState<GatewayView[]>([]);
   const [gwBusy, setGwBusy] = useState(false);
   const [gwRiskAck, setGwRiskAck] = useState(false);
-  const [avState, setAvState] = useState<AvatarState>("waiting_confirm");
+  // 桌宠/形象暂时停用（2026-11-15）：预览已注释，setter 一并去掉，状态保留给下方汇总。
+  const [avState] = useState<AvatarState>("waiting_confirm");
   const [busy, setBusy] = useState<"" | "save" | "test" | "list">("");
   const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
   const [packMsg, setPackMsg] = useState<string>("");
@@ -2120,6 +2123,8 @@ export function SettingsModal({
                 ))}
               </div>
             </div>
+            {/* 桌宠/形象暂时停用（2026-11-15）：素材 20MB 不入库，设置入口一并藏起来。
+                恢复：取消本块注释 + 文件顶部 AvatarStage / BUBBLE 的注释 + avState 的 setter。
             <div className="sf-sub" style={{ padding: "10px 0 6px" }}>
               <span className="sf-label">{t("look.avatar")}</span>
               <div className="sf-inline">
@@ -2135,6 +2140,7 @@ export function SettingsModal({
               </div>
             </div>
             {avatar && <AvatarStage state={avState} onState={setAvState} bubble={BUBBLE[avState]} height={200} />}
+            */}
           </div>
           <div className="sf-group">
             <div className="sf-group-head">
