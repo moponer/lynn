@@ -38,13 +38,14 @@ function contractKeys() {
 
 function kernelCases() {
   const src = read("src/main/kernel.ts");
-  const cases = [...src.matchAll(new RegExp(String.raw`^\s+case\s+${KEY}\s*:`, "gm"))].map((m) => m[1]);
-  // 新增：匹配 kernel.ts 中的 registry.register() 调用（kernel 拆域后，部分方法从 switch 迁移到注册表）
-  const registryCalls = [...src.matchAll(new RegExp(String.raw`registry\.register\(\s*${KEY}`, "g"))].map((m) => m[1]);
-  return [...new Set([...cases, ...registryCalls])];
+  return [...src.matchAll(new RegExp(String.raw`^\s+case\s+${KEY}\s*:`, "gm"))].map((m) => m[1]);
 }
 
-/** rpc-registry.ts 里的注册调用（kernel 拆域第一批：model.* 方法） */
+/**
+ * rpc-registry.ts 里的注册调用（kernel 拆域：已迁移的方法不再有 case）。
+ * 静态扫描只能证明"源码里有这个注册点"，证明不了 handler 真能跑起来——
+ * 可执行性由 tests/rpc-registry.test.mjs 拿 dist 产物做运行时断言。
+ */
 function registryCases() {
   const src = read("src/main/rpc-registry.ts");
   return [...src.matchAll(new RegExp(String.raw`registry\.register\(\s*${KEY}`, "g"))].map((m) => m[1]);
@@ -87,8 +88,15 @@ test("实现里挂的每个 RPC 都在契约里（防拼错 / 防删类型不删
   assert.deepEqual(extra, [], `实现了、但契约里没有的方法（会退化成 any）：${extra.join(", ")}`);
 });
 
+test("已迁移到注册表的方法不能同时留在 kernel switch 里（防双实现点）", () => {
+  const inSwitch = new Set(kernelCases());
+  const both = uniq(registryCases()).filter((k) => inSwitch.has(k));
+  assert.deepEqual(both, [], `同时存在于 switch 与注册表（改一处漏一处）：${both.join(", ")}`);
+});
+
 test("三份名单都不是空的（正则没写崩）", () => {
   assert.ok(contractKeys().length > 50, "契约 key 数量异常少");
   assert.ok(kernelCases().length > 50, "kernel case 数量异常少");
+  assert.ok(registryCases().length > 0, "注册表方法数量异常少");
   assert.ok(shellHandlers().length > 5, "壳层 handler 数量异常少");
 });

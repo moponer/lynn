@@ -89,7 +89,7 @@ import {
 import { mergeStrings } from "../shared/i18n";
 import { createSettingsRpc, type SettingsRpc } from "./rpc/settings-rpc";
 import { createThreadRpc, type ThreadRpc } from "./rpc/thread-rpc";
-import { buildKernelRegistry, type RpcRegistry } from "./rpc-registry";
+import { buildKernelRegistry, type ModelRpcDeps, type RpcRegistry } from "./rpc-registry";
 import { BUILTIN_SKILLS } from "./builtin-skills";
 import { ConnectorStore, CONNECTOR_CATALOG, probeConnector as probeConnectorLive } from "./connectors";
 import { allPresets, buildSkillMd, installPreset, presetInstalled, SCHEDULE_PRESETS } from "./capability-catalog";
@@ -7506,7 +7506,7 @@ export class Kernel {
    * 懒建：构造函数里 settings/threads 还没就绪时不能提前取，首次调用时它们一定已经赋值。
    */
   private settingsRpcCache: SettingsRpc | null = null;
-  get settingsRpc(): SettingsRpc {
+  private get settingsRpc(): SettingsRpc {
     if (!this.settingsRpcCache) {
       this.settingsRpcCache = createSettingsRpc({
         settings: this.settings,
@@ -7542,19 +7542,36 @@ export class Kernel {
     return this.threadRpcCache;
   }
 
-  /** RPC 方法注册表（第一批：model.* 已委托给 settingsRpc） */
+  /** RPC 方法注册表（按域迁移的落点，约定见 rpc-registry.ts 顶部注释） */
   private rpcRegistryCache: RpcRegistry | null = null;
   private get rpcRegistry(): RpcRegistry {
     if (!this.rpcRegistryCache) {
-      this.rpcRegistryCache = buildKernelRegistry();
+      this.rpcRegistryCache = buildKernelRegistry({ models: this.modelRpcDeps() });
     }
     return this.rpcRegistryCache;
   }
 
+  /**
+   * 模型库域的能力注入（2026-11-15）。
+   * SettingsRpc 的 model.* 目前仍声明 unknown 入参 / 返回值（既有实现，本批不动），
+   * 这里是唯一的类型收口点：出了这个方法，注册表侧只看到契约类型。
+   */
+  private modelRpcDeps(): ModelRpcDeps {
+    const s = this.settingsRpc;
+    return {
+      list: () => s.modelList() as RpcContracts["model.list"]["result"],
+      save: (p) => s.modelSave(p) as RpcContracts["model.save"]["result"],
+      remove: (p) => s.modelRemove(p) as RpcContracts["model.remove"]["result"],
+      setDefault: (p) => s.modelSetDefault(p) as RpcContracts["model.setDefault"]["result"],
+      setThread: (p) => s.modelSetThread(p) as RpcContracts["model.setThread"]["result"],
+      test: (p) => s.modelTest(p) as RpcContracts["model.test"]["result"],
+    };
+  }
+
   handle<M extends RpcMethod>(method: M, params: unknown): RpcContracts[M]["result"] {
-    // 第一批：model.* 已委托给 settingsRpc，通过注册表处理
+    // 已迁移到注册表的方法先走注册表；未迁移的仍落在下面的 switch（逐批减少）
     if (this.rpcRegistry.has(method)) {
-      return this.rpcRegistry.handle(method, params as Record<string, unknown>, { kernel: this });
+      return this.rpcRegistry.handle(method, params as RpcContracts[M]["params"]);
     }
     switch (method) {
       case "app.info": {
@@ -8736,10 +8753,8 @@ export class Kernel {
         return probeEndpoint({ ...p, apiKey }) as unknown as RpcContracts[M]["result"];
       }
 
-       // ---------- 模型库：多条配置 / 全局默认 / 每对话覆盖 ----------
-       // （已迁移到 rpc-registry.ts，此处保留注释位置以便后续批次参考）
-
-       case "config.prefs": {
+      // 模型库（model.*）已迁到 rpc-registry.ts 的 model 域
+      case "config.prefs": {
         const savedPrefs = this.settingsRpc.savePrefs(params as Partial<Prefs>);
         // 写作规则开关（2026-11-15）：开=下一轮起系统提示词里带上约束。
         // 已经在跑的 Pi 会话要热同步一次，否则用户点了开关却要等重开会话才生效。
