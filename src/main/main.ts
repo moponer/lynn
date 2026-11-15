@@ -187,7 +187,8 @@ function createTray(): void {
   tray.setContextMenu(
     Menu.buildFromTemplate([
       { label: "打开指挥台", click: () => focusMain() },
-      { label: "桌宠", click: () => createPet() },
+      // 桌宠自 2026-11-15 起停用（渲染层 ?pet=1 返回 null）；恢复时取消下一行注释即可。
+      // { label: "桌宠", click: () => createPet() },
       {
         label: "区域截图",
         click: () => {
@@ -245,24 +246,14 @@ function updateBroadcast(): void {
   }
 }
 
-function bindUpdater(): void {
-  if (!app.isPackaged) {
-    updateState.supported = false;
-    updateState.reason = "开发环境不检查更新（打包后可用）。";
-    return;
-  }
-  const feed = resolveFeedUrl(process.env, kernel.dataRoot);
-  const feedIssue = feed ? feedUrlIssue(feed) : null;
-  if (!feed || feedIssue) {
-    updateState.supported = false;
-    updateState.reason = feedIssue ?? "未配置更新源：在 ~/.lynn/updater.json 写 { feedUrl } 或设 LYNN_UPDATE_FEED。";
-    return;
-  }
-  updateState.supported = true;
-  updateState.feedUrl = feed;
+let updaterInitialized = false;
+
+/** 开关与事件监听只做一次；启动时没 feed 也不能跳过，否则懒配置会退回自动下载/自动安装。 */
+function initializeUpdaterOnce(): void {
+  if (updaterInitialized) return;
+  updaterInitialized = true;
   autoUpdater.autoDownload = false; // 有新版本先告知，用户确认再下载
   autoUpdater.autoInstallOnAppQuit = false;
-  autoUpdater.setFeedURL({ provider: "generic", url: feed });
   autoUpdater.on("checking-for-update", () => void 0);
   autoUpdater.on("update-available", (it) => {
     Object.assign(updateState, transition(updateState, { type: "available", version: it?.version }));
@@ -286,6 +277,25 @@ function bindUpdater(): void {
     Object.assign(updateState, transition(updateState, { type: "error", message: err?.message }));
     updateBroadcast();
   });
+}
+
+function bindUpdater(): void {
+  initializeUpdaterOnce();
+  if (!app.isPackaged) {
+    updateState.supported = false;
+    updateState.reason = "开发环境不检查更新（打包后可用）。";
+    return;
+  }
+  const feed = resolveFeedUrl(process.env, kernel.dataRoot);
+  const feedIssue = feed ? feedUrlIssue(feed) : null;
+  if (!feed || feedIssue) {
+    updateState.supported = false;
+    updateState.reason = feedIssue ?? "未配置更新源：在 ~/.lynn/updater.json 写 { feedUrl } 或设 LYNN_UPDATE_FEED。";
+    return;
+  }
+  updateState.supported = true;
+  updateState.feedUrl = feed;
+  autoUpdater.setFeedURL({ provider: "generic", url: feed });
 }
 
 // 消息平台（M2-16）：合规路径——官方 API + 用户自建应用；凭据加密落盘
@@ -326,6 +336,8 @@ const globalThisFetch = ((url: string, init?: { method?: string; headers?: Recor
   fetch(url, init as RequestInit)) as never;
 
 async function handleUpdateRpc(method: string): Promise<unknown> {
+  // update.check 可能在这里才补配 feed；幂等初始化必须先于任何 feed 校验。
+  initializeUpdaterOnce();
   if (method === "update.status") return { ...updateState };
   if (!updateState.supported) {
     if (method === "update.check") {

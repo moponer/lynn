@@ -5,6 +5,14 @@
   "version": "0.0.1",
   "description": "风铃 Lynn — 本地优先、插件化的桌面 AI 个人助理（指挥者形态）。薄壳 + Pi 运行时 + 三档插件 + MCP。",
   "license": "MIT",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "overrides": {
+    "uuid": "^11.1.1",
+    "undici": "^8.12.3",
+    "minimatch": "^11.0.3"
+  },
   "main": "dist/main/main.js",
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.main.json",
@@ -21,7 +29,7 @@
     "dist": "npm run build && electron-builder --win --config electron-builder.yml",
     "perf:standby": "electron scripts/perf-run.cjs 60",
     "lint:design": "node scripts/check-design.mjs",
-    "lint": "oxlint src",
+    "lint": "oxlint src --deny-warnings",
     "verify": "npm run typecheck && npm run lint && npm run lint:design && npm test",
     "probe:usage": "electron scripts/live-usage-probe.cjs",
     "probe:pi": "electron scripts/live-pi-usage-probe.cjs",
@@ -33,9 +41,9 @@
   "dependencies": {
     "@dicebear/collection": "^9.4.3",
     "@dicebear/core": "^9.4.3",
-    "@earendil-works/pi-agent-core": "^1.4.0",
-    "@earendil-works/pi-ai": "^1.4.0",
-    "@earendil-works/pi-coding-agent": "^1.4.0",
+    "@earendil-works/pi-agent-core": "1.4.0",
+    "@earendil-works/pi-ai": "1.4.0",
+    "@earendil-works/pi-coding-agent": "1.4.0",
     "@js-preview/excel": "^1.7.14",
     "diff": "^9.0.0",
     "docx-preview": "^0.4.1",

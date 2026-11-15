@@ -13,6 +13,7 @@ import { extractPdfText } from "./pdf-text";
 import type { CommandFamily } from "../shared/contract";
 import { normalizeTargetPath } from "./member-path";
 import { buildDocx, type DocxBlock } from "./docx";
+import { insideBase } from "./path-guard";
 
 export interface FileChange {
   path: string;
@@ -196,11 +197,11 @@ const READ_LINES = 400;
 const MAX_READ_LINES = 2_000;
 const DIFF_CAP = 1_200;
 
-/** 解析路径：必须落在 root 内 */
+/** 解析路径：词法归一后再做 realpath containment，符号链接也不能把读写带出 root */
 export function resolveWithin(root: string, target: string): string {
   const base = path.resolve(root);
   const full = normalizeTargetPath(base, target);
-  if (full !== base && !full.startsWith(base + path.sep)) {
+  if (!insideBase(base, full)) {
     // 拒绝时给出路（2026-11-15）：只说"不行"会让成员换路径反复硬试，最后空转。
     throw new Error(
       `路径越界：${target} 不在工作区内。只能访问工作区里的文件。` +
@@ -223,12 +224,10 @@ export function resolveReadable(
 ): { full: string; outside: boolean; root?: string } {
   const base = path.resolve(root);
   const full = target === "" || target === "." ? base : normalizeTargetPath(base, target);
-  const rel = path.relative(base, full);
-  if (!rel.startsWith("..") && !path.isAbsolute(rel)) return { full, outside: false };
+  if (insideBase(base, full)) return { full, outside: false };
   for (const r of readRoots) {
     const rb = path.resolve(r);
-    const rrel = path.relative(rb, full);
-    if (!rrel.startsWith("..") && !path.isAbsolute(rrel)) return { full, outside: true, root: rb };
+    if (insideBase(rb, full)) return { full, outside: true, root: rb };
   }
   throw new Error(
     `路径越界：${target} 既不在工作区，也不是本单授权的只读目录。` +

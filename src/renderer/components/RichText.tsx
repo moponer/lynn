@@ -88,21 +88,22 @@ export function HighlightedCode({
   lineNumbers?: boolean;
 }) {
   const html = useMemo(() => highlightHtml(code, lang || path || ""), [code, lang, path]);
-  const lines = useMemo(() => html.split("\n"), [html]);
+  // 高亮 HTML 可能由跨行 span 组成，只能完整注入；行号另从原始源码计算，绝不拆高亮结果。
+  const numbers = useMemo(() => code.split("\n").map((_, index) => index + 1), [code]);
   const label = langOf(lang || path || "") ?? (path ? path.split(".").pop() : undefined);
   return (
-    <div className="hl-code" data-lang={label || undefined}>
+    <div className={`hl-code${lineNumbers ? " hl-numbered" : ""}`} data-lang={label || undefined}>
       {label && <span className="hl-lang mono">{label}</span>}
-      <pre>
-        <code>
-          {lines.map((line, i) => (
-            <span className="hl-line" key={i}>
-              {lineNumbers && <i className="hl-no mono">{i + 1}</i>}
-              <span dangerouslySetInnerHTML={{ __html: line || " " }} />
-            </span>
-          ))}
-        </code>
-      </pre>
+      <div className="hl-code-body">
+        {lineNumbers && (
+          <pre className="hl-gutter mono" aria-hidden="true">
+            {numbers.join("\n")}
+          </pre>
+        )}
+        <pre className="hl-source">
+          <code dangerouslySetInnerHTML={{ __html: html }} />
+        </pre>
+      </div>
     </div>
   );
 }

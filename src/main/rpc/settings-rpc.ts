@@ -10,7 +10,7 @@ import { isLang } from "../../shared/i18n";
 import { loadApiKey, type SettingsStore } from "../settings";
 import type { ThreadStore } from "../threads";
 import { probeEndpoint } from "../llm";
-import { endpointRiskLevel, normalizeBaseUrl } from "../endpoint";
+import { endpointRiskError, endpointRiskLevel, normalizeBaseUrl } from "../endpoint";
 import { isCaptureHotkey } from "../capture";
 import { isValidVoiceId, isProsody, VOICE_SCOPES } from "../voice-policy";
 
@@ -209,19 +209,25 @@ export function createSettingsRpc(deps: SettingsRpcDeps): SettingsRpc {
     },
 
     modelTest(params: unknown): unknown {
-      const p = params as { id?: string; baseUrl?: string; apiKey?: string; model?: string };
+      const p = params as { id?: string; baseUrl?: string; apiKey?: string; model?: string; riskAccepted?: boolean };
       let baseUrl = p.baseUrl?.trim() ?? "";
       let model = p.model?.trim() ?? "";
       let apiKey = p.apiKey?.trim() ?? "";
+      let riskAccepted = p.riskAccepted === true;
       if (p.id) {
         const cfg = settings.getModel(p.id);
         if (!cfg) return { ok: false, error: "模型不存在" };
+        const stored = settings.getModels().find((e) => e.id === p.id);
         baseUrl = baseUrl || cfg.baseUrl;
         model = model || cfg.model;
+        // 覆盖 baseUrl 后就是一次新端点探测，旧端点的 riskAcceptedAt 不得带过去。
+        if (stored?.riskAcceptedAt && normalizeBaseUrl(stored.baseUrl) === normalizeBaseUrl(baseUrl)) riskAccepted = true;
         if (!apiKey) apiKey = loadApiKey(settings, (b) => deps.decrypt(b), p.id) ?? "";
       }
       if (!baseUrl || !model) return { ok: false, error: "Base URL 和模型都要填。" };
       if (!apiKey) return { ok: false, error: "请先填写 API Key（新配置不能借用别的模型 Key）。" };
+      const riskError = endpointRiskError(baseUrl, riskAccepted, "测试连接");
+      if (riskError) return { ok: false, error: riskError };
       return probeEndpoint({ baseUrl, apiKey, model });
     },
   };

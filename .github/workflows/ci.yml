@@ -5,7 +5,7 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    branches: [master]
   pull_request:
   workflow_dispatch:
 
@@ -20,5 +20,7 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      # typecheck（渲染层 + 主进程）→ oxlint → 设计规范 → 全量测试
+      # typecheck（渲染层 + 主进程）→ oxlint → 设计规范 → 全量测试（含主进程构建）
       - run: npm run verify
+      # 干净仓库再覆盖渲染层构建，防止素材或静态资源缺失回潮
+      - run: npm run build:renderer

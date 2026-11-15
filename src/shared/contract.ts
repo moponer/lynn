@@ -1448,12 +1448,21 @@ export interface RpcContracts {
     result: ModelConfigView;
   };
   "config.save": {
-    params: { provider: string; baseUrl: string; model: string; apiKey?: string };
+    params: {
+      provider: string;
+      baseUrl: string;
+      model: string;
+      apiKey?: string;
+      /** 本机/局域网/非 HTTPS 端点必须显式确认风险 */
+      riskAccepted?: boolean;
+      /** safeStorage 不可用时明文落盘需显式确认 */
+      plaintextOk?: boolean;
+    };
     /** 换端点却留空 Key 时如实拒绝（旧 Key 不能带到新服务商） */
     result: { ok: true } | { ok: false; error: string };
   };
   "config.test": {
-    params: { baseUrl: string; apiKey: string; model: string };
+    params: { baseUrl: string; apiKey: string; model: string; riskAccepted?: boolean };
     result: { ok: true; latencyMs: number } | { ok: false; error: string };
   };
 
@@ -1502,7 +1511,7 @@ export interface RpcContracts {
   };
   "model.test": {
     /** 传 id 测已保存的 Key；不传 id 用表单里临时填的 Key 测 */
-    params: { id?: string; baseUrl?: string; apiKey?: string; model?: string };
+    params: { id?: string; baseUrl?: string; apiKey?: string; model?: string; riskAccepted?: boolean };
     result: { ok: true; latencyMs: number } | { ok: false; error: string };
   };
   /** 自定义 OpenAI 兼容端点：拉 /v1/models，不消耗 token */
@@ -1520,7 +1529,7 @@ export interface RpcContracts {
   };
   /** 端点健康检查：/models 优先，失败再退回一次最小 chat 探针 */
   "model.health": {
-    params: { id?: string; baseUrl?: string; apiKey?: string; model?: string };
+    params: { id?: string; baseUrl?: string; apiKey?: string; model?: string; riskAccepted?: boolean };
     result:
       | { ok: true; latencyMs: number; modelCount?: number; via: "models" | "chat" }
       | { ok: false; error: string; latencyMs?: number };
@@ -1732,7 +1741,7 @@ export interface RpcContracts {
     result: { ok: true; maximized: boolean };
   };
   /** 桌宠模式（P2）：独立透明置顶小窗，单击唤回主界面 */
-  "pet.open": { params: void; result: { ok: true } };
+  "pet.open": { params: void; result: { ok: boolean; error?: string } };
   "pet.close": { params: void; result: { ok: true } };
   "pet.focus": { params: void; result: { ok: true } };
   /** 已装插件（L0 可加载；L1/L2 先列出、标记待接入） */

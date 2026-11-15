@@ -540,6 +540,34 @@ export function SettingsModal({
   const [advisor, setAdvisor] = useState<boolean | null>(null);
   /** 工具轮次上限（2026-11-15）：风铃单轮最多跑几个工具轮次 */
   const [agentRounds, setAgentRounds] = useState<number | null>(null);
+  const [agentRoundsError, setAgentRoundsError] = useState("");
+  const agentRoundsTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const agentRoundsSeq = useRef(0);
+  useEffect(() => () => {
+    agentRoundsSeq.current += 1;
+    if (agentRoundsTimer.current !== null) clearTimeout(agentRoundsTimer.current);
+  }, []);
+  const changeAgentRounds = (value: number) => {
+    setAgentRounds(value);
+    setAgentRoundsError("");
+    const request = ++agentRoundsSeq.current;
+    if (agentRoundsTimer.current !== null) clearTimeout(agentRoundsTimer.current);
+    const debounceMs = 300;
+    // 拖动过程只改本地；停下后再提交，新的一次拖动会立即让旧响应失效。
+    agentRoundsTimer.current = setTimeout(() => {
+      agentRoundsTimer.current = null;
+      void window.lynn
+        .rpc("config.prefs", { autoStart, maxAgentRounds: value })
+        .then((r) => {
+          if (request === agentRoundsSeq.current) setAgentRounds(r.maxAgentRounds ?? value);
+        })
+        .catch((err: unknown) => {
+          if (request === agentRoundsSeq.current) {
+            setAgentRoundsError(`工具轮次保存失败：${err instanceof Error ? err.message : String(err)}`);
+          }
+        });
+    }, debounceMs);
+  };
   /** 写作规则（2026-11-15）：开关在 prefs 里，加载状态与注入字数在插件那边 */
   const [humanizer, setHumanizer] = useState<boolean | null>(null);
   const [hzStatus, setHzStatus] = useState<{ loaded: boolean; version: string | null; dir: string | null; chars: number } | null>(null);
@@ -587,27 +615,73 @@ export function SettingsModal({
   };
   /** 会话记忆（M2-05）：两层（助理记忆可回滚 / 用户记忆永远保留），照 persona 页模式 */
   const [memKind, setMemKind] = useState<"memory" | "user">("memory");
+  const memKindRef = useRef<"memory" | "user">("memory");
+  const memLoadSeq = useRef(0);
   const [memText, setMemText] = useState<string | null>(null);
+  /** 文本归属单独记账：切类型后，旧类型的晚到响应或未更新文本都不能保存进新类型。 */
+  const [memTextKind, setMemTextKind] = useState<"memory" | "user" | null>(null);
   const [memVersions, setMemVersions] = useState<{ id: string; savedAt: string; chars: number }[]>([]);
   const [memMsg, setMemMsg] = useState("");
   const refreshMemory = async (kind: "memory" | "user") => {
+    const request = ++memLoadSeq.current;
     try {
       const [g, v] = await Promise.all([
         window.lynn.rpc("memory.get", { kind }),
         window.lynn.rpc("memory.versions", { kind }),
       ]);
+      if (request !== memLoadSeq.current || kind !== memKindRef.current) return;
       setMemText(g.text ?? "");
+      setMemTextKind(kind);
       setMemVersions(Array.isArray(v.versions) ? v.versions : []);
       setMemMsg("");
     } catch {
+      if (request !== memLoadSeq.current || kind !== memKindRef.current) return;
       setMemText(null);
+      setMemTextKind(null);
       setMemMsg("读不到记忆（内核未连接？）");
     }
   };
   const switchMemKind = (kind: "memory" | "user") => {
+    memKindRef.current = kind;
     setMemKind(kind);
     setMemText(null);
+    setMemTextKind(null);
+    setMemVersions([]);
+    setMemMsg("");
     void refreshMemory(kind);
+  };
+  const saveMemory = async () => {
+    const kind = memKind;
+    const text = memText;
+    if (text === null || memTextKind !== kind) {
+      setMemMsg("记忆类型已切换，请等当前类型加载后再保存。");
+      return;
+    }
+    try {
+      const r = await window.lynn.rpc("memory.save", { kind, text });
+      if (kind !== memKindRef.current) return;
+      setMemMsg(r.hot ? t("persona.savedHot") : t("persona.savedNext"));
+      const v = await window.lynn.rpc("memory.versions", { kind });
+      if (kind !== memKindRef.current) return;
+      setMemVersions(Array.isArray(v.versions) ? v.versions : []);
+    } catch (err) {
+      if (kind === memKindRef.current) setMemMsg(`保存记忆失败：${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+  const rollbackMemory = async (versionId: string) => {
+    const kind = memKind;
+    const request = ++memLoadSeq.current;
+    try {
+      const r = await window.lynn.rpc("memory.rollback", { kind, versionId });
+      if (request !== memLoadSeq.current || kind !== memKindRef.current) return;
+      setMemText(r.text ?? "");
+      setMemTextKind(kind);
+      setMemMsg(r.hot ? t("persona.rollbackHot") : t("persona.rollbackNext"));
+    } catch (err) {
+      if (request === memLoadSeq.current && kind === memKindRef.current) {
+        setMemMsg(`回滚记忆失败：${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
   };
   const [themePlugins, setThemePlugins] = useState<
     {
@@ -1036,13 +1110,23 @@ export function SettingsModal({
   const pickPack = async (file: File) => {
     setPackMsg("");
     setPreview(null);
-    const text = await file.text();
-    const r = checkPack(text);
-    if (!r.ok || !r.pack) {
-      setPackMsg(`导入失败：${r.issues.join("；")}`);
-      return;
+    const maxBytes = 1024 * 1024;
+    try {
+      if (file.size > maxBytes) {
+        setPackMsg("导入失败：配置包不能超过 1 MB。");
+        return;
+      }
+      // 读取、结构校验、摘要任何一步失败都只给用户正常提示，不留未处理 Promise。
+      const text = await file.text();
+      const r = checkPack(text);
+      if (!r.ok || !r.pack) {
+        setPackMsg(`导入失败：${r.issues.join("；") || "配置包结构不正确"}`);
+        return;
+      }
+      setPreview({ pack: r.pack, lines: describePack(r.pack) });
+    } catch (err) {
+      setPackMsg(`导入失败：${err instanceof Error ? err.message : String(err)}`);
     }
-    setPreview({ pack: r.pack, lines: describePack(r.pack) });
   };
 
   // 自动化（定时任务）：列表/开关/删除都回读调度器，不在前端记假状态
@@ -1830,12 +1914,7 @@ export function SettingsModal({
                   <button
                     type="button"
                     className="sf-btn primary"
-                    onClick={() => {
-                      void window.lynn.rpc("memory.save", { kind: memKind, text: memText }).then((r) => {
-                        setMemMsg(r.hot ? t("persona.savedHot") : t("persona.savedNext"));
-                        void window.lynn.rpc("memory.versions", { kind: memKind }).then((v) => setMemVersions(Array.isArray(v.versions) ? v.versions : []));
-                      });
-                    }}
+                    onClick={() => void saveMemory()}
                   >
                     {t("persona.save")}
                   </button>
@@ -1865,12 +1944,7 @@ export function SettingsModal({
                         <button
                           type="button"
                           className="sf-btn"
-                          onClick={() => {
-                            void window.lynn.rpc("memory.rollback", { kind: memKind, versionId: v.id }).then((r) => {
-                              setMemText(r.text);
-                              setMemMsg(r.hot ? t("persona.rollbackHot") : t("persona.rollbackNext"));
-                            });
-                          }}
+                          onClick={() => void rollbackMemory(v.id)}
                         >
                           {t("persona.rollback")}
                         </button>
@@ -1984,13 +2058,7 @@ export function SettingsModal({
                   step={1}
                   value={agentRounds ?? 24}
                   style={{ "--fill": `${Math.round((((agentRounds ?? 24) - 4) / 76) * 100)}%` } as CSSProperties}
-                  onChange={(e) => {
-                    const v = Number(e.target.value);
-                    setAgentRounds(v);
-                    void window.lynn
-                      .rpc("config.prefs", { autoStart, maxAgentRounds: v })
-                      .then((r) => setAgentRounds(r.maxAgentRounds ?? v));
-                  }}
+                  onChange={(e) => changeAgentRounds(Number(e.target.value))}
                 />
                 <span className="sf-slider-val">
                   {agentRounds ?? 24}
@@ -1998,6 +2066,7 @@ export function SettingsModal({
                 </span>
               </div>
             </div>
+            {agentRoundsError && <p className="sf-result bad">{agentRoundsError}</p>}
           </div>
           <div className="sf-group">
             <div className="sf-group-head">

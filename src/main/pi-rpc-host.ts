@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { killProcessTree } from "./process-tree";
 import { clearWorkerMarker, writeWorkerMarker } from "./agent-orphans";
-import { drainUtf8Lines } from "./rpc-lines";
+import { drainUtf8Lines, RpcLineBufferOverflowError } from "./rpc-lines";
 import type { AgentStats, RpcToolSpec } from "./agent-host";
 
 /**
@@ -23,6 +23,7 @@ import type { AgentStats, RpcToolSpec } from "./agent-host";
 export const PI_PROVIDER_ID = "lynn-user";
 const DEFAULT_RPC_TIMEOUT_MS = 45_000;
 const LONG_RPC_TIMEOUT_MS = 30 * 60_000;
+const PROMPT_AND_WAIT_TIMEOUT_MS = 30 * 60_000;
 const BUSY_WATCHDOG_MS = 10_000;
 const STDERR_CAP = 200_000;
 const LONG_RUNNING = new Set(["prompt", "abort", "get_messages", "get_entries", "get_tree", "export_html"]);
@@ -64,6 +65,8 @@ export interface PiRpcHostOptions {
   execPath?: string;
   spawnImpl?: typeof spawn;
   watchdogMs?: number;
+  /** prompt 响应 + agent_settled 的整体 deadline（默认 30min；测试可调小） */
+  promptAndWaitTimeoutMs?: number;
   markerDir?: string;
 }
 
@@ -195,6 +198,7 @@ export class PiRpcHost {
       if (this.child !== child) return;
       this.child = undefined;
       if (child.pid !== undefined) void killProcessTree(child.pid, "SIGTERM");
+      if (this.options.markerDir && child.pid !== undefined) clearWorkerMarker(this.options.markerDir, child.pid);
       this.handleExit(error instanceof Error ? error : new Error(String(error)));
     });
     child.once("exit", (code, signal) => {
@@ -205,9 +209,15 @@ export class PiRpcHost {
       this.handleExit(new Error(`Pi RPC 子进程退出（code ${code ?? "unknown"}${signal ? `, ${signal}` : ""}）`));
     });
 
-    // 官方 RPC 没有 ready 帧：用官方 get_state 握手，等得到响应即就绪
-    const state = await this.request<{ sessionId?: string }>("get_state", {}, 20_000);
-    if (typeof state?.sessionId === "string") this.lastSessionId = state.sessionId;
+    try {
+      // 官方 RPC 没有 ready 帧：用官方 get_state 握手，等得到响应即就绪
+      const state = await this.request<{ sessionId?: string }>("get_state", {}, 20_000);
+      if (typeof state?.sessionId === "string") this.lastSessionId = state.sessionId;
+    } catch (error) {
+      // 握手超时同样走完整 stop：清 pending、删 marker、杀进程树，再原样抛出失败原因。
+      await this.stop();
+      throw error;
+    }
   }
 
   /** 官方命令：一律 {type, id, ...data}；响应 {type:"response", id, success, data|error} */
@@ -241,11 +251,25 @@ export class PiRpcHost {
       done = resolve;
       this.settledWaiters.add(resolve);
     });
-    try {
+    const timeoutMs = this.options.promptAndWaitTimeoutMs ?? PROMPT_AND_WAIT_TIMEOUT_MS;
+    let timer: NodeJS.Timeout | undefined;
+    const deadline = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        // 只结束本次等待，不篡改 busy；后续状态仍由官方事件与既有看门狗对账。
+        this.settledWaiters.delete(done);
+        void this.abort().catch(() => undefined);
+        reject(new Error(`Pi prompt-and-wait 总超时（${timeoutMs}ms）；已尽力发送 abort 中止本轮。`));
+      }, timeoutMs);
+    });
+    const promptAndWait = (async () => {
       const result = await this.request<{ disposition?: string }>("prompt", { message: text });
       if (result?.disposition !== "handled") await settled;
       return result ?? {};
+    })();
+    try {
+      return await Promise.race([promptAndWait, deadline]);
     } finally {
+      if (timer) clearTimeout(timer);
       this.settledWaiters.delete(done);
     }
   }
@@ -329,9 +353,18 @@ export class PiRpcHost {
   // ---------- 内部：只做帧层，不裁剪事件面 ----------
 
   private handleChunk(chunk: Buffer): void {
-    const drained = drainUtf8Lines(this.lineBuffer, chunk);
-    this.lineBuffer = drained.rest;
-    for (const line of drained.lines) this.handleLine(line);
+    try {
+      const drained = drainUtf8Lines(this.lineBuffer, chunk);
+      this.lineBuffer = drained.rest;
+      for (const line of drained.lines) this.handleLine(line);
+    } catch (error) {
+      if (!(error instanceof RpcLineBufferOverflowError)) throw error;
+      // 半行超限后不再信任该流：释放 handshake/settled/pending，并完整回收 worker。
+      this.handleExit(error);
+      void this.stop().catch((stopError) => {
+        this.options.onError(`Pi RPC worker 超限清理失败：${stopError instanceof Error ? stopError.message : String(stopError)}`);
+      });
+    }
   }
 
   private handleLine(line: string): void {

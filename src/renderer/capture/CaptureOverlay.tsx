@@ -75,6 +75,8 @@ export function CaptureOverlay() {
   const [textDraft, setTextDraft] = useState<TextDraft | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // React 状态要下一次渲染才生效；按钮、Enter、双击共用这把同步锁，挡住同一拍里的重复提交。
+  const busyRef = useRef(false);
   /** 拖拽 / 标注 / 框选进行中：工具栏先收起，松手（选区确定）后才出现 */
   const [dragging, setDragging] = useState(false);
 
@@ -183,52 +185,56 @@ export function CaptureOverlay() {
   }, [color, lineWidth]);
 
   const finish = useCallback(async (action: "attach" | "copy" | "save") => {
-    const f = frameRef.current;
-    const v = viewRef.current;
-    const r = rectRef.current;
-    const c = canvasRef.current;
-    if (!f || !v.width || !c) return;
-    if (!r) {
-      setMsg("先框一块区域（或单击自动识别的窗口）");
-      return;
-    }
-    const px = toPixelRect(r, { width: f.width, height: f.height }, v);
-    if (!px) {
-      setMsg("选区太小，重新拖一次");
-      return;
-    }
-    const out = document.createElement("canvas");
-    out.width = px.width;
-    out.height = px.height;
-    const octx = out.getContext("2d");
-    if (!octx) {
-      setMsg("合成画布不可用");
-      return;
-    }
-    octx.drawImage(c, px.x, px.y, px.width, px.height, 0, 0, px.width, px.height);
-    let dataUrl: string;
-    try {
-      dataUrl = out.toDataURL("image/png");
-    } catch (err) {
-      setMsg(`导出 PNG 失败：${err instanceof Error ? err.message : String(err)}`);
-      return;
-    }
+    if (busyRef.current) return;
+    busyRef.current = true;
     setBusy(true);
+    // attach / copy 成功后主进程会关窗，保持锁定；校验失败、导出失败与 RPC 失败都在 finally 解锁。
+    let keepLocked = false;
     try {
+      const f = frameRef.current;
+      const v = viewRef.current;
+      const r = rectRef.current;
+      const c = canvasRef.current;
+      if (!f || !v.width || !c) return;
+      if (!r) {
+        setMsg("先框一块区域（或单击自动识别的窗口）");
+        return;
+      }
+      const px = toPixelRect(r, { width: f.width, height: f.height }, v);
+      if (!px) {
+        setMsg("选区太小，重新拖一次");
+        return;
+      }
+      const out = document.createElement("canvas");
+      out.width = px.width;
+      out.height = px.height;
+      const octx = out.getContext("2d");
+      if (!octx) {
+        setMsg("合成画布不可用");
+        return;
+      }
+      octx.drawImage(c, px.x, px.y, px.width, px.height, 0, 0, px.width, px.height);
+      let dataUrl: string;
+      try {
+        dataUrl = out.toDataURL("image/png");
+      } catch (err) {
+        setMsg(`导出 PNG 失败：${err instanceof Error ? err.message : String(err)}`);
+        return;
+      }
       const res = await window.lynn.rpc("capture.commit", { rect: r, dataUrl, action });
       if (!res.ok) {
         setMsg(res.error ?? "截图没成功");
-        setBusy(false);
         return;
       }
-      if (action === "save") {
-        setMsg(`已保存到 ${res.path ?? "文件"}`);
-        setBusy(false);
-      }
-      // attach / copy：主进程会关窗，这里不必再动状态
+      if (action === "save") setMsg(`已保存到 ${res.path ?? "文件"}`);
+      else keepLocked = true;
     } catch (err) {
       setMsg(`截图没成功：${err instanceof Error ? err.message : String(err)}`);
-      setBusy(false);
+    } finally {
+      if (!keepLocked) {
+        busyRef.current = false;
+        setBusy(false);
+      }
     }
   }, []);
 

@@ -34,6 +34,11 @@ files:
   - "!**/*.map"
   - "!**/*.ts"
   - "!**/*.md"
+  # 后置规则覆盖上面的 Markdown 排除：保留生产依赖的许可证与声明
+  - "**/LICENSE.md"
+  - "**/NOTICE.md"
+  - LICENSE
+  - THIRD_PARTY_NOTICES.md
 
 win:
   # 真正的 Windows 图标：build/icon.ico 内含 16/24/32/48/64/128/256 七种尺寸（带 alpha）。

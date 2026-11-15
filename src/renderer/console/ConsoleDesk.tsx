@@ -111,8 +111,12 @@ export function ConsoleDesk(props: ConsoleViewProps) {
   const [draft, setDraft] = useState("");
   /** cd 回执（成功/失败都写在底栏，不吞） */
   const [cdMsg, setCdMsg] = useState("");
-  /** 球面锁定卡：位置在点击时按容器尺寸算好，跟着节点走 */
-  const [picked, setPicked] = useState<{ job: DeskJob; left: number; top: number } | null>(null);
+  /**
+   * 球面锁定卡：只存单号与位置（点击时按容器尺寸算好）。
+   * 工单本体不存快照——渲染时从最新 desk.jobs 派生，状态/证据读数永远跟快照走，
+   * 工单被删掉时锁定卡自动消失，不留一张"幽灵详情"。
+   */
+  const [picked, setPicked] = useState<{ jobId: string; left: number; top: number } | null>(null);
   /** 已上膛的删除（第一下上膛、第二下执行）：不可恢复的动作不做静默单击 */
   const [armedRemove, setArmedRemove] = useState<string | null>(null);
   /** 终止本群同样两段确认：3.6 秒内不点第二下自动收回（与值台标题栏同一手感） */
@@ -160,6 +164,15 @@ export function ConsoleDesk(props: ConsoleViewProps) {
   /** 本群的单（2026-11-15）：控制台不再把别群的单算进任务/待办/球面 */
   const mine = useMemo(() => jobsInThread(desk), [desk]);
   const active = useMemo(() => mine.filter((j) => j.group !== "archived"), [mine]);
+  /** 锁定卡的工单本体：每次渲染从最新 desk.jobs 取，不拿点击那一刻的旧快照 */
+  const pickedJob = useMemo(
+    () => (picked ? (desk.jobs.find((j) => j.id === picked.jobId) ?? null) : null),
+    [picked, desk.jobs],
+  );
+  // 工单消失（被删/被合并）→ 锁定自动解除，别留一张对不上的卡
+  useEffect(() => {
+    if (picked && !pickedJob) setPicked(null);
+  }, [picked, pickedJob]);
   /** 能直接拍板的单（in_review）：验收 / 打回 */
   const waiting = useMemo(() => active.filter((j) => j.group === "waiting"), [active]);
   /**
@@ -235,7 +248,7 @@ export function ConsoleDesk(props: ConsoleViewProps) {
   const outputs = useMemo(() => allOutputs.slice(0, 6), [allOutputs]);
 
   /** 流水栏：优先锁定单，其次当前回合单，最后是第一张在办单 */
-  const streamJobId = picked?.job.id ?? currentJobId ?? active[0]?.id ?? null;
+  const streamJobId = picked?.jobId ?? currentJobId ?? active[0]?.id ?? null;
   const streamLines = useMemo(() => {
     if (!streamJobId) return lines.slice(-5);
     const mine = lines.filter((l) => l.jobId === streamJobId);
@@ -244,7 +257,7 @@ export function ConsoleDesk(props: ConsoleViewProps) {
   }, [lines, streamJobId]);
 
   /** 节点视图要有锁定目标，没有就退回全量 */
-  const focusJobId = picked?.job.id ?? currentJobId ?? null;
+  const focusJobId = picked?.jobId ?? currentJobId ?? null;
 
   /**
    * 一张单现在**真的需要你做的事**（口径与值台印章一致）：
@@ -354,8 +367,9 @@ export function ConsoleDesk(props: ConsoleViewProps) {
     const x = at?.x ?? W * 0.6;
     const y = at?.y ?? H * 0.2;
     const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
+    // 只存单号与位置：工单本体渲染时从最新 desk.jobs 派生（pickedJob）
     setPicked({
-      job,
+      jobId: job.id,
       left: clamp(x + 22, 12, Math.max(12, W - 292)),
       top: clamp(y - 56, 12, Math.max(12, H - 340)),
     });
@@ -539,7 +553,7 @@ export function ConsoleDesk(props: ConsoleViewProps) {
                     key={j.id}
                     job={j}
                     cmds={cmdsOf(j.id)}
-                    picked={picked?.job.id === j.id}
+                    picked={picked?.jobId === j.id}
                     onPick={() => pickJob(j.id)}
                     acts={actsOf(j)}
                     stale={staleOf(j)}
@@ -606,7 +620,7 @@ export function ConsoleDesk(props: ConsoleViewProps) {
             <Field
               desk={desk}
               scope={scope}
-              focusId={picked?.job.id ?? currentJobId}
+              focusId={picked?.jobId ?? currentJobId}
               onPick={pickJob}
               onStats={setStats}
             />
@@ -701,34 +715,34 @@ export function ConsoleDesk(props: ConsoleViewProps) {
               </div>
             )}
 
-            {/* 锁定卡：贴在点中的节点旁边，不铺满球面 */}
-            {picked && (
+            {/* 锁定卡：贴在点中的节点旁边，不铺满球面；工单本体来自最新快照（pickedJob） */}
+            {picked && pickedJob && (
               <div className="cs-focus" style={{ left: picked.left, top: picked.top }}>
                 <div className="cs-focus-h">
-                  <span className="mono">{shortId(picked.job.id)}</span>
+                  <span className="mono">{shortId(pickedJob.id)}</span>
                   <span className="cs-focus-tag">锁定</span>
                   <button type="button" className="cs-x" onClick={() => setPicked(null)}>
                     解锁
                   </button>
                 </div>
-                <div className="cs-focus-t">{picked.job.title}</div>
+                <div className="cs-focus-t">{pickedJob.title}</div>
                 <dl className="cs-focus-grid">
                   <dt>状态</dt>
-                  <dd>{picked.job.statusLabel}</dd>
+                  <dd>{pickedJob.statusLabel}</dd>
                   <dt>席位</dt>
-                  <dd>{picked.job.member ?? "未派"}</dd>
+                  <dd>{pickedJob.member ?? "未派"}</dd>
                   <dt>阶段</dt>
-                  <dd>{picked.job.stage}/4</dd>
+                  <dd>{pickedJob.stage}/4</dd>
                   <dt>证据</dt>
-                  <dd>{picked.job.evidenceCount} 条</dd>
+                  <dd>{pickedJob.evidenceCount} 条</dd>
                   <dt>打回</dt>
                   <dd>
-                    {picked.job.rejections}/{picked.job.rejectLimit}
+                    {pickedJob.rejections}/{pickedJob.rejectLimit}
                   </dd>
                 </dl>
-                {picked.job.statusNote && <div className="cs-focus-note">{picked.job.statusNote}</div>}
+                {pickedJob.statusNote && <div className="cs-focus-note">{pickedJob.statusNote}</div>}
                 <div className="cs-focus-acts">
-                  {actsOf(picked.job).map((a) => (
+                  {actsOf(pickedJob).map((a) => (
                     <button
                       key={a.key}
                       type="button"
@@ -738,14 +752,14 @@ export function ConsoleDesk(props: ConsoleViewProps) {
                       {a.label}
                     </button>
                   ))}
-                  <button type="button" className="cs-act" onClick={() => openResult(picked.job.id)}>
+                  <button type="button" className="cs-act" onClick={() => openResult(pickedJob.id)}>
                     战果
                   </button>
                   <button
                     type="button"
                     className="cs-act"
                     title="给她授权一个只读目录（目录由你在系统选择框里点）"
-                    onClick={() => onGrantRead(picked.job.id)}
+                    onClick={() => onGrantRead(pickedJob.id)}
                   >
                     授权目录
                   </button>
@@ -755,7 +769,7 @@ export function ConsoleDesk(props: ConsoleViewProps) {
                     className="cs-act"
                     title="从台账撤下这张单，卷宗保留"
                     onClick={() => {
-                      onDismissTask(picked.job.id);
+                      onDismissTask(pickedJob.id);
                       setPicked(null);
                     }}
                   >
@@ -767,16 +781,16 @@ export function ConsoleDesk(props: ConsoleViewProps) {
                     title="彻底删除这张单（含卷宗）"
                     onClick={() => {
                       // 不可恢复：第一下只上膛，第二下才删（同一张单之外点别的单会自动复位）
-                      if (armedRemove !== picked.job.id) {
-                        setArmedRemove(picked.job.id);
+                      if (armedRemove !== pickedJob.id) {
+                        setArmedRemove(pickedJob.id);
                         return;
                       }
-                      onRemoveTask(picked.job.id);
+                      onRemoveTask(pickedJob.id);
                       setArmedRemove(null);
                       setPicked(null);
                     }}
                   >
-                    {armedRemove === picked.job.id ? "确认删除" : "删除"}
+                    {armedRemove === pickedJob.id ? "确认删除" : "删除"}
                   </button>
                 </div>
               </div>

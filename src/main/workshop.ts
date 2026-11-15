@@ -9,8 +9,10 @@
 //  5. 冲突即拒并报明双方（§4.11.5：不自作主张改名）。
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { createHash } from "node:crypto";
 import { checkManifest, type PluginManifest } from "./plugin-manifest";
 import { checkPluginCss, checkThemeFile } from "./plugin-host";
+import { insideBase } from "./path-guard";
 
 export const WORKSHOP_KINDS = ["L0", "L1", "L2"] as const;
 export type WorkshopKind = (typeof WORKSHOP_KINDS)[number];
@@ -23,6 +25,8 @@ export interface DraftMeta {
   spec: string;
   createdAt: string;
   status: "draft" | "reviewed" | "enabled";
+  /** 过审时的产物树 SHA-256；启用前重算，审查后改动必须重新审查 */
+  reviewedHash?: string;
 }
 
 export interface ReviewFinding {
@@ -176,9 +180,34 @@ function productFiles(dir: string): string[] {
   }
 }
 
+/** 过审指纹：排序后的相对路径 + 每个文件内容 SHA-256；草稿自留文件不参与 */
+function productTreeHash(dir: string): string {
+  const lines: string[] = [];
+  const walk = (current: string, prefix: string): void => {
+    const entries = fs.readdirSync(current, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!prefix && DRAFT_OWNED.has(entry.name)) continue;
+      const full = path.join(current, entry.name);
+      const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) {
+        walk(full, rel);
+      } else if (entry.isFile()) {
+        const digest = createHash("sha256").update(fs.readFileSync(full)).digest("hex");
+        lines.push(`${rel}\0${digest}`);
+      } else if (entry.isSymbolicLink()) {
+        // 不跟随链接读根外内容；链接目标本身也纳入指纹，替换链接同样会失配。
+        const digest = createHash("sha256").update(fs.readlinkSync(full)).digest("hex");
+        lines.push(`${rel}\0symlink\0${digest}`);
+      }
+    }
+  };
+  walk(dir, "");
+  return createHash("sha256").update(lines.sort().join("\n"), "utf-8").digest("hex");
+}
+
 // ---------- 准入审查（静态流水线；隔离试装见 plugin-host.probe） ----------
 
-export function reviewDraft(
+function reviewAdmission(
   dataRoot: string,
   draftId: string,
   existing: { pluginIds: string[]; skillNames: string[] },
@@ -335,11 +364,22 @@ export function reviewDraft(
 
   const ok = findings.every((f) => f.ok);
   const verdict = ok ? "approved" : "rejected";
-  if (ok) {
+  return { ok, verdict, tier: meta.kind, findings, selfEnable: ok && meta.kind === "L0", manifest };
+}
+
+export function reviewDraft(
+  dataRoot: string,
+  draftId: string,
+  existing: { pluginIds: string[]; skillNames: string[] },
+): ReviewResult {
+  const result = reviewAdmission(dataRoot, draftId, existing);
+  if (result.ok) {
+    const meta = readMeta(dataRoot, draftId);
     meta.status = "reviewed";
+    meta.reviewedHash = productTreeHash(draftDir(dataRoot, draftId));
     writeMeta(dataRoot, draftId, meta);
   }
-  return { ok, verdict, tier: meta.kind, findings, selfEnable: ok && meta.kind === "L0", manifest };
+  return result;
 }
 
 // ---------- 启用（影子 → 正式的落点） ----------
@@ -351,7 +391,12 @@ export function reviewDraft(
  *  - 迁入后文件在 plugins/<id>/，是否 enabled 由 plugin-host 默认规则 + 插件面板接管
  *    （L1/L2 第三方默认 disabled = 影子态；用户在面板点启用才进全局工具面）。
  */
-export function promoteDraft(dataRoot: string, draftId: string, byUser: boolean): { id: string; tier: WorkshopKind; byUser: boolean } {
+export function promoteDraft(
+  dataRoot: string,
+  draftId: string,
+  byUser: boolean,
+  existing: { pluginIds: string[]; skillNames: string[] } = { pluginIds: [], skillNames: [] },
+): { id: string; tier: WorkshopKind; byUser: boolean } {
   const meta = readMeta(dataRoot, draftId);
   if (meta.status !== "reviewed") {
     throw new Error(`草稿 ${draftId} 尚未过审（status=${meta.status}）：先 review，产物没过准入不进插件库`);
@@ -361,8 +406,25 @@ export function promoteDraft(dataRoot: string, draftId: string, byUser: boolean)
   }
   const dir = draftDir(dataRoot, draftId);
   const manifest = JSON.parse(fs.readFileSync(path.join(dir, "plugin.json"), "utf-8")) as PluginManifest;
-  const dest = path.join(dataRoot, "plugins", manifest.id);
-  if (fs.existsSync(dest)) throw new Error(`插件库已有 ${manifest.id}，不能覆盖（冲突即拒，§4.11.5）`);
+  const id = typeof manifest.id === "string" ? manifest.id : "";
+  if (!/^[A-Za-z0-9._-]+$/.test(id) || id === "." || id.includes("..")) {
+    throw new Error(`插件 id 不合法：${id || "（空）"}。只允许字母、数字、点、下划线与连字符，禁止路径分隔符和 ..`);
+  }
+  const pluginsRoot = path.resolve(dataRoot, "plugins");
+  const dest = path.resolve(pluginsRoot, id);
+  if (dest === pluginsRoot || !insideBase(pluginsRoot, dest)) {
+    throw new Error(`插件落点越界：${id} 不在 plugins/ 内，已拒绝`);
+  }
+  if (!meta.reviewedHash || productTreeHash(dir) !== meta.reviewedHash) {
+    throw new Error("审查后产物已变更，需重新审查");
+  }
+  // review 不是一次性通行证：promote 当下重新跑同一套 manifest / 禁项 / 档位准入。
+  const review = reviewAdmission(dataRoot, draftId, existing);
+  if (!review.ok || !review.manifest) {
+    const detail = review.findings.filter((f) => !f.ok).map((f) => f.text).join("；") || "manifest 不可用";
+    throw new Error(`启用前复审未通过：${detail}`);
+  }
+  if (fs.existsSync(dest)) throw new Error(`插件库已有 ${id}，不能覆盖（冲突即拒，§4.11.5）`);
   fs.mkdirSync(dest, { recursive: true });
   for (const name of fs.readdirSync(dir)) {
     if (DRAFT_OWNED.has(name)) continue;
@@ -370,7 +432,7 @@ export function promoteDraft(dataRoot: string, draftId: string, byUser: boolean)
   }
   meta.status = "enabled";
   writeMeta(dataRoot, draftId, meta);
-  return { id: manifest.id, tier: meta.kind, byUser };
+  return { id, tier: meta.kind, byUser };
 }
 
 export function discardDraft(dataRoot: string, draftId: string): void {

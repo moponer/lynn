@@ -132,14 +132,24 @@ export default function App() {
     }
   }, []);
   const ConsoleHost = consoleSlot && stageView === "console" ? consoleViewOf(consoleSlot.view) : null;
-  /** 截图结果：只进输入框的「本轮随附」，不自动发送 */
-  const [captureShot, setCaptureShot] = useState<CaptureShot | null>(null);
+  /**
+   * 截图结果：只进输入框的「本轮随附」，不自动发送。
+   * 记录所属会话（threadId）：截图只落进当时那个会话的输入台，切会话不带着走。
+   */
+  const [captureShot, setCaptureShot] = useState<{ shot: CaptureShot; threadId: string } | null>(null);
+  /** onSend 是回调不是渲染：用 ref 读最新截图，免得把它列进依赖反复重建回调 */
+  const captureShotRef = useRef<{ shot: CaptureShot; threadId: string } | null>(null);
+  useEffect(() => {
+    captureShotRef.current = captureShot;
+  }, [captureShot]);
+  /** 截图到达时的当前会话：事件回调里读快照外的最新 thread.id */
+  const threadIdRef = useRef("");
   const seenShots = useRef(new Set<string>());
   /** 事件 / 待取队列双通道共用，按 id 去重（窗口刚起来或焦点切换时可能同时收到） */
   const acceptShot = useCallback((shot: CaptureShot) => {
     if (!shot?.id || seenShots.current.has(shot.id)) return;
     seenShots.current.add(shot.id);
-    setCaptureShot(shot);
+    setCaptureShot({ shot, threadId: threadIdRef.current });
     const clip = shot.copied ? "，并已复制到剪贴板" : shot.copied === false ? "（剪贴板写入失败）" : "";
     setNotice(`截图 ${shot.width}×${shot.height} 已放进本轮随附${clip}（处理 ${shot.ms}ms），发送前可以移除。`);
   }, []);
@@ -398,6 +408,11 @@ export default function App() {
 
   const desk: Desk | null = useMemo(() => (snap ? deskFromSnapshot(snap) : null), [snap]);
 
+  // 当前会话 id 同步给截图事件回调用（acceptShot 不随快照重建）
+  useEffect(() => {
+    threadIdRef.current = desk?.thread.id ?? "";
+  }, [desk?.thread.id]);
+
   /** 启动页 → 值台的交接：快照就绪后让进度补满并淡出，再切主界面（不是直接闪过去） */
   const [bootDone, setBootDone] = useState(false);
   useEffect(() => {
@@ -435,16 +450,41 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [fullAsk]);
 
-  /** 发送失败必须可见：之前用 void 吞掉了 rejection，界面一片空白 */
+  /**
+   * 发送结果约定：null = 成功，字符串 = 失败原因（Composer 等它回来才清草稿，失败原样保留）。
+   * 两种失败都要接住：RPC reject，以及壳层把内核异常包成 {error} 返回值（不 reject）。
+   */
   const onSend = useCallback(
-    async (text: string, mode: "queue" | "steer" = "queue", attachments?: { files?: string[]; images?: { name: string; data: string }[] }) => {
+    async (
+      text: string,
+      mode: "queue" | "steer" = "queue",
+      attachments?: { files?: string[]; images?: { name: string; data: string }[] },
+    ): Promise<string | null> => {
       setNotice(null);
+      // 只消费"这一发携带"的截图：发送途中新到的截图（id 不同）必须留下
+      const shotAtStart = captureShotRef.current;
+      const sentShotId =
+        shotAtStart && attachments?.images?.some((img) => img.name === shotAtStart.shot.name && img.data === shotAtStart.shot.data)
+          ? shotAtStart.shot.id
+          : null;
       try {
         const r = await rpc("feed.send", { text, mode, ...(attachments ? { attachments } : {}) });
+        const resError = (r as { error?: string } | undefined)?.error;
+        if (resError) {
+          const msg = rpcErrorText(new Error(resError), "发送失败");
+          setNotice(msg);
+          return msg;
+        }
         if (r.queued) setNotice(`已排队（${text.slice(0, 20)}${text.length > 20 ? "…" : ""}）`);
+        if (sentShotId) {
+          setCaptureShot((cur) => (cur && cur.shot.id === sentShotId ? null : cur));
+        }
         await refresh();
+        return null;
       } catch (err) {
-        setNotice(`发送失败：${err instanceof Error ? err.message : String(err)}`);
+        const msg = `发送失败：${err instanceof Error ? err.message : String(err)}`;
+        setNotice(msg);
+        return msg;
       }
     },
     [refresh],
@@ -803,23 +843,27 @@ export default function App() {
     }
   }, [refresh]);
 
+  /**
+   * 裁决结果约定：null = 已受理，字符串 = 失败原因。
+   * 审查台打回靠它决定"显示成功还是保留三要素"；规则不允许（证据缺失/三要素不全）如实回显。
+   */
   const onDecision = useCallback(
     async (
       taskId: string,
       action: "approve" | "reject",
       reason?: { what: string; expect: string; deadline: string },
-    ) => {
-      if (!taskId) return;
+    ): Promise<string | null> => {
+      if (!taskId) return "没有指定工单";
+      let failure: string | null = null;
       try {
         const r = await rpc("task.decide", { taskId, action, reason });
-        if (!r.ok) {
-          // 规则不允许（证据缺失 / 无拍板 / 三要素不全）：如实回显，不假装成功
-          setNotice(`裁不了：${r.error}`);
-        }
+        if (!r.ok) failure = `裁不了：${r.error}`;
       } catch (err) {
-        setNotice(`裁决失败：${err instanceof Error ? err.message : String(err)}`);
+        failure = `裁决失败：${err instanceof Error ? err.message : String(err)}`;
       }
+      if (failure) setNotice(failure);
       await refresh();
+      return failure;
     },
     [refresh],
   );
@@ -879,18 +923,22 @@ export default function App() {
   if (!bootDone || bootPreview || !desk || !snap) return <BootScreen ready={!!(desk && snap) && !bootPreview} />;
 
   if (wizardOpen) {
+    // 向导也要包 I18nProvider：WindowControls 的 tooltip 走 useT，
+    // 没有 Provider 时字典为空，按钮上会直接露出 "win.minimize" 这种键名
     return (
-      <Wizard
-        current={snap.model}
-        theme={theme.id}
-        mode={theme.mode}
-        onTheme={changeTheme}
-        onDone={(r) => void finishWizard(r)}
-        onSkip={() => {
-          localStorage.setItem("lynn.onboarded", "1");
-          setWizardOpen(false);
-        }}
-      />
+      <I18nProvider strings={i18nStrings}>
+        <Wizard
+          current={snap.model}
+          theme={theme.id}
+          mode={theme.mode}
+          onTheme={changeTheme}
+          onDone={(r) => void finishWizard(r)}
+          onSkip={() => {
+            localStorage.setItem("lynn.onboarded", "1");
+            setWizardOpen(false);
+          }}
+        />
+      </I18nProvider>
     );
   }
 
@@ -916,6 +964,18 @@ export default function App() {
             {i18nStrings["app.restart"] ?? "重启应用"}
           </button>
           <button type="button" className="icon-btn" onClick={() => setStaleBackend(false)} aria-label="close">
+            <Icon name="x" size="sm" />
+          </button>
+        </div>
+      )}
+      {/* 全局错误条（2026-11-15）：发送/裁决等失败必须值台、审查台、控制台都看得见——
+          此前只挂在值台输入框下面，审查台与控制台里失败等于静默。
+          浮层复用 stale-bar 版式（固定在右下），可手动关掉；与旧版本提示条错开高度。 */}
+      {notice && (
+        <div className="stale-bar" role="alert" style={{ bottom: 16 }}>
+          <Icon name="warn" size="sm" />
+          <span>{notice}</span>
+          <button type="button" className="icon-btn" onClick={() => setNotice(null)} aria-label="close">
             <Icon name="x" size="sm" />
           </button>
         </div>
@@ -989,11 +1049,11 @@ export default function App() {
         ambient={ambient}
         ambientMode={ambientMode}
         onPermission={(m) => void onPermission(m)}
-        onSend={(t, mode, att) => void onSend(t, mode, att)}
+        onSend={(t, mode, att) => onSend(t, mode, att)}
         onFileSearch={(q) => rpc("files.search", { q }).then((r) => r.files)}
         onAbort={() => void onAbort()}
         onQueue={(a, id) => void onQueue(a, id)}
-        onDecision={(id, a, reason) => void onDecision(id, a, reason)}
+        onDecision={(id, a, reason) => onDecision(id, a, reason)}
         onDecisionResolve={(id, a, text) => void onDecisionResolve(id, a, text)}
         onFeedAction={onFeedAction}
         onHalt={() => void onHalt()}
@@ -1047,7 +1107,8 @@ export default function App() {
         onDraftNotice={() => {
           setNotice(null);
           const id = desk.thread.id;
-          void rpc("thread.draftNotice", { id })
+          // 返回真实 RPC Promise：Roster 的「起草中」跟着它复位，而不是点了就一直转
+          return rpc("thread.draftNotice", { id })
             .then((r) => {
               if (!r.ok) setNotice(r.error ?? "风铃这会儿正忙，等它闲下来再起草");
             })
@@ -1114,8 +1175,7 @@ export default function App() {
             await refresh();
           });
         }}
-        captureShot={captureShot}
-        notice={notice}
+        captureShot={captureShot && captureShot.threadId === desk.thread.id ? captureShot.shot : null}
       />
       )}
       {/* 有控制台可用、但当前不在控制台时才给入口（插件停用 → 卡槽空 → 入口一并消失） */}

@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import type { ToolSchema } from "./llm";
 import type { PluginManifest } from "./plugin-manifest";
-import { drainUtf8Lines } from "./rpc-lines";
+import { drainUtf8Lines, RpcLineBufferOverflowError } from "./rpc-lines";
 import { killProcessTree } from "./process-tree";
 
 /**
@@ -71,6 +71,8 @@ export interface L1Deps {
   workerEntry?: string;
   /** 隔离进程单次调用超时（默认 30s）：超时直接杀进程树——进程可强杀，文案如实说明 */
   workerCallTimeoutMs?: number;
+  /** 隔离进程激活超时（默认 20s；测试可调小） */
+  workerActivateTimeoutMs?: number;
   /** spawn 实现（测试注入） */
   spawnImpl?: typeof spawn;
 }
@@ -116,35 +118,50 @@ class L1Worker {
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
     }) as ChildProcessWithoutNullStreams;
+    const rejectAll = (why: string) => {
+      if (this.child !== child) return;
+      this.child = null;
+      for (const [, p] of this.pending) p.reject(new Error(`${why}${this.stderrTail ? `：${this.stderrTail.trim()}` : ""}`));
+      this.pending.clear();
+    };
     child.stdout.on("data", (chunk: Buffer) => {
-      const { rest, lines } = drainUtf8Lines(this.buf, chunk);
-      this.buf = rest;
-      for (const line of lines) {
-        let msg: WorkerMsg;
-        try {
-          msg = JSON.parse(line) as WorkerMsg;
-        } catch {
-          continue;
+      if (this.child !== child) return;
+      try {
+        const { rest, lines } = drainUtf8Lines(this.buf, chunk);
+        this.buf = rest;
+        for (const line of lines) {
+          let msg: WorkerMsg;
+          try {
+            msg = JSON.parse(line) as WorkerMsg;
+          } catch {
+            continue;
+          }
+          if (msg.type === "log") {
+            console.log(...((msg.parts as unknown[]) ?? []));
+            continue;
+          }
+          if (typeof msg.callId !== "number") continue;
+          const p = this.pending.get(msg.callId);
+          if (!p) continue;
+          this.pending.delete(msg.callId);
+          p.resolve(msg);
         }
-        if (msg.type === "log") {
-          console.log(...((msg.parts as unknown[]) ?? []));
-          continue;
-        }
-        if (typeof msg.callId !== "number") continue;
-        const p = this.pending.get(msg.callId);
-        if (!p) continue;
-        this.pending.delete(msg.callId);
-        p.resolve(msg);
+      } catch (error) {
+        if (!(error instanceof RpcLineBufferOverflowError)) throw error;
+        const detail = `L1 插件 stdout 半行缓冲超限：${error.message}`;
+        const killed = this.kill(`${detail}；隔离进程已被强制终止`);
+        console.error(`[l1-worker] ${detail}${killed ? "；已强制终止隔离进程" : "；worker 已退出"}`);
       }
     });
     child.stderr.on("data", (c: Buffer) => {
       this.stderrTail = `${this.stderrTail}${c.toString()}`.slice(-4_000);
     });
-    const rejectAll = (why: string) => {
-      this.child = null;
-      for (const [, p] of this.pending) p.reject(new Error(`${why}${this.stderrTail ? `：${this.stderrTail.trim()}` : ""}`));
-      this.pending.clear();
-    };
+    child.stdin.on("error", (error) => {
+      if (this.child !== child) return;
+      const detail = error instanceof Error ? error.message : String(error);
+      if (!/EPIPE|ECONNRESET|broken pipe/i.test(detail)) console.error(`[l1-worker] stdin 异常：${detail}`);
+      this.kill(`L1 插件进程 stdin 写入失败（${detail}）；隔离进程已被强制终止`);
+    });
     child.once("exit", (code) => rejectAll(`L1 插件进程退出（code ${code ?? "?"}）`));
     child.once("error", (err) => rejectAll(`L1 插件进程启动失败：${err.message}`));
     this.child = child;
@@ -155,15 +172,15 @@ class L1Worker {
     return this.child !== null;
   }
 
-  /** 发请求并等响应；超时回调（通常 = 杀进程）后以超时错误拒绝 */
-  async request(msg: WorkerMsg, timeoutMs: number, onTimeout?: () => void): Promise<WorkerMsg> {
+  /** 发请求并等响应；只有超时回调确实杀了进程，错误文案才说“已强制终止” */
+  async request(msg: WorkerMsg, timeoutMs: number, onTimeout?: () => boolean | void): Promise<WorkerMsg> {
     const child = this.start();
     const callId = this.callId();
     return new Promise<WorkerMsg>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(callId);
-        onTimeout?.();
-        reject(new Error(`插件调用超时（${Math.round(timeoutMs / 1000)}s）——隔离进程已被强制终止`));
+        const killed = onTimeout?.() === true;
+        reject(new Error(`插件调用超时（${Math.round(timeoutMs / 1000)}s）${killed ? "——隔离进程已被强制终止" : ""}`));
       }, timeoutMs);
       this.pending.set(callId, {
         resolve: (m) => {
@@ -175,18 +192,27 @@ class L1Worker {
           reject(e);
         },
       });
-      child.stdin.write(JSON.stringify({ ...msg, callId }) + "\n");
+      try {
+        child.stdin.write(JSON.stringify({ ...msg, callId }) + "\n");
+      } catch (error) {
+        clearTimeout(timer);
+        this.pending.delete(callId);
+        const killed = this.kill();
+        const detail = error instanceof Error ? error.message : String(error);
+        reject(new Error(`插件请求写入失败：${detail}${killed ? "——隔离进程已被强制终止" : ""}`));
+      }
     });
   }
 
-  /** 同步强杀（超时路径）：进程树一起带走，挂起请求由 exit 事件拒绝 */
-  kill(): void {
+  /** 同步发起强杀并拒绝全部 pending；返回值用于保证超时文案不谎报已杀进程。 */
+  kill(reason = "L1 插件进程已被强制终止"): boolean {
     const child = this.child;
     this.child = null;
-    if (!child) return;
+    if (!child) return false;
     if (child.pid) void killProcessTree(child.pid);
-    for (const [, p] of this.pending) p.reject(new Error("L1 插件进程已被强制终止"));
+    for (const [, p] of this.pending) p.reject(new Error(reason));
     this.pending.clear();
+    return true;
   }
 
   /** 停用路径：尽力让 deactivate 钩子跑一下（最多等 300ms），然后杀进程树 */
@@ -364,43 +390,51 @@ export class L1Host {
         return { ok: false, detail: `L1 worker 入口不存在：${this.deps.workerEntry}` };
       }
       const worker = new L1Worker(this.deps.workerEntry, this.deps.spawnImpl ?? spawn);
-      const res = await worker.request(
-        {
-          type: "activate",
-          id,
-          entryPath,
-          declared: manifest.contributes?.tools ?? [],
-          dataDir: path.join(dir, "state"),
-        },
-        L1_ACTIVATE_TIMEOUT_MS,
-      );
-      if (res.type === "activateError") {
-        worker.kill();
-        return { ok: false, detail: `activate 失败：${String(res.message ?? "")}` };
-      }
-      if (res.type !== "activated") {
-        worker.kill();
-        return { ok: false, detail: `worker 响应异常：${res.type}` };
-      }
-      const tools = new Map<string, L1ToolDef>();
-      for (const d of (res.tools ?? []) as { name: string; description: string; parameters: Record<string, unknown> }[]) {
-        const full = l1ToolFullName(id, d.name);
-        if (this.has(full) || tools.has(full)) {
-          worker.kill();
-          throw new Error(`工具名冲突：${full} 已存在——冲突时插件加载失败，不静默覆盖（§4.2.2）`);
-        }
-        tools.set(full, {
-          name: d.name,
-          description: d.description,
-          parameters: d.parameters,
-          // 真正的执行走 p.worker（execute 按 loaded[id].worker 路由）；这个占位永不直接调用
-          execute: () => {
-            throw new Error("worker 模式的执行应经由隔离进程路由");
+      let registered = false;
+      try {
+        const res = await worker.request(
+          {
+            type: "activate",
+            id,
+            entryPath,
+            declared: manifest.contributes?.tools ?? [],
+            dataDir: path.join(dir, "state"),
           },
-        });
+          this.deps.workerActivateTimeoutMs ?? L1_ACTIVATE_TIMEOUT_MS,
+          () => worker.kill(),
+        );
+        if (res.type === "activateError") {
+          return { ok: false, detail: `activate 失败：${String(res.message ?? "")}` };
+        }
+        if (res.type !== "activated") {
+          return { ok: false, detail: `worker 响应异常：${res.type}` };
+        }
+        const tools = new Map<string, L1ToolDef>();
+        for (const d of (res.tools ?? []) as { name: string; description: string; parameters: Record<string, unknown> }[]) {
+          const full = l1ToolFullName(id, d.name);
+          if (this.has(full) || tools.has(full)) {
+            throw new Error(`工具名冲突：${full} 已存在——冲突时插件加载失败，不静默覆盖（§4.2.2）`);
+          }
+          tools.set(full, {
+            name: d.name,
+            description: d.description,
+            parameters: d.parameters,
+            // 真正的执行走 p.worker（execute 按 loaded[id].worker 路由）；这个占位永不直接调用
+            execute: () => {
+              throw new Error("worker 模式的执行应经由隔离进程路由");
+            },
+          });
+        }
+        this.loaded.set(id, { id, dir, manifest, tools, worker });
+        registered = true;
+        return { ok: true, detail: `已激活（隔离进程，${tools.size} 个工具：${[...tools.keys()].join("、") || "无"}）` };
+      } catch (error) {
+        worker.kill();
+        throw error;
+      } finally {
+        // 只有登记进 loaded 的 worker 才交给 deactivate；其余无论成败路径都立即回收。
+        if (!registered) worker.kill();
       }
-      this.loaded.set(id, { id, dir, manifest, tools, worker });
-      return { ok: true, detail: `已激活（隔离进程，${tools.size} 个工具：${[...tools.keys()].join("、") || "无"}）` };
     }
 
     const mod = await importL1Module(entryPath);

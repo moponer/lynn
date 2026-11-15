@@ -74,7 +74,6 @@ export function DeskView({
   onRevealDeliverable,
   onRemoveDeliverable,
   captureShot,
-  notice,
 }: {
   desk: Desk;
   permission: PermissionMode;
@@ -82,12 +81,22 @@ export function DeskView({
   ambient: AmbientParams;
   ambientMode: AmbientMode;
   onPermission: (m: PermissionMode) => void;
-  onSend: (text: string, mode: "queue" | "steer", attachments?: { files?: string[]; images?: { name: string; data: string }[] }) => void;
+  /** 发送结果：null = 成功，字符串 = 失败原因（输入台等结果才清草稿） */
+  onSend: (
+    text: string,
+    mode: "queue" | "steer",
+    attachments?: { files?: string[]; images?: { name: string; data: string }[] },
+  ) => void | Promise<string | null>;
   /** 项目工作区文件检索（@ 提及补全，M1-16） */
   onFileSearch?: (q: string) => Promise<{ path: string; size: number }[]>;
   onAbort: () => void;
   onQueue: (action: "clear" | "remove", id?: string) => void;
-  onDecision: (taskId: string, action: "approve" | "reject", reason?: { what: string; expect: string; deadline: string }) => void;
+  /** 裁决结果：null = 已受理，字符串 = 失败原因（审查台打回据此保留或放行三要素） */
+  onDecision: (
+    taskId: string,
+    action: "approve" | "reject",
+    reason?: { what: string; expect: string; deadline: string },
+  ) => void | Promise<string | null>;
   onDecisionResolve: (id: string, action: "answer" | "start" | "revise" | "reject", text?: string, always?: boolean) => void;
   onFeedAction: (card: FeedCard) => void;
   onOpenSettings: () => void;
@@ -115,8 +124,8 @@ export function DeskView({
   onThreadPin?: (id: string, pinned: boolean) => void;
   /** 写群公告（全局段） */
   onAnnounce?: (text: string) => void;
-  /** 请风铃起草群公告 */
-  onDraftNotice?: () => void;
+  /** 请风铃起草群公告：原样返回 RPC Promise，Roster 的「起草中」随真实结果复位 */
+  onDraftNotice?: () => void | Promise<void>;
   /** 终止本群所有进行中的工作（2026-11-15）：成员停机 + 心跳/巡检/验收叫醒全停 */
   onHalt?: () => void;
   /** 工单往来（跨会话追溯）：工单出发会话 ≠ 当前会话时按 threadId 回读 */
@@ -141,10 +150,8 @@ export function DeskView({
   onOpenDeliverable?: (taskId: string, ref: string) => void;
   onRevealDeliverable?: (taskId: string, ref: string) => void;
   onRemoveDeliverable?: (taskId: string, ref: string, deleteFile: boolean) => void;
-  /** 全局快捷键截好的图（只进本轮随附） */
+  /** 全局快捷键截好的图（只进本轮随附；App 已按所属会话过滤，别群的截图不会传进来） */
   captureShot?: CaptureShot | null;
-  /** 发送/新建失败时的可见提示（不允许静默失败） */
-  notice?: string | null;
 }) {
   /** 本群的活（2026-11-15）：右栏印章、顶栏待办数、频道提示都只认它，别群的单不串进来。
    *  口径统一在 model.jobsInThread——控制台与态势球也走同一处，避免各写一遍后漂移。 */
@@ -169,6 +176,14 @@ export function DeskView({
   }, [desk.jobs, desk.members, desk.thread.id]);
   /** 右键成员「@他说话」：把名字插进输入框（群聊模式） */
   const [atTarget, setAtTarget] = useState<{ name: string; nonce: number } | null>(null);
+  /** 文字草稿按会话隔离的草稿匣（key=thread.id）：附件不入匣，切会话即清空 */
+  const draftByThread = useRef(new Map<string, string>());
+  const saveDraft = useCallback(
+    (d: string) => {
+      draftByThread.current.set(desk.thread.id, d);
+    },
+    [desk.thread.id],
+  );
   // 默认永远是「会话频道」：用户与风铃的完整对话不会被任何工单抢走。
   // 需要拍板的单走右栏/频道提示，用户点开才切工单详情（2026-11-11 修）。
   const [activeId, setActiveId] = useState<string | undefined>(undefined);
@@ -237,8 +252,11 @@ export function DeskView({
           onDecision(reviewJob.id, "approve");
           setReviewId(null);
         }}
-        onReject={(reason) => {
-          onDecision(reviewJob.id, "reject", reason);
+        onReject={async (reason) => {
+          // 适配层：把裁决结果（null=受理 / 字符串=失败原因）原样递给审查台，
+          // 审查台只在真正成功（或权威快照打回轮次增加）时才显示"已打回"
+          const r = await onDecision(reviewJob.id, "reject", reason);
+          return r ?? null;
         }}
         />
         {preview && (
@@ -323,6 +341,12 @@ export function DeskView({
             />
           </div>
           <ComposerZone
+            // 会话 key 重建输入台（产品行为）：切会话时 @ 文件与图片附件随旧实例卸载清空，
+            // 不会把 A 会话选的附件误发进 B 会话；文字草稿则按会话隔离——
+            // 每个会话在草稿匣里各存一份，切回来接着写，不是一刀切清空。
+            key={desk.thread.id || "none"}
+            initialDraft={draftByThread.current.get(desk.thread.id) ?? ""}
+            onDraftChange={saveDraft}
             configured={configured}
             turn={desk.turn}
             queue={desk.queue}
@@ -337,7 +361,6 @@ export function DeskView({
             onQueue={onQueue}
             captureShot={captureShot}
           />
-          {notice && <p className="composer-notice">{notice}</p>}
         </main>
         <Roster
           desk={desk}

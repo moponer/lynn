@@ -3234,9 +3234,16 @@ html[data-mode="light"] { color-scheme: light; }
 }
 .hl-code pre { margin: 0; }
 .hl-code code { display: block; font-family: var(--f-mono); font-size: var(--fs-meta); line-height: 1.7; color: var(--ink-2); }
-.hl-line { display: flex; gap: 12px; }
-.hl-line > span { white-space: pre-wrap; overflow-wrap: anywhere; min-width: 0; }
-.hl-no { flex: none; width: 30px; text-align: right; color: var(--ink-4); opacity: .45; user-select: none; }
+.hl-code-body, .hl-source { min-width: 0; }
+/* 行号是独立列，不插进高亮 HTML；带行号时两列一起横向滚动，长源码不会把行号挤错位。 */
+.hl-numbered .hl-code-body { display: grid; grid-template-columns: auto max-content; column-gap: 12px; min-width: max-content; }
+.hl-gutter {
+  padding: 0; font-family: var(--f-mono); font-size: var(--fs-meta); line-height: 1.7;
+  text-align: right; color: var(--ink-4); opacity: .45; user-select: none;
+}
+.hl-numbered .hl-source code { white-space: pre; overflow-wrap: normal; }
+/* Markdown 代码块不显示行号，仍按原有阅读方式自动换行。 */
+.hl-code:not(.hl-numbered) .hl-source code { white-space: pre-wrap; overflow-wrap: anywhere; }
 .hljs-keyword, .hljs-selector-tag, .hljs-built_in, .hljs-type, .hljs-title, .hljs-literal { color: var(--brass); }
 .hljs-string, .hljs-attr, .hljs-symbol, .hljs-regexp, .hljs-addition { color: var(--blue); }
 .hljs-number, .hljs-meta, .hljs-variable, .hljs-template-variable { color: var(--seal); }

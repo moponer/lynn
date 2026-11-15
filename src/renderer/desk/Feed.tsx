@@ -267,6 +267,8 @@ const BADGE_ICON: Record<string, IconName> = {
  * 正文一律走 Markdown（标题、列表、表格、代码块），纯文本直出只会出现在思考块里。
  * 不做聊天气泡（设计规范 §2.1），层级靠底色、字距与左侧的细色条。
  */
+const FEED_PAGE_SIZE = 80;
+
 export function FeedView({
   cards,
   empty,
@@ -289,6 +291,7 @@ export function FeedView({
   onRefMenu?: (taskId: string, ref: string, label: string, x: number, y: number) => void;
 }) {
   const [showHistory, setShowHistory] = useState(false);
+  const [visibleCount, setVisibleCount] = useState(FEED_PAGE_SIZE);
   const t = useT();
   // 分割点 = 最后一条"你"的消息：它之前的全是上一回合的账
   let split = -1;
@@ -302,12 +305,14 @@ export function FeedView({
   }
   const historyCount = split > 0 ? split : 0;
   const base = collapseHistory && !showHistory && split > 0 ? cards.slice(split) : cards;
+  // 权威 cards 原样保留，只给渲染加窗口；更早的内容每次按 80 条补回，不截断、不删数据。
+  const recent = base.slice(-visibleCount);
   // 带可行动作的错误卡即使被折叠成「历史」也要留在屏上：用户刚发了新消息，
   // 上一条 429/5xx 的「重试」入口不能凭空消失（2026-11-11 修）。
   const pinned = cards
     .filter((c) => c.kind === "system" && Boolean(c.code) && Boolean(c.action) && c.action !== "none")
     .slice(-1);
-  const visible = pinned.length && !base.some((c) => c.id === pinned[0].id) ? [...pinned, ...base] : base;
+  const visible = pinned.length && !recent.some((c) => c.id === pinned[0].id) ? [...pinned, ...recent] : recent;
   /**
    * 群里被 @ 的消息是否还没人接（群聊模式）：
    * 其后还没有风铃的回应 → 标「待风铃处理」。纯界面判断，不额外烧 token。
@@ -330,7 +335,7 @@ export function FeedView({
   if (cards.length === 0) return <div className="feed-empty">{empty ?? "还没有往来。"}</div>;
   return (
     <div className="feed">
-      {historyCount > 0 && (
+      {historyCount > 0 && !showHistory && (
         <button
           type="button"
           className="feed-history"
@@ -344,6 +349,22 @@ export function FeedView({
           }}
         >
           {t("feed.earlier", { n: historyCount })}
+        </button>
+      )}
+      {base.length > visibleCount && (
+        <button
+          type="button"
+          className="feed-history"
+          onClick={() => {
+            setVisibleCount((count) => count + FEED_PAGE_SIZE);
+            // 新补的是当前列表前面的内容，回到这一批的起点继续读。
+            requestAnimationFrame(() => {
+              const node = document.querySelector<HTMLElement>("[data-feed-scroll]");
+              if (node) node.scrollTop = 0;
+            });
+          }}
+        >
+          {t("feed.earlier", { n: Math.min(FEED_PAGE_SIZE, base.length - visibleCount) })}
         </button>
       )}
       {visible.map((c, i) => {

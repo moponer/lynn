@@ -405,6 +405,8 @@ export class SettingsStore {
     apiKey?: string;
     /** safeStorage 不可用时允许明文落盘（界面勾选「明文存储，我知晓风险」才传 true） */
     plaintextOk?: boolean;
+    /** 风险确认时间；旧入口 config.save 与模型库共用同一份确认记录 */
+    riskAcceptedAt?: string;
     previous?: StoredModelConfig | null;
   }): StoredModelConfig {
     const s = this.normalize(this.read());

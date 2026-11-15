@@ -11,21 +11,45 @@ import * as path from "node:path";
  * preview.read / preview.pdfWindow / app.openPath）只走这一个入口。
  */
 
-/** 目标已存在时两侧都走 realpath；不存在（尚未创建）时退回 resolve + relative 判定 */
+/**
+ * 目标已存在时两侧都走 realpath；不存在（尚未创建）时 realpath 最近已存在祖先，
+ * 再把缺失的相对段拼回去。这样 root/link/new.txt 里的 link 指向根外也混不过去。
+ */
 export function insideBase(base: string, target: string): boolean {
   if (!base) return false;
-  const real = (p: string): string => {
-    try {
-      return fs.realpathSync(p);
-    } catch {
-      return path.resolve(p);
+  const realWithMissing = (p: string): string | null => {
+    let current = path.resolve(p);
+    const missing: string[] = [];
+    let links = 0;
+    for (;;) {
+      try {
+        const real = fs.realpathSync(current);
+        return missing.length ? path.join(real, ...missing) : real;
+      } catch {
+        try {
+          // realpath 对悬空链接也报 ENOENT；链接本身是已存在的，必须按 readlink 继续判，
+          // 否则 root/dangling -> /outside/new.txt 会被当成"根内待创建文件"放行。
+          if (fs.lstatSync(current).isSymbolicLink()) {
+            if (++links > 40) return null;
+            current = path.resolve(path.dirname(current), fs.readlinkSync(current));
+            continue;
+          }
+        } catch {
+          /* 普通的不存在路径段：向最近已存在祖先回退 */
+        }
+        const parent = path.dirname(current);
+        if (parent === current) return null;
+        missing.unshift(path.basename(current));
+        current = parent;
+      }
     }
   };
-  const rb = real(base);
-  const rt = real(target);
+  const rb = realWithMissing(base);
+  const rt = realWithMissing(target);
+  if (!rb || !rt) return false;
   const rel = path.relative(rb, rt);
   if (rel === "") return true;
-  return !rel.startsWith("..") && !path.isAbsolute(rel);
+  return rel !== ".." && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel);
 }
 
 /**

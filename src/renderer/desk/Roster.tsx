@@ -57,7 +57,7 @@ export function Roster({
   /** 写群公告（全局段）：保存后风铃下一轮就看得见 */
   onAnnounce?: (text: string) => void;
   /** 请风铃起草群公告（用户不该只能自己写） */
-  onDraftNotice?: () => void;
+  onDraftNotice?: () => void | Promise<unknown>;
 }) {
   const t = useT();
   // 成员状态由成员卡自己表达（排序 + 状态色），标题栏不再报两套互相打架的总数
@@ -100,11 +100,35 @@ export function Roster({
   const [rosterNote, setRosterNote] = useState<string | null>(null);
   /** 群公告起草中（风铃写好了就停） */
   const [draftingNotice, setDraftingNotice] = useState(false);
+  const noticeRequest = useRef(0);
   const noticeText = desk.threads.find((x) => x.id === desk.thread.id)?.announcement;
   useEffect(() => {
     // 公告内容变了 = 起草完成
     if (noticeText) setDraftingNotice(false);
   }, [noticeText]);
+  useEffect(() => {
+    // 换群后旧请求的成功、失败与 finally 都不能再操作新群的起草状态。
+    noticeRequest.current += 1;
+    setDraftingNotice(false);
+    return () => {
+      noticeRequest.current += 1;
+    };
+  }, [desk.thread.id]);
+  const draftNotice = async () => {
+    if (!onDraftNotice) return;
+    const request = ++noticeRequest.current;
+    setDraftingNotice(true);
+    try {
+      // 同时兼容旧的 void 回调与新的 Promise 回调；同步抛错也由这个 try 捕获。
+      await Promise.resolve(onDraftNotice());
+    } catch (err) {
+      if (request === noticeRequest.current) {
+        setRosterNote(`起草没发起：${err instanceof Error ? err.message : String(err)}`);
+      }
+    } finally {
+      if (request === noticeRequest.current) setDraftingNotice(false);
+    }
+  };
   /** 编制全景：按群分家（2026-11-12）。
    *  队→群的绑定内核一直有（TeamRecord.threadId），此前没暴露给渲染层，
    *  十几支队只能平铺成一列——看不出哪支队是谁的，也跳不过去。 */
@@ -316,7 +340,7 @@ export function Roster({
           <GroupNotice
             text={desk.threads.find((x) => x.id === desk.thread.id)?.announcement}
             onSave={(text) => onAnnounce(text)}
-            onDraft={onDraftNotice ? () => { setDraftingNotice(true); onDraftNotice(); } : undefined}
+            onDraft={onDraftNotice ? () => void draftNotice() : undefined}
             drafting={draftingNotice}
           />
         )}
@@ -365,13 +389,14 @@ export function Roster({
             </div>
           )}
           {decision?.kind === "plan" && decision.plan ? (
-            <PlanSeal decision={decision} onPlan={onPlan} />
+            <PlanSeal key={decision.id} decision={decision} onPlan={onPlan} />
           ) : decision?.kind === "approval" ? (
             <ApprovalSeal decision={decision} onPlan={onPlan} />
           ) : decision ? (
-            <QuestionSeal decision={decision} onAnswer={onAnswer} />
+            <QuestionSeal key={decision.id} decision={decision} onAnswer={onAnswer} />
           ) : sealJob?.action === "accept" ? (
             <AcceptSeal
+              key={sealJob.id}
               job={sealJob}
               onAccept={() => onAccept(sealJob.id)}
               onReject={(reason) => onReject(sealJob.id, reason)}

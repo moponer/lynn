@@ -33,3 +33,14 @@ src-tauri/resources/dsh-engine/
 # 57 张 300–500KB 的姿态 PNG 重画一次就 20MB，历史里曾占 57MB/189 个版本。
 # 规格与重画口径见 docs/pet-assets.md；本机打包不受影响（electron-builder 读本地目录）。
 /assets/pet-dafeiyu/
+
+# 本地凭据、运行状态与私钥（.env.example 仍入库）
+/.env*
+!.env.example
+/.lynn/
+Local State
+*.pem
+*.key
+*.pfx
+
+# /shots/ 中历史已跟踪的 PNG 不受忽略规则影响；本次不做 git rm，后续另行清理。

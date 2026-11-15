@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { killProcessTree } from "./process-tree";
 import { clearWorkerMarker, writeWorkerMarker } from "./agent-orphans";
-import { drainUtf8Lines } from "./rpc-lines";
+import { drainUtf8Lines, RpcLineBufferOverflowError } from "./rpc-lines";
 
 /**
  * Pi RPC 宿主（M0-03 / §4.1）：壳与内核分进程。
@@ -177,6 +177,7 @@ export class AgentHost {
       if (this.child !== child) return;
       this.child = undefined;
       if (child.pid !== undefined) void killProcessTree(child.pid, "SIGTERM");
+      if (this.options.markerDir && child.pid !== undefined) clearWorkerMarker(this.options.markerDir, child.pid);
       this.handleExit(error instanceof Error ? error : new Error(String(error)));
     });
     child.once("exit", (code, signal) => {
@@ -187,12 +188,21 @@ export class AgentHost {
       this.handleExit(new Error(`Agent 子进程退出（code ${code ?? "unknown"}${signal ? `, ${signal}` : ""}）`));
     });
 
-    await readyPromise;
-    const initResult = await this.request<{ tools: string[] }>("init", {
-      tools: this.options.tools,
-      ...(this.options.systemPrompt ? { systemPrompt: this.options.systemPrompt } : {}),
-    });
-    void initResult;
+    try {
+      await readyPromise;
+      const initResult = await this.request<{ tools: string[] }>("init", {
+        tools: this.options.tools,
+        ...(this.options.systemPrompt ? { systemPrompt: this.options.systemPrompt } : {}),
+      });
+      void initResult;
+    } catch (error) {
+      // ready/init 任一步失败都要带走整棵进程树；只抛异常会把无人看管的 worker 留在后台。
+      await this.stop();
+      throw error;
+    } finally {
+      this.readyResolver = undefined;
+      this.readyRejecter = undefined;
+    }
   }
 
   private readyResolver?: () => void;
@@ -209,6 +219,9 @@ export class AgentHost {
     const child = this.child;
     if (!child) return;
     this.child = undefined;
+    this.readyRejecter?.(new Error("会话已关闭"));
+    this.readyResolver = undefined;
+    this.readyRejecter = undefined;
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timeout);
       pending.reject(new Error("会话已关闭"));
@@ -310,9 +323,18 @@ export class AgentHost {
   // ---------- 内部 ----------
 
   private handleChunk(chunk: Buffer): void {
-    const drained = drainUtf8Lines(this.lineBuffer, chunk);
-    this.lineBuffer = drained.rest;
-    for (const line of drained.lines) this.handleLine(line);
+    try {
+      const drained = drainUtf8Lines(this.lineBuffer, chunk);
+      this.lineBuffer = drained.rest;
+      for (const line of drained.lines) this.handleLine(line);
+    } catch (error) {
+      if (!(error instanceof RpcLineBufferOverflowError)) throw error;
+      // 半行无限增长视同传输层失效：拒绝 ready/pending，随后走统一进程树与 marker 清理。
+      this.handleExit(error);
+      void this.stop().catch((stopError) => {
+        this.options.onError(`RPC worker 超限清理失败：${stopError instanceof Error ? stopError.message : String(stopError)}`);
+      });
+    }
   }
 
   private handleLine(line: string): void {

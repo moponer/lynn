@@ -2,7 +2,7 @@
 //
 // 它自己持有少量纯视图状态（搜索词、台账分组、重命名输入、右键菜单位置），
 // 不碰中栏与右栏的编排状态，所以可以整块搬。
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useT } from "../i18n";
 import type { I18nKey } from "../../shared/i18n-strings";
@@ -25,6 +25,8 @@ import { JobMenu, OutputMenu, ThreadMenu } from "./Menus";
 import { ask, askConfirm } from "../components/ConfirmCard";
 import { groupArchived } from "../../shared/archive-groups";
 
+
+const THREAD_SEARCH_DEBOUNCE_MS = 300;
 
 export function Ledger({
   desk,
@@ -90,6 +92,45 @@ export function Ledger({
   const [view, setView] = useState<"threads" | "jobs" | "outputs">("threads");
   const [tq, setTq] = useState("");
   const [hits, setHits] = useState<{ id: string; title: string; hits: string[] }[]>([]);
+  const [threadSearching, setThreadSearching] = useState(false);
+  const [threadSearchError, setThreadSearchError] = useState<string | null>(null);
+  const threadSearchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const threadSearchSeq = useRef(0);
+  useEffect(() => () => {
+    // 卸载后计时器与晚到响应都失效，不能再写已卸载组件的状态。
+    threadSearchSeq.current += 1;
+    if (threadSearchTimer.current !== null) clearTimeout(threadSearchTimer.current);
+  }, []);
+  const changeThreadSearch = (value: string) => {
+    setTq(value);
+    const request = ++threadSearchSeq.current;
+    if (threadSearchTimer.current !== null) clearTimeout(threadSearchTimer.current);
+    if (!value.trim()) {
+      setHits([]);
+      setThreadSearching(false);
+      setThreadSearchError(null);
+      return;
+    }
+    setHits([]);
+    setThreadSearching(true);
+    setThreadSearchError(null);
+    threadSearchTimer.current = setTimeout(() => {
+      threadSearchTimer.current = null;
+      void Promise.resolve()
+        .then(() => onThreadSearch?.(value) ?? [])
+        .then((rows) => {
+          if (request === threadSearchSeq.current) setHits(rows);
+        })
+        .catch((err: unknown) => {
+          if (request !== threadSearchSeq.current) return;
+          setHits([]);
+          setThreadSearchError(`搜索失败：${err instanceof Error ? err.message : String(err)}`);
+        })
+        .finally(() => {
+          if (request === threadSearchSeq.current) setThreadSearching(false);
+        });
+    }, THREAD_SEARCH_DEBOUNCE_MS);
+  };
   const [renaming, setRenaming] = useState<{ id: string; title: string } | null>(null);
   /** 群操作菜单（群列表行尾的 ⋯ 或右键群行都走它） */
   const [threadMenu, setThreadMenu] = useState<{ id: string; x: number; y: number } | null>(null);
@@ -239,20 +280,16 @@ export function Ledger({
               className="thread-q qin"
               value={tq}
               placeholder={t("top.searchHistory")}
-              onChange={(e) => {
-                const v = e.target.value;
-                setTq(v);
-                if (!v.trim()) {
-                  setHits([]);
-                  return;
-                }
-                void (onThreadSearch?.(v) ?? Promise.resolve([])).then(setHits);
-              }}
+              onChange={(e) => changeThreadSearch(e.target.value)}
             />
           </label>
           <div className="ledger-scroll thread-scroll">
           {tq.trim()
-            ? hits.map((h) => (
+            ? threadSearching
+              ? <p className="sf-empty" role="status">正在搜索历史…</p>
+              : threadSearchError
+                ? <p className="sf-empty" role="alert">{threadSearchError}</p>
+                : hits.map((h) => (
                 <button
                   type="button"
                   key={h.id}
@@ -351,7 +388,9 @@ export function Ledger({
                   </div>
                 );
               })}
-          {tq.trim() && hits.length === 0 && <p className="sf-empty">没有匹配的历史。</p>}
+          {tq.trim() && !threadSearching && !threadSearchError && hits.length === 0 && (
+            <p className="sf-empty">没有匹配的历史。</p>
+          )}
           {/* 会话删光了：列表不能只剩一个搜索框，给一句说明 + 顺手开的动作 */}
           {!tq.trim() && desk.threads.length === 0 && (
             <div className="thread-none">

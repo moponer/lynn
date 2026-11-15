@@ -1,5 +1,5 @@
 // 审查台（2026-11-14）：从 Desk.tsx 拆出。装配函数 toReviewCase 与用例类型一起搬过来。
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useT } from "../i18n";
 import { Icon } from "../components/Icon";
 import { fmtTime } from "./model";
@@ -19,7 +19,8 @@ export function ReviewDesk({
   job: DeskJob;
   onBack: () => void;
   onApprove: () => void;
-  onReject: (reason: { what: string; expect: string; deadline: string }) => void;
+  /** 打回结果：null = 已受理，字符串 = 失败原因（三要素保留，改完可重发） */
+  onReject: (reason: { what: string; expect: string; deadline: string }) => Promise<string | null>;
   onPreview?: OpenPreview;
 }) {
   const r = reviewOf(job);
@@ -27,7 +28,28 @@ export function ReviewDesk({
   const [expect, setExpect] = useState(r.reject.expect);
   const [deadline, setDeadline] = useState(r.reject.deadline);
   const [sent, setSent] = useState(false);
+  /** 打回失败原因：不点了就假装成功，失败时三要素原样留在输入框里 */
+  const [rejectErr, setRejectErr] = useState<string | null>(null);
+  /** 打回在途：结果没回来之前不重复发 */
+  const [rejecting, setRejecting] = useState(false);
   const t = useT();
+
+  // 权威快照兜底：就算回调只是"发起"没给结果，打回轮次真的涨了也算成功
+  const baseRejections = useRef(job.rejections);
+  // 换了一张单审查：轮次基准与结果提示先复位，别把上一张单的"已打回"带过来
+  useEffect(() => {
+    baseRejections.current = job.rejections;
+    setSent(false);
+    setRejectErr(null);
+    setRejecting(false);
+  }, [job.id]);
+  useEffect(() => {
+    if (job.rejections > baseRejections.current) {
+      baseRejections.current = job.rejections;
+      setSent(true);
+      setRejectErr(null);
+    }
+  }, [job.rejections]);
 
   // Esc = 返回值台（审查台唯一的深页面，必须有键盘出口）
   useEffect(() => {
@@ -275,19 +297,29 @@ export function ReviewDesk({
                 <button
                   type="button"
                   className="btn btn-reject"
-                  disabled={!canReject}
+                  disabled={!canReject || rejecting}
                   style={{ justifyContent: "space-between", padding: "8px 12px" }}
                   onClick={() => {
-                    if (!canReject) return;
-                    setSent(true);
-                    onReject({ what: what.trim(), expect: expect.trim(), deadline: deadline.trim() });
+                    if (!canReject || rejecting) return;
+                    // 不点击即报成功：等 onReject 的真实结果——null 才亮"已打回"，
+                    // 失败原因落下方红条，三要素一个字都不清
+                    setSent(false);
+                    setRejectErr(null);
+                    setRejecting(true);
+                    void onReject({ what: what.trim(), expect: expect.trim(), deadline: deadline.trim() })
+                      .then((err) => {
+                        if (err) setRejectErr(err);
+                        else setSent(true);
+                      })
+                      .catch((e) => setRejectErr(e instanceof Error ? e.message : String(e)))
+                      .finally(() => setRejecting(false));
                   }}
                 >
                   <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
                     <Icon name="undo" size="sm" /> 打回重做
                   </span>
                   <span className="mono" style={{ fontSize: "var(--fs-label)", color: "var(--ink-3)" }}>
-                    {canReject ? "理由已填好" : "三要素必填"}
+                    {rejecting ? "打回中…" : canReject ? "理由已填好" : "三要素必填"}
                   </span>
                 </button>
               </div>
@@ -302,6 +334,11 @@ export function ReviewDesk({
             </div>
 
             {sent && <div className="sf-result ok" style={{ margin: "0 0 12px" }}>已打回：理由已记入卷宗。</div>}
+            {rejectErr && (
+              <div className="sf-result bad" style={{ margin: "0 0 12px" }}>
+                打回没发出去：{rejectErr}（三要素已保留，可改完重试）
+              </div>
+            )}
           </div>
         </aside>
       </div>

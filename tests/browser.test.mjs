@@ -78,7 +78,7 @@ test("M2-08：抓取表格 → csv 落盘 → 入知识库可检索（工具组�
   assert.ok(msg.includes("未装配"));
 });
 
-test("真 Edge 冒烟（本地夹具页，不依赖外网）：导航+快照+关闭", { timeout: 60_000 }, async () => {
+test("真 Edge 冒烟（本地夹具页，不依赖外网）：导航+快照+关闭", { timeout: 60_000 }, async (t) => {
   // 2026-11-14 实测：原先导航 https://example.com 时，外网不通会变成
   // "Navigation ... interrupted by another navigation to chrome-error://chromewebdata/"，
   // 表现为时好时坏的假红（之前误判成"并行抢 CPU"，重试一次只是掩盖）。
@@ -97,8 +97,11 @@ test("真 Edge 冒烟（本地夹具页，不依赖外网）：导航+快照+关
   try {
     const nav = JSON.parse(await ctl.navigate(`${base}/`));
     if (!nav.ok && /Edge/.test(nav.error ?? "")) {
-      console.log(`  skip：${nav.error}`);
-      return;
+      // Windows CI 已承诺提供 Edge：启动失败是真回归，必须红；其余环境显式跳过而非假装通过
+      if (!(process.platform === "win32" && process.env.CI === "true")) {
+        t.skip(`当前环境 Edge 不可用：${nav.error}`);
+        return;
+      }
     }
     assert.equal(nav.ok, true, nav.error ?? "");
     assert.equal(nav.sensitive, false);

@@ -138,7 +138,14 @@ export function loadMessaging(dataRoot: string): MessagingConfig {
 
 export function saveMessaging(dataRoot: string, cfg: MessagingConfig): void {
   fs.mkdirSync(dataRoot, { recursive: true });
-  fs.writeFileSync(path.join(dataRoot, "messaging.json"), JSON.stringify(cfg, null, 2), "utf-8");
+  const file = path.join(dataRoot, "messaging.json");
+  // 与 settings.json 同一纪律：新文件 0600，旧文件即便此前权限过宽也尽力收紧。
+  fs.writeFileSync(file, JSON.stringify(cfg, null, 2), { encoding: "utf-8", mode: 0o600 });
+  try {
+    fs.chmodSync(file, 0o600);
+  } catch {
+    /* Windows / 只读介质：尽力而为，不挡配置保存 */
+  }
 }
 
 /** 配置渠道（纯函数，M2-16）：不碰盘不碰 electron，加密函数注入以便测试 */

@@ -25,13 +25,23 @@ export function ComposerZone({
   pendingAt,
   usage,
   tokensUsed,
+  initialDraft,
+  onDraftChange,
 }: {
   configured: boolean;
   turn: Desk["turn"];
   queue: QueueItem[];
   variant?: "desk" | "review";
   onStandby?: () => void;
-  onSend: (text: string, mode: "queue" | "steer", attachments?: { files?: string[]; images?: { name: string; data: string }[] }) => void;
+  /**
+   * 发送结果约定：null = 成功，字符串 = 失败原因。
+   * 输入台等这个结果回来才清草稿/随附——失败时原样保留，用户改完能直接重发。
+   */
+  onSend: (
+    text: string,
+    mode: "queue" | "steer",
+    attachments?: { files?: string[]; images?: { name: string; data: string }[] },
+  ) => void | Promise<string | null>;
   /** @ 提及的项目文件检索（M1-16） */
   onFileSearch?: (q: string) => Promise<{ path: string; size: number }[]>;
   onAbort: () => void;
@@ -45,8 +55,15 @@ export function ComposerZone({
   /** 会话用量（顶栏用量计与这里共用同一套口径） */
   usage: UsageView;
   tokensUsed: number;
+  /**
+   * 文字草稿按会话隔离（产品行为）：DeskView 按会话 key 重建输入台，
+   * 文字草稿从草稿匣取回、变化时写回——切走再切回来还能接着写；
+   * @ 文件与图片附件不走这个匣子，切会话即随组件卸载清空（不跨会话误发）。
+   */
+  initialDraft?: string;
+  onDraftChange?: (draft: string) => void;
 }) {
-  const [draft, setDraft] = useState("");
+  const [draft, setDraft] = useState(initialDraft ?? "");
   const [mode, setMode] = useState<"queue" | "steer">("queue");
   const busy = turn.busy;
   const now = useTick(busy && Boolean(turn.activity));
@@ -61,11 +78,34 @@ export function ComposerZone({
   const [mentionItems, setMentionItems] = useState<MentionItem[]>([]);
   const [mentionIdx, setMentionIdx] = useState(0);
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** @ 文件补全请求序号：只接受最后一次查询的响应，旧响应一律丢弃 */
+  const fileSeq = useRef(0);
   const imgSeq = useRef(0);
   const lastShot = useRef<string | null>(null);
   const [captureErr, setCaptureErr] = useState<string | null>(null);
+  /** 发送中：等 onSend 结果期间防重复提交（Enter 连打也只发一次） */
+  const [sending, setSending] = useState(false);
+  /** 发送失败原因：草稿与随附原样保留，错误落在输入台而不是被吞掉 */
+  const [sendErr, setSendErr] = useState<string | null>(null);
   const hasAtt = attFiles.length > 0 || attImages.length > 0;
   const canSend = (draft.trim().length > 0 || hasAtt) && configured;
+
+  // 文字草稿写回会话草稿匣：附件不进匣子（产品行为见 props 注释）
+  useEffect(() => {
+    onDraftChange?.(draft);
+  }, [draft, onDraftChange]);
+
+  /** 让在途的文件补全失效并清掉定时器：新查询/退出 @/选中/卸载都走这一个口 */
+  const invalidateFileSearch = () => {
+    fileSeq.current += 1;
+    if (searchTimer.current) {
+      clearTimeout(searchTimer.current);
+      searchTimer.current = null;
+    }
+  };
+
+  // 卸载：清定时器 + 在途响应作废，晚了到的响应不再 setState
+  useEffect(() => () => invalidateFileSearch(), []);
 
   // 截图进随附条：与粘贴图片同一条可见链；按 id 去重，StrictMode 双跑也不会加两片
   useEffect(() => {
@@ -96,20 +136,33 @@ export function ComposerZone({
         .slice(0, 8)
         .map((mm) => ({ kind: "member" as const, name: mm.name, role: mm.role }));
       if (people.length) {
+        // 成员候选直接出：不再需要文件查询，在途响应一并作废
+        invalidateFileSearch();
         setMentionItems(people);
         return;
       }
       if (!onFileSearch) {
+        invalidateFileSearch();
         setMentionItems([]);
         return;
       }
-      if (searchTimer.current) clearTimeout(searchTimer.current);
+      invalidateFileSearch();
+      const seq = fileSeq.current;
       searchTimer.current = setTimeout(() => {
-        void onFileSearch(q).then((files) => {
-          setMentionItems(files.map((f) => ({ kind: "file" as const, path: f.path, size: f.size })));
-        });
+        searchTimer.current = null;
+        onFileSearch(q)
+          .then((files) => {
+            // 只接受最后一次查询：旧查询的响应覆盖新候选是补全最常见的错乱
+            if (seq !== fileSeq.current) return;
+            setMentionItems(files.map((f) => ({ kind: "file" as const, path: f.path, size: f.size })));
+          })
+          .catch(() => {
+            // 检索失败就当没有候选：不能留一个未处理 rejection，也不清空现有输入
+          });
       }, 200);
     } else {
+      // 退出 @：候选收起来的同时，在途响应与定时器一起作废
+      invalidateFileSearch();
       setMention(null);
       setMentionItems([]);
     }
@@ -125,6 +178,8 @@ export function ComposerZone({
       setDraft((d) => d.slice(0, mention.start) + d.slice(mention.start + mention.q.length + 1));
       setAttFiles((f) => (f.includes(p.path) ? f : [...f, p.path]));
     }
+    // 选中即收尾：在途的文件查询响应不该再把候选列表顶回来
+    invalidateFileSearch();
     setMention(null);
     setMentionItems([]);
     taRef.current?.focus();
@@ -147,6 +202,8 @@ export function ComposerZone({
       if (pick) pickMention(pick);
       return;
     }
+    // 上一发还没回结果：不再发第二发，草稿保持原样
+    if (sending) return;
     const text = draft.trim();
     if (!text && !hasAtt) return;
     if (text === "/standby") {
@@ -154,12 +211,29 @@ export function ComposerZone({
       onStandby?.();
       return;
     }
-    const attachments = hasAtt ? { files: attFiles, images: attImages } : undefined;
-    onSend(text, busy ? mode : "queue", attachments);
-    setDraft("");
-    setAttFiles([]);
-    setAttImages([]);
-    setMention(null);
+    // 快照这一发携带的内容：等结果期间用户新写的字、新贴的图、新到的截图都不属于这一发
+    const sentDraft = draft;
+    const sentFiles = attFiles;
+    const sentImages = attImages;
+    const attachments = hasAtt ? { files: sentFiles, images: sentImages } : undefined;
+    setSending(true);
+    setSendErr(null);
+    void Promise.resolve(onSend(text, busy ? mode : "queue", attachments))
+      .then((err) => {
+        if (err) {
+          // 失败：草稿与随附一个字都不动，错误显示出来，改完可直接重发
+          setSendErr(err);
+          return;
+        }
+        // 成功：只清这一发带走的内容——发送期间新增的文字/附件必须留下
+        setDraft((d) => (d === sentDraft ? "" : d.startsWith(sentDraft) ? d.slice(sentDraft.length) : d));
+        setAttFiles((fs) => fs.filter((f) => !sentFiles.includes(f)));
+        // 图片按对象引用剔除：发送途中新到的截图是另一个对象，不会被误清
+        setAttImages((imgs) => imgs.filter((img) => !sentImages.includes(img)));
+        setMention(null);
+      })
+      .catch((e) => setSendErr(e instanceof Error ? e.message : String(e)))
+      .finally(() => setSending(false));
   };
 
   const fmtSize = (n: number): string => (n >= 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)}MB` : n >= 1024 ? `${Math.round(n / 1024)}KB` : `${n}B`);
@@ -294,7 +368,10 @@ export function ComposerZone({
               }
               if (e.key === "Escape") {
                 e.preventDefault();
+                // 退出 @ 同样让在途响应作废：候选收起后不该再被旧响应顶回来
+                invalidateFileSearch();
                 setMention(null);
+                setMentionItems([]);
                 return;
               }
               if (e.key === "Enter" || e.key === "Tab") {
@@ -344,7 +421,7 @@ export function ComposerZone({
             <i />
           </button>
         ) : (
-          <button type="button" className="send" onClick={submit} disabled={!canSend} title={t("composer.send")}>
+          <button type="button" className="send" onClick={submit} disabled={!canSend || sending} title={t("composer.send")}>
             <Icon name="send" />
           </button>
         )}
@@ -353,8 +430,10 @@ export function ComposerZone({
       {/* 常驻快捷键提示删掉（2026-11-13）：Ctrl+/ 里有完整清单，天天压在输入框下面
           "Enter 发送 · Shift+Enter 换行 · @ 提及文件 · 粘贴图片 · Ctrl+K 跳转"是纯噪音。
           只有真有状态（生成中可排队/插话、截图失败）时才出这一行。 */}
-      <div className={`composer-hint${busy || captureErr ? "" : " quiet"}`}>
+      <div className={`composer-hint${busy || captureErr || sendErr || sending ? "" : " quiet"}`}>
         {busy && <span className="mono">生成中可排队或插话</span>}
+        {sending && <span className="mono">发送中…</span>}
+        {sendErr && <span className="capture-err">发送失败：{sendErr}（草稿与随附已保留，可重发）</span>}
         <button
           type="button"
           className="capture-trigger"

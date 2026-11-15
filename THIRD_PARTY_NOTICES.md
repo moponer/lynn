@@ -152,6 +152,7 @@
 @fontsource/ibm-plex-mono@5.3.0
 @google/genai@2.21.0
 @isaacs/fs-minipass@4.0.1
+@isaacs/nonrecursive-glob-match@1.1.0
 @jridgewell/gen-mapping@0.3.13
 @jridgewell/remapping@2.3.5
 @jridgewell/resolve-uri@3.1.2
@@ -272,7 +273,7 @@ agent-base@9.0.0
 ajv@8.20.0
 ansi-regex@5.0.1
 ansi-styles@4.3.0
-app-builder-lib@26.18.0
+app-builder-lib@26.18.1
 argparse@2.0.1
 asn1js@3.1.0
 async-exit-hook@2.0.1
@@ -293,7 +294,7 @@ browserslist@4.29.5
 buffer-equal-constant-time@1.0.1
 buffer-from@1.1.2
 builder-util-runtime@9.7.0
-builder-util@26.16.0
+builder-util@26.18.1
 bytestreamjs@2.0.1
 cacheable-lookup@5.0.4
 cacheable-request@7.0.4
@@ -316,7 +317,6 @@ combined-stream@1.0.8
 comma-separated-tokens@2.0.3
 commander@5.1.0
 compare-version@0.1.2
-concat-map@0.0.1
 convert-source-map@2.0.0
 core-util-is@1.0.3
 cross-dirname@0.1.0
@@ -335,7 +335,7 @@ detect-node@2.1.0
 devlop@1.1.0
 diff@9.0.0
 dir-compare@4.2.0
-dmg-builder@26.18.0
+dmg-builder@26.18.1
 docx-preview@0.4.1
 dotenv-expand@11.0.7
 dotenv@16.6.1
@@ -344,9 +344,9 @@ duplexer2@0.1.4
 ecdsa-sig-formatter@1.0.11
 echarts@5.6.0
 ejs@3.1.10
-electron-builder-squirrel-windows@26.18.0
-electron-builder@26.18.0
-electron-publish@26.18.0
+electron-builder-squirrel-windows@26.18.1
+electron-builder@26.18.1
+electron-publish@26.18.1
 electron-to-chromium@1.5.472
 electron-updater@6.8.11
 electron-winstaller@5.4.0
@@ -508,7 +508,7 @@ mime-types@2.1.35
 mime@2.6.0
 mimic-fn@4.0.0
 mimic-response@1.0.1
-minimatch@10.2.6
+minimatch@11.0.8
 minimist@1.2.8
 minipass@7.1.3
 minizlib@3.1.0
@@ -593,7 +593,7 @@ roarr@2.15.4
 rollup@4.67.2
 safe-buffer@5.2.1
 safer-buffer@2.1.2
-sanitize-filename@1.6.4
+sanitize-filename@1.6.5
 sax@1.6.1
 scheduler@0.23.2
 semver-compare@1.0.0
@@ -619,7 +619,7 @@ strip-final-newline@3.0.0
 style-to-object@2.0.2
 sumchecker@3.0.1
 supports-color@7.2.0
-tar@7.5.22
+tar@7.5.23
 temp-file@3.4.0
 temp@0.9.4
 tiny-async-pool@1.3.0
@@ -636,7 +636,7 @@ type-fest@0.13.1
 typebox@1.3.27
 typescript@5.9.3
 undici-types@6.21.0
-undici@8.10.2
+undici@8.12.4
 unified@11.0.5
 unist-util-is@6.0.1
 unist-util-position@5.0.0
@@ -648,7 +648,7 @@ unzipper@0.12.5
 update-browserslist-db@1.3.4
 utf8-byte-length@1.0.5
 util-deprecate@1.0.2
-uuid@10.0.0
+uuid@11.1.1
 vfile-message@4.0.4
 vfile@6.0.3
 vite@5.4.21

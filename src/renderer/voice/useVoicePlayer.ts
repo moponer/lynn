@@ -6,22 +6,38 @@ import { useEffect } from "react";
  * 纪律：串行播放、高优先级打断、stop 立刻清空；播放被浏览器自动播放策略拦下时
  * 不假装播过，只跳过这一条（下次有用户交互后自然恢复）。
  */
+const QUEUE_CAP = 10;
+const PRIORITY_RANK = { low: 0, normal: 1, high: 2 } as const;
+
+type VoicePriority = keyof typeof PRIORITY_RANK;
+interface QueueEntry {
+  audio: HTMLAudioElement;
+  priority: VoicePriority;
+  generation: number;
+}
+
 export function useVoicePlayer(): void {
   useEffect(() => {
-    let current: HTMLAudioElement | null = null;
-    let queue: HTMLAudioElement[] = [];
+    let current: QueueEntry | null = null;
+    let queue: QueueEntry[] = [];
     let disposed = false;
+    // stop / 高优先级打断都会换一代，旧音频的异步回调不能再碰新一代的播放状态。
+    let generation = 0;
+
+    const release = (entry: QueueEntry) => {
+      entry.audio.onended = null;
+      entry.audio.onerror = null;
+      entry.audio.pause();
+      entry.audio.src = "";
+    };
 
     const stopAll = () => {
+      generation += 1;
       if (current) {
-        current.pause();
-        current.src = "";
+        release(current);
         current = null;
       }
-      for (const a of queue) {
-        a.pause();
-        a.src = "";
-      }
+      for (const entry of queue) release(entry);
       queue = [];
     };
 
@@ -29,20 +45,36 @@ export function useVoicePlayer(): void {
       if (disposed || current) return;
       const next = queue.shift();
       if (!next) return;
+      if (next.generation !== generation) {
+        release(next);
+        playNext();
+        return;
+      }
       current = next;
-      next.onended = () => {
+      const finish = () => {
+        if (disposed || next.generation !== generation || current !== next) return;
+        release(next);
         current = null;
         playNext();
       };
-      next.onerror = () => {
-        current = null;
-        playNext();
-      };
-      void next.play().catch(() => {
+      next.audio.onended = finish;
+      next.audio.onerror = finish;
+      void next.audio.play().catch(() => {
+        if (disposed || next.generation !== generation || current !== next) return;
         console.warn("[voice] 播放被阻止（自动播放策略或音频设备不可用）");
-        current = null;
-        playNext();
+        finish();
       });
+    };
+
+    const makeRoom = (incoming: QueueEntry): boolean => {
+      if (queue.length < QUEUE_CAP) return true;
+      const lowest = Math.min(...queue.map((entry) => PRIORITY_RANK[entry.priority]));
+      // 队列里全是更高优先级时，新到的低优先级不挤掉已有内容。
+      if (PRIORITY_RANK[incoming.priority] < lowest) return false;
+      const index = queue.findIndex((entry) => PRIORITY_RANK[entry.priority] === lowest);
+      const [evicted] = queue.splice(index, 1);
+      release(evicted);
+      return true;
     };
 
     const off = window.lynn.onVoice((ev) => {
@@ -51,9 +83,13 @@ export function useVoicePlayer(): void {
         stopAll();
         return;
       }
-      const audio = new Audio(ev.audio);
       if (ev.priority === "high") stopAll();
-      queue.push(audio);
+      const entry: QueueEntry = { audio: new Audio(ev.audio), priority: ev.priority, generation };
+      if (!makeRoom(entry)) {
+        release(entry);
+        return;
+      }
+      queue.push(entry);
       playNext();
     });
 

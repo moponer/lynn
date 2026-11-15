@@ -71,16 +71,20 @@ function whoOfCard(card: FeedCard): string {
   return "风铃";
 }
 
+/** 流水正文统一压成单行并截断，流式 delta 与完整卡片必须走同一把尺子。 */
+function capText(raw: string): string {
+  const one = raw.replace(/\s*\n+\s*/g, " ／ ").trim();
+  return one.length > TEXT_CAP ? `${one.slice(0, TEXT_CAP)}…` : one;
+}
+
 /** 一行正文：正文 > 四段汇报 > body > 标题（不拼工单号与路径） */
 function textOfCard(card: FeedCard): string {
   const report = card.report;
   if (!card.text && report) {
     const parts = [report.conclusion, report.decision].filter((x) => x && x.trim());
-    if (parts.length) return parts.join("｜");
+    if (parts.length) return capText(parts.join("｜"));
   }
-  const raw = card.text || card.body || card.title || "";
-  const one = raw.replace(/\s*\n+\s*/g, " ／ ").trim();
-  return one.length > TEXT_CAP ? `${one.slice(0, TEXT_CAP)}…` : one;
+  return capText(card.text || card.body || card.title || "");
 }
 
 /** 卡片的 createdAt 只有 "HH:MM"：按今天的时钟还原成时间戳，别把历史全标成"现在" */
@@ -196,7 +200,7 @@ export function useConsoleFeed(desk: Desk): ConsoleFeed {
                 l.id === p.id
                   ? {
                       ...l,
-                      text: p.text !== undefined ? p.text : l.text,
+                      text: p.text !== undefined ? capText(p.text) : l.text,
                       live: true,
                     }
                   : l,

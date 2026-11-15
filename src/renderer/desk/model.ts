@@ -477,12 +477,15 @@ export function outputsOf(desk: Desk): DeskOutput[] {
     return isAbs || !base ? p : `${base}/${p.replace(/^[\\/]+/, "")}`;
   };
   const byPath = new Map<string, DeskOutput>();
+  // Windows 路径不区分大小写；POSIX 的 Foo 与 foo 是两个文件，去重键必须保留原大小写。
+  const foldCase = typeof navigator !== "undefined" && /windows/i.test(navigator.userAgent);
   for (const j of desk.jobs) {
     for (const d of j.deliverables ?? []) {
       const path = d.path || d.ref;
       if (!path) continue;
       const abs = resolvePath(j.workspaceRoot, path);
-      const key = abs.replace(/\\/g, "/").replace(/\/{2,}/g, "/").toLowerCase();
+      const normalized = abs.replace(/\\/g, "/").replace(/\/{2,}/g, "/");
+      const key = foldCase ? normalized.toLowerCase() : normalized;
       // 固化时刻优先（同一文件被两张单更新过时，它才知道谁更晚）
       const stamp = d.at ?? j.at;
       const hit = byPath.get(key);

@@ -101,7 +101,7 @@
 
 ## 快速开始
 
-要求 Node 22+（建议 22.12 以上）。
+要求 Node **>=22.19.0**（与 undici、pdfjs-dist 及 Pi 运行时的实际要求一致）。
 
 ```bash
 npm ci
@@ -223,6 +223,10 @@ tests/                     # 700+ 条 node --test（含整链路模拟任务）
 - API Key 由系统 `safeStorage` 加密；成员命令环境剔除变量名含 `KEY/TOKEN/SECRET/PASS…` 的值。
 - 卸载默认**不删数据**（`deleteAppDataOnUninstall: false`）；交接机器前请手动删除 `~/.lynn/settings.json`。
 - 安装包目前**未做 Windows 代码签名**，详见 [`docs/site/zh/release.md`](./docs/site/zh/release.md)。
+
+## 已知风险
+
+- `pptx-preview@1.0.7` 传递依赖的 `echarts@5.6.0` 存在 XSS 风险（[GHSA-fgmj-fm8m-jvvx](https://github.com/advisories/GHSA-fgmj-fm8m-jvvx)）。截至 2026-11-15，ECharts 5.x 尚未发布修复版，只有 6.1.0 及以上修复；为避免跨大版本覆盖破坏 PPT 预览，暂不强制升级。后续跟踪 `pptx-preview` 上游修复，或在完成 ECharts 6 兼容验证后升级；升级前不要预览不可信来源的 PPTX。
 
 ## 已知边界
 

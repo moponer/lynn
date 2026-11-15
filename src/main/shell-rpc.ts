@@ -60,9 +60,9 @@ export async function handleShellRpc(method: string, params: unknown, ctx: Shell
 
 // ---------- 桌宠与窗口（自绘标题栏） ----------
 
-rpc("pet.open", (_p, ctx) => {
-  ctx.createPet();
-  return { ok: true };
+rpc("pet.open", () => {
+  // 桌宠入口暂时停用；close/focus 保留，已有小窗仍能退出并回到主界面。
+  return { ok: false, error: "桌宠功能暂时停用" };
 });
 rpc("pet.close", (_p, ctx) => {
   ctx.closePet();
@@ -216,6 +216,12 @@ rpc("evidence.open", async (params, ctx) => {
   if (r.error) return { ok: false, error: r.error };
   if (r.guardError) return { ok: false, error: "证据路径越界，已拒绝" };
   if (!fs.existsSync(r.target)) return { ok: false, error: "文件不存在（可能已被移动）" };
+  // 与 app.openPath 同一扩展名白名单。目录外交付物已经由 resolveTaskRef 的登记豁免验明，
+  // 这里以其所在目录为 base 只复查 realpath containment，不把它误挡成未登记路径。
+  const taskBase = path.resolve(ctx.kernel.dataRoot, "tasks", r.taskId);
+  const openBase = insideBase(taskBase, r.target) ? taskBase : path.dirname(r.target);
+  const blocked = openPathBlockReason(openBase, r.target);
+  if (blocked) return { ok: false, error: blocked };
   const err = await shell.openPath(r.target);
   return err ? { ok: false, error: err } : { ok: true };
 });

@@ -22,7 +22,7 @@ import type {
 import type { VoicePort } from "./voice-policy";
 import { ManagementTools, MANAGEMENT_ONLY_TOOLS } from "./management-tools";
 import { LlmError, probeEndpoint, streamChat, streamChatWithRetry, type ChatMessage, type ToolSchema } from "./llm";
-import { discoverModels, endpointRiskError } from "./endpoint";
+import { discoverModels, endpointRiskError, normalizeBaseUrl, redactSecrets } from "./endpoint";
 import { probeGateways } from "./gateways";
 import { SettingsStore, loadApiKey, defaultDataRoot, type Prefs, type StoredModelConfig } from "./settings";
 import { applyPiEnvironment } from "./pi-home";
@@ -154,6 +154,53 @@ function kernelBuildId(): string {
     cachedBuildId = `t-${Date.now()}`;
   }
   return cachedBuildId;
+}
+
+const SSH_READ_ONLY_COMMANDS = new Set([
+  "ls", "ps", "df", "du", "free", "uptime", "uname", "whoami", "hostname", "date",
+  "cat", "head", "tail", "grep", "egrep", "fgrep", "find", "stat", "wc", "sort", "uniq",
+  "journalctl", "ss", "netstat", "ip", "lsblk", "lscpu", "vmstat", "pgrep", "pidof", "id",
+  "mount", "systemctl", "top",
+]);
+
+/** SSH 只读命令白名单：在真正连接前做纯字符串校验，便于脱离远端环境单测 */
+export function sshReadOnlyCommandError(command: string): string | null {
+  const cmd = String(command ?? "").trim();
+  if (!cmd) return "命令不能为空。";
+  if (/[`>;\r\n]/.test(cmd) || cmd.includes("$(") || cmd.includes("<(") || cmd.includes("|") || cmd.includes("&")) {
+    return "拒绝执行：SSH 只读排查不支持重定向、命令替换、多条命令或管道。只读排查：多条命令/管道请拆分执行。";
+  }
+  const tokens = cmd.split(/\s+/);
+  const name = tokens[0];
+  if (!SSH_READ_ONLY_COMMANDS.has(name)) {
+    return `拒绝执行：命令「${name}」不在 SSH 只读白名单。SSH 只用于只读排查（看日志/磁盘/进程）；要改配置或重启服务，请让用户自己动手。`;
+  }
+  const args = tokens.slice(1).map((t) => t.replace(/^["']|["']$/g, ""));
+  if (name === "systemctl" && args.find((t) => !t.startsWith("-")) !== "status") {
+    return "拒绝执行：systemctl 只允许 status 子命令；启动、停止、重启与改配置请让用户自己动手。";
+  }
+  if (name === "top" && !args.includes("-b")) {
+    return "拒绝执行：top 只允许 -b 批处理模式（可搭配 -n 指定次数），交互模式不适用只读排查。";
+  }
+  if (name === "mount" && args.length > 0 && !(args.length === 1 && args[0] === "-l")) {
+    return "拒绝执行：mount 只允许无参数或 -l 查看挂载，不允许挂载/卸载操作。";
+  }
+  if (name === "ip" && args.some((t) => /^(set|add|del|delete|change|replace|flush|save|restore|exec)$/i.test(t))) {
+    return "拒绝执行：ip 只允许 show/list/get 等只读查看，不允许改地址、链路、路由或借 netns exec 执行命令。";
+  }
+  if (name === "find" && args.some((t) => /^-(delete|exec|execdir|ok|okdir|fprintf|fprint)$/i.test(t))) {
+    return "拒绝执行：find 只允许查找与查看，禁止 -delete/-exec/-fprintf 等删除、执行或写文件动作。";
+  }
+  if (name === "sort" && args.some((t) => t === "-o" || t.startsWith("-o") || t === "--output" || t.startsWith("--output="))) {
+    return "拒绝执行：sort 不允许 -o/--output 写文件，请直接读取标准输出。";
+  }
+  if (name === "journalctl" && args.some((t) => /^--(vacuum-|rotate$|flush$|sync$|setup-keys$|relinquish-var$)/.test(t))) {
+    return "拒绝执行：journalctl 只允许查询日志，禁止清理、轮转或写入动作。";
+  }
+  if (name === "ss" && args.some((t) => t === "--kill" || /^-[A-Za-z]*K/.test(t))) {
+    return "拒绝执行：ss 不允许 -K/--kill 关闭连接。";
+  }
+  return null;
 }
 
 /** 两种运行时宿主都要满足的最小面：官方 RPC 为主，旧自建协议仅作一键回退 */
@@ -4717,26 +4764,61 @@ export class Kernel {
         // 工作区：默认会话项目目录；给了就必须是已存在目录（用户会在契约卡上看到并批准）
         let workspace: string | undefined;
         if (args.workspace !== undefined && String(args.workspace).trim()) {
-          const ws = path.resolve(String(args.workspace).trim());
-          if (!path.isAbsolute(ws)) {
+          const raw = String(args.workspace).trim();
+          // 先验原始字符串，再 resolve；否则相对路径会被 resolve 成绝对路径而混过校验。
+          if (!path.isAbsolute(raw)) {
+            // 跨平台单测里也会传 C:\\ 形状；仍按既有口径明确报盘符根，而不是误报不存在。
+            if (/^[A-Za-z]:[\\/]$/.test(raw)) {
+              return `workspace 不能是数据目录或盘符根（${raw}）：成员会拿到整棵树的写权限。选一个具体的项目/任务子目录。`;
+            }
             return `workspace 必须是绝对路径（收到：${String(args.workspace)}）。不确定就先 ask_user 问用户材料在哪。`;
           }
-          if (!fs.existsSync(ws) || !fs.statSync(ws).isDirectory()) {
+          const ws = path.resolve(raw);
+          try {
+            if (!fs.statSync(ws).isDirectory()) throw new Error("not-directory");
+          } catch {
             return `workspace 目录不存在：${ws}。先 ask_user 向用户确认工作目录，不要猜路径。`;
           }
-          if (ws === path.resolve(this.dataRoot) || ws.length <= 3) {
-            return `workspace 不能是数据目录或盘符根（${ws}）：成员会拿到整棵树的写权限。选一个具体的项目/任务子目录。`;
-          }
+          const dataRootAbs = path.resolve(this.dataRoot);
+          const boundaryError = (candidate: string): string | null => {
+            if (candidate === dataRootAbs || isDriveRoot(candidate)) {
+              return `workspace 不能是数据目录或盘符根（${candidate}）：成员会拿到整棵树的写权限。选一个具体的项目/任务子目录。`;
+            }
+            const forbidden = forbiddenRootReason(candidate, this.dataRoot);
+            return forbidden ? `workspace 不允许：${forbidden}` : null;
+          };
+          const lexicalError = boundaryError(ws);
+          if (lexicalError) return lexicalError;
+          // 符号链接指向家目录、数据根、系统目录或盘符根时，同样不能授权整棵树。
+          const real = fs.realpathSync(ws);
+          const realError = boundaryError(real);
+          if (realError) return realError;
           workspace = ws;
         }
         // 只读授权：先登记，开工时才落权（自动/放手档=风铃授予即生效，询问/计划档=用户点「开始」）。
         // 成员永远不能自己扩权；授权最终写在 TaskRecord.readRoots 上。
         let readRoots: string[] | undefined;
         if (Array.isArray(args.readRoots) && args.readRoots.length > 0) {
-          const roots = (args.readRoots as unknown[]).map((r) => path.resolve(String(r).trim())).filter(Boolean);
-          const bad = roots.filter((r) => !path.isAbsolute(r) || !fs.existsSync(r) || !fs.statSync(r).isDirectory());
+          const rawRoots = args.readRoots.map((r) => String(r).trim()).filter(Boolean);
+          const relative = rawRoots.filter((r) => !path.isAbsolute(r));
+          if (relative.length) {
+            return `readRoots 必须是绝对路径（收到：${relative.join("、")}）。先 ask_user 向用户确认材料位置。`;
+          }
+          const roots = rawRoots.map((r) => path.resolve(r));
+          const bad = roots.filter((r) => {
+            try {
+              return !fs.statSync(r).isDirectory();
+            } catch {
+              return true;
+            }
+          });
           if (bad.length) {
             return `readRoots 里这些目录不存在或不是目录：${bad.join("、")}。先 ask_user 向用户确认材料位置。`;
+          }
+          for (const root of roots) {
+            const real = fs.realpathSync(root);
+            const forbidden = forbiddenRootReason(root, this.dataRoot) ?? forbiddenRootReason(real, this.dataRoot);
+            if (forbidden) return `readRoots 目录 ${root} 不允许授权：${forbidden}`;
           }
           readRoots = roots;
         }
@@ -4751,7 +4833,9 @@ export class Kernel {
           }
           const usable = [...inherited].filter((r) => {
             try {
-              return path.isAbsolute(r) && fs.existsSync(r) && fs.statSync(r).isDirectory();
+              if (!path.isAbsolute(r) || !fs.statSync(r).isDirectory()) return false;
+              const real = fs.realpathSync(r);
+              return !forbiddenRootReason(r, this.dataRoot) && !forbiddenRootReason(real, this.dataRoot);
             } catch {
               return false;
             }
@@ -5214,10 +5298,11 @@ export class Kernel {
       case "ship_plugin": {
         // M3-07（Q6 定稿 C）：只有 L0 技能插件允许她自启用，每次启用记审计并落卡告知用户
         const draftId = String(args.draftId);
-        const review = reviewDraft(this.dataRoot, draftId, {
+        const existing = {
           pluginIds: this.pluginHost.scan().plugins.map((p) => p.id),
           skillNames: this.skillEntries.map((s) => s.name),
-        });
+        };
+        const review = reviewDraft(this.dataRoot, draftId, existing);
         if (!review.ok) {
           return JSON.stringify({ ok: false, verdict: review.verdict, findings: review.findings }, null, 2);
         }
@@ -5226,7 +5311,7 @@ export class Kernel {
         }
         let enabled;
         try {
-          enabled = promoteDraft(this.dataRoot, draftId, false);
+          enabled = promoteDraft(this.dataRoot, draftId, false, existing);
         } catch (err) {
           return `启用失败：${err instanceof Error ? err.message : String(err)}`;
         }
@@ -5622,6 +5707,13 @@ export class Kernel {
 
   // ---------- Pi RPC 会话（M0-03：模型循环在子进程，工具与权限留在壳） ----------
 
+  /** worker stderr / RPC 错误进卡片与渲染事件前，先脱敏再限长，避免凭据落进会话持久层 */
+  private reportRuntimeError(message: string): void {
+    const safe = redactSecrets(String(message)).slice(0, 2_000);
+    this.card({ kind: "system", text: `运行时错误：${safe}` });
+    this.emit({ type: "error", message: safe });
+  }
+
   /** 起/复用运行时；模型或工具面变化时重建（子进程崩溃不影响壳） */
   private async ensureHost(): Promise<RuntimeHost> {
     const cfg = this.activeModelConfig();
@@ -5676,11 +5768,8 @@ export class Kernel {
       // 无主根的会话：不传 cwd（Pi 用 entry 所在目录），成员命令仍各自钉在工作区
       projectRoot: this.projectRoot || undefined,
       onEvent: (ev: { type: string; [k: string]: unknown }) => this.onAgentEvent(ev),
-      onError: (message: string) => {
-        // 运行时错误必须进对话流：只发事件的话界面会一片空白（用户只看到自己那半句）
-        this.card({ kind: "system", text: `运行时错误：${message}` });
-        this.emit({ type: "error", message });
-      },
+      // 运行时错误必须进对话流：只发事件的话界面会一片空白（用户只看到自己那半句）
+      onError: (message: string) => this.reportRuntimeError(message),
     };
     const host: RuntimeHost = official
       ? new PiRpcHost({
@@ -6144,8 +6233,9 @@ export class Kernel {
       // （错误由 onAgentEvent 写入，TS 不跨方法追踪属性 narrowing，这里显式收成局部变量）
       const modelError = this.lastModelError as string | null;
       if (modelError && !(live.text ?? "").trim() && !this.repetitionAborted) {
-        const fail = this.classifyError(new Error(modelError));
-        this.failTurn(fail.code, `${fail.message}（端点原文：${modelError.slice(0, 160)}）`, fail.action);
+        const safeModelError = redactSecrets(modelError);
+        const fail = this.classifyError(new Error(safeModelError));
+        this.failTurn(fail.code, `${fail.message}（端点原文：${safeModelError.slice(0, 160)}）`, fail.action);
         return;
       }
       this.settleAssistant(live, live.text ?? "");
@@ -7071,12 +7161,9 @@ export class Kernel {
     if (!host || !user) return "SSH 连接缺主机或账号（能力中心 → 外部应用）。";
     const cmd = String(input.command ?? "").trim();
     if (!cmd) return "命令不能为空。";
-    // 只读纪律的第二道闸：提示词说了不许，代码也拦（远端破坏性动作一律拒）
-    const denied = /\b(rm|rmdir|mkfs|dd|shutdown|reboot|halt|kill|pkill|systemctl\s+(stop|restart|disable)|service\s+\S+\s+(stop|restart)|sudo|truncate|drop\s+table|delete\s+from)\b/i;
-    const hit = denied.exec(cmd);
-    if (hit) {
-      return `拒绝执行：远端命令含破坏性动作「${hit[1]}」。SSH 只用于只读排查（看日志/磁盘/进程）；要改配置或重启服务，请让用户自己动手。`;
-    }
+    // 只读纪律的第二道闸：黑名单漏一个写法就是远端任意执行，改为首命令白名单 + 全串连接符拒绝。
+    const commandError = sshReadOnlyCommandError(cmd);
+    if (commandError) return commandError;
     const args = [
       "-i", key,
       "-p", port,
@@ -7128,15 +7215,21 @@ export class Kernel {
     let baseUrl = params.baseUrl?.trim() ?? "";
     let model = params.model?.trim() ?? "";
     let apiKey = params.apiKey?.trim() ?? "";
+    let riskAccepted = params.riskAccepted === true;
     if (params.id) {
       const cfg = this.settings.getModel(params.id);
       if (!cfg) return { ok: false, error: "模型不存在" };
+      const stored = this.settings.getModels().find((e) => e.id === params.id);
       baseUrl = baseUrl || cfg.baseUrl;
       model = model || cfg.model;
+      // 同一端点可沿用保存时的确认；id + 新 baseUrl 必须按新端点重新确认。
+      if (stored?.riskAcceptedAt && normalizeBaseUrl(stored.baseUrl) === normalizeBaseUrl(baseUrl)) riskAccepted = true;
       if (!apiKey) apiKey = loadApiKey(this.settings, (b) => this.decryptBlob(b), params.id) ?? "";
     }
     if (!baseUrl) return { ok: false, error: "Base URL 要填。" };
     if (!apiKey) return { ok: false, error: "Key 无法读取，请重新填一次。" };
+    const riskError = endpointRiskError(baseUrl, riskAccepted, "健康检查");
+    if (riskError) return { ok: false, error: riskError };
     try {
       const r = await discoverModels(baseUrl, apiKey, 6000);
       return { ok: true, latencyMs: r.latencyMs, modelCount: r.models.length, via: "models" };
@@ -8527,7 +8620,10 @@ export class Kernel {
       case "workshop.promote": {
         const p = params as { draftId: string; byUser: boolean };
         try {
-          const r = promoteDraft(this.dataRoot, p.draftId, p.byUser);
+          const r = promoteDraft(this.dataRoot, p.draftId, p.byUser, {
+            pluginIds: this.pluginHost.scan().plugins.map((x) => x.id),
+            skillNames: this.skillEntries.map((s) => s.name),
+          });
           if (r.tier === "L0") this.reloadSkills();
           this.card({
             kind: "system",
@@ -8571,7 +8667,21 @@ export class Kernel {
       }
 
       case "config.save": {
-        const p = params as { provider: string; baseUrl: string; model: string; apiKey?: string; plaintextOk?: boolean };
+        const p = params as {
+          provider: string;
+          baseUrl: string;
+          model: string;
+          apiKey?: string;
+          plaintextOk?: boolean;
+          riskAccepted?: boolean;
+        };
+        const models = this.settings.getModels();
+        const previousEntry = models.find((e) => e.id === this.settings.getDefaultModelId()) ?? models[0];
+        const inheritedRisk = Boolean(
+          previousEntry?.riskAcceptedAt && normalizeBaseUrl(previousEntry.baseUrl) === normalizeBaseUrl(p.baseUrl),
+        );
+        const riskError = endpointRiskError(p.baseUrl, p.riskAccepted === true || inheritedRisk, "保存");
+        if (riskError) return { ok: false, error: riskError } as RpcContracts[M]["result"];
         try {
           this.settings.saveModel({
             provider: p.provider,
@@ -8579,6 +8689,7 @@ export class Kernel {
             model: p.model,
             apiKey: p.apiKey,
             plaintextOk: p.plaintextOk === true,
+            riskAcceptedAt: p.riskAccepted === true ? new Date().toISOString() : undefined,
             previous: this.settings.getModel(),
           });
           return { ok: true } as RpcContracts[M]["result"];
@@ -8589,7 +8700,7 @@ export class Kernel {
       }
 
       case "config.test": {
-        const p = params as { baseUrl: string; apiKey: string; model: string };
+        const p = params as { baseUrl: string; apiKey: string; model: string; riskAccepted?: boolean };
         // 输入框留空 = 用已保存的 Key 测（渲染层拿不到明文，由主进程解密）
         let apiKey = p.apiKey?.trim() ?? "";
         if (!apiKey) {
@@ -8600,6 +8711,14 @@ export class Kernel {
           apiKey = this.activeApiKey() ?? "";
         }
         if (!apiKey) return { ok: false, error: "Key 无法解密，请重新填一次。" } as RpcContracts[M]["result"];
+        const models = this.settings.getModels();
+        const activeId = this.activeModelId() ?? this.settings.getDefaultModelId() ?? models[0]?.id;
+        const activeEntry = models.find((e) => e.id === activeId);
+        const inheritedRisk = Boolean(
+          activeEntry?.riskAcceptedAt && normalizeBaseUrl(activeEntry.baseUrl) === normalizeBaseUrl(p.baseUrl),
+        );
+        const riskError = endpointRiskError(p.baseUrl, p.riskAccepted === true || inheritedRisk, "测试连接");
+        if (riskError) return { ok: false, error: riskError } as RpcContracts[M]["result"];
         return probeEndpoint({ ...p, apiKey }) as unknown as RpcContracts[M]["result"];
       }
 

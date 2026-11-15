@@ -66,6 +66,9 @@ export function checkPack(rawText: string): PackCheck {
   if (!isObj(raw)) return { ok: false, issues: ["顶层必须是对象"] };
   if (raw.kind !== "lynnpack") issues.push("kind 必须是 lynnpack");
   if (raw.version !== 1) issues.push("version 必须是 1");
+  if (typeof raw.createdAt !== "string" || !raw.createdAt.trim() || Number.isNaN(Date.parse(raw.createdAt))) {
+    issues.push("createdAt 必须是有效时间字符串");
+  }
 
   const theme = raw.theme;
   if (!isObj(theme) || typeof theme.id !== "string" || !(theme.id in THEME_NAMES)) {
@@ -75,16 +78,30 @@ export function checkPack(rawText: string): PackCheck {
 
   if (typeof raw.avatar !== "boolean") issues.push("avatar 必须是布尔");
 
-  if (raw.capabilities !== undefined) {
-    if (!Array.isArray(raw.capabilities) || raw.capabilities.some((c) => typeof c !== "string")) {
-      issues.push("capabilities 必须是字符串数组");
-    }
+  if (!Array.isArray(raw.capabilities) || raw.capabilities.some((c) => typeof c !== "string")) {
+    issues.push("capabilities 必须是字符串数组");
   }
 
   if (raw.model !== undefined) {
     const m = raw.model;
     if (!isObj(m) || typeof m.provider !== "string" || typeof m.baseUrl !== "string" || typeof m.model !== "string") {
       issues.push("model 至少要有 provider / baseUrl / model 三个字符串");
+    }
+  }
+
+  if (raw.teamTemplate !== undefined) {
+    const team = raw.teamTemplate;
+    if (!isObj(team) || typeof team.name !== "string" || !Array.isArray(team.roles)) {
+      issues.push("teamTemplate 至少要有 name 字符串与 roles 数组");
+    } else {
+      team.roles.forEach((role, index) => {
+        if (!isObj(role) || typeof role.name !== "string" || typeof role.role !== "string" || typeof role.goal !== "string") {
+          issues.push(`teamTemplate.roles[${index}] 至少要有 name / role / goal 三个字符串`);
+        }
+        if (!isObj(role) || !Array.isArray(role.tools) || role.tools.some((tool) => typeof tool !== "string")) {
+          issues.push(`teamTemplate.roles[${index}].tools 必须是字符串数组`);
+        }
+      });
     }
   }
 

@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 
 /**
@@ -185,6 +186,12 @@ export function forbiddenRootReason(p: string, dataRoot: string): string | null 
 
   const lower = abs.toLowerCase();
   const win = process.platform === "win32";
+  // 整个用户目录在各平台都算敏感根：里面通常同时有凭据、文档与其他项目。
+  // 允许授权具体子目录；realpath 后还会由调用方再验一次，符号链接不能绕过。
+  const home = asAbs(os.homedir());
+  if (home && (win ? lower === home.toLowerCase() : abs === home)) {
+    return "不能授权整个用户目录，请选具体子目录";
+  }
   if (win) {
     const sys = (process.env.SystemRoot || "C:\\Windows").toLowerCase();
     if (lower === sys || lower.startsWith(sys + path.sep)) return "不能授权系统目录（Windows）";
@@ -195,9 +202,6 @@ export function forbiddenRootReason(p: string, dataRoot: string): string | null 
       if (lower === sysDrive) return "不能授权系统盘根：请选具体目录，或换一个数据盘。";
       return null;
     }
-    // 用户主目录顶层：可以授权具体子目录，但不给整个用户目录
-    const home = (process.env.USERPROFILE || "").toLowerCase();
-    if (home && lower === home) return "不能授权整个用户目录，请选具体子目录";
   }
   return null;
 }

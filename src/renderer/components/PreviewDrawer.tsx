@@ -29,6 +29,7 @@ const RENDERABLE = new Set(["md", "markdown", "mdx", "html", "htm", "csv", "tsv"
 function OfficePane({ ext, base64 }: { ext: string; base64: string }) {
   const holder = useRef<HTMLDivElement>(null);
   const excelRef = useRef<{ destroy: () => void } | null>(null);
+  const pptxRef = useRef<{ destroy: () => void } | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(true);
   const t = useT();
@@ -47,7 +48,13 @@ function OfficePane({ ext, base64 }: { ext: string; base64: string }) {
           const docx = await import("docx-preview");
           if (gone || !holder.current) return;
           holder.current.innerHTML = "";
-          await docx.renderAsync(bytes.buffer, holder.current, undefined, { inWrapper: true });
+          await docx.renderAsync(bytes.buffer, holder.current, undefined, {
+            inWrapper: true,
+            // altChunk（外链/嵌套文档）不展开：docx-preview@0.4.1 展开会带出整段无关内容
+            renderAltChunks: false,
+            // 图片一律 base64 内嵌：blob: URL 在抽屉重开/容器销毁后会裂图
+            useBase64URL: true,
+          });
         } else if (ext === "xlsx" || ext === "xlsm") {
           const excel = await import("@js-preview/excel");
           await import("@js-preview/excel/lib/index.css");
@@ -61,7 +68,11 @@ function OfficePane({ ext, base64 }: { ext: string; base64: string }) {
           if (gone || !holder.current) return;
           holder.current.innerHTML = "";
           const previewer = pptx.init(holder.current, { width: 960 });
-          previewer.preview(bytes.buffer);
+          pptxRef.current = previewer;
+          // pptx-preview 的 preview 是异步的：必须 await，否则 busy 提前复位、失败也接不到
+          await previewer.preview(bytes.buffer);
+          // 响应到达时组件可能已卸载/换了文件：先查 gone，别再碰 state
+          if (gone) return;
         }
         if (!gone) setBusy(false);
       } catch (e) {
@@ -80,6 +91,13 @@ function OfficePane({ ext, base64 }: { ext: string; base64: string }) {
         /* 实例可能已随容器销毁 */
       }
       excelRef.current = null;
+      // pptx 实例同样要收：pptx-preview@1.0.7 自带 destroy，关掉定时器与内部监听
+      try {
+        pptxRef.current?.destroy();
+      } catch {
+        /* 实例可能已随容器销毁 */
+      }
+      pptxRef.current = null;
     };
   }, [ext, base64]);
 

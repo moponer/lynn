@@ -159,7 +159,14 @@ export class MemoryStore {
   private archive(kind: MemoryKind, text: string): string {
     const dir = this.versionsDir(kind);
     fs.mkdirSync(dir, { recursive: true });
-    const id = `${kind}-${Date.now().toString(36)}`;
+    // 同一毫秒内连续存档（save 先存改前版、再存新版）若共用时间戳 id 会互相覆盖，
+    // 改前版本直接丢失，rollback/diff 基线随之失真（Linux 高频写入必现）。
+    // 撞 id 时追加单调序号，保证每一次存档都有独立版本。
+    const stamp = Date.now().toString(36);
+    let id = `${kind}-${stamp}`;
+    for (let n = 1; fs.existsSync(path.join(dir, `${id}.md`)); n += 1) {
+      id = `${kind}-${stamp}-${n.toString(36)}`;
+    }
     fs.writeFileSync(path.join(dir, `${id}.md`), text, "utf-8");
     this.prune(kind);
     return id;
@@ -209,7 +216,8 @@ export class MemoryStore {
         const st = fs.statSync(full);
         return { id: f.replace(/\.md$/, ""), savedAt: st.mtime.toISOString(), chars: st.size };
       })
-      .sort((a, b) => b.savedAt.localeCompare(a.savedAt))
+      // mtime 同毫秒时按 id 定序（id 内嵌时间戳 + 撞 id 序号），保证版本顺序跨平台确定
+      .sort((a, b) => b.savedAt.localeCompare(a.savedAt) || b.id.localeCompare(a.id))
       .slice(0, MAX_VERSIONS);
   }
 
@@ -219,7 +227,7 @@ export class MemoryStore {
     let from = "";
     if (versionId) {
       const full = path.join(this.versionsDir(kind), `${versionId}.md`);
-      if (!versionId.match(/^[a-z]+-[a-z0-9]+$/) || !fs.existsSync(full)) throw new Error(`记忆版本不存在：${versionId}`);
+      if (!versionId.match(/^[a-z]+-[a-z0-9]+(-[a-z0-9]+)?$/) || !fs.existsSync(full)) throw new Error(`记忆版本不存在：${versionId}`);
       from = fs.readFileSync(full, "utf-8");
     } else {
       const vs = this.versions(kind);
@@ -235,7 +243,7 @@ export class MemoryStore {
 
   rollback(kind: MemoryKind, versionId: string): string {
     const full = path.join(this.versionsDir(kind), `${versionId}.md`);
-    if (!versionId.match(/^[a-z]+-[a-z0-9]+$/) || !fs.existsSync(full)) throw new Error(`记忆版本不存在：${versionId}`);
+    if (!versionId.match(/^[a-z]+-[a-z0-9]+(-[a-z0-9]+)?$/) || !fs.existsSync(full)) throw new Error(`记忆版本不存在：${versionId}`);
     const text = fs.readFileSync(full, "utf-8");
     fs.writeFileSync(this.file(kind), text, "utf-8");
     return text;

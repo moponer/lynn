@@ -13,7 +13,7 @@ import { endpointRiskError } from "../dist/main/endpoint.js";
 
 const tmp = (p = "lynn-guard-") => fs.mkdtempSync(path.join(os.tmpdir(), p));
 
-test("insideBase：普通内外判定；junction 逃逸被识破", () => {
+test("insideBase：普通内外判定；junction 逃逸被识破", (t) => {
   const root = tmp();
   fs.mkdirSync(path.join(root, "inner"), { recursive: true });
   const outside = tmp("lynn-guard-out-");
@@ -33,7 +33,9 @@ test("insideBase：普通内外判定；junction 逃逸被识破", () => {
   try {
     fs.symlinkSync(outside, link, "junction");
   } catch {
-    return; // 无权限建 junction 的环境跳过（判定逻辑已由上面用例覆盖）
+    // 无权限建 junction 的环境显式跳过（判定逻辑已由上面用例覆盖），不许静默 return 假装通过
+    t.skip("当前环境无权限创建 junction/符号链接");
+    return;
   }
   assert.equal(insideBase(root, path.join(link, "secret.md")), false, "junction 指向根外必须判 outside");
   // junction 指向根内仍然放行
