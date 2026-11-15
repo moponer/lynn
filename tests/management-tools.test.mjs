@@ -89,7 +89,7 @@ test("accept_or_reject：不带理由的打回算她失职", () => {
   );
 });
 
-test("打回上限 3 轮：第 4 次不再循环，升级问你", () => {
+test("打回上限 3 轮：第 4 次不再循环，也不再问你——交给风铃换法", () => {
   tools.createMember("t1", member());
   tools.assignTask("t1", { taskId: "x", member: "林工", brief: "b", deadline: "d" });
   const reason = { what: "w", expect: "e", deadline: "d" };
@@ -98,9 +98,13 @@ test("打回上限 3 轮：第 4 次不再循环，升级问你", () => {
     assert.equal(r.escalated, false);
   }
   const fourth = tools.acceptOrReject("t1", "x", "reject", { member: "林工", rejectReason: reason });
-  assert.equal(fourth.escalated, true, "第 4 次打回必须升级问你");
-  assert.equal(tools.pendingQuestions().length, 1);
-  assert.equal(store.rejectCount("t1", "x"), 3, "升级后不再追加打回记录");
+  assert.equal(fourth.escalated, true, "第 4 次打回触到上限");
+  assert.equal(tools.pendingQuestions().length, 0, "「继续打回还是换策略」是执行层选择，不该丢给用户");
+  assert.equal(store.rejectCount("t1", "x"), 3, "到上限后不再追加打回记录");
+  assert.ok(
+    store.readAssignments("t1", "x").some((r) => r.kind === "escalate" && /改由风铃换人\/换法\/关单/.test(r.text)),
+    "处置权要落在风铃身上并留痕",
+  );
 });
 
 test("ask_user：成员的问题归集到她转呈，产生待答问题", () => {

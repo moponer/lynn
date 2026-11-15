@@ -3,7 +3,9 @@ dist/
 # 打包输出：主目录与换目录时的 release-fresh / release-final
 release*/
 *.log
+*.tsbuildinfo
 .DS_Store
+Thumbs.db
 
 # 本地运行时与工具产物（不进仓库）
 /tasks/
@@ -15,3 +17,25 @@ release*/
 
 # 插件草稿（工坊运行时）
 src-tauri/resources/dsh-engine/
+
+# ---- 以下为本地工作资产，不入库（2026-11-15 清理，归档在仓库外 lynn-archive/）----
+
+# 图标设计过程的全部画法/尺寸存档（1075 个 PNG，仓库只用 build/icon.ico）
+/design/
+
+# 模型与性能评测的原始输出（.log/.err/.json 一次性记录，不是基线）
+/perf/
+
+# 临时试验文件
+/tmp/
+
+# 桌宠素材：仓库只保留运行时真正加载的两样——
+#   poses/alpha/*.png（57 张三视图）+ anim-walk.webp / anim-blink.webp
+# 顶层 pose-*-base*.png / turnaround-*.png 是重新生成姿态时的锚点，保留。
+/assets/pet-dafeiyu/_gen/
+/assets/pet-dafeiyu/_diag/
+/assets/pet-dafeiyu/_rejected/
+/assets/pet-dafeiyu/_old-long-hair/
+/assets/pet-dafeiyu/poses/final/
+/assets/pet-dafeiyu/poses/export@1x/
+/assets/pet-dafeiyu/poses/export@2x/

@@ -67,6 +67,15 @@ export interface ToolkitOptions {
     add: (name: string, markdown: string) => { ok: boolean; file?: string; error?: string };
   };
   /**
+   * 外部应用桥接（2026-11-15）：成员通过用户在能力中心配好的连接器访问外部系统。
+   * 凭据只在核心里（这里拿不到明文），成员只给 app id + 路径/命令。
+   * 未注入时工具如实提示"未装配"，不假装能连。
+   */
+  apps?: {
+    request: (input: { app: string; method: string; path: string; body?: string }) => Promise<string>;
+    ssh?: (input: { app: string; command: string }) => Promise<string>;
+  };
+  /**
    * 只读授权目录（用户显式授予，按任务生效）：读可以在这些目录里，**写永远只能在工作区**。
    * 传函数 = 每次读时现取——成员跑到一半用户才授权，也能立刻生效（不必停掉重派）。
    */
@@ -192,7 +201,11 @@ export function resolveWithin(root: string, target: string): string {
   const base = path.resolve(root);
   const full = normalizeTargetPath(base, target);
   if (full !== base && !full.startsWith(base + path.sep)) {
-    throw new Error(`路径越界：${target} 不在工作区内。只能访问工作区里的文件。`);
+    // 拒绝时给出路（2026-11-15）：只说"不行"会让成员换路径反复硬试，最后空转。
+    throw new Error(
+      `路径越界：${target} 不在工作区内。只能访问工作区里的文件。` +
+        "需要别的目录时不要换写法重试：停手回报写明「需要授权：<绝对路径>（用途）」，由风铃补只读授权。",
+    );
   }
   return full;
 }
@@ -345,6 +358,7 @@ export class Toolkit {
   private readonly office?: ToolkitOptions["office"];
   private readonly browser?: ToolkitOptions["browser"];
   private readonly kb?: ToolkitOptions["kb"];
+  private readonly apps?: ToolkitOptions["apps"];
   private readonly readRootsSource: () => string[];
   private readonly writableRootsSource: () => string[];
   private readonly onBeforeCommand?: ToolkitOptions["onBeforeCommand"];
@@ -364,6 +378,7 @@ export class Toolkit {
     this.office = opts.office;
     this.browser = opts.browser;
     this.kb = opts.kb;
+    this.apps = opts.apps;
     const src = opts.readRoots;
     this.readRootsSource = typeof src === "function" ? src : () => src ?? [];
     const wsrc = opts.writableRoots;
@@ -853,6 +868,10 @@ export class Toolkit {
         return this.browserTool(name, args);
       case "kb_add":
         return this.kbAdd(args);
+      case "app_api":
+        return this.appApi(args);
+      case "ssh_run":
+        return this.sshRun(args);
       default:
         throw new Error(`工作区里没有这个工具：${name}`);
     }
@@ -864,6 +883,41 @@ export class Toolkit {
       return "知识库写入未装配——把内容写进工作区文件即可，入库由风铃或用户处理。";
     }
     return JSON.stringify(this.kb.add(String(args.name ?? ""), String(args.markdown ?? "")), null, 2);
+  }
+
+  /**
+   * 外部应用请求（能力中心 · 连接器）：成员只给 app id + 路径，
+   * 凭据与可访问主机都在内核侧（成员拿不到令牌，也就抄不进产物）。
+   */
+  private async appApi(args: Record<string, unknown>): Promise<string> {
+    if (!this.apps) {
+      return "外部应用能力未装配（当前进程没有连接器桥接）——请回报此限制，改用命令行或说明需要它。";
+    }
+    const app = String(args.app ?? "").trim();
+    const method = String(args.method ?? "GET").toUpperCase();
+    const p = String(args.path ?? "").trim();
+    if (!app) return "app 参数必填（能力中心里已启用的连接器 id，如 github / gitee / atomgit / webdav）";
+    if (!p) return "path 参数必填（例如 /repos/owner/repo）";
+    try {
+      return await this.apps.request({ app, method, path: p, body: args.body === undefined ? undefined : String(args.body) });
+    } catch (err) {
+      return `外部应用请求失败：${err instanceof Error ? err.message : String(err)}`;
+    }
+  }
+
+  /** 远程命令（能力中心 · SSH 连接器）：主机与私钥路径都在内核侧，成员只给命令 */
+  private async sshRun(args: Record<string, unknown>): Promise<string> {
+    if (!this.apps?.ssh) {
+      return "SSH 能力未装配（当前进程没有连接器桥接）——请回报此限制，改为请用户提供导出的日志/数据。";
+    }
+    const app = String(args.app ?? "ssh").trim() || "ssh";
+    const command = String(args.command ?? "").trim();
+    if (!command) return "command 参数必填（要在远端执行的命令）";
+    try {
+      return await this.apps.ssh({ app, command });
+    } catch (err) {
+      return `远程命令失败：${err instanceof Error ? err.message : String(err)}`;
+    }
   }
 
   /** browser 工具（M2-07）：全局单例资源；未注入（壳没装配）就如实说 */
@@ -1007,6 +1061,42 @@ export const TOOLKIT_SCHEMAS = [
         type: "object",
         properties: { name: { type: "string", description: "文档名" }, markdown: { type: "string", description: "正文（含 # 标题更好）" } },
         required: ["name", "markdown"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "app_api",
+      description:
+        "调用用户已连接的外部应用（GitHub / Gitee / AtomGit / WebDAV 网盘）：只给 app id 与接口路径，令牌由内核自动带上，你看不到也不需要它。" +
+        "返回值是 HTTP 状态 + 响应正文（超长截断）。未连接或主机不匹配会如实报错。只读为主，写操作要先确认对象。",
+      parameters: {
+        type: "object",
+        properties: {
+          app: { type: "string", description: "连接器 id：github / gitee / atomgit / webdav" },
+          method: { type: "string", description: "HTTP 方法：GET / POST / PUT / PATCH / PROPFIND / HEAD（默认 GET，不允许 DELETE）" },
+          path: { type: "string", description: "接口路径，不含主机名，例如 /repos/owner/repo 或 /目录/（WebDAV）" },
+          body: { type: "string", description: "请求体（JSON 字符串或纯文本），GET 不用填" },
+        },
+        required: ["app", "path"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "ssh_run",
+      description:
+        "在用户已连接的 SSH 服务器上执行一条命令（主机/端口/账号/私钥都由内核带入）。" +
+        "只用于只读排查：看日志、看磁盘、看进程。不许改配置、不许重启服务、不许 sudo。",
+      parameters: {
+        type: "object",
+        properties: {
+          app: { type: "string", description: "连接器 id，默认 ssh" },
+          command: { type: "string", description: "要在远端执行的单条命令（加 -n / head 限制输出量）" },
+        },
+        required: ["command"],
       },
     },
   },

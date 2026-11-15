@@ -432,6 +432,8 @@ const snapshot = {
         ],
         version: 3,
         rejectRounds: 0,
+        // 阶段账摘要（2026-11-15）：台账一行看见"走到第几段"
+        stage: { done: 2, total: 4, current: "独立验收" },
         evidence: process.env.LYNN_PREVIEW_HEAVY
           ? [
               "PLUGIN-CONTRACT.md",
@@ -829,6 +831,35 @@ snapshot.board.track.push({
   rejectRounds: 0,
   evidence: [{ label: "smoke-shell.txt", ref: "artifacts/smoke-shell.txt", verified: true, at: new Date().toISOString() }],
 });
+
+// LYNN_PREVIEW_SEAL=1：本群挂一张"等你验收"的单，专供走查
+// 「终止任务之后印章该消失」（2026-11-15）。默认不挂——否则所有走查图都会多一枚印章。
+if (process.env.LYNN_PREVIEW_SEAL) {
+  // 没有挂起的契约/提问、也没有本群卡住的单，印章区才会露出「验收归档 / 打回重做」那一枚
+  // （这才是实机截图里那枚；卡住卡优先级更高，会把它顶掉）
+  snapshot.board.decisions = [];
+  snapshot.board.track = snapshot.board.track.filter(
+    (t) => !(t.status === "blocked" && (!t.threadId || t.threadId === "t-main")),
+  );
+  snapshot.board.track.push({
+    id: "task-seal",
+    teamId: "t1",
+    title: "音频运行诊断：把 11 月 15 日的异常段整理成结论",
+    status: "in_review",
+    statusNote: "in_review · 音频运行诊断员 · 证据 2",
+    member: "音频运行诊断员",
+    reviewer: "user",
+    at: new Date(Date.now() - 3 * 60_000).toISOString(),
+    threadId: "t-main",
+    evidenceCount: 2,
+    version: 2,
+    rejectRounds: 0,
+    evidence: [
+      { label: "audio-report.md", ref: "artifacts/report_0914.md", verified: true, at: new Date().toISOString() },
+      { label: "timeline.json", ref: "artifacts/report_0914.md", verified: true, at: new Date().toISOString() },
+    ],
+  });
+}
 
 // 空场走查：会话删光 = 名下的工单连带清掉，成员回到空闲。
 // 放在所有夹具 push 之后，才不会被默认样例单"复活"。
@@ -1345,7 +1376,294 @@ contextBridge.exposeInMainWorld("lynn", {
     if (method === "persona.versions") return { versions: [{ id: "p-abc", savedAt: new Date().toISOString(), chars: 128 }] };
   // 去 AI 味（2026-11-15）：预览里插件是真装着的（仓库就在旁边），所以如实报 loaded
   if (method === "humanizer.status") return { enabled: true, loaded: true, dir: "~/.lynn/plugins/humanizer-stream", version: "0.1.0" };
-    if (method === "workshop.list") return { drafts: [] };
+    if (method === "workshop.list") {
+      return {
+        drafts: [
+          {
+            draftId: "d-0914",
+            title: "周报分桶口径插件",
+            kind: "L0",
+            createdAt: new Date(Date.now() - 3_600_000).toISOString(),
+            status: "draft",
+          },
+        ],
+      };
+    }
+    if (method === "workshop.promote") return { ok: true, id: "lynn.tool.preview", tier: "L0", byUser: true };
+    if (method === "workshop.discard") return { ok: true };
+    // 能力中心（2026-11-15）：预置清单 + 外部应用连接（走查要看齐五段与开关）
+    if (method === "plugins.toggle") return { ok: true };
+    if (method === "plugins.probe") return { ok: true, detail: "试装通过（预览）" };
+    if (method === "plugins.rollback") return { ok: true, detail: "已回滚（预览）" };
+    if (method === "plugins.safeMode") return { ok: true };
+    if (method === "skills.list") {
+      return {
+        skills: [
+          {
+            name: "docx-report",
+            description: "正式 Word 报告的结构、排版与交付前自检",
+            allowedTools: ["office_write_docx", "read_file", "write_file"],
+            level: "user",
+            dir: "C:/Users/demo/.lynn/skills/docx-report",
+            disabled: false,
+            warnings: [],
+          },
+          {
+            name: "plugin-dev",
+            description: "插件开发与验收：档位选型、工坊流程与验收标准",
+            allowedTools: ["create_plugin_draft", "assign_task", "ship_plugin"],
+            level: "user",
+            dir: "C:/Users/demo/.lynn/skills/plugin-dev",
+            disabled: false,
+            warnings: [],
+          },
+          {
+            name: "text-check",
+            description: "写稿/改稿前的文本体检",
+            allowedTools: ["text_check", "read_file"],
+            level: "plugin",
+            dir: "C:/Users/demo/.lynn/plugins/lynn.tool.textstat",
+            disabled: true,
+            warnings: [],
+          },
+        ],
+        errors: [],
+      };
+    }
+    if (method === "skills.toggle") return { ok: true, enabled: true };
+    if (method === "mcp.toggle") return { ok: true };
+    if (method === "cap.presets") {
+      return {
+        presets: [
+          {
+            kind: "plugin",
+            id: "lynn.tool.textstat",
+            name: "文本体检",
+            summary: "统计字数/中英文占比/句长分布/重复短语，写稿前先量一遍",
+            source: "lynn 官方预置（自研，零依赖）",
+            license: "MIT",
+            requires: "无（随内核加载）",
+            icon: "pkg",
+            skill: "text-check",
+            installed: true,
+            skillReady: true,
+          },
+          {
+            kind: "plugin",
+            id: "lynn.tool.csv",
+            name: "CSV 表分析",
+            summary: "识别列、统计空值与数值分布、找重复行，不必写脚本",
+            source: "lynn 官方预置（自研，零依赖）",
+            license: "MIT",
+            requires: "无（随内核加载）",
+            icon: "table",
+            skill: "csv-profile",
+            installed: false,
+            skillReady: false,
+          },
+          {
+            kind: "mcp",
+            id: "filesystem",
+            name: "文件系统",
+            summary: "在指定目录内列目录、读文件、搜索（官方 server）",
+            source: "@modelcontextprotocol/server-filesystem",
+            license: "MIT",
+            requires: "Node.js（npx 首次会联网安装）",
+            icon: "file",
+            skill: "mcp-filesystem",
+            installed: true,
+            skillReady: true,
+          },
+          {
+            kind: "mcp",
+            id: "memory",
+            name: "知识图谱记忆",
+            summary: "把跨任务的事实存成实体与关系，下次先查再问",
+            source: "@modelcontextprotocol/server-memory",
+            license: "MIT",
+            requires: "Node.js（npx）",
+            icon: "layers",
+            skill: "mcp-memory",
+            installed: false,
+            skillReady: false,
+          },
+          {
+            kind: "skill",
+            id: "data-audit",
+            name: "数据核对",
+            summary: "报表/台账对账口径：先定口径、再独立复算、差异逐项归零",
+            source: "lynn 官方预置（自写工作流）",
+            license: "MIT",
+            requires: "无",
+            icon: "table",
+            skill: "data-audit",
+            installed: true,
+            skillReady: true,
+          },
+          {
+            kind: "skill",
+            id: "web-research",
+            name: "调研取证",
+            summary: "外部调研的来源分级、交叉验证与结论写法",
+            source: "lynn 官方预置（自写工作流）",
+            license: "MIT",
+            requires: "能联网（浏览器或 fetch 工具）",
+            icon: "globe",
+            skill: "web-research",
+            installed: false,
+            skillReady: false,
+          },
+          {
+            kind: "schedule",
+            id: "daily-standup",
+            name: "每日开工巡检",
+            summary: "每天 09:30 汇总在办工单、待审查、卡住的单",
+            source: "lynn 官方预置",
+            license: "MIT",
+            requires: "心跳/调度已启用",
+            icon: "clock",
+            installed: false,
+          },
+        ],
+      };
+    }
+    if (method === "cap.install") {
+      const p = params || {};
+      return { ok: true, detail: `${p.id} 已装上（预览）`, id: String(p.id || ""), created: true };
+    }
+    if (method === "connectors.list") {
+      const catalog = [
+        {
+          id: "github",
+          name: { zh: "GitHub", en: "GitHub" },
+          category: "code",
+          icon: "git",
+          summary: { zh: "读仓库、Issue、PR，把代码线索带进任务", en: "Read repos, issues and PRs" },
+          detail: {
+            zh: "用 Personal Access Token 直连 GitHub REST API，建议只授 repo:read 与 issues:read。令牌只加密存在本机。",
+            en: "Connects to the GitHub REST API with a personal access token; stored encrypted locally.",
+          },
+          docUrl: "https://github.com/settings/tokens",
+          authType: "token",
+          fields: [
+            { key: "token", label: { zh: "访问令牌", en: "Access token" }, hint: { zh: "建议只勾 repo:read、issues:read", en: "repo:read and issues:read only" }, placeholder: "ghp_…", secret: true, required: true },
+            { key: "owner", label: { zh: "默认组织/账号", en: "Default owner" }, hint: { zh: "可留空", en: "Optional" }, placeholder: "openai" },
+          ],
+          skill: "connector-github",
+        },
+        {
+          id: "gitee",
+          name: { zh: "Gitee", en: "Gitee" },
+          category: "code",
+          icon: "git",
+          summary: { zh: "国内代码托管：仓库、Issue 与 PR 查询", en: "Chinese Git hosting: repos and issues" },
+          detail: { zh: "用私人令牌直连 Gitee OpenAPI v5，只读即可。", en: "Uses a Gitee personal token against OpenAPI v5." },
+          docUrl: "https://gitee.com/personal_access_tokens",
+          authType: "token",
+          fields: [
+            { key: "token", label: { zh: "私人令牌", en: "Private token" }, placeholder: "粘贴 Gitee 私人令牌", secret: true, required: true },
+            { key: "owner", label: { zh: "默认组织/账号", en: "Default owner" }, placeholder: "my-org" },
+          ],
+          skill: "connector-gitee",
+        },
+        {
+          id: "atomgit",
+          name: { zh: "AtomGit", en: "AtomGit" },
+          category: "code",
+          icon: "git",
+          summary: { zh: "开放原子 AtomGit：仓库与 Issue 查询", en: "OpenAtom AtomGit: repos and issues" },
+          detail: { zh: "接口与 Gitee v5 兼容；令牌在 AtomGit 设置里创建。", en: "Gitee-v5 compatible API." },
+          docUrl: "https://atomgit.com",
+          authType: "token",
+          fields: [{ key: "token", label: { zh: "访问令牌", en: "Access token" }, placeholder: "粘贴 AtomGit 访问令牌", secret: true, required: true }],
+          skill: "connector-atomgit",
+        },
+        {
+          id: "email",
+          name: { zh: "邮箱（IMAP / SMTP）", en: "Email (IMAP / SMTP)" },
+          category: "mail",
+          icon: "mail",
+          summary: { zh: "收发邮件：读信、发周报与通知", en: "Read and send mail" },
+          detail: { zh: "填服务商的 IMAP/SMTP 主机与授权码（不是登录密码）。", en: "Provide IMAP/SMTP hosts and an app password." },
+          docUrl: "https://support.google.com/mail/answer/7126229",
+          authType: "basic",
+          fields: [
+            { key: "host", label: { zh: "IMAP 主机", en: "IMAP host" }, placeholder: "imap.example.com", required: true },
+            { key: "port", label: { zh: "IMAP 端口", en: "IMAP port" }, placeholder: "993", required: true },
+            { key: "user", label: { zh: "邮箱账号", en: "Mailbox" }, placeholder: "you@example.com", required: true },
+            { key: "password", label: { zh: "授权码 / 应用密码", en: "App password" }, hint: { zh: "多数邮箱需要单独生成应用密码", en: "Most providers require an app password" }, secret: true, required: true },
+          ],
+          skill: "connector-email",
+        },
+        {
+          id: "webdav",
+          name: { zh: "网盘（WebDAV）", en: "Cloud drive (WebDAV)" },
+          category: "drive",
+          icon: "cloud",
+          summary: { zh: "坚果云 / Nextcloud / 群晖：读写网盘文件", en: "Jianguoyun / Nextcloud / Synology" },
+          detail: { zh: "填 WebDAV 地址与应用密码；地址形如 https://dav.jianguoyun.com/dav/。", en: "Enter the WebDAV URL and an app password." },
+          docUrl: "https://help.jianguoyun.com/?p=2064",
+          authType: "basic",
+          fields: [
+            { key: "url", label: { zh: "WebDAV 地址", en: "WebDAV URL" }, placeholder: "https://dav.jianguoyun.com/dav/", required: true },
+            { key: "user", label: { zh: "账号", en: "Account" }, placeholder: "you@example.com", required: true },
+            { key: "password", label: { zh: "应用密码", en: "App password" }, secret: true, required: true },
+          ],
+          skill: "connector-webdav",
+        },
+        {
+          id: "ssh",
+          name: { zh: "SSH 服务器", en: "SSH server" },
+          category: "server",
+          icon: "server",
+          summary: { zh: "远程服务器：跑命令、同步文件", en: "Remote host: run commands, sync files" },
+          detail: { zh: "填主机、端口、账号与私钥路径；lynn 只记路径、不复制私钥内容。", en: "Host, port, user and private key path; the key itself is never copied." },
+          docUrl: "https://www.openssh.com/manual.html",
+          authType: "ssh",
+          fields: [
+            { key: "host", label: { zh: "主机", en: "Host" }, placeholder: "10.0.0.12", required: true },
+            { key: "port", label: { zh: "端口", en: "Port" }, placeholder: "22", required: true },
+            { key: "user", label: { zh: "账号", en: "User" }, placeholder: "deploy", required: true },
+            { key: "keyPath", label: { zh: "私钥路径", en: "Private key path" }, placeholder: "~/.ssh/id_ed25519", required: true },
+          ],
+          skill: "connector-ssh",
+        },
+      ];
+      return {
+        catalog,
+        canEncrypt: true,
+        items: [
+          {
+            id: "github",
+            enabled: true,
+            configured: true,
+            values: { owner: "spiker" },
+            hasSecret: { token: true },
+            updatedAt: new Date(Date.now() - 7_200_000).toISOString(),
+            checkedAt: new Date(Date.now() - 3_600_000).toISOString(),
+            checkOk: true,
+            checkDetail: "令牌有效，账号 spiker",
+          },
+          { id: "gitee", enabled: false, configured: false, values: {}, hasSecret: {} },
+          { id: "atomgit", enabled: false, configured: false, values: {}, hasSecret: {} },
+          {
+            id: "webdav",
+            enabled: false,
+            configured: true,
+            values: { url: "https://dav.jianguoyun.com/dav/", user: "me@example.com" },
+            hasSecret: { password: true },
+            updatedAt: new Date(Date.now() - 86_400_000).toISOString(),
+          },
+          { id: "email", enabled: false, configured: false, values: {}, hasSecret: {} },
+          { id: "ssh", enabled: false, configured: false, values: {}, hasSecret: {} },
+        ],
+      };
+    }
+    if (method === "connectors.save") return { ok: true, enabled: true };
+    if (method === "connectors.toggle") return { ok: true, enabled: true };
+    if (method === "connectors.forget") return { ok: true };
+    if (method === "connectors.test") return { ok: true, detail: "令牌有效，账号 demo（预览）" };
+
     if (method === "window.control") return { ok: true, maximized: false };
     if (method === "i18n.get") {
       // 截图只验版式：直接给内置中文（与 src/shared/i18n-strings.ts 的 zh 同源，缺 key 回退键名）

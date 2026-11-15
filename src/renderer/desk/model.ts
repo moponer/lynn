@@ -65,6 +65,16 @@ export interface DeskJob {
   group: JobGroup;
   /** 这张单需要你做什么：accept / unblock / none */
   action: JobAction;
+  /**
+   * 阶段账摘要（2026-11-15）：走到第几段、当前段叫什么。
+   * 与上面的 `stage`（回合阶段 0–5 的旧刻度）不是一回事：这个是任务自己的流程账。
+   */
+  flow?: { done: number; total: number; current?: string; finalized?: boolean };
+  /**
+   * 所属群被用户终止（2026-11-15）：单还在，但不再催任何决定。
+   * 印章、待办计数、台账"等你拍板"都靠它一起闭嘴。
+   */
+  halted?: boolean;
   /** 验收人：lynn = 风铃自己验（不弹给你），user = 你拍板（缺省按 user） */
   reviewer?: "lynn" | "user";
   stage: number;
@@ -248,7 +258,14 @@ function reportOf(feed: FeedCard[], taskId: string): DeskJob["report"] {
   return undefined;
 }
 
-function toJob(job: TaskTrackItem, teamName?: string, member?: Member, feed: FeedCard[] = [], turn?: TurnState): DeskJob {
+function toJob(
+  job: TaskTrackItem,
+  teamName?: string,
+  member?: Member,
+  feed: FeedCard[] = [],
+  turn?: TurnState,
+  halted = false,
+): DeskJob {
   const onThisTask = turn && turn.taskId === job.id && turn.phase !== "idle" ? PHASE_STAGE[turn.phase] : undefined;
   return {
     id: job.id,
@@ -257,8 +274,10 @@ function toJob(job: TaskTrackItem, teamName?: string, member?: Member, feed: Fee
     title: job.title,
     status: job.status,
     statusLabel: STATUS_LABEL[job.status] ?? job.status,
-    group: groupOf(job.status, job.reviewer),
-    action: actionOf(job.status, job.reviewer),
+    group: groupOf(job.status, job.reviewer, halted),
+    action: actionOf(job.status, job.reviewer, halted),
+    halted: halted || undefined,
+    flow: job.stage,
     stage: onThisTask ?? STAGE_OF[job.status] ?? 0,
     member: job.member,
     memberRole: member?.role,
@@ -311,7 +330,20 @@ export function deskFromSnapshot(snap: SessionSnapshot): Desk {
     return undefined;
   };
 
-  const jobs = board.track.map((t) => toJob(t, teamNames.get(t.teamId), memberOf(t.member), snap.feed, snap.turn));
+  /**
+   * 已终止的群（2026-11-15）：用户按「终止任务」之后，本群一切"等你拍板"都该闭嘴——
+   * 印章整块消失、台账里那些单归「已终止」组、待办计数归零。
+   * 只改显示不改数据：发一条消息恢复后，单原样回到原来的组（终止是停住，不是销毁）。
+   */
+  const haltedThreads = new Set<string>();
+  for (const th of [...(snap.threads ?? []), ...(snap.thread ? [snap.thread] : [])]) {
+    if (th.halted && th.id) haltedThreads.add(th.id);
+  }
+  const isHalted = (tid?: string) => (tid ? haltedThreads.has(tid) : haltedThreads.has(snap.thread?.id ?? ""));
+
+  const jobs = board.track.map((t) =>
+    toJob(t, teamNames.get(t.teamId), memberOf(t.member), snap.feed, snap.turn, isHalted(t.threadId)),
+  );
 
   const members: DeskMember[] = board.teams
     .filter((t) => t.status !== "dissolved")
@@ -384,6 +416,8 @@ export function deskFromSnapshot(snap: SessionSnapshot): Desk {
     decisions: board.decisions.filter((d) => {
       const cur = snap.thread?.id;
       if (cur && d.threadId && d.threadId !== cur) return false;
+      // 群已终止：契约/审批/提问一律不再顶在"等你拍板"上（恢复后原样回来）
+      if (isHalted(d.threadId)) return false;
       const teamId = board.track.find((t) => t.id === d.jobId)?.teamId;
       const team = board.teams.find((t) => t.id === teamId);
       return !team || team.status !== "dissolved";

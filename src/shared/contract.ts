@@ -444,6 +444,15 @@ export interface FeedCard {
    * 只有 ref 不点开就等于让用户自己去找文件——实机她只给了绝对路径字符串。
    */
   artifacts?: { label: string; ref: string; bytes?: number }[];
+  /**
+   * 语音播报的现成一句人话（可选，界面不渲染）。
+   *
+   * 有些卡在界面上是给眼睛看的（标题只有工单号、正文是路径与工具清单），
+   * 按字段推导只能念出「阿计 回报 · task-mf3k9x2a-1」这种没有信息量的句子。
+   * 落卡时顺手写一句能听懂的话（「我把「Q3 订单核对」交给阿计了」），
+   * 语音优先用它；仍然会过 cleanSpeechText 与有效性判定，写坏了就不播。
+   */
+  speak?: string;
 }
 
 // ---------- 指挥板（§3.8） ----------
@@ -454,6 +463,11 @@ export interface TaskTrackItem {
   title: string;
   status: TaskStatus;
   statusNote: string;
+  /**
+   * 阶段账摘要（2026-11-15）：走到第几段、当前段叫什么、是否已收尾。
+   * 用户要"随时看得见进展"——阶段由代码持有，界面直接读，不靠模型描述。
+   */
+  stage?: { done: number; total: number; current?: string; finalized?: boolean };
   /** 当前承办人（最近一次派单/回报的成员） */
   member?: string;
   /** 最近一次记录时间（ISO） */
@@ -623,12 +637,19 @@ export interface SessionSnapshot {
     voiceMaxChars?: number;
     voiceWhenHidden?: boolean;
     voiceProxy?: string;
-    /** 去 AI 味插件（2026-11-15）：缺省视为开；插件没装时无效 */
+    /**
+     * 写作规则插件（2026-11-15 重做）：开 = 把规则注入系统提示词。
+     * 缺省视为开；插件没装时注入空串，不影响任何输出。
+     */
     humanizer?: boolean;
   };
 }
 
-/** ---------- 去 AI 味插件（2026-11-15）：外部包 humanizer-stream 的加载状态 ---------- */
+/**
+ * ---------- 写作规则插件（2026-11-15）：外部包 humanizer-stream 的状态 ----------
+ *
+ * 这一版插件不放「输出过滤器」，只提供规则文本；状态里报的是「注入了多少字的约束」。
+ */
 export interface HumanizerStatus {
   /** 用户在设置里是否勾选 */
   enabled: boolean;
@@ -637,6 +658,8 @@ export interface HumanizerStatus {
   /** 插件目录（loaded 时才有） */
   dir: string | null;
   version: string | null;
+  /** 实际注入系统提示词的规则字数（0 = 没注入） */
+  chars: number;
 }
 
 // ---------- 事件流（主进程 → 渲染层） ----------
@@ -668,6 +691,8 @@ export type KernelEvent =
       author?: FeedAuthor;
       /** 群聊：这张动作卡点名了谁（工具层强制 @，模型忘了写也补上） */
       mentions?: FeedMention[];
+      /** 语音播报用的一句人话（不渲染），见 FeedCard.speak */
+      speak?: string;
     }
   | { type: "turn"; turn: TurnState }
   /** 另一个会话有新动静（后台成员回报写回了它的出发会话）：前端只刷新，不 upsert */
@@ -838,6 +863,94 @@ export interface RpcContracts {
   "skills.toggle": {
     params: { name: string; enabled: boolean };
     result: { ok: true; enabled: boolean } | { ok: false; error: string };
+  };
+  /** ---------- 能力中心（2026-11-15）：插件 / MCP / 技能 / 自动化 / 外部应用的统一入口 ---------- */
+  "cap.presets": {
+    params: void;
+    result: {
+      presets: {
+        kind: "mcp" | "plugin" | "skill" | "schedule";
+        id: string;
+        name: string;
+        summary: string;
+        /** 开源项目 / 官方包名（可追溯） */
+        source?: string;
+        license?: string;
+        /** 先决条件（node / uv / 网络） */
+        requires?: string;
+        icon?: string;
+        /** 配套提示词技能名（插件与 MCP 预置都带一个，风铃建团队时按需命中） */
+        skill?: string;
+        /** 已落地成本机配置（磁盘/配置为准，不看内存态） */
+        installed: boolean;
+        /** 该技能现在是否已进运行时技能表 */
+        skillReady?: boolean;
+      }[];
+    };
+  };
+  /** 预装（幂等）：mcp 写 mcp.json、plugin 写插件目录、skill 写 SKILL.md、schedule 交给调度器 */
+  "cap.install": {
+    params: { kind: "mcp" | "plugin" | "skill" | "schedule"; id: string };
+    result: { ok: boolean; detail: string; id: string; skill?: string; created: boolean };
+  };
+  /** 外部应用连接（GitHub / Gitee / AtomGit / 邮箱 / 网盘 / SSH）：凭据加密落盘，明文不回渲染层 */
+  "connectors.list": {
+    params: void;
+    result: {
+      items: {
+        id: string;
+        enabled: boolean;
+        configured: boolean;
+        /** 非密文字段（主机/端口/账号/路径） */
+        values: Record<string, string>;
+        /** 密文字段是否已填（只有布尔，没有值） */
+        hasSecret: Record<string, boolean>;
+        updatedAt?: string;
+        checkedAt?: string;
+        checkOk?: boolean;
+        checkDetail?: string;
+      }[];
+      catalog: {
+        id: string;
+        name: { zh: string; en: string };
+        category: "code" | "mail" | "drive" | "server";
+        icon: string;
+        summary: { zh: string; en: string };
+        detail: { zh: string; en: string };
+        docUrl: string;
+        authType: "token" | "basic" | "ssh";
+        fields: {
+          key: string;
+          label: { zh: string; en: string };
+          hint?: { zh: string; en: string };
+          placeholder?: string;
+          secret?: boolean;
+          required?: boolean;
+        }[];
+        /** 配套的提示词技能名 */
+        skill: string;
+      }[];
+      /** 本机能否安全加密（false 时保存密钥必须显式勾选明文风险） */
+      canEncrypt: boolean;
+    };
+  };
+  "connectors.save": {
+    params: { id: string; values?: Record<string, string>; clear?: string[]; plaintextOk?: boolean; enable?: boolean };
+    result: { ok: boolean; enabled?: boolean; error?: string };
+  };
+  "connectors.toggle": {
+    params: { id: string; enabled: boolean };
+    result: { ok: boolean; enabled?: boolean; error?: string };
+  };
+  /** 删掉某个连接的凭据与状态（不留残影） */
+  "connectors.forget": {
+    params: { id: string };
+    result: { ok: boolean };
+  };
+  /** 真探测（发一次真实请求/连一次端口）：失败如实带原因 */
+  "connectors.test": {
+    params: { id: string };
+    result: { ok: boolean; detail: string };
   };
   /** 多 provider（M2-12）：预设只是推荐值；models.yaml 增删厂商不改主程序 */
   "providers.presets": {
@@ -1084,6 +1197,11 @@ export interface RpcContracts {
   "mcp.reload": {
     params: void;
     result: McpStatusView & { ok: true };
+  };
+  /** 单个 server 启停（改 mcp.json 的 enabled 并重连；界面上的开关走这里） */
+  "mcp.toggle": {
+    params: { id: string; enabled: boolean };
+    result: { ok: boolean; error?: string };
   };
   /** 定时任务（M2-02）：调度器在核心里；单飞/补跑/陈旧清理，lastStatus 如实 */
   "schedule.add": {

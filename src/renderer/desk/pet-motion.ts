@@ -36,12 +36,27 @@ export interface MotionFrame {
   bubble?: string;
 }
 
+/** 待机池分类（对齐 dsh-pet 的 idle / 转向 / 移动 / 随机四类池） */
+export type MotionGroup = "idle" | "turn" | "move" | "random";
+
 export interface MotionClip {
   id: string;
   frames: MotionFrame[];
-  /** 待机池权重 */
+  /** 同类内的抽样权重 */
   weight: number;
+  group: MotionGroup;
 }
+
+/**
+ * 分类权重。dsh-pet 是 idle 10 / 转向 5 / 移动 5 / 随机 80；
+ * 我们用的是静帧拼接而非连续视频，动作过密会显得抽搐，故按比例压低 random。
+ */
+export const MOTION_WEIGHTS: Record<MotionGroup, number> = {
+  idle: 26,
+  turn: 10,
+  move: 10,
+  random: 54,
+};
 
 const f = (pose: PoseName, ms: number, extra: Partial<MotionFrame> = {}): MotionFrame => ({
   pose,
@@ -49,17 +64,19 @@ const f = (pose: PoseName, ms: number, extra: Partial<MotionFrame> = {}): Motion
   ...extra,
 });
 
-/** 待机池：她闲下来自己找事做（权重越大越常出现） */
+/** 待机池：她闲下来自己找事做（先按类别权重抽类别，再在类内按 weight 抽 clip） */
 const IDLE_POOL: MotionClip[] = [
-  { id: "breathe", weight: 22, frames: [f("idle", 2600)] },
+  { id: "breathe", group: "idle", weight: 22, frames: [f("idle", 2600)] },
   {
     id: "blink",
+    group: "idle",
     weight: 16,
     frames: [f("idle", 900), f("blink", 110), f("idle", 500)],
   },
   {
     // 东张西望：把侧/背视图真正用起来，且首尾都回正面
     id: "look-around",
+    group: "turn",
     weight: 13,
     frames: [
       f("idle", 700),
@@ -72,21 +89,25 @@ const IDLE_POOL: MotionClip[] = [
   },
   {
     id: "wave",
+    group: "random",
     weight: 9,
     frames: [f("idle", 380), f("wave", 620), f("wave", 480, { fx: "sway" }), f("idle", 420)],
   },
   {
     id: "heart",
+    group: "random",
     weight: 8,
     frames: [f("idle", 380), f("heart", 760), f("happy", 520), f("idle", 420)],
   },
   {
     id: "hum",
+    group: "random",
     weight: 7,
     frames: [f("idle", 360), f("sing", 780, { fx: "sway" }), f("sing", 620), f("idle", 420)],
   },
   {
     id: "stretch",
+    group: "random",
     weight: 8,
     frames: [
       f("idle", 420),
@@ -97,12 +118,14 @@ const IDLE_POOL: MotionClip[] = [
   },
   {
     id: "doze",
+    group: "idle",
     weight: 5,
     frames: [f("idle", 520), f("sleep", 1100), f("tired", 620), f("idle", 460)],
   },
   {
     // 窗内溜达：走路四拍 contact-pass-contact，侧视 + 镜像
     id: "stroll",
+    group: "move",
     weight: 9,
     frames: [
       f("walk1", 140, { view: "side", dx: 0 }),
@@ -114,6 +137,7 @@ const IDLE_POOL: MotionClip[] = [
   },
   {
     id: "happy-hop",
+    group: "random",
     weight: 6,
     frames: [
       f("idle", 340),
@@ -129,11 +153,13 @@ const STATE_CLIPS: Record<AvatarState, MotionClip> = {
   idle: IDLE_POOL[0],
   thinking: {
     id: "state-thinking",
+    group: "idle",
     weight: 0,
     frames: [f("think", 1500, { fx: "sway" }), f("think", 1200), f("blink", 130), f("think", 1400)],
   },
   running: {
     id: "state-running",
+    group: "idle",
     weight: 0,
     frames: [
       f("walk1", 130, { view: "side", dx: 0 }),
@@ -144,6 +170,7 @@ const STATE_CLIPS: Record<AvatarState, MotionClip> = {
   },
   success: {
     id: "state-success",
+    group: "idle",
     weight: 0,
     frames: [
       f("happy", 700),
@@ -154,16 +181,19 @@ const STATE_CLIPS: Record<AvatarState, MotionClip> = {
   },
   failed: {
     id: "state-failed",
+    group: "idle",
     weight: 0,
     frames: [f("sad", 1200, { fx: "lean-l" }), f("sad", 1100), f("tired", 900), f("sad", 1000)],
   },
   waiting_confirm: {
     id: "state-waiting",
+    group: "idle",
     weight: 0,
     frames: [f("surprise", 900, { fx: "pop" }), f("surprise", 1100, { fx: "sway" }), f("poke", 800)],
   },
   standby: {
     id: "state-standby",
+    group: "idle",
     weight: 0,
     frames: [f("sleep", 3200), f("tired", 900), f("sleep", 3200)],
   },
@@ -173,23 +203,34 @@ const STATE_CLIPS: Record<AvatarState, MotionClip> = {
 const INTERACT_CLIPS: Record<string, MotionClip> = {
   poke: {
     id: "interact-poke",
+    group: "idle",
     weight: 0,
     frames: [f("poke", 300, { fx: "pop" }), f("surprise", 460, { fx: "squash" }), f("idle", 320, { fx: "land" })],
   },
   happy: {
     id: "interact-happy",
+    group: "idle",
     weight: 0,
     frames: [f("happy", 420, { fx: "pop" }), f("heart", 640), f("idle", 320)],
   },
   drag: {
     id: "interact-drag",
+    group: "idle",
     weight: 0,
     frames: [f("drag", 260, { fx: "stretch" }), f("drag", 800)],
   },
   land: {
     id: "interact-land",
+    group: "idle",
     weight: 0,
     frames: [f("jump", 220, { fx: "squash" }), f("idle", 420, { fx: "land" })],
+  },
+  /** 甩抛飞行：长帧锁住腾空姿态，落地由 land 接管 */
+  throw: {
+    id: "interact-throw",
+    group: "idle",
+    weight: 0,
+    frames: [f("jump", 260, { fx: "stretch" }), f("jump", 1400, { fx: "hop" })],
   },
 };
 
@@ -208,17 +249,27 @@ export const STATE_BUBBLE: Partial<Record<AvatarState, string>> = {
 /** 待机池轮转计数：纯加权随机不保证三视图一定被看到，
  *  每 LOOK_EVERY 段强制插一次「东张西望」（含侧/背视图）。 */
 const LOOK_EVERY = 4;
+const GROUPS: MotionGroup[] = ["idle", "turn", "move", "random"];
 
-function pickIdle(exclude: string, sinceLook: number): MotionClip {
-  if (sinceLook >= LOOK_EVERY - 1) return IDLE_POOL[2]; // look-around
-  const pool = IDLE_POOL.filter((c) => c.id !== exclude);
-  const total = pool.reduce((s, c) => s + c.weight, 0);
+function weightedPick<T>(pool: T[], weight: (item: T) => number): T {
+  const total = pool.reduce((s, item) => s + weight(item), 0);
+  if (total <= 0) return pool[0];
   let r = Math.random() * total;
-  for (const c of pool) {
-    r -= c.weight;
-    if (r <= 0) return c;
+  for (const item of pool) {
+    r -= weight(item);
+    if (r <= 0) return item;
   }
-  return pool[0];
+  return pool[pool.length - 1];
+}
+
+/** 两级抽样：先按类别权重抽类别，再在类内按 clip 权重抽具体动作 */
+function pickIdle(exclude: string, sinceLook: number): MotionClip {
+  const fresh = IDLE_POOL.filter((c) => c.id !== exclude);
+  const pool = fresh.length ? fresh : IDLE_POOL;
+  const group: MotionGroup =
+    sinceLook >= LOOK_EVERY - 1 ? "turn" : weightedPick(GROUPS, (g) => MOTION_WEIGHTS[g]);
+  const inGroup = pool.filter((c) => c.group === group);
+  return weightedPick(inGroup.length ? inGroup : pool, (c) => c.weight);
 }
 
 function prefersReducedMotion(): boolean {
@@ -317,7 +368,7 @@ export function usePetMotion(state: AvatarState, mood?: PoseName): MotionOutput 
   const interact = useCallback(
     (kind: InteractKind) => {
       if (mood) return;
-      const phase = kind === "drag" || kind === "land";
+      const phase = kind === "drag" || kind === "land" || kind === "throw";
       if (pendingInteract.current && !phase) return;
       const clip = INTERACT_CLIPS[kind];
       if (!clip) return;

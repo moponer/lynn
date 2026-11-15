@@ -736,6 +736,13 @@ export function JobRow({
         </span>
       </div>
       <div className="job-title" title={job.title}>{job.title}</div>
+      {/* 阶段账（2026-11-15）：全局进展在台账就能看见走到第几段，不用点开详情问风铃 */}
+      {job.flow && job.flow.total > 0 && (
+        <div className="job-stage">
+          <span className="mono">{t("ledger.stage", { a: job.flow.done, b: job.flow.total })}</span>
+          {job.flow.current && <span className="job-stage-cur">{job.flow.current}</span>}
+        </div>
+      )}
       <div className="job-meta">
         <MemberAvatar name={job.member ?? t("sheet.lynn")} size={20} />
         <span className="job-who">{job.member ?? t("sheet.lynn")}</span>
@@ -770,6 +777,9 @@ const GROUP_META: { k: Exclude<JobGroup, "archived">; labelKey: I18nKey; color: 
   { k: "stuck", labelKey: "ledger.stuck", color: "var(--seal)", stoppable: true },
   { k: "running", labelKey: "ledger.running", color: "var(--blue)", stoppable: true },
   { k: "queued", labelKey: "ledger.queued", color: "var(--ink-4)", stoppable: false },
+  // 已终止（2026-11-15）：用户按了「终止任务」，这些单不再催人但也没被销毁，
+  // 单独一组放着——既不混进"等你拍板"，也不会凭空消失让人以为丢了。
+  { k: "halted", labelKey: "ledger.halted", color: "var(--ink-4)", stoppable: false },
 ];
 
 /**

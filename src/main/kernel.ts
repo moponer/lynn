@@ -48,10 +48,21 @@ import { destructiveFamily } from "./toolkit";
 import { LogGate } from "./log-policy";
 import { detectTrailingRepetition, stripTrailingRepetition } from "./repetition";
 import { estimateTaskScale, scaleLimits, type EvidencePolicy } from "./task-scale";
+import {
+  createStagePlan,
+  finalizeStagePlan,
+  reopenStage,
+  shouldFinalize,
+  stageBrief,
+  stageDefsFor,
+  stageLine,
+  tryCompleteStage,
+} from "./stage-plan";
 import { findDuplicateAssignment } from "./assignment-guard";
 import { readDocxText } from "./docx-read";
-// 去 AI 味（2026-11-15）：可选外部插件 humanizer-stream，只改展示层文本，上下文与 token 不受影响
-import { humanizeDisplay, humanizeFileText, humanizerStatus, loadHumanizer, setHumanizerEnabled } from "./humanizer";
+// 写作规则（2026-11-15 重做）：可选外部插件 humanizer-stream，只往系统提示词里加一段约束，
+// 不改任何模型输出（0.1 的展示层改写已删除）
+import { humanizerStatus, loadHumanizer, setHumanizerEnabled, writingRulesSection } from "./humanizer";
 import { avatarById, avatarFor, isAvatarId } from "../shared/avatars";
 import {
   buildInjection,
@@ -79,6 +90,8 @@ import { mergeStrings } from "../shared/i18n";
 import { createSettingsRpc, type SettingsRpc } from "./rpc/settings-rpc";
 import { createThreadRpc, type ThreadRpc } from "./rpc/thread-rpc";
 import { BUILTIN_SKILLS } from "./builtin-skills";
+import { ConnectorStore, CONNECTOR_CATALOG, probeConnector as probeConnectorLive } from "./connectors";
+import { allPresets, buildSkillMd, installPreset, presetInstalled, SCHEDULE_PRESETS } from "./capability-catalog";
 import { ProjectStore, defaultProjectName, type ProjectRecord } from "./projects";
 import {
   addRoot,
@@ -118,7 +131,7 @@ import {
 import { L1Host } from "./plugin-l1";
 import { AgentHost, type AgentStats, type RpcToolSpec } from "./agent-host";
 import { PiRpcHost } from "./pi-rpc-host";
-import { execSync } from "node:child_process";
+import { execFile, execSync } from "node:child_process";
 
 /**
  * 构建号（2026-11-13 审计 #19）：git 提交计数，与 vite.config.ts 同一算法——
@@ -461,6 +474,12 @@ const TOOL_JSON: ToolSchema[] = [
           what: { type: "string" },
           expect: { type: "string" },
           deadline: { type: "string" },
+          failedChecks: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "打回时填：具体哪几条判据没过（照抄完成标准原文）。重派时只重做这几条，已通过的不用重来；不填就只能整段重做。",
+          },
         },
       },
     },
@@ -531,7 +550,7 @@ const TOOL_JSON: ToolSchema[] = [
     function: {
       name: "save_memory",
       description:
-        "沉淀记忆（M2-05）：把一条事实/决定/坑/做事方法写进记忆（跨会话都在你的系统提示词里）。完成任务后的经验教训、用户偏好、项目的关键路径都该沉淀。scope=user 写「用户记忆」（偏好/背景，永远保留）；scope=project 写「这个项目的记忆」（换个项目看不到，适合仓库怎么跑、谁负责哪块这类事实）。",
+        "记一件事（M2-05）：把一条事实/决定/坑/做法写进长期记忆（跨会话都在你的系统提示词里）。做完任务的经验教训、用户偏好、项目的关键路径都值得记。scope=user 写「用户记忆」（偏好/背景，永远保留）；scope=project 写「这个项目的记忆」（换个项目看不到，适合仓库怎么跑、谁负责哪块这类事实）。",
       parameters: {
         type: "object",
         required: ["entry"],
@@ -1024,10 +1043,19 @@ export class Kernel {
 
   private decryptor: ((blob: Buffer) => string) | null = null;
 
+  /** 外部应用连接（能力中心）：凭据仓库 + 加解密函数（main.ts 注入 safeStorage） */
+  private connectorStore: ConnectorStore;
+  private connectorEnc: ((plain: string) => Buffer) | null = null;
+  private connectorCanEncrypt: () => boolean = () => false;
+
   constructor(dataRoot = defaultDataRoot()) {
     this.dataRoot = dataRoot;
     // 测试环境（LYNN_HOME 隔离）无 safeStorage；main.ts 会用真实现覆盖
     this.settings = new SettingsStore(dataRoot, (plain) => Buffer.from(plain, "utf-8"), () => false);
+    // 外部应用连接的凭据仓库（2026-11-15）：与 API Key 同一道加密闸；main.ts 注入真实现
+    this.connectorEnc = (plain) => Buffer.from(plain, "utf-8");
+    this.connectorCanEncrypt = () => false;
+    this.connectorStore = new ConnectorStore(dataRoot, this.connectorEnc, this.connectorCanEncrypt);
     this.teamStore = new TeamStore(dataRoot);
     // 工单落盘回调：有成员在跑时，状态一变就评估一次心跳（500ms 合并窗口）
     this.taskStore = new TaskStore(dataRoot, { onChange: () => this.onTaskStoreChanged() });
@@ -1098,6 +1126,10 @@ export class Kernel {
   ): void {
     this.settings = new SettingsStore(this.dataRoot, encrypt, isAvailable);
     this.decryptor = decrypt;
+    // 外部应用凭据同一条纪律：换真实加密实现时把连接仓库一起换掉（旧实例缓存的是假加密）
+    this.connectorEnc = encrypt;
+    this.connectorCanEncrypt = isAvailable;
+    this.connectorStore = new ConnectorStore(this.dataRoot, encrypt, isAvailable);
   }
 
   onEvent(cb: (ev: KernelEvent) => void): () => void {
@@ -1207,6 +1239,7 @@ export class Kernel {
         artifacts: ev.artifacts,
         author: ev.author,
         mentions: ev.mentions,
+        speak: ev.speak,
       });
     }
     this.notify(ev);
@@ -1214,17 +1247,11 @@ export class Kernel {
 
   private card(c: Omit<FeedCard, "id" | "createdAt">): FeedCard {
     /**
-     * 去 AI 味（2026-11-15）：只有「人说的话」才过滤——她的回复（kind=lynn）与群里带 author 的发言。
-     * 系统卡是代码写的，不是模型输出，一个字都不动。
-     *
-     * 过滤只作用于**这张展示卡**：history 与落盘仍是原文（见 settleAssistant）。
-     * 否则上下文会被改写、前缀缓存会被打穿——那正是这个功能最容易犯的错。
+     * 写作规则（2026-11-15 重做）：**这里一个字都不改**。
+     * 0.1 曾在展示层改写模型文本，结果是「界面看到 A、落盘与上下文是 B」，
+     * 排查时对不上；而且改写需要语义判断，规则只能猜。现在约束放在生成侧
+     * （写作规则进系统提示词），展示层保持与模型输出逐字一致。
      */
-    if (c.kind === "lynn" || c.author) {
-      const text = c.text ? humanizeDisplay(c.text) : c.text;
-      const body = c.body ? humanizeDisplay(c.body) : c.body;
-      if (text !== c.text || body !== c.body) c = { ...c, text, body };
-    }
     // 同一张单反复出同一种事件（权限拦截 / 外呼审计）：聚合成一张卡计数，不再一屏刷 N 条
     if (AGGREGATED_BADGES.has(c.badge ?? "") && this.feed.length > 0) {
       const last = this.feed[this.feed.length - 1];
@@ -1548,8 +1575,19 @@ export class Kernel {
       this.memory.systemPromptSection() +
       this.memory.projectSection(this.currentProject()?.id) +
       this.projectContext() +
-      this.environmentFacts()
+      this.environmentFacts() +
+      // 写作规则（2026-11-15 重做）：插件提供的固定约束段，会话内不变。
+      // 放在 system prompt 末尾：换插件版本才变化，前缀缓存不受日常对话影响。
+      this.rulesSection("chat")
     );
+  }
+
+  /**
+   * 写作规则段（外部插件 humanizer-stream）。
+   * 没装插件 / 关掉开关 → 空串，一个字都不注入。
+   */
+  private rulesSection(profile: "chat" | "prose" | "code" | "ui", maxChars?: number): string {
+    return writingRulesSection(profile, maxChars);
   }
 
   /**
@@ -2713,6 +2751,68 @@ export class Kernel {
   }
 
   /**
+   * 阶段账推进（2026-11-15）：阶段进度由代码持有，不放在模型上下文里。
+   *
+   * 实机教训：7 阶段长任务里顺序全靠模型自己记，两次上下文压缩后它开始复述摘要、
+   * 查 246 次进度、重派 24 次。**阶段这类"事实"必须落在工单上**——压缩、换会话、
+   * 重开单都抹不掉，模型每轮从 check_progress 读到的才是真的。
+   * 失败只记日志：阶段账是辅助事实，不能反过来打断回报/验收主流程。
+   */
+  private advanceStage(taskId: string, ids: string | string[], evidence: string[]): string {
+    const plan = this.taskStore.get(taskId)?.stagePlan;
+    if (!plan) return "";
+    let next = plan;
+    const moved: string[] = [];
+    for (const id of Array.isArray(ids) ? ids : [ids]) {
+      const s = next.stages.find((x) => x.id === id);
+      if (!s || s.status !== "active") continue;
+      const r = tryCompleteStage(next, id, evidence);
+      if (!r) continue;
+      next = r;
+      moved.push(s.title);
+    }
+    if (!moved.length) return "";
+    try {
+      this.taskStore.setStagePlan(taskId, next);
+      this.taskCase.append(taskId, { kind: "note", text: `阶段：${moved.join("、")} → 完成` });
+    } catch (err) {
+      this.log("stage_write_failed", {
+        taskId,
+        error: String(err instanceof Error ? err.message : err).slice(0, 200),
+      });
+      return "";
+    }
+    return stageLine(next);
+  }
+
+  /** 工单上的阶段进度（查进度/详情/提示词共用；没有阶段账就返回空串） */
+  private stageSummaryOf(taskId: string): string {
+    const plan = this.taskStore.get(taskId)?.stagePlan;
+    return plan ? stageLine(plan) : "";
+  }
+
+  /**
+   * 全部阶段结束 → 由代码生成最终验收表（2026-11-15）。
+   * 实机里"收尾"一直靠模型自觉，于是它交完一半就宣布完成；这里把收尾变成一次闸。
+   */
+  private finalizeStagesIfReady(taskId: string): string {
+    const plan = this.taskStore.get(taskId)?.stagePlan;
+    if (!plan || !shouldFinalize(plan)) return "";
+    try {
+      const done = finalizeStagePlan(plan);
+      this.taskStore.setStagePlan(taskId, done);
+      this.taskCase.append(taskId, { kind: "note", text: "阶段：全部结束，已生成最终验收表" });
+      return stageLine(done);
+    } catch (err) {
+      this.log("stage_finalize_failed", {
+        taskId,
+        error: String(err instanceof Error ? err.message : err).slice(0, 200),
+      });
+      return "";
+    }
+  }
+
+  /**
    * 成员回报登记（风铃 review_result 与成员后台回报共用；§4.10.5 证据原则的执行点）。
    * 证据可点开验证：真实文件收进卷宗 artifacts/，验不了的只登记 verified:false，不冒充。
    */
@@ -2814,6 +2914,16 @@ export class Kernel {
       }
     }
 
+    /**
+     * 阶段账（2026-11-15）：成员交回回报 = 本单"产出/勘察"这一段做完了。
+     * 探索型任务没有产出阶段，交回报等于勘察结论到手——别拿 execute 的阶段名硬套。
+     */
+    const stageDone = this.advanceStage(
+      taskId,
+      this.taskStore.get(taskId)?.mode === "explore" ? "survey" : "produce",
+      evidence.length ? evidence.slice(0, 5) : [`回报：${text.slice(0, 40)}`],
+    );
+
     if (announce) {
       this.cardTo(threadId, {
         kind: "tool",
@@ -2849,11 +2959,14 @@ export class Kernel {
       }
     };
     queueMicrotask(kickReview);
-    return moved
-      ? evidence.length
-        ? `回报已登记，${verified} 项证据已验证并收入卷宗，工单进入待审查。`
-        : "回报已登记（未附证据，本单证据可选），工单进入待审查。"
-      : "回报已登记（含证据索引）。";
+    const stageTail = stageDone ? `\n阶段：${stageDone}` : "";
+    return (
+      moved
+        ? evidence.length
+          ? `回报已登记，${verified} 项证据已验证并收入卷宗，工单进入待审查。`
+          : "回报已登记（未附证据，本单证据可选），工单进入待审查。"
+        : "回报已登记（含证据索引）。"
+    ) + stageTail;
   }
 
   /**
@@ -2876,8 +2989,10 @@ export class Kernel {
     if (this.turn.phase === "awaiting_plan") return; // 用户正在拍板，别插队
     const item = this.reviewPending.shift();
     if (!item) return;
+    const stageNow = this.stageSummaryOf(item.taskId);
     this.submitTurn(
       `【成员回报】${item.member} 交了 ${item.taskId}：${item.text}\n` +
+        (stageNow ? `当前阶段：${stageNow}\n` : "") +
         "现在验收：先 read_artifact 读产物正文（没读过正文不许点头），再逐条对完成标准 → " +
         "合格就 accept_or_reject 验收，不合格就打回并写清改什么、期望什么；缺材料就如实说缺什么。\n" +
         // 2026-11-13 实机：她验收完就收轮，用户只看到一堆过程卡，最后一份汇报都没有
@@ -2919,6 +3034,14 @@ export class Kernel {
       return;
     }
     const task = this.taskStore.get(taskId);
+    /**
+     * 小任务不另起验收员（2026-11-15）：判据 ≤2 条的单，单独跑一次完整执行来验收
+     * 比产出本身还贵，用户看到的就是"一篇散文架了三支队"。风铃看成员交的核对清单拍板即可。
+     */
+    if (task?.scale === "small") {
+      this.wakeLynnForReview(taskId, workerMember, workerReport);
+      return;
+    }
     const acceptance = task?.acceptance && task.acceptance.length ? task.acceptance : ["完成标准全部满足"];
     const brief =
       `你是本队的常驻验收员，现在验收 ${taskId}（执行成员：${workerMember}）。\n` +
@@ -3061,11 +3184,16 @@ export class Kernel {
       meta: { deadline: p.deadline, tools: p.tools },
     });
     this.taskCase.appendSummary(p.taskId, `派给 ${p.member}（截止 ${p.deadline}）`);
-    // 用户点「开始」= 批准契约卡上的只读授权申请：此刻落权（写仍限工作区，模型不能自我扩权）
+    // 开工 = 这份只读授权生效（写仍限工作区，成员不能自我扩权）。
+    // 自动/放手档：风铃已经判断过风险，她授予即生效；询问/计划档：这一步就是用户那次点头。
     if (p.readRoots?.length) {
       const prev = this.taskStore.get(p.taskId)?.readRoots ?? [];
       this.taskStore.setReadRoots(p.taskId, [...new Set([...prev, ...p.readRoots])]);
-      this.taskCase.append(p.taskId, { kind: "note", text: `用户批准只读授权：${p.readRoots.join("、")}（写仍限工作区）` });
+      const by = this.permission === "auto" || this.permission === "full" ? "风铃授予" : "用户批准";
+      this.taskCase.append(p.taskId, {
+        kind: "note",
+        text: `${by}只读授权：${p.readRoots.join("、")}（写仍限工作区）`,
+      });
     }
     const kickoff = this.dispatchMember(p.teamId, p.taskId, p.member, p.brief, p.deadline, p.tools, p.draftId, p.maxTurns);
     if (kickoff.ok) {
@@ -3074,6 +3202,15 @@ export class Kernel {
       } catch {
         /* 已是 in_progress */
       }
+      /**
+       * 契约阶段到此为止（2026-11-15）：用户点了「开始」= 判据/材料/工作区都定了。
+       * 证据写的是可回查的事实（哪张契约、几条判据、授权目录），不是"确认过了"这句空话。
+       */
+      this.advanceStage(p.taskId, "contract", [
+        `契约 ${p.taskId} · 判据 ${p.acceptance?.length ?? 1} 条`,
+        `工作区 ${p.workspace ?? "（继承会话主根）"}`,
+        ...(p.readRoots?.length ? [`只读授权 ${p.readRoots.join("、")}`] : []),
+      ]);
     } else {
       // 停在 todo：没有假"进行中"；原因写进会话与卷宗，用户知道下一步该做什么
       this.taskCase.append(p.taskId, { kind: "note", text: `未开工：${kickoff.message}` });
@@ -3226,6 +3363,8 @@ export class Kernel {
       forbidden: recNow?.forbidden,
       priority: recNow?.priority,
       mode: recNow?.mode,
+      // 打回后的重派：只重做这几条（2026-11-15），别把已通过的部分推翻
+      focus: recNow?.reworkFocus?.items,
       signal: controller.signal,
       workdir,
       // 项目名：成员要知道自己在哪个项目里干活，回报里也要说得出来
@@ -3244,12 +3383,16 @@ export class Kernel {
         ...this.roots.extras.filter((r) => r.mode === "rw").map((r) => r.path),
         ...(this.taskStore.get(taskId)?.workspace?.roots ?? []).filter((r) => r.mode === "rw").map((r) => r.path),
       ],
-      // 删除类命令必须用户点头：挂一张审批卡，超时按拒绝。
-      // 工具层已经先放过"本单开工后新造的文件"（自清理），到这里的是真有风险的删除。
+      // 删除类命令必须过闸：工具层已经先放过"本单开工后新造的文件"（自清理），到这里的是真有风险的删除。
+      // 谁批由风铃的档位决定（见 awaitCommandApproval）：放手档她代批留痕，其余档问你。
       onBeforeCommand: (cmd) => this.awaitCommandApproval(member, taskId, cmd),
       runStartedAt: startedAt,
-      // 权限档=全权：工作区内删除不再逐次点头（工作区外仍由路径守卫直接拒）
-      autoDeleteInWorkspace: () => this.permission === "full",
+      /**
+       * 成员**不继承放手级**（2026-11-15 拍板）：这一档意味着"删除免审批"，
+       * 属于用户交给风铃的那一档，不能再往下传。成员的删除永远过闸，
+       * 放手档下改由风铃代批（内核代她执行并写卷宗），不打扰你，也不再是静默放行。
+       */
+      autoDeleteInWorkspace: () => false,
       // 出站闸（审计 #2）：计划/询问档成员不能把工作区数据 curl 出本机；自动/全权只审计
       outboundAllowed: () => this.permission === "auto" || this.permission === "full",
       // 收件箱：风铃/巡检中途补的指示，成员每轮开头取（催办不杀进程、不重派）
@@ -3272,9 +3415,9 @@ export class Kernel {
           outcome: ev.outcome,
         }),
       onBeforeWrite: (rel, full, existed) => this.checkpoints.beforeWrite(rel, full, existed),
-      // 去 AI 味（2026-11-15）：成员写的文档/文案/代码注释在落盘前过一遍。
-      // 走 code 档时只碰注释，代码本体零改动；插件没装时是恒等变换。
-      onWriteContent: (rel, content) => humanizeFileText(rel, content),
+      // 写作规则（2026-11-15 重做）：成员写文档/回报之前就把规则给它，
+      // 而不是等它写完再改稿（改稿会破坏校验、也会让落盘与交付物不一致）。
+      writingRules: this.rulesSection("prose", 1200),
       office: {
         read: (file) => readTable(file, this.officeHealth),
         write: (file, table) => writeTable(file, table),
@@ -3289,6 +3432,11 @@ export class Kernel {
       },
       kb: {
         add: (name, markdown) => this.knowledge.addDoc(name, markdown),
+      },
+      // 外部应用（能力中心 · 连接器）：成员只给 app id + 路径/命令，凭据与主机白名单都在这里
+      apps: {
+        request: (input) => this.connectorRequest(input),
+        ssh: (input) => this.connectorSsh(input),
       },
       onEvent: (ev) => {
         // 工具开始就刷新心跳与卡面：一条递归命令跑 100s 时，此前界面与看门狗都当它死了
@@ -3478,12 +3626,18 @@ export class Kernel {
         `只读授权：${readRoots.length ? readRoots.join("、") : "无（只能读工作区）"}`,
       ].join("\n"),
     );
+    // 语音只需要一句人话："谁 + 做什么"。卡片标题留给眼睛（工单号 + 工具清单），
+    // 按字段推导只会念成「阿计 开工 · task-mf3k9x2a-1」——那是噪音，不是进度。
+    const what = String(recForWork?.title ?? "").trim();
     this.emit({
       type: "tool",
       badge: "派单",
       title: `${member} 开工 · ${taskId}`,
       meta: `工具：${allowed.join("、") || "无"}`,
       body: at.body,
+      speak: what
+        ? `我把「${what}」交给${member}了，他开始做。`
+        : `我把任务交给${member}了，他开始做。`,
       author: { kind: "lynn", name: "风铃" },
       mentions: at.mentions,
     });
@@ -3599,7 +3753,22 @@ export class Kernel {
     }
     // 2) 待验收的回报：本群的丢掉（恢复后靠台账与卷宗继续，不靠这半条队列）
     this.reviewPending = this.reviewPending.filter((p) => this.taskStore.get(p.taskId)?.threadId !== tid);
-    // 3) 当前回合属于这个群：就地中断
+    /**
+     * 3) 挂着等用户拍板的东西一起作废（2026-11-15）。
+     * 终止之后没人会来点，留着就是一张骗人的「等你拍板」——实机截图里那枚验收印章
+     * 就是在按了「终止任务」之后还赖在右栏不走的。审批按拒绝收口（成员已停机，
+     * 再等 5 分钟超时没有意义），契约与提问一并撤掉；这些记录都能从台账与卷宗重建。
+     */
+    for (const d of this.decisions.filter((x) => x.threadId === tid && x.kind === "approval")) {
+      const pa = this.pendingApprovals.get(d.id);
+      this.pendingApprovals.delete(d.id);
+      pa?.resolve(false);
+    }
+    // 审批卡绑的是"正在等你的那个成员动作"，成员已经停机 → 卡必须撤（留着点了也没人接）。
+    // 契约与提问不撤：它们是"接下来要做什么"，恢复后原样回来。
+    this.decisions = this.decisions.filter((d) => !(d.threadId === tid && d.kind === "approval"));
+    this.persistPending();
+    // 4) 当前回合属于这个群：就地中断
     if (tid === this.currentThreadId) {
       this.abortRequested = true;
       this.queue = [];
@@ -3613,7 +3782,7 @@ export class Kernel {
         this.liveCard = null;
       }
     }
-    // 4) 一条汇总卡说清"停的是什么、怎么恢复"，不给每张单都留一张
+    // 5) 一条汇总卡说清"停的是什么、怎么恢复"，不给每张单都留一张
     const head = stoppedIds.length
       ? `已终止本群：${stoppedIds.length} 张在跑的单已停机（${stoppedIds.join("、")}）`
       : "已终止本群：没有成员在跑";
@@ -3701,19 +3870,30 @@ export class Kernel {
   }
 
   /**
-   * 删除类命令的用户审批：挂一张审批卡（右栏「等你拍板」），最长等 5 分钟，超时按拒绝。
+   * 删除类命令的审批闸。**谁批取决于用户的档位**（2026-11-15 起）：
    *
-   * 为什么是用户而不是风铃批：删除不可撤销，工具层只做"防御性拦截"，不做价值判断——
-   * 模型放行一次错误删除，代价由用户承担。所以定级**只有用户能批**。
-   * 但"低风险"不该打扰人：工具层已经把「本单开工后自己造的文件」（探针、临时落盘）自动放行了，
-   * 走到这里的都是工作区里的既有文件/目录（或参数说不清的删除）。
+   *  - auto / full：风铃代批，写卷宗留痕，不打扰用户——"用户只出需求"之后，
+   *    逐次点删除显然违背它；而真正拦住风险的是工具层的路径守卫与自清理分级。
+   *  - ask：唯一的"逐步确认"档，仍然挂卡问用户（用户自己选的细粒度控制）。
+   *  - plan：只读，删除到不了这里。
    *
-   * 另外两处修正（实机反馈）：
-   *   1. 以前会把主会话 setTurn(awaiting_plan)，成员在后台等审批却把用户当前对话标成"等你裁决"；
-   *      成员是后台任务，不该劫持主会话状态。
-   *   2. 审批结果写进工单卷宗，风铃下一轮 check_progress 就能看到"用户批过/拒过哪条删除"。
+   * 走到这里的都是工作区里的既有文件/目录（本单自己造的临时文件工具层已自动放行）。
+   * 审批结果一律写进工单卷宗：风铃下一轮 check_progress 能看到批/拒了哪条、谁批的。
    */
   private awaitCommandApproval(member: string, taskId: string, command: string): Promise<{ ok: boolean; reason?: string }> {
+    /**
+     * 自动 / 放手档：这一刀由风铃判断（用户只管档位），不打扰用户。
+     * 成员不继承放手级——她代批的每一笔都写进卷宗，能在任务详情里回溯；
+     * 需要逐步确认的话，把档位切到「询问」即可（那一档仍逐次问用户）。
+     */
+    if (this.permission === "auto" || this.permission === "full") {
+      this.taskCase.append(taskId, {
+        kind: "note",
+        text: `${this.permission === "full" ? "放手档" : "自动档"}：风铃代批删除（成员不继承放手级）：${command.slice(0, 200)}`,
+      });
+      this.log("command_owner_auto", { taskId, member, mode: this.permission });
+      return Promise.resolve({ ok: true });
+    }
     // 「这类以后都允许」（2026-11-14）：用户在审批卡上放行过的族不再逐次弹卡。
     // 放宽的只是"打扰"：命令照样过 destructiveReason / 自清理分级 / 路径守卫。
     const family = destructiveFamily(command);
@@ -3929,6 +4109,22 @@ export class Kernel {
         // 目录被占用之类：留在台账里，至少别把删会话整个搞失败
         kept += 1;
       }
+    }
+    /**
+     * 群没了，挂在它名下的裁决一起撤（2026-11-15）：
+     * 没有群可跳、或指向的工单已经被删的「等你拍板」就是一条死链——
+     * 点了没反应，还占着右栏最显眼的位置。顺手把死链一起清掉。
+     */
+    const before = this.decisions.length;
+    this.decisions = this.decisions.filter(
+      (d) => d.threadId !== threadId && (!d.jobId || this.taskStore.get(d.jobId)),
+    );
+    for (const [id, p] of [...this.pendingPlans]) {
+      if (p.threadId === threadId || !this.taskStore.get(p.taskId)) this.pendingPlans.delete(id);
+    }
+    if (this.decisions.length !== before) {
+      this.persistPending();
+      this.setTurn({});
     }
     return { removed, kept };
   }
@@ -4533,8 +4729,8 @@ export class Kernel {
           }
           workspace = ws;
         }
-        // 只读授权申请：先登记，开工时（用户点「开始」或用户已开的「自动开始」）才落权，
-        // 模型自己不能扩权。授权最终写在 TaskRecord.readRoots 上。
+        // 只读授权：先登记，开工时才落权（自动/放手档=风铃授予即生效，询问/计划档=用户点「开始」）。
+        // 成员永远不能自己扩权；授权最终写在 TaskRecord.readRoots 上。
         let readRoots: string[] | undefined;
         if (Array.isArray(args.readRoots) && args.readRoots.length > 0) {
           const roots = (args.readRoots as unknown[]).map((r) => path.resolve(String(r).trim())).filter(Boolean);
@@ -4770,19 +4966,42 @@ export class Kernel {
             ...(forbiddenList.length ? { forbidden: forbiddenList } : {}),
             ...(priority ? { priority } : {}),
             mode: taskMode,
+            scale,
             // 派单时所在的项目（冻结快照）：契约卡上写「项目 · 名字」，
             // 旧单翻出来也知道当初动的是哪个项目
             ...(this.projectRoot ? { projectName: this.currentProject()?.name ?? defaultProjectName(this.projectRoot) } : {}),
           });
           this.taskStore.transition(taskId, "todo");
         }
+        /**
+         * 阶段账（2026-11-15 接入）：阶段清单落单，顺序不再由模型记忆持有。
+         * 阶段数跟规模走——小任务只有「契约 → 产出 → 汇报」，写一篇散文不该架三支队。
+         * 重做沿用原单的阶段账（打回时已把产出段拉回执行中），不重新建一份。
+         */
+        if (!this.taskStore.get(taskId)?.stagePlan) {
+          try {
+            this.taskStore.setStagePlan(taskId, createStagePlan(`sp-${taskId}`, title, stageDefsFor({ scale, mode: taskMode })));
+          } catch (err) {
+            this.log("stage_plan_failed", {
+              taskId,
+              error: String(err instanceof Error ? err.message : err).slice(0, 200),
+            });
+          }
+        }
+        const stageTitles = (this.taskStore.get(taskId)?.stagePlan?.stages ?? []).map((s) => s.title);
+        const stageNote = stageTitles.length ? `\n\n阶段：${stageTitles.join(" → ")}（进度由系统记，别自己数）` : "";
         const reworkNote = reworkRec
           ? `\n这是 ${taskId} 的第 ${reworkRound} 轮重做：状态与卷宗都记在同一张单里，没有新建工单。`
           : "";
         const scaleLabel = scale === "small" ? "小" : scale === "large" ? "大" : "中";
+        const focusNow = this.taskStore.get(taskId)?.reworkFocus;
+        const focusNote =
+          focusNow?.items.length ? `\n本轮只重做未过项：${focusNow.items.join("；")}（已过的部分不要推翻重做）` : "";
         const scaleNote =
           `\n本单按${scaleLabel}任务配置：${maxTurns ?? scaleBudget.maxTurns} 轮 / ` +
-          `${Math.round(scaleBudget.budgetTokens / 1000)}K 预算；按交付结果验收。`;
+          `${Math.round(scaleBudget.budgetTokens / 1000)}K 预算；按交付结果验收。` +
+          stageNote +
+          focusNote;
         if (this.settings.getPrefs().autoStart) {
           // 自动开始跳过契约卡；授权状态并进「派单」工具卡统一出，别再刷第二张系统卡。
           return `已按任务契约开工（设置里开启了自动开始）。${this.startAssignment(ctx)}\n任务 ID：${taskId}（系统生成；后续查进度/催办都用它，不要自己编）。${turnHint}${reworkNote}${scaleNote}`;
@@ -4795,7 +5014,17 @@ export class Kernel {
         } catch {
           /* 命名失败不影响派单 */
         }
-        const permNote = readRoots?.length ? `\n\n只读授权申请（点「开始」即批准）：${readRoots.join("、")}` : "";
+        /**
+         * 授权归风铃（2026-11-15 拍板的口径）：成员权限由她判断风险后授予，
+         * 用户只管她的档位。所以自动/放手档下这份只读授权直接生效（写进契约卡是告知，不是征求）；
+         * 询问/计划档才仍走「点开始」那一次点头——那一档用户要管的正是"她能不能动"。
+         */
+        const selfGrant = this.permission === "auto" || this.permission === "full";
+        const permNote = readRoots?.length
+          ? selfGrant
+            ? `\n\n只读授权（风铃判断风险后授予，可在设置里撤销）：${readRoots.join("、")}`
+            : `\n\n只读授权申请（点「开始」即批准）：${readRoots.join("、")}`
+          : "";
         // 禁区 / 取舍 / 型态也上契约卡：用户点「开始」前就该看见这次的红线
         const methodNote =
           (forbiddenList.length ? `\n\n禁区（不许做）：${forbiddenList.join("；")}` : "") +
@@ -4852,6 +5081,11 @@ export class Kernel {
             const p = {
               ...this.tools.checkProgress(teamId, taskId),
               running: this.memberRuns.has(taskId),
+              // 阶段账（2026-11-15）：进度由系统算好给它，别让它自己数——它会数错，也会反复查
+              ...(this.stageSummaryOf(taskId) ? { stage: this.stageSummaryOf(taskId) } : {}),
+              ...(rec.reworkFocus?.items.length
+                ? { reworkFocus: `本轮只重做 ${rec.reworkFocus.items.length} 条未过项` }
+                : {}),
             };
             sig = JSON.stringify(p, null, 2);
           }
@@ -5032,6 +5266,8 @@ export class Kernel {
         return this.registerReport(teamId, taskId, member, text, (args.evidence as string[]) ?? []);
       }
       case "accept_or_reject": {
+        /** 阶段账的收尾提示（推进结果回给模型，让它知道还剩哪一段没走完） */
+        let stageTail = "";
         // 硬闸：有产物的单，验收前必须 read_artifact 看过正文。实机她只看
         // "文件存在 + 成员说结构齐全"就把四行标题的骨架稿验收通过了（2026-11-12）。
         if (args.verdict === "accept") {
@@ -5066,6 +5302,46 @@ export class Kernel {
           } catch {
             // 工单不在 in_review（例如旧记录）：只记派单卷宗
           }
+        }
+        /**
+         * 阶段账（2026-11-15）：
+         *  - 通过 → 独立验收段结束，全阶段齐了才生成最终验收表（收尾不再靠模型自觉）；
+         *  - 打回 → 只把「产出」这一段拉回执行中（下游自动退回 pending），
+         *    并把未过项记在单上，重派时只重做这几条——这才是"打回只重做未过项"。
+         */
+        const tidForStage = String(args.taskId);
+        if (args.verdict === "reject") {
+          try {
+            const cur = this.taskStore.get(tidForStage);
+            if (cur?.stagePlan) {
+              const redoId = cur.mode === "explore" ? "survey" : "produce";
+              this.taskStore.setStagePlan(
+                tidForStage,
+                reopenStage(cur.stagePlan, redoId, `打回：${String(args.what ?? "").slice(0, 120)}`),
+              );
+            }
+            const failed = (Array.isArray(args.failedChecks) ? args.failedChecks : []).map(String).filter(Boolean);
+            if (failed.length) {
+              this.taskStore.setReworkFocus(tidForStage, failed);
+              this.taskCase.append(tidForStage, {
+                kind: "note",
+                text: `本轮只重做未过项（${failed.length} 条）：${failed.join("；")}`,
+              });
+            }
+          } catch (err) {
+            this.log("stage_reopen_failed", {
+              taskId: tidForStage,
+              error: String(err instanceof Error ? err.message : err).slice(0, 200),
+            });
+          }
+        } else {
+          const stageRec = this.taskStore.get(tidForStage);
+          const verifyTail = this.advanceStage(tidForStage, "verify", [
+            `验收结论：${String(args.member ?? "")} · 判据 ${stageRec?.acceptance?.length ?? 0} 条`,
+            this.artifactsInspected.has(tidForStage) ? "已读产物正文" : "无产物需读正文",
+          ]);
+          const finalTail = this.finalizeStagesIfReady(tidForStage);
+          if (finalTail || verifyTail) stageTail = finalTail || verifyTail;
         }
         /**
          * 验收通过＝归档。成员交的活归风铃管，她点头就算结案，不再让用户逐单盖章；
@@ -5104,13 +5380,19 @@ export class Kernel {
           author: { kind: "lynn", name: "风铃" },
           mentions: atReview.mentions,
         });
-        return r.escalated
-          ? "打回轮数已达上限，已自动升级问用户，等待其决定。"
+        const reply = r.escalated
+          ? "打回已达上限：这张单停在「卡住」，停止循环打回，也不再问用户。" +
+            "下一步你自己定——换人重做 / 换一种做法 / 拆小 / 关单（stop_task dismiss=true），" +
+            "处置完在汇报里写清「没做成 + 卡在哪 + 建议怎么做」，不要把选择推回给用户。"
           : args.verdict === "accept"
             ? archived
               ? "已代验归档：这张单结案，不再占用用户。整件事做完后用 report_to_user 把最终结果汇报给她，她只对那一份拍板。"
               : `验收结论已记录，但没能归档（${whyNot}）。先补齐可说清的证据，或确认这张单确实在待验状态。`
-            : `已打回，并写清了改什么、期望什么、时限。让 ${args.taskId ?? "这张单"} 的原成员重做时，用 assign_task 带 reworkTaskId=${String(args.taskId ?? "")} 在同一张单上重派（状态与卷宗都留在这张单里），不要新开工单。`;
+            : `已打回，并写清了改什么、期望什么、时限。让 ${args.taskId ?? "这张单"} 的原成员重做时，用 assign_task 带 reworkTaskId=${String(args.taskId ?? "")} 在同一张单上重派（状态与卷宗都留在这张单里），不要新开工单。` +
+              ((Array.isArray(args.failedChecks) ? args.failedChecks : []).length
+                ? "已记下未过项：重派时成员只重做这几条，已通过的部分不推翻。"
+                : "没填 failedChecks：成员拿不到「只改哪几条」，会整段重做——下次填上。");
+        return stageTail ? `${reply}\n阶段：${stageTail}` : reply;
       }
       case "set_group_notice": {
         // 群公告（全局段）：只有风铃能写。落一张她的话的卡，让群里看得见是谁写的。
@@ -5156,6 +5438,10 @@ export class Kernel {
         } catch {
           // 没有权威工单（临时派活）：汇报照常呈上，不弹章
         }
+        // 阶段账：汇报是最后一段；全阶段齐了由代码收尾（不再靠模型自觉说"做完了"）
+        const reportTaskId = String(args.taskId);
+        this.advanceStage(reportTaskId, "report", [`汇报：${String(args.conclusion).slice(0, 60)}`]);
+        this.finalizeStagesIfReady(reportTaskId);
         // 产物做成可点的清单：报告里只给绝对路径字符串，用户还得自己去资源管理器里翻
         // （实机：汇报写完 "C:\Users\...\漏洞文档测试-续.docx"，用户只能自己去打开）
         const artifacts = (doneRec?.deliverables ?? []).map((d) => ({
@@ -5751,10 +6037,9 @@ export class Kernel {
   /** 落一轮助手回复（两条路径共用，顺序固定：history → 落盘 → 卡片收尾） */
   private settleAssistant(live: FeedCard, text: string): void {
     if (text.trim()) {
-      // 展示层去 AI 味（2026-11-15）：卡片上是过滤后的，history 与落盘仍是原文。
-      // 这一行和下一行是同一个约定的两半——把 humanizeDisplay 挪到 history 上，
-      // 上下文就会被改写、前缀缓存会随插件版本变化而失效。
-      live.text = humanizeDisplay(text);
+      // 写作规则（2026-11-15 重做）：卡片、history、落盘用同一份原文。
+      // 曾经的展示层过滤已删除——三处不一致会让「出问题能复核」这件事失效。
+      live.text = text;
       this.history.push({ role: "assistant", content: text });
       // 巡检轮的助手回复也不落时间线：它只服务这一轮，不进长期上下文
       if (this.ephemeralFrom < 0) this.persist("assistant", text);
@@ -5816,6 +6101,8 @@ export class Kernel {
       badge: "汇报",
       jobId: rec.id,
       title: `系统汇总 · ${rec.title.slice(0, 40)}`,
+      // 完成播报要说清"哪件事做完了"，不是「这张单已归档」这种过程话
+      speak: `「${rec.title.slice(0, 30)}」做完了，${pending.member}交的活我已经验收归档。`,
       body:
         `**结论**：${pending.member} 交付的这张单已验收归档。\n` +
         (files.length ? `**交付物**：${files.join("、")}\n` : "**交付物**：（这张单没有留交付物）\n") +
@@ -5977,7 +6264,7 @@ export class Kernel {
       if (streaming && now - this.lastDeltaEmit >= DELTA_FRAME_MS) {
         this.lastDeltaEmit = now;
         // cardId 必须带：渲染层只认带 cardId 的 delta，否则降级路径等于没有流式
-        this.notify({ type: "delta", text: humanizeDisplay(text), cardId: live.id });
+        this.notify({ type: "delta", text, cardId: live.id });
       }
       if (streaming) this.guardRepetition();
     };
@@ -6561,6 +6848,8 @@ export class Kernel {
             evidence: task.evidence.map((e) => ({ label: e.label, ref: e.ref ?? "", verified: e.verified, at: e.at })),
             deliverables: task.deliverables?.map((d) => ({ path: d.path, ref: d.ref, bytes: d.bytes, at: d.at })),
             rejectDraft,
+            // 阶段账（2026-11-15）：界面直接读，不靠模型描述进展
+            ...(task.stagePlan ? { stage: stageBrief(task.stagePlan) } : {}),
           });
           continue;
         }
@@ -6611,6 +6900,7 @@ export class Kernel {
         reviewer: task.reviewer ?? "user",
         evidence: task.evidence.map((e) => ({ label: e.label, ref: e.ref ?? "", verified: e.verified, at: e.at })),
         deliverables: task.deliverables?.map((d) => ({ path: d.path, ref: d.ref, bytes: d.bytes, at: d.at })),
+        ...(task.stagePlan ? { stage: stageBrief(task.stagePlan) } : {}),
       });
     }
     // 只读派生：轮次与状态时间线供详情区展示；不改变任何工单状态，也不写卷宗。
@@ -6655,6 +6945,156 @@ export class Kernel {
   noteKernelStart(): { safeMode: boolean; starts: number; fingerprint: string } {
     const r = this.pluginSet.noteStart();
     return { ...r, fingerprint: this.pluginSet.fingerprint().fingerprint };
+  }
+
+  /**
+   * 连接器配套提示词技能（2026-11-15）：连上就写进 ~/.lynn/skills，风铃建团队/派单时按需命中。
+   * 缺才写（用户改过不覆盖），写完重发现技能表。
+   */
+  private ensureConnectorSkill(id: string): void {
+    const spec = CONNECTOR_CATALOG.find((s) => s.id === id);
+    if (!spec) return;
+    const dir = path.join(this.dataRoot, "skills", spec.skill.name);
+    const file = path.join(dir, "SKILL.md");
+    if (!fs.existsSync(file)) {
+      try {
+        fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(file, buildSkillMd(spec.skill), "utf-8");
+        this.log("connector_skill_seeded", { id, skill: spec.skill.name });
+      } catch (err) {
+        this.log("connector_skill_failed", { id, error: err instanceof Error ? err.message : String(err) });
+      }
+    }
+    this.reloadSkills();
+  }
+
+  /** 外部应用真探测（异步；壳层单独 await）：发一次真实请求/连一次端口，结论写回磁盘 */
+  async connectorsTest(params: RpcContracts["connectors.test"]["params"]): Promise<RpcContracts["connectors.test"]["result"]> {
+    const id = String(params?.id ?? "");
+    const spec = CONNECTOR_CATALOG.find((s) => s.id === id);
+    if (!spec) return { ok: false, detail: `未知的外部应用：${id}` };
+    const it = this.connectorStore.get(id);
+    if (!it) return { ok: false, detail: `「${spec.name.zh}」还没配置过，先填凭据再测` };
+    const secrets = this.connectorStore.plainSecrets(id, (b) => this.decryptBlob(b));
+    const r = await probeConnectorLive(id, it.values ?? {}, secrets);
+    this.connectorStore.recordCheck(id, r.ok, r.detail);
+    this.log("connector_probe", { id, ok: r.ok, detail: r.detail.slice(0, 120) });
+    return r;
+  }
+
+  /**
+   * 外部应用请求（成员工具 app_api 的执行方，2026-11-15）。
+   * 硬约束都在这里，不靠提示词：
+   *  - 只认已启用且已配置的连接器；
+   *  - 主机钉死在该连接器自己的域（路径必须是相对路径，不能贴外部 URL）；
+   *  - 不允许 DELETE 一类破坏性方法；
+   *  - 响应截断 8K，令牌永不回显。
+   */
+  private async connectorRequest(input: { app: string; method: string; path: string; body?: string }): Promise<string> {
+    const spec = CONNECTOR_CATALOG.find((s) => s.id === input.app);
+    if (!spec) return `没有这个外部应用：${input.app}。可用的连接器见能力中心 → 外部应用。`;
+    const item = this.connectorStore.get(spec.id);
+    if (!item?.enabled) return `「${spec.name.zh}」还没启用：能力中心 → 外部应用里打开开关并填好凭据。`;
+    const method = String(input.method ?? "GET").toUpperCase();
+    if (!["GET", "POST", "PUT", "PATCH", "PROPFIND", "HEAD"].includes(method)) {
+      return `不允许的请求方法：${method}（外部应用只读为主；DELETE/OPTIONS 一律拒）。`;
+    }
+    const p = String(input.path ?? "").trim();
+    if (!p) return "路径不能为空（给相对路径，如 /repos/owner/repo）。";
+    if (/^https?:/i.test(p)) return "path 只接受相对路径（不带 http:// 或 https://）——主机由连接器决定，不能改。";
+
+    const secrets = this.connectorStore.plainSecrets(spec.id, (b) => this.decryptBlob(b));
+    const headers: Record<string, string> = { "user-agent": "lynn" };
+    let base = "";
+    if (spec.id === "github") {
+      base = "https://api.github.com";
+      headers.authorization = `Bearer ${secrets.token ?? ""}`;
+      headers.accept = "application/vnd.github+json";
+    } else if (spec.id === "gitee" || spec.id === "atomgit") {
+      base = spec.id === "gitee" ? "https://gitee.com/api/v5" : "https://api.atomgit.com/api/v5";
+      // Gitee 系用 access_token 查询参数（官方支持）；不加进 header 免得某些网关丢掉
+      const sep = p.includes("?") ? "&" : "?";
+      // 路径在下面统一拼，这里先记住要附加的凭据
+      headers["x-lynn-token-key"] = `access_token${sep}`;
+    } else if (spec.id === "webdav") {
+      base = String(item.values.url ?? "").replace(/\/+$/, "");
+      if (!base) return "WebDAV 地址还没填（能力中心 → 外部应用）。";
+      headers.authorization = `Basic ${Buffer.from(`${item.values.user ?? ""}:${secrets.password ?? ""}`).toString("base64")}`;
+    } else {
+      return `「${spec.name.zh}」不是 HTTP 服务：邮箱与 SSH 请用各自的工具（ssh_run / 命令行脚本）。`;
+    }
+
+    let url = `${base}${p.startsWith("/") ? "" : "/"}${p}`;
+    if (headers["x-lynn-token-key"]) {
+      const marker = headers["x-lynn-token-key"];
+      delete headers["x-lynn-token-key"];
+      url += `${marker}${encodeURIComponent(secrets.token ?? "")}`;
+    }
+    const body = input.body;
+    if (body !== undefined && method !== "GET" && method !== "HEAD") {
+      headers["content-type"] = /^\s*[[{]/.test(body) ? "application/json" : "text/plain; charset=utf-8";
+    }
+
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 30_000);
+    try {
+      const res = await fetch(url, {
+        method,
+        headers,
+        ...(body !== undefined && method !== "GET" && method !== "HEAD" ? { body } : {}),
+        signal: ctrl.signal,
+      });
+      const text = await res.text().catch(() => "");
+      const tail = text.length > 8_000 ? `${text.slice(0, 8_000)}\n…（响应超过 8K，已截断；需要更多就缩小查询范围）` : text;
+      this.log("connector_request", { app: spec.id, method, path: p.slice(0, 80), status: res.status });
+      return `[${spec.id}] ${method} ${p} → HTTP ${res.status}\n${tail || "（无响应正文）"}`;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return `请求失败：${/abort/i.test(msg) ? "30s 超时" : msg}`;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** 远程命令（成员工具 ssh_run 的执行方）：主机/端口/账号/私钥都在内核侧，成员只给命令 */
+  private async connectorSsh(input: { app: string; command: string }): Promise<string> {
+    if (input.app && input.app !== "ssh") return `只支持 ssh 连接器（当前给的是 ${input.app}）`;
+    const item = this.connectorStore.get("ssh");
+    if (!item?.enabled) return "SSH 连接还没启用：能力中心 → 外部应用 → SSH 服务器。";
+    const v = item.values ?? {};
+    const keyRaw = String(v.keyPath ?? "");
+    const key = keyRaw.replace(/^~(?=$|[\\/])/, os.homedir());
+    if (!key || !fs.existsSync(key)) return `私钥文件不在：${key || "（未填）"}——路径要在本机真实存在。`;
+    const host = String(v.host ?? "");
+    const user = String(v.user ?? "");
+    const port = String(v.port ?? "22");
+    if (!host || !user) return "SSH 连接缺主机或账号（能力中心 → 外部应用）。";
+    const cmd = String(input.command ?? "").trim();
+    if (!cmd) return "命令不能为空。";
+    // 只读纪律的第二道闸：提示词说了不许，代码也拦（远端破坏性动作一律拒）
+    const denied = /\b(rm|rmdir|mkfs|dd|shutdown|reboot|halt|kill|pkill|systemctl\s+(stop|restart|disable)|service\s+\S+\s+(stop|restart)|sudo|truncate|drop\s+table|delete\s+from)\b/i;
+    const hit = denied.exec(cmd);
+    if (hit) {
+      return `拒绝执行：远端命令含破坏性动作「${hit[1]}」。SSH 只用于只读排查（看日志/磁盘/进程）；要改配置或重启服务，请让用户自己动手。`;
+    }
+    const args = [
+      "-i", key,
+      "-p", port,
+      "-o", "BatchMode=yes",
+      "-o", "StrictHostKeyChecking=accept-new",
+      "-o", "ConnectTimeout=10",
+      `${user}@${host}`,
+      cmd,
+    ];
+    const out = await new Promise<{ code: number | null; text: string }>((resolve) => {
+      execFile("ssh", args, { timeout: 120_000, windowsHide: true, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
+        const code = err ? ((err as { code?: number | string }).code as number | undefined) ?? 1 : 0;
+        resolve({ code: typeof code === "number" ? code : 1, text: `${stdout ?? ""}${stderr ?? ""}`.trim() });
+      });
+    });
+    this.log("connector_ssh", { host, command: cmd.slice(0, 120), code: out.code });
+    const body = out.text.length > 8_000 ? `${out.text.slice(0, 8_000)}\n…（输出超过 8K，已截断）` : out.text;
+    return `[ssh ${user}@${host}] ${cmd}\nexit=${out.code}\n${body || "（无输出）"}`;
   }
 
   /** 本机免费/本地网关探测：只读 /models，不启动任何进程，不向公网发请求 */
@@ -6846,6 +7286,22 @@ export class Kernel {
         statusNote: rec.statusNote ?? "",
         ...(brief ? { brief, goal: brief.split("\n")[0]?.replace(/^【目标】/, "").trim() ?? "" } : {}),
         acceptance,
+        // 阶段账（2026-11-15）：详情区能看出走到哪一段、哪一段被打回、只重做哪几条
+        ...(rec.stagePlan
+          ? {
+              stages: rec.stagePlan.stages.map((s) => ({
+                id: s.id,
+                title: s.title,
+                status: s.status,
+                round: s.round,
+                evidence: s.evidence.slice(0, 3),
+                ...(s.note ? { note: s.note } : {}),
+              })),
+              stageLine: stageLine(rec.stagePlan),
+            }
+          : {}),
+        ...(rec.scale ? { scale: rec.scale } : {}),
+        ...(rec.reworkFocus?.items.length ? { reworkFocus: rec.reworkFocus.items } : {}),
         ...(rec.workspaceRoot ? { workspaceRoot: rec.workspaceRoot } : {}),
         ...(rec.projectName ? { projectName: rec.projectName } : {}),
         deliverables: (rec.deliverables ?? []).map((d) => ({ label: d.path, ref: d.ref, bytes: d.bytes })),
@@ -7270,6 +7726,128 @@ export class Kernel {
         return { ok: true, enabled: p.enabled } as RpcContracts[M]["result"];
       }
 
+      // ---------- 能力中心（2026-11-15）：插件 / MCP / 技能 / 自动化 / 外部应用 ----------
+      // 预置清单：读的是真实磁盘与配置（presetInstalled），不记内存标记——重启后状态照样对得上
+      case "cap.presets": {
+        const skillNames = new Set(this.skillEntries.map((s) => s.name));
+        return {
+          presets: allPresets().map((p) => ({
+            kind: p.kind,
+            id: p.id,
+            name: p.name,
+            summary: p.summary,
+            source: p.source,
+            license: p.license,
+            requires: p.requires,
+            icon: p.icon,
+            skill: p.skill?.name,
+            installed:
+              p.kind === "schedule"
+                ? this.scheduler.list().some((t) => t.name === p.schedule?.name)
+                : presetInstalled(this.dataRoot, p.kind, p.id),
+            skillReady: p.skill ? skillNames.has(p.skill.name) : undefined,
+          })),
+        } as RpcContracts[M]["result"];
+      }
+
+      // 一键预装（幂等）：文件类走 installPreset，自动化交给调度器；装完立刻让运行时接上
+      case "cap.install": {
+        const p = params as { kind: "mcp" | "plugin" | "skill" | "schedule"; id: string };
+        if (p.kind === "schedule") {
+          const preset = SCHEDULE_PRESETS.find((x) => x.id === p.id);
+          if (!preset?.schedule) {
+            return { ok: false, detail: `没有这个自动化预置：${p.id}`, id: p.id, created: false } as RpcContracts[M]["result"];
+          }
+          if (this.scheduler.list().some((t) => t.name === preset.schedule!.name)) {
+            return { ok: true, detail: `已经有一条同名定时任务「${preset.schedule.name}」，没动它`, id: p.id, created: false } as RpcContracts[M]["result"];
+          }
+          try {
+            const task = this.scheduler.add({
+              name: preset.schedule.name,
+              prompt: preset.schedule.prompt,
+              kind: preset.schedule.kind,
+              time: preset.schedule.time,
+              intervalMin: preset.schedule.intervalMin,
+            });
+            this.log("cap_schedule_installed", { id: p.id, taskId: task.id });
+            return {
+              ok: true,
+              detail: `已排期「${task.name}」，下次触发 ${task.nextRun ? new Date(task.nextRun).toLocaleString("zh-CN") : "待定"}`,
+              id: p.id,
+              created: true,
+            } as RpcContracts[M]["result"];
+          } catch (err) {
+            return { ok: false, detail: err instanceof Error ? err.message : String(err), id: p.id, created: false } as RpcContracts[M]["result"];
+          }
+        }
+        const out = installPreset(this.dataRoot, p.kind, p.id);
+        if (!out.ok) return out as RpcContracts[M]["result"];
+        if (p.kind === "mcp") {
+          // 新 server 要重新握手；不阻塞这一帧，完成后再落卡
+          this.scheduleMcpReload();
+        } else if (p.kind === "plugin") {
+          // 官方预置默认启用：立刻把它载进工具面（失败如实记日志，不假装成功）
+          void this.l1
+            .requestReload(p.id)
+            .then((msg) => this.emit({ type: "tool", badge: "工具", title: `插件 · ${p.id}`, body: msg }))
+            .catch((err) => this.log("cap_plugin_reload_failed", { id: p.id, error: err instanceof Error ? err.message : String(err) }));
+          void this.resetAgentHost();
+          this.reloadSkills();
+        } else if (p.kind === "skill") {
+          this.reloadSkills();
+        }
+        this.log("cap_installed", { kind: p.kind, id: p.id, created: out.created, skill: out.skill });
+        return out as RpcContracts[M]["result"];
+      }
+
+      // 外部应用连接：列表只回"有没有填"，明文凭据永不出内核
+      case "connectors.list": {
+        return {
+          items: this.connectorStore.list(CONNECTOR_CATALOG.map((s) => s.id)),
+          catalog: CONNECTOR_CATALOG.map((s) => ({
+            id: s.id,
+            name: s.name,
+            category: s.category,
+            icon: s.icon,
+            summary: s.summary,
+            detail: s.detail,
+            docUrl: s.docUrl,
+            authType: s.authType,
+            fields: s.fields,
+            skill: s.skill.name,
+          })),
+          canEncrypt: this.connectorCanEncrypt(),
+        } as RpcContracts[M]["result"];
+      }
+
+      case "connectors.save": {
+        const p = params as { id: string; values?: Record<string, string>; clear?: string[]; plaintextOk?: boolean; enable?: boolean };
+        const r = this.connectorStore.save(p);
+        if (r.ok) {
+          this.ensureConnectorSkill(p.id);
+          this.log("connector_saved", { id: p.id, enabled: r.enabled });
+        }
+        return { ...r } as RpcContracts[M]["result"];
+      }
+
+      case "connectors.toggle": {
+        const p = params as { id: string; enabled: boolean };
+        const r = this.connectorStore.toggle(p.id, p.enabled, (b) => this.decryptBlob(b));
+        if (r.ok) {
+          // 启用即补技能：连接类技能描述"能做什么、边界在哪"，风铃建团队时按需命中
+          if (p.enabled) this.ensureConnectorSkill(p.id);
+          this.log("connector_toggled", { id: p.id, enabled: p.enabled });
+        }
+        return { ...r } as RpcContracts[M]["result"];
+      }
+
+      case "connectors.forget": {
+        const { id } = params as { id: string };
+        const ok = this.connectorStore.forget(id);
+        if (ok) this.log("connector_forgotten", { id });
+        return { ok } as RpcContracts[M]["result"];
+      }
+
       case "providers.presets": {
         return { presets: PRESETS } as RpcContracts[M]["result"];
       }
@@ -7433,6 +8011,31 @@ export class Kernel {
           this.card({ kind: "system", text: `MCP 重连失败：${err instanceof Error ? err.message : String(err)}` }),
         );
         return { ok: true, ...this.mcpStatusPayload() } as RpcContracts[M]["result"];
+      }
+
+      // 单个 server 启停（能力中心的开关）：改全局 mcp.json 的 enabled，再重连。
+      // 项目级配置里同 id 的项不动——那是项目自己的声明，改它等于替用户改仓库文件。
+      case "mcp.toggle": {
+        const p = params as { id: string; enabled: boolean };
+        const file = path.join(this.dataRoot, "mcp.json");
+        if (!fs.existsSync(file)) {
+          return { ok: false, error: `还没有 mcp.json（${file}），先装一个预置或手写配置` } as RpcContracts[M]["result"];
+        }
+        try {
+          const raw = JSON.parse(fs.readFileSync(file, "utf-8")) as { servers?: { id?: string; enabled?: boolean }[] };
+          const list = Array.isArray(raw.servers) ? raw.servers : [];
+          const hit = list.find((s) => s?.id === p.id);
+          if (!hit) {
+            return { ok: false, error: `全局 mcp.json 里没有 ${p.id}（可能在项目级配置里，请改项目文件）` } as RpcContracts[M]["result"];
+          }
+          hit.enabled = p.enabled;
+          fs.writeFileSync(file, JSON.stringify({ ...raw, servers: list }, null, 2), { encoding: "utf-8", mode: 0o600 });
+          this.scheduleMcpReload();
+          this.log("mcp_toggled", { id: p.id, enabled: p.enabled });
+          return { ok: true } as RpcContracts[M]["result"];
+        } catch (err) {
+          return { ok: false, error: `mcp.json 读写失败：${err instanceof Error ? err.message : String(err)}` } as RpcContracts[M]["result"];
+        }
       }
 
       case "task.cancel":
@@ -8022,9 +8625,13 @@ export class Kernel {
 
       case "config.prefs": {
         const savedPrefs = this.settingsRpc.savePrefs(params as Partial<Prefs>);
-        // 去 AI 味开关热生效：插件加载与否是另一回事，没装时开关空转（界面会如实说明）
+        // 写作规则开关（2026-11-15）：开=下一轮起系统提示词里带上约束。
+        // 已经在跑的 Pi 会话要热同步一次，否则用户点了开关却要等重开会话才生效。
         const hz = (params as { humanizer?: boolean }).humanizer;
-        if (typeof hz === "boolean") setHumanizerEnabled(hz);
+        if (typeof hz === "boolean") {
+          setHumanizerEnabled(hz);
+          this.hotSyncSystemPrompt();
+        }
         return savedPrefs as RpcContracts[M]["result"];
       }
 

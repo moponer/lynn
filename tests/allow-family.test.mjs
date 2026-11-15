@@ -33,6 +33,8 @@ test("放行过的族不再弹卡；没放行的仍然挂审批", async () => {
   try {
     await kernel.init();
     kernel.handle("config.prefs", { autoStart: false });
+    // 「放行过的族不再弹卡」只在询问档有意义：自动/放手档本来就不弹（2026-11-15 口径）
+    kernel.handle("permission.set", { mode: "ask" });
 
     // 没放行：挂一张审批卡
     const waiting = kernel.awaitCommandApproval("林工", "t1", "del a.txt");

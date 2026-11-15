@@ -12,6 +12,7 @@ import { AMBIENT_MODE_LABEL, type AmbientMode } from "../../shared/ambient";
 import { AVATARS, avatarById, avatarFor } from "../../shared/avatars";
 import { MemberAvatar } from "../desk/MemberAvatar";
 import { askConfirm } from "./ConfirmCard";
+import { CapabilityCenter } from "./CapabilityCenter";
 import { useT } from "../i18n";
 import type { I18nKey } from "../../shared/i18n-strings";
 import { Icon, type IconName } from "./Icon";
@@ -34,7 +35,7 @@ const PRESETS = [
   { name: "MiniMax", baseUrl: "https://api.minimax.chat/v1", model: "MiniMax-M2" },
 ];
 
-type Tab = "overview" | "model" | "persona" | "memory" | "team" | "auto" | "skills" | "plugins" | "safety" | "look" | "data" | "about";
+type Tab = "overview" | "model" | "persona" | "memory" | "team" | "auto" | "plugins" | "safety" | "look" | "data" | "about";
 
 /** 定时任务（M2-02）：界面只回读调度器的真实状态 */
 type ScheduleRow = {
@@ -45,17 +46,6 @@ type ScheduleRow = {
   nextRun?: string;
   lastRun?: string;
   lastStatus?: string;
-};
-
-/** MCP 服务器实况（mcp.status） */
-type McpRow = {
-  id: string;
-  command: string;
-  enabled: boolean;
-  lazy: boolean;
-  connected: boolean;
-  tools: number;
-  error?: string;
 };
 
 /** 设置导航：三组（她本人 / 干活能力 / 权限与扩展），组帽让"哪页管什么"一眼可查 */
@@ -73,14 +63,13 @@ const NAV_GROUPS: { capKey: I18nKey; items: { k: Tab; labelKey: I18nKey; icon: I
     items: [
       { k: "model", labelKey: "nav.model", icon: "cpu" },
       { k: "team", labelKey: "nav.team", icon: "users" },
-      { k: "auto", labelKey: "nav.auto", icon: "clock" },
-      { k: "skills", labelKey: "nav.skills", icon: "pkg" },
+      // 插件 / MCP / 技能 / 自动化在 2026-11-15 收进「能力中心」一页（它们同属"她会什么"）
+      { k: "plugins", labelKey: "nav.capcenter", icon: "layers" },
     ],
   },
   {
     capKey: "nav.capSystem",
     items: [
-      { k: "plugins", labelKey: "nav.plugins", icon: "layers" },
       { k: "safety", labelKey: "nav.safety", icon: "shield" },
       { k: "look", labelKey: "nav.look", icon: "pen" },
       { k: "data", labelKey: "nav.data", icon: "folder" },
@@ -179,6 +168,10 @@ export function SettingsModal({
   initialTab?: Tab;
 }) {
   const [tab, setTab] = useState<Tab>(initialTab ?? "overview");
+  /** 能力中心分段（2026-11-15）：插件 / MCP / 技能 / 自动化 / 外部应用 */
+  const [capSection, setCapSection] = useState<"plugins" | "mcp" | "skills" | "auto" | "apps">(
+    initialTab === "auto" ? "auto" : "plugins",
+  );
   const [provider, setProvider] = useState(current.provider || "DeepSeek");
   const [baseUrl, setBaseUrl] = useState(current.baseUrl || "https://api.deepseek.com/v1");
   const [model, setModel] = useState(current.model || "deepseek-chat");
@@ -529,7 +522,6 @@ export function SettingsModal({
   useEffect(() => {
     if (tab === "persona" && personaText === null) void refreshPersona();
     if (tab === "memory" && memText === null) void refreshMemory(memKind);
-    if (tab === "skills") void refreshSkills();
     if (tab === "safety" && heartbeat === null) void refreshHeartbeat();
     if (tab === "safety" && agentRounds === null) setAgentRounds(24);
     if (tab === "look") void refreshVoices();
@@ -539,18 +531,15 @@ export function SettingsModal({
   const [plugins, setPlugins] = useState<
     { id: string; name: string; version: string; tier: string; enabled: boolean; loadable: boolean; description?: string; slots?: string[]; view?: string }[]
   >([]);
-  const [drafts, setDrafts] = useState<
-    { draftId: string; title: string; kind: string; createdAt: string; status: string }[]
-  >([]);
   /** 心跳巡检开关（M3-01）：null = 还没读到；开关走 config.prefs 即时生效 */
   const [heartbeat, setHeartbeat] = useState<boolean | null>(null);
   /** 顾问审阅开关（2026-11-14）：成员交回报后另一个模型独立审一遍 */
   const [advisor, setAdvisor] = useState<boolean | null>(null);
   /** 工具轮次上限（2026-11-15）：风铃单轮最多跑几个工具轮次 */
   const [agentRounds, setAgentRounds] = useState<number | null>(null);
-  /** 去 AI 味（2026-11-15）：开关在 prefs 里，加载状态在插件那边 */
+  /** 写作规则（2026-11-15）：开关在 prefs 里，加载状态与注入字数在插件那边 */
   const [humanizer, setHumanizer] = useState<boolean | null>(null);
-  const [hzStatus, setHzStatus] = useState<{ loaded: boolean; version: string | null; dir: string | null } | null>(null);
+  const [hzStatus, setHzStatus] = useState<{ loaded: boolean; version: string | null; dir: string | null; chars: number } | null>(null);
   const refreshHeartbeat = async () => {
     try {
       const r = await window.lynn.rpc("config.prefs", { autoStart });
@@ -592,20 +581,6 @@ export function SettingsModal({
       setHumanizer(r.humanizer ?? next);
       setResult({ ok: true, text: r.humanizer === false ? t("safety.humanizerOff") : t("safety.humanizerOn") });
     });
-  };
-  /** 技能管理（M2-10）：发现列表 + 启停（禁用落 prefs.disabledSkills） */
-  const [skillRows, setSkillRows] = useState<
-    { name: string; description: string; allowedTools: string[]; level: string; dir: string; disabled: boolean; warnings: string[] }[]
-  >([]);
-  const [skillErrors, setSkillErrors] = useState<string[]>([]);
-  const refreshSkills = async () => {
-    try {
-      const r = await window.lynn.rpc("skills.list");
-      setSkillRows(Array.isArray(r?.skills) ? r.skills : []);
-      setSkillErrors(Array.isArray(r?.errors) ? r.errors : []);
-    } catch {
-      /* 无内核时忽略 */
-    }
   };
   /** 会话记忆（M2-05）：两层（助理记忆可回滚 / 用户记忆永远保留），照 persona 页模式 */
   const [memKind, setMemKind] = useState<"memory" | "user">("memory");
@@ -664,12 +639,6 @@ export function SettingsModal({
         })),
       );
       setThemePlugins(list.filter((p) => p.theme).map((p) => ({ id: p.id, name: p.name, theme: p.theme, style: p.style })));
-    } catch {
-      /* 无内核时忽略 */
-    }
-    try {
-      const w = await window.lynn.rpc("workshop.list");
-      setDrafts(Array.isArray(w?.drafts) ? w.drafts : []);
     } catch {
       /* 无内核时忽略 */
     }
@@ -1084,34 +1053,6 @@ export function SettingsModal({
   const [autoTime, setAutoTime] = useState("09:00");
   const [autoEvery, setAutoEvery] = useState("60");
 
-  // MCP 实况：配置里写了什么 + 实际连上没连上（可手动重连，改配置也会自动重连）
-  const [mcp, setMcp] = useState<{ servers: McpRow[]; globalFile: string; projectFile: string; projectTrusted: boolean; errors?: string[] } | null>(null);
-  const [mcpBusy, setMcpBusy] = useState(false);
-
-  const applyMcpStatus = (r: { servers: McpRow[]; globalFile: string; projectFile: string; projectTrusted: boolean; errors?: string[] }) => {
-    setMcp({ servers: r.servers, globalFile: r.globalFile, projectFile: r.projectFile, projectTrusted: r.projectTrusted, errors: r.errors });
-  };
-
-  const reloadMcp = async () => {
-    setMcpBusy(true);
-    try {
-      // 重连要拉起子进程，是异步的：先拿回执，再轮询几次让面板跟上真实状态
-      const r = await window.lynn.rpc("mcp.reload");
-      applyMcpStatus(r);
-      for (let i = 0; i < 8; i += 1) {
-        await new Promise((res) => setTimeout(res, 700));
-        const s = await window.lynn.rpc("mcp.status");
-        applyMcpStatus(s);
-        const settled = s.servers.every((x) => !x.enabled || x.connected || x.lazy);
-        if (settled) break;
-      }
-    } catch (err) {
-      setResult({ ok: false, text: `重连失败：${err instanceof Error ? err.message : String(err)}` });
-    } finally {
-      setMcpBusy(false);
-    }
-  };
-
   const refreshSchedules = async () => {
     try {
       const r = await window.lynn.rpc("schedule.list");
@@ -1126,21 +1067,6 @@ export function SettingsModal({
     if (tab === "auto") void refreshSchedules();
   }, [tab]);
 
-  useEffect(() => {
-    if (tab !== "plugins") return;
-    let dead = false;
-    void window.lynn
-      .rpc("mcp.status")
-      .then((r) => {
-        if (!dead) setMcp(r);
-      })
-      .catch(() => {
-        /* 旧内核没有这个接口：不假装有 */
-      });
-    return () => {
-      dead = true;
-    };
-  }, [tab]);
 
   const addSchedule = async () => {
     if (!autoName.trim() || !autoPrompt.trim()) {
@@ -1209,6 +1135,19 @@ export function SettingsModal({
         <div className="sf-pane">
           <h3>{t("auto.title")}</h3>
           <p className="sf-lede">{t("auto.lede")}</p>
+          {/* 自动化已并入能力中心：这里是新建表单页，给一个回去的路（导航里不再单列这一页） */}
+          <div className="sf-actions">
+            <button
+              type="button"
+              className="sf-btn"
+              onClick={() => {
+                setCapSection("auto");
+                setTab("plugins");
+              }}
+            >
+              {t("nav.capcenter")}
+            </button>
+          </div>
           {autoMsg && <div className="sf-result ok">{autoMsg}</div>}
           {schedules === null && <p className="sf-empty">{t("auto.loading")}</p>}
           {schedules !== null && rows.length === 0 && <p className="sf-empty">{t("auto.empty")}</p>}
@@ -1943,335 +1882,18 @@ export function SettingsModal({
       );
     }
 
-    if (tab === "skills") {
-      return (
-        <div className="sf-pane">
-          <h3>{t("skills.title")}</h3>
-          <p className="sf-lede">{t("skills.lede")}</p>
-          <div className="sf-group">
-            <div className="sf-group-head">
-              <b>{t("skills.listTitle")}</b>
-              <small>{t("skills.listHint")}</small>
-            </div>
-            {skillRows.length === 0 ? (
-              <p className="sf-empty">{t("skills.empty")}</p>
-            ) : (
-              <div className="sf-list">
-                {skillRows.map((s) => (
-                  <div className="sf-row" key={`${s.level}:${s.name}`}>
-                    <div className="sf-row-main">
-                      <b>
-                        {s.name}
-                        {s.disabled && <span className="sf-badge warn">{t("skills.off")}</span>}
-                      </b>
-                      <small title={s.dir}>{s.description || t("skills.noDesc")}</small>
-                      <small className="mono">
-                        {s.allowedTools.length ? s.allowedTools.join("、") : t("skills.noTools")}
-                      </small>
-                    </div>
-                    <button
-                      type="button"
-                      className={`sf-btn${s.disabled ? "" : " primary"}`}
-                      title={s.disabled ? t("skills.onHint") : t("skills.offHint")}
-                      onClick={() =>
-                        void window.lynn.rpc("skills.toggle", { name: s.name, enabled: s.disabled }).then(() => refreshSkills())
-                      }
-                    >
-                      {s.disabled ? t("common.enable") : t("plugins.disable")}
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-            {skillErrors.length > 0 && <div className="sf-result bad">{skillErrors.join("；")}</div>}
-          </div>
-          {result && <div className={`sf-result ${result.ok ? "ok" : "bad"}`}>{result.text}</div>}
-        </div>
-      );
-    }
-
     if (tab === "plugins") {
-      // 徽章用人能读的词：贡献了什么就是什么（主题/界面/工具/外接命令），tier 原码进悬停提示
-      const kindOf = (p: { theme?: unknown; style?: string; slots?: string[]; view?: string; tier: string }): { label: string; title: string } => {
-        if (p.theme || p.style) return { label: t("plugins.kindTheme"), title: `L0 · ${p.tier}` };
-        if ((p.slots?.length ?? 0) > 0 || p.view) return { label: t("plugins.kindView"), title: `L0 · ${p.tier}` };
-        if (p.tier === "L1") return { label: t("plugins.kindTool"), title: "L1" };
-        if (p.tier === "L2") return { label: t("plugins.kindCmd"), title: "L2" };
-        return { label: t("plugins.kindDeclarative"), title: p.tier };
-      };
-      // 界面卡槽区去重：已在「已安装」列表里的不再重复出现（此前同一插件以同一名字出现三处）
-      const slotOnly = uiPlugins.filter((u) => !plugins.some((p) => p.id === u.id));
+      // 能力中心（2026-11-15）：插件 / MCP / 技能 / 自动化 / 外部应用收成一处入口
       return (
-        <div className="sf-pane">
-          <h3>{t("plugins.title")}</h3>
-          <p className="sf-lede">{t("plugins.lede")}</p>
-          <div className="sf-group">
-            <div className="sf-group-head">
-              <b>{t("plugins.installedTitle")}</b>
-              <small>
-                {t("plugins.marketHint")}
-                {" · "}
-                {t("plugins.fingerprint")} <span className="mono">{setStatus?.fingerprint.slice(0, 12) ?? "—"}</span> ·{" "}
-                {t("plugins.count", { n: setStatus?.count ?? 0 })}
-                {setStatus?.safeMode ? ` · ${t("plugins.safeMode", { reason: setStatus.safeModeReason ?? "…" })}` : ""}
-              </small>
-            </div>
-            {setStatus?.safeMode && (
-              <div className="sf-actions" style={{ padding: "0 0 8px" }}>
-                <button
-                  type="button"
-                  className="sf-btn"
-                  title={t("plugins.exitSafeMode")}
-                  onClick={() =>
-                    void window.lynn
-                      .rpc("plugins.safeMode", { on: false })
-                      .then(() => refreshPlugins())
-                      .then(() => setResult({ ok: true, text: t("plugins.exitSafeModeOk") }))
-                  }
-                >
-                  {t("plugins.exitSafeMode")}
-                </button>
-              </div>
-            )}
-            <div className="sf-group-body">
-              {/* 类型徽章：把 L0/L1/L2 翻译成人能读的词（主题/界面/工具/外接命令），tier 原码进悬停 */}
-          {plugins.length === 0 ? (
-            <p className="sf-empty">{t("plugins.empty")}</p>
-          ) : (
-            <div className="sf-market">
-              {plugins.map((p) => {
-                const kind = kindOf(p);
-                return (
-                <div className="sf-market-card" key={p.id}>
-                  <div className="sf-market-head">
-                    <b title={p.id}>{p.name}</b>
-                    <span className="sf-badge" title={kind.title}>{kind.label}</span>
-                  </div>
-                  <small title={p.description || p.id}>{p.description || p.id}</small>
-                  <small className="mono">
-                    {p.id} · v{p.version}
-                    {p.slots?.includes("stage.console") ? ` · ${t("plugins.slotConsole")}` : ""}
-                  </small>
-                  <div className="sf-market-actions">
-                    <button
-                      type="button"
-                      className={`sf-btn${p.enabled ? " primary" : ""}`}
-                      onClick={() =>
-                        void window.lynn
-                          .rpc("plugins.toggle", { id: p.id, enabled: !p.enabled })
-                          .then(() => {
-                            refreshPlugins();
-                            // 卡槽（含 stage.console）跟着启停变化走同一条广播
-                            window.dispatchEvent(new Event("lynn:ui-plugins"));
-                          })
-                      }
-                    >
-                      {p.enabled ? t("plugins.disable") : t("common.enable")}
-                    </button>
-                    <button
-                      type="button"
-                      className="sf-btn"
-                      onClick={() =>
-                        void window.lynn.rpc("plugins.probe", { id: p.id }).then((r) =>
-                          setResult({ ok: r.ok, text: t("plugins.probeResult", { id: p.id, detail: r.detail }) }),
-                        )
-                      }
-                    >
-                      {t("plugins.probe")}
-                    </button>
-                  </div>
-                </div>
-                );
-              })}
-            </div>
-          )}
-          <div className="sf-actions">
-            <button
-              type="button"
-              className="sf-btn"
-              onClick={() =>
-                void window.lynn.rpc("plugins.rollback", {}).then((r) => {
-                  setResult({ ok: r.ok, text: r.ok ? t("plugins.rollbackOk") : r.detail });
-                  if (r.ok) void refreshPlugins();
-                })
-              }
-            >
-              {t("plugins.rollback")}
-            </button>
-          </div>
-            </div>
-          </div>
-          {/* 插件工坊：风铃/用户开的草稿在这里过审入库；L1/L2 必须由用户点启用 */}
-          <div className="sf-group">
-            <div className="sf-group-head">
-              <b>{t("workshop.title")}</b>
-              <small>{t("workshop.hint")}</small>
-            </div>
-            {drafts.length === 0 ? (
-              <p className="sf-empty">{t("workshop.empty")}</p>
-            ) : (
-              <div className="sf-list">
-                {drafts.map((d) => (
-                  <div className="sf-row" key={d.draftId}>
-                    <div className="sf-row-main">
-                      <b>
-                        {d.title}
-                        <span className={`sf-badge ${d.status === "reviewed" || d.status === "enabled" ? "ok" : ""}`}>
-                          {d.status === "draft" ? t("workshop.statusDraft") : d.status === "reviewed" ? t("workshop.statusReviewed") : t("workshop.statusEnabled")}
-                        </span>
-                      </b>
-                      <small className="mono">
-                        {d.draftId} · {d.kind} · {fmtTime(d.createdAt)}
-                      </small>
-                    </div>
-                    <button
-                      type="button"
-                      className="sf-btn"
-                      onClick={() =>
-                        void window.lynn.rpc("workshop.promote", { draftId: d.draftId, byUser: true }).then((r) => {
-                          if (r.ok) {
-                            setResult({ ok: true, text: t("workshop.promoteOk", { id: r.id }) });
-                            void refreshPlugins();
-                          } else {
-                            setResult({ ok: false, text: (r as { error?: string }).error ?? t("workshop.promoteFail") });
-                          }
-                        })
-                      }
-                    >
-                      {t("workshop.promote")}
-                    </button>
-                    <button
-                      type="button"
-                      className="sf-btn"
-                      onClick={() =>
-                        void window.lynn.rpc("workshop.discard", { draftId: d.draftId }).then(() => {
-                          setResult({ ok: true, text: t("workshop.discardOk") });
-                          void refreshPlugins();
-                        })
-                      }
-                    >
-                      {t("workshop.discard")}
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-          {/* MCP：配置文件里写了几台、实际连上几台，都在这里看；改完保存即重连 */}
-          <div className="sf-group">
-            <div className="sf-group-head">
-              <b>{t("mcp.title")}</b>
-              <small>
-                {t("mcp.hint")} <span className="mono">{mcp?.globalFile ?? "~/.lynn/mcp.json"}</span>
-                {" · "}
-                {t("mcp.liveHint")}
-              </small>
-            </div>
-            <div className="sf-actions">
-              <button type="button" className="sf-btn" disabled={mcpBusy} onClick={() => void reloadMcp()}>
-                {mcpBusy ? t("mcp.reloading") : t("mcp.reload")}
-              </button>
-            </div>
-            {!mcp && <p className="sf-empty">{t("mcp.loading")}</p>}
-            {mcp && mcp.servers.length === 0 && <p className="sf-empty">{t("mcp.empty")}</p>}
-            {mcp && mcp.servers.length > 0 && (
-              <div className="sf-list">
-                {mcp.servers.map((s) => (
-                  <div className="sf-row" key={s.id}>
-                    <div className="sf-row-main">
-                      <b>
-                        {s.id}
-                        <span className={`sf-badge ${s.connected ? "ok" : s.enabled ? "warn" : ""}`}>
-                          {s.connected
-                            ? t("mcp.connected")
-                            : s.lazy
-                              ? t("mcp.lazy")
-                              : s.enabled
-                                ? t("mcp.offline")
-                                : t("mcp.disabled")}
-                        </span>
-                      </b>
-                      <small className="mono">{s.command}</small>
-                      <small>
-                        {t("mcp.toolCount", { n: s.tools })}
-                        {s.error ? ` · ${s.error}` : ""}
-                      </small>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-            {mcp && (
-              <small className="sf-hint">
-                {t("mcp.projectFile")} <span className="mono">{mcp.projectFile}</span>
-                {mcp.projectTrusted ? t("mcp.trusted") : t("mcp.untrusted")}
-              </small>
-            )}
-            {mcp?.errors?.length ? <div className="sf-result bad">{mcp.errors.join("；")}</div> : null}
-          </div>
-
-          {/* 界面扩展：主题插件一键应用 + U 档卡槽（第三方 iframe 沙箱） */}
-          <div className="sf-group">
-            <div className="sf-group-head">
-              <b>{t("plugins.uiExtTitle")}</b>
-              <small>{t("plugins.uiExtHint")}</small>
-            </div>
-            {themePlugins.length > 0 && (
-              <div className="sf-sub" style={{ padding: "6px 0" }}>
-                <span className="sf-label">{t("plugins.themePlugins")}</span>
-                <div className="sf-inline">
-                  {themePlugins.map((p) => (
-                    <button
-                      type="button"
-                      key={p.id}
-                      className="sf-btn"
-                      onClick={() => {
-                        onApplyThemeTokens(p.theme?.[mode] ?? p.theme?.dark ?? p.theme?.light);
-                        onApplyPluginStyle?.(p.id, p.style);
-                      }}
-                    >
-                      {p.name}
-                    </button>
-                  ))}
-                  <button
-                    type="button"
-                    className="sf-btn"
-                    onClick={() => {
-                      onApplyThemeTokens(undefined);
-                      onApplyPluginStyle?.(null);
-                    }}
-                  >
-                    {t("plugins.restoreTheme")}
-                  </button>
-                </div>
-              </div>
-            )}
-            <div className="sf-sub" style={{ padding: "6px 0" }}>
-              <span className="sf-label">{t("plugins.uiSlots", { n: slotOnly.length })}</span>
-              {slotOnly.length === 0 ? (
-              <p className="sf-empty">{t("plugins.uiEmpty")}</p>
-            ) : (
-              <div className="sf-list">
-                {slotOnly.map((p) => (
-                  <div className="sf-row" key={p.id}>
-                    <div className="sf-row-main">
-                      <b>{p.name}</b>
-                      <small className="mono">
-                        {p.id} · {p.slots.join(" / ")}
-                      </small>
-                    </div>
-                    <button type="button" className={`sf-btn${uiDisabled.includes(p.id) ? "" : " primary"}`} onClick={() => toggleUi(p.id)}>
-                      {uiDisabled.includes(p.id) ? t("common.enable") : t("plugins.disable")}
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-            {uiErrors.length > 0 && <div className="sf-result bad">{uiErrors.join("；")}</div>}
-            </div>
-          </div>
-          {result && <div className={`sf-result ${result.ok ? "ok" : "bad"}`}>{result.text}</div>}
-        </div>
+        <CapabilityCenter
+          section={capSection}
+          onSection={setCapSection}
+          mode={mode}
+          lang={lang}
+          onApplyThemeTokens={onApplyThemeTokens}
+          onApplyPluginStyle={onApplyPluginStyle}
+          onOpenAuto={() => setTab("auto")}
+        />
       );
     }
 
@@ -2323,7 +1945,8 @@ export function SettingsModal({
                 <small>
                   {t("safety.humanizerHint")}
                   {hzStatus?.loaded
-                    ? ` · ${t("safety.humanizerLoaded")}${hzStatus.version ? ` ${hzStatus.version}` : ""}`
+                    ? ` · ${t("safety.humanizerLoaded")}${hzStatus.version ? ` ${hzStatus.version}` : ""}` +
+                      (hzStatus.chars > 0 ? ` · ${t("safety.humanizerChars", { n: hzStatus.chars })}` : "")
                     : hzStatus
                       ? ` · ${t("safety.humanizerMissing")}`
                       : ""}
@@ -3167,8 +2790,6 @@ export function SettingsModal({
     autoAt,
     autoTime,
     autoEvery,
-    mcp,
-    mcpBusy,
     provider,
     baseUrl,
     model,

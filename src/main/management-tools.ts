@@ -295,7 +295,14 @@ export class ManagementTools {
     return { verdict: "logged" };
   }
 
-  /** 5. accept_or_reject —— 打回/验收；第 4 次打回必须升级问你（§4.10.5） */
+  /**
+   * 5. accept_or_reject —— 打回/验收。
+   *
+   * 打回上限（§4.10.5 的防死循环闸）**不再问用户**（2026-11-15）：
+   * 用户只出需求，不该在"继续打回还是换策略"这种执行层选择上被打断。
+   * 到上限就把单停在 blocked，由风铃自己定下一步（换人 / 换法 / 拆小 / 关单并如实汇报），
+   * 用户只在最终汇报里看到"没做成 + 卡在哪 + 建议"。
+   */
   acceptOrReject(
     teamId: string,
     taskId: string,
@@ -309,17 +316,13 @@ export class ManagementTools {
       }
       const rejects = this.store.rejectCount(teamId, taskId);
       if (rejects >= REJECT_LIMIT) {
-        // 不再循环：升级问你（§4.10.5 防死循环最后一道闸）
-        const q = this.askUser(
-          `任务 ${taskId} 对 ${opts.member} 连续 ${REJECT_LIMIT} 轮打回未通过，继续打回还是换策略？`,
-          `最近一次不合格：${r.what}`,
-        );
+        // 不再循环，也不再问用户：单停在 blocked，交给风铃换法（这一层是她的活）
         this.store.appendAssignment(teamId, {
           taskId,
           at: new Date().toISOString(),
           kind: "escalate",
           member: opts.member,
-          text: `打回上限 ${REJECT_LIMIT} 轮已到，升级问你（问题 id: ${q.id}）`,
+          text: `打回上限 ${REJECT_LIMIT} 轮已到（最近一次：${r.what}）：停止打回，改由风铃换人/换法/关单`,
         });
         this.audit("accept_or_reject", { teamId, taskId, escalated: true });
         return { escalated: true };

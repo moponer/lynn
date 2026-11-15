@@ -1,55 +1,48 @@
 /**
- * 去 AI 味（humanizer-stream）宿主桥 —— 一个**可选的外部插件**，不内置规则。
+ * 写作规则插件（humanizer-stream v0.2）宿主桥 —— 一个**可选的外部插件**，规则不内置在本仓。
  *
- * 为什么放在这里而不是内联进 kernel：
- *  规则会长、会改、会有人想单独发一个包。内核只该知道「有个文本过滤器」，
- *  不该知道「首先/其次要删掉」。所以这里只做三件事：找到插件、加载它、调它。
+ * 这一版改为「约束生成」而不是「改写产出」（2026-11-15 用户裁定 0.1 效果不佳）：
+ *  插件提供一段写作约束，我们把它拼进**系统提示词**；
+ *  模型按它写，输出的每个字都是模型自己的，落盘与上下文完全一致。
  *
- * 关键约束（决定了它为什么不影响 token / 缓存）：
- *  1. 只在**展示边界**调用。写进 history 与落盘的永远是模型原文。
- *  2. 不发起任何模型请求，也不碰请求体（提示词一个字不改）。
- *  3. 插件缺失 / 版本不匹配 / 抛错 → 一律透传原文，绝不让用户看不到模型的话。
+ * 三条纪律，决定了它为什么安全：
+ *  1. 只在 system prompt 里出现，且每会话只拼一次（规则文本随插件版本固定，
+ *     不会因为某轮内容变化而抖动——前缀缓存不受影响）。
+ *  2. 不碰模型的任何输出：历史上 0.1 在展示层改写，导致「看到的是 A、落盘的是 B」。
+ *  3. 插件缺失 / 版本不匹配 / 抛错 → 注入空串，绝不影响对话。
  *
  * 插件来源（按顺序探测，命中即用）：
  *  - 环境变量 LYNN_HUMANIZER_DIR
- *  - ~/.lynn/plugins/humanizer-stream      （`deslop install-lynn` 装到这里）
+ *  - <数据根>/plugins/humanizer-stream   （`deslop install-lynn` 装到这里）
  *  - 与 lynn 仓库并排的 humanizer-stream 检出（开发期）
  */
 
 import fs from "node:fs";
 import path from "node:path";
 
-export interface HumanizerProfile {
-  profile?: "prose" | "chat" | "mild" | "code" | "all";
-  mode?: "text" | "code";
-  lang?: "zh" | "en" | "auto";
-  emoji?: "strip" | "keep";
-}
-
-interface Filter {
-  text(input: string, extra?: HumanizerProfile): string;
-}
+export type WritingProfile = "chat" | "prose" | "code" | "ui";
 
 interface PluginModule {
   api?: number;
-  profileForFile?: (file: string) => { profile: string; mode: string };
-  createFilter?: (opts?: HumanizerProfile) => Filter;
-  createTextFilter?: (opts?: HumanizerProfile) => Filter;
-  default?: { createFilter?: (opts?: HumanizerProfile) => Filter };
+  writingRules?: (opts?: { profile?: WritingProfile; locale?: string; maxChars?: number }) => string;
+  default?: { writingRules?: PluginModule["writingRules"] };
 }
 
 export interface HumanizerHandle {
   dir: string;
   version: string;
   module: PluginModule;
-  filter: (opts?: HumanizerProfile) => Filter | null;
+  /** 规则文本（按 profile 缓存；同参同输出，插件自身保证确定性） */
+  rules: (profile: WritingProfile, maxChars?: number) => string;
 }
 
 let handle: HumanizerHandle | null = null;
 let loading: Promise<HumanizerHandle | null> | null = null;
 let enabled = true;
-/** 每次调用都新建 filter 太碎，按 profile 缓存一个 */
-const filterCache = new Map<string, Filter>();
+const rulesCache = new Map<string, string>();
+
+/** 契约版本：0.2 起是 2（writingRules）。api 1 的旧输出过滤器一律不认。 */
+const API_WRITING_RULES = 2;
 
 function probe(): string[] {
   const out: string[] = [];
@@ -58,7 +51,7 @@ function probe(): string[] {
   if (process.env.LYNN_DATA_ROOT) out.push(path.join(process.env.LYNN_DATA_ROOT, "plugins", "humanizer-stream"));
   /**
    * 测试环境**不**探测兄弟目录：否则「这台机器上恰好 clone 了一个插件」
-   * 会让 lynn 的整套测试输出被改写，测出来的东西和发布版不是一回事。
+   * 会让 lynn 的整套测试行为依赖本机环境。
    */
   if (process.env.NODE_TEST_CONTEXT) return out;
   // __dirname = <repo>/dist/main 或 <app>/dist/main
@@ -92,29 +85,30 @@ export function loadHumanizer(dataRoot?: string): Promise<HumanizerHandle | null
         } catch {
           mod = (await import(entry)) as PluginModule;
         }
-        const make = mod.createFilter ?? mod.createTextFilter ?? mod.default?.createFilter;
-        if (typeof make !== "function") continue;
-        // 契约版本必须对得上：宁可不加载，也不猜着跑
-        if (typeof mod.api === "number" && mod.api !== 1) continue;
-        const version = readVersion(dir);
+        const make = mod.writingRules ?? mod.default?.writingRules;
+        if (typeof make !== "function") {
+          // 旧版（api 1 输出过滤器）留在插件目录里：跳过，别让它遮蔽新版本
+          if (mod.api === 1) console.warn(`[humanizer] 跳过旧版插件（api 1 输出过滤器）：${dir}`);
+          continue;
+        }
+        if (typeof mod.api === "number" && mod.api !== API_WRITING_RULES) continue;
         handle = {
           dir,
-          version,
+          version: readVersion(dir),
           module: mod,
-          filter: (opts) => {
-            const key = JSON.stringify(opts ?? {});
-            const hit = filterCache.get(key);
-            if (hit) return hit;
+          rules: (profile, maxChars) => {
+            const key = `${profile}::${maxChars ?? ""}`;
+            const hit = rulesCache.get(key);
+            if (hit !== undefined) return hit;
             try {
-              const f = make(opts);
-              if (f && typeof f.text === "function") {
-                filterCache.set(key, f);
-                return f;
-              }
-            } catch {
-              // 插件内部炸了：当作没有
+              const text = String(make({ profile, locale: "zh", ...(maxChars ? { maxChars } : {}) }) ?? "");
+              rulesCache.set(key, text);
+              return text;
+            } catch (err) {
+              console.warn(`[humanizer] 生成规则失败（${profile}）：${(err as Error)?.message ?? err}`);
+              rulesCache.set(key, "");
+              return "";
             }
-            return null;
           },
         };
         return handle;
@@ -150,53 +144,24 @@ export function humanizerStatus(): {
   loaded: boolean;
   dir: string | null;
   version: string | null;
+  chars: number;
 } {
-  return { enabled, loaded: Boolean(handle), dir: handle?.dir ?? null, version: handle?.version ?? null };
+  return {
+    enabled,
+    loaded: Boolean(handle),
+    dir: handle?.dir ?? null,
+    version: handle?.version ?? null,
+    chars: enabled && handle ? handle.rules("chat").length : 0,
+  };
 }
 
 /**
- * 展示层过滤。任何异常都返回原文——这条路径在用户等回复的关键路径上，
- * 宁可留着 AI 味，也不能让回复消失。
+ * 注入系统提示词的写作规则段。空串表示「没装 / 关了 / 插件出错」——
+ * 调用方直接拼上去就行，空串是恒等变换。
  */
-export function humanizeDisplay(text: string, profile: HumanizerProfile["profile"] = "chat"): string {
-  if (!enabled || !handle || !text || !text.trim()) return text;
-  const f = handle.filter({ profile });
-  if (!f) return text;
-  try {
-    const out = f.text(text);
-    return out && out.trim() ? out : text;
-  } catch {
-    return text;
-  }
-}
-
-/**
- * 写盘前过滤（成员产出的文档/文案/代码注释）。
- * 源码走 code 档：只碰注释；其它文本走 prose。认不出类型就原样返回。
- */
-export function humanizeFileText(file: string, text: string): string {
-  if (!enabled || !handle || !text || !text.trim()) return text;
-  let profile: HumanizerProfile["profile"] = "prose";
-  let mode: HumanizerProfile["mode"] = "text";
-  try {
-    const guess = handle.module.profileForFile?.(file);
-    if (guess?.profile) {
-      profile = guess.profile as HumanizerProfile["profile"];
-      mode = (guess.mode as HumanizerProfile["mode"]) ?? "text";
-    } else if (/\.(js|mjs|cjs|ts|tsx|jsx|rs|go|java|kt|py|rb|php|c|h|cpp|cs|swift|sh|ps1|sql|css|scss|vue|svelte|lua)$/i.test(file)) {
-      profile = "code";
-      mode = "code";
-    }
-  } catch {
-    profile = "prose";
-    mode = "text";
-  }
-  const f = handle.filter({ profile, mode });
-  if (!f) return text;
-  try {
-    const out = f.text(text);
-    return out && out.trim() ? out : text;
-  } catch {
-    return text;
-  }
+export function writingRulesSection(profile: WritingProfile = "chat", maxChars?: number): string {
+  if (!enabled || !handle) return "";
+  const text = handle.rules(profile, maxChars).trim();
+  if (!text) return "";
+  return `\n\n【写作规则（约束你自己的措辞：不是给你的角色设定，是硬约束）】\n${text}`;
 }

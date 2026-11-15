@@ -2,7 +2,8 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { TaskStatus } from "../shared/contract";
 import type { Root } from "./roots";
-import type { EvidencePolicy } from "./task-scale";
+import type { EvidencePolicy, TaskScale } from "./task-scale";
+import type { StagePlan } from "./stage-plan";
 
 /**
  * 工单实体（计划书 §4.8 / §4.10.4 / §4.10.5）。
@@ -147,6 +148,22 @@ export interface TaskRecord {
   priority?: string;
   /** 任务型态：execute=要有产物；explore=要结论与依据（调研/选型） */
   mode?: "execute" | "explore";
+  /**
+   * 任务规模（派单时按简报与判据数判定，2026-11-15 落盘）。
+   * 用途：小任务的验收不再另起验收员（不值一次完整执行），由风铃看核对清单拍板。
+   * 存单上是因为"规模"是判卷时的事实，不能等验收时再按当前上下文重算。
+   */
+  scale?: TaskScale;
+  /**
+   * 阶段账（2026-11-15 接入内核）：阶段进度由代码持有，不放在模型上下文里。
+   * 上下文压缩、换会话、重开单都抹不掉它——这正是「顺序混乱 / 反复重派」的根治点。
+   */
+  stagePlan?: StagePlan;
+  /**
+   * 本轮只重做这些未过判据（打回时写入，重派时带进成员简报）。
+   * 没有它，打回就变成"再改改"——成员不知道改哪、把已过的部分推翻重做。
+   */
+  reworkFocus?: { round: number; items: string[]; at: string };
 }
 
 export class TaskConflictError extends Error {
@@ -317,6 +334,8 @@ export class TaskStore {
     priority?: string;
     /** 任务型态 */
     mode?: "execute" | "explore";
+    /** 任务规模（小任务不另起验收员） */
+    scale?: TaskScale;
     /** 派单时所在的项目名（冻结快照，2026-11-12） */
     projectName?: string;
   }): TaskRecord {
@@ -351,6 +370,7 @@ export class TaskStore {
       ...(input.forbidden?.length ? { forbidden: input.forbidden } : {}),
       ...(input.priority ? { priority: input.priority } : {}),
       ...(input.mode ? { mode: input.mode } : {}),
+      ...(input.scale ? { scale: input.scale } : {}),
       ...(input.projectName ? { projectName: input.projectName } : {}),
     };
     this.write(rec);
@@ -544,6 +564,28 @@ export class TaskStore {
     const rec = this.mustGet(id);
     if (rec.reviewer === reviewer) return rec;
     rec.reviewer = reviewer;
+    return this.commit(rec);
+  }
+
+  /**
+   * 写回阶段账（2026-11-15）。阶段推进只走这一个入口，
+   * 于是"谁在什么阶段、下一段是什么"永远只有一个答案。
+   */
+  setStagePlan(id: string, plan: StagePlan): TaskRecord {
+    const rec = this.mustGet(id);
+    rec.stagePlan = plan;
+    return this.commit(rec);
+  }
+
+  /** 记下本轮打回只重做哪几条判据（重派时带进简报，别让成员把已过的部分推翻重做） */
+  setReworkFocus(id: string, items: string[], round?: number): TaskRecord {
+    const rec = this.mustGet(id);
+    const list = items.map((x) => String(x ?? "").trim()).filter(Boolean).slice(0, 12);
+    if (!list.length) {
+      delete rec.reworkFocus;
+      return this.commit(rec);
+    }
+    rec.reworkFocus = { round: round ?? rec.rejectRounds, items: list, at: new Date().toISOString() };
     return this.commit(rec);
   }
 

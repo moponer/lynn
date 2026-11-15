@@ -159,10 +159,16 @@ export function cleanSpeechText(raw: string, maxChars = 120): string {
   s = s.replace(/^\s*(?:结论|证据|未完成|待你拍板|等你拍板|产物|交付物|材料|简报)[：:]\s*/gm, "");
   s = s.replace(/[A-Za-z]:[\\/][^\s，。；、）)]+/g, " ");
   s = s.replace(/\b[\w./\\-]+\.(?:md|json|csv|tsx?|jsx?|mjs|cjs|docx|xlsx|pptx|pdf|png|jpe?g|log)\b/gi, " ");
-  // 工单/任务内部编号（task-20261115-a1b2c3）：念出来是噪音，用户不记这些
+  // 工单/任务内部编号：真实格式是 task-<base36 时间戳>-<序号>（字母数字混合，
+  // 例如 task-mf3k9x2a-1）。旧正则只认「-」后面 6 位以上**纯数字**，
+  // 于是真单号一个都没匹配上，被原样念成「阿计 回报 · task-mf3k9x2a-1」（实机投诉）。
+  s = s.replace(/\btask-[a-z0-9]+(?:-[a-z0-9]+)*/gi, " ");
   s = s.replace(/\b[\w]*-\d{6,}[\w-]*/g, " ");
   s = s.replace(/\b(?:[0-9a-f]{8,}|[0-9a-f-]{16,})\b/gi, " ");
   s = s.replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, " ");
+  // 抹掉编号后常留下「阿计 第 3 步 · 」这种尾巴：分隔符单独留着会被念成顿挫噪音
+  s = s.replace(/\s*[·|]\s*(?=([，。；、！？]|$))/g, "");
+  s = s.replace(/\s*[·|]\s*/g, "，");
   s = s.replace(/[ \t]+/g, " ");
   s = s.replace(/\n{2,}/g, "。");
   s = s.replace(/\n/g, "，");
@@ -195,9 +201,43 @@ function labeledLines(body: string, labels: string[]): string {
   return picked.join("。");
 }
 
+/** 标题里这些词是动作或状态，不是人名（`交付待补充 · 阿计 · task-…` 的头部就不是名字） */
+const NOT_A_NAME = /^(?:交付待补充|验收通过|打回|不合格|验收|回报|开工|已停止|没交出回报|执行崩溃|顾问意见|已解散|保留编制|进度|审查|汇报)$/;
+
+/**
+ * 这张卡的主体是谁（成员名）。标题的形态很杂：
+ * `阿明 开工 · WO-2418` / `交付待补充 · 阿计 · task-…` / `验收通过 · 阿计`。
+ * 逐段看，跳过动作词与内部编号，取第一个像人名的段落。
+ */
 function memberOf(title: string | undefined): string {
-  const head = String(title ?? "").split(/[·|]/)[0].trim().replace(/(?:回报|已停止|开工|没交出回报|执行崩溃)$/, "").trim();
-  return head.length > 0 && head.length <= 12 && !/^[A-Za-z0-9-]{8,}$/.test(head) ? head : "";
+  for (const raw of String(title ?? "").split(/[·|]/)) {
+    const head = raw
+      .trim()
+      .replace(/(?:回报|已停止|开工|没交出回报|执行崩溃)$/, "")
+      .replace(/\s*第\s*\d+\s*步$/, "")
+      .trim();
+    if (!head) continue;
+    if (NOT_A_NAME.test(head)) continue;
+    if (head.length > 12) break;
+    if (/^[A-Za-z0-9-]{8,}$/.test(head)) continue;
+    return head;
+  }
+  return "";
+}
+
+/** 只念得出「名字 + 标点」的句子不算信息（「阿计。」不是播报） */
+function hasSubstance(text: string): boolean {
+  return (String(text ?? "").match(/[\u4e00-\u9fff]/g) ?? []).length >= 4;
+}
+
+/** 成员回报的四种收尾口径：成员档案里要求回报首行写明，这里据此决定怎么说 */
+function reportTone(body: string | undefined): "done" | "reserved" | "blocked" | "missing" | "plain" {
+  const head = String(body ?? "").slice(0, 240);
+  if (/完成有保留|有保留/.test(head)) return "reserved";
+  if (/受阻|卡住做不下去|无法完成|做不了/.test(head)) return "blocked";
+  if (/缺上下文|材料不够|没拿到材料/.test(head)) return "missing";
+  if (/完成|做完了|已交付|已核完/.test(head)) return "done";
+  return "plain";
 }
 
 function candidate(text: string, priority: SpeechCandidate["priority"], reason: SpeechCandidate["reason"]): SpeechCandidate | null {
@@ -249,14 +289,31 @@ function detailSpeech(card: SpeechCard, badge: string): SpeechCandidate | null {
   }
 }
 
+/** 这几类打断当前播报也要说：用户正等着这个结论 */
+const HIGH_BADGES = new Set(["汇报", "需要你拍板", "未完成", "崩溃"]);
+const SPEAK_REASON: Record<string, SpeechCandidate["reason"]> = {
+  汇报: "report",
+  需要你拍板: "decision",
+  提醒: "reminder",
+  回报: "delivery",
+  派单: "dispatch",
+  进度: "progress",
+  审查: "review",
+  未完成: "problem",
+  崩溃: "problem",
+};
+
 /**
  * 卡片 → 播报候选。返回 null 表示「只在界面上留下文字，不播」。
  *
- * 两档都播：汇报（只结论+待拍板）、需要你拍板、提醒、成员回报、进度里程碑、
- *           审查结论、未完成 / 崩溃。
+ * 判定标准只有一条（2026-11-15 用户投诉"频繁念某成员+task-xxxx"后收紧）：
+ * **这句话里有没有用户不知道的信息**。有就播，只剩人名/工单号/动作标签的一律不播。
+ *
+ * 播：开工做什么、谁推进到第几步、谁交回了什么结果、被打回的原因、等你拍板的事、
+ *     任务完成的汇总、异常与提醒。
  * 仅详细档播：过程卡短句（见 detailSpeech）。
- * 永不播：user 卡、流式 lynn 卡、thinking、系统内务（压缩/额度/重建/随附/
- *         历史回放）、命令、路径、工单 ID、Markdown 证据清单。
+ * 永不播：user 卡、流式 lynn 卡、thinking、系统内务（压缩/额度/重建/随附/历史回放）、
+ *         命令、路径、工单号、只剩名字的进度。
  */
 export function pickCardSpeech(card: SpeechCard, prefs: VoicePrefs): SpeechCandidate | null {
   if (!prefs.voiceEnabled) return null;
@@ -279,6 +336,19 @@ export function pickCardSpeech(card: SpeechCard, prefs: VoicePrefs): SpeechCandi
   if (prefs.voiceScope === "detail") systemAllowed.push("心跳");
   if (card.kind === "system" && !systemAllowed.includes(badge)) return null;
 
+  /**
+   * 落卡时写好的那句人话优先（`speak`）。
+   * 界面上这张卡是给眼睛看的：标题可能要放工单号，正文是工作区与工具清单，
+   * 按字段推导只能得到「阿计 回报 · task-mf3k9x2a-1」——念了等于没念。
+   */
+  const hint = String(card.speak ?? "").trim();
+  if (hint) {
+    const s = cleanSpeechText(hint, limit);
+    if (isMeaningfulSpeech(s) && hasSubstance(s)) {
+      return { text: s, priority: HIGH_BADGES.has(badge) ? "high" : "normal", reason: SPEAK_REASON[badge] ?? "progress" };
+    }
+  }
+
   switch (badge) {
     case "汇报": {
       const r = card.report;
@@ -298,11 +368,26 @@ export function pickCardSpeech(card: SpeechCard, prefs: VoicePrefs): SpeechCandi
       return candidate(text, "high", "decision");
     }
     case "回报": {
-      const member = memberOf(card.title);
-      return candidate(member ? `${member}交回了结果，等${SELF}验收。` : `成员交回了结果，等${SELF}验收。`, "normal", "delivery");
+      const member = who || "成员";
+      // 「交付待补充 · 阿计 · task-…」不是一次正常回报，说的是缺什么
+      if (/交付待补充/.test(String(card.title ?? ""))) {
+        return candidate(`${member}交的东西还差核验记录，${SELF}让他补上。`, "normal", "delivery");
+      }
+      switch (reportTone(card.body)) {
+        case "reserved":
+          return candidate(`${member}交回了结果，说有几处没做到，等${SELF}验收。`, "normal", "delivery");
+        case "blocked":
+          return candidate(`${member}做不下去，报了受阻，${SELF}去看卡在哪。`, "normal", "problem");
+        case "missing":
+          return candidate(`${member}说材料不够，没往下做，${SELF}去补齐。`, "normal", "problem");
+        case "done":
+          return candidate(`${member}交回了结果，说已经做完，等${SELF}验收。`, "normal", "delivery");
+        default:
+          return candidate(`${member}交回了结果，等${SELF}验收。`, "normal", "delivery");
+      }
     }
     case "派单":
-      // 开工本身就是第一个进度节点：默认档就要听见"派给谁了"，
+      // 开工本身就是第一个进度节点：默认档就要听见"派给谁、做什么"，
       // 否则耳朵里的第一条进度永远是"交回了结果"，中间发生了什么一无所知。
       return candidate(who ? `${SELF}已把任务派给${who}，开始处理。` : `${SELF}已派单，开始处理。`, "normal", "dispatch");
     case "进度": {
@@ -316,11 +401,21 @@ export function pickCardSpeech(card: SpeechCard, prefs: VoicePrefs): SpeechCandi
       if (/没有任何交付物|未完成|已关单/.test(note)) {
         return candidate("有一张单没交出交付物，我先收尾了。", "normal", "progress");
       }
-      return candidate(raw, "normal", "progress");
+      // 只剩名字（单号已被清洗掉）的进度卡不是信息：界面上留痕就够了
+      return hasSubstance(raw) ? candidate(raw, "normal", "progress") : null;
     }
     case "审查": {
-      const raw = cleanSpeechText([card.title, firstSentence(card.body ?? "")].filter(Boolean).join("，"), Math.min(limit, 60));
-      return candidate(raw, "normal", "review");
+      const member = who || "成员";
+      if (!/打回|不合格/.test(String(card.title ?? ""))) {
+        // 验收通过 = 归档：紧跟着那张汇报卡会把结论说一遍，这里再念就是同一件事说两次
+        return null;
+      }
+      const reason = String(card.body ?? "").match(/不合格[：:]\s*([^\n]{1,40})/)?.[1] ?? "";
+      const why = cleanSpeechText(reason, 40);
+      return candidate(
+        hasSubstance(why) ? `${member}这单被打回了：${why}。` : `${member}这单被打回了，${SELF}让他按意见重做。`,
+        "normal", "review",
+      );
     }
     case "未完成":
     case "崩溃": {

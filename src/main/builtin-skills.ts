@@ -7,7 +7,7 @@
 export const BUILTIN_SKILLS: Record<string, string> = {
   "plugin-dev/SKILL.md": `---
 name: plugin-dev
-description: 插件开发与验收：当用户需要新能力、某类任务重复出现值得沉淀成插件、或要改进现有插件时使用。涵盖档位选型（L0/L1/L2）、工坊流程（开草稿→派插件工程师→验收→启用）、manifest 规范与验证测试标准。
+description: 插件开发与验收：当用户需要新能力、某类任务反复出现值得做成插件、或要改进现有插件时使用。涵盖档位选型（L0/L1/L2）、工坊流程（开草稿→派插件工程师→验收→启用）、manifest 规范与验证测试标准。
 allowed-tools: [create_plugin_draft, assign_task, create_member, check_progress, nudge_member, stop_task, ship_plugin, save_memory, review_result, report_to_user, ask_user]
 ---
 
@@ -16,7 +16,7 @@ allowed-tools: [create_plugin_draft, assign_task, create_member, check_progress,
 ## 1. 先决策，再动手：要不要做成插件？
 
 - 这个能力**只做一次** → 不做插件，正常派单完成即可。
-- 会**重复出现**（每周报表、固定格式转换、固定网页操作）→ 值得沉淀成插件。
+- 会**重复出现**（每周报表、固定格式转换、固定网页操作）→ 值得做成插件。
 - 先用 save_memory 记下「这类任务重复出现 + 用户原话」，再走工坊流程。
 
 ## 2. 档位选型（能用低档不用高档）
@@ -61,7 +61,7 @@ allowed-tools: [create_plugin_draft, assign_task, create_member, check_progress,
 - [ ] spec 里的每条验收用例都能对着产物走一遍并给出结论
 - [ ] 插件加载失败时的表现（不拖垮主程序）
 
-## 5. 沉淀闭环
+## 5. 收尾与复用
 
 - 上线后用 save_memory 记：插件 id、解决什么问题、验收时的坑。
 - 用户反馈插件有问题 → 先查工坊草稿与审计记录，必要时开新草稿改进（旧 id 冲突会被准入拦下，改进走新版本）。

@@ -148,7 +148,7 @@ export function createSettingsRpc(deps: SettingsRpcDeps): SettingsRpc {
           ok: false,
           error:
             risk === "local"
-              ? "这是本机/局域网网关：可能复用第三方免费额度，prompt 可能被上游记录，且随时可能限流或下线。请勾选风险确认后再保存。"
+              ? "这是本机/局域网网关：额度、日志与可用性都由上游决定（可能走第三方免费额度，prompt 会经过它，随时可能限流或下线）。确认风险后再保存。"
               : "这个端点不是 HTTPS：API Key 与内容会明文传输。请勾选风险确认后再保存。",
         };
       }

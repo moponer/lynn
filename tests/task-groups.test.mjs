@@ -23,8 +23,26 @@ test("只有 in_review 可以验收；卡住只给解卡，不给签字", () => 
   }
 });
 
-test("台账渲染顺序固定：等你 → 卡住 → 进行中 → 未开工", () => {
-  assert.deepEqual(GROUP_ORDER, ["waiting", "stuck", "running", "queued"]);
+test("台账渲染顺序固定：等你 → 卡住 → 进行中 → 未开工 → 已终止", () => {
+  assert.deepEqual(GROUP_ORDER, ["waiting", "stuck", "running", "queued", "halted"]);
+});
+
+/*
+ * 群被「终止任务」之后（2026-11-15 实机）：本来"等你拍板"的验收印章还赖在右栏不走。
+ * 终止是停住不是销毁——这些单不再催任何决定，归「已终止」组，恢复后自己回到原来的组。
+ */
+test("已终止的群：等你的单不再催、也不给任何动作（印章整块消失）", () => {
+  assert.equal(groupOf("in_review", "user", true), "halted");
+  assert.equal(actionOf("in_review", "user", true), "none");
+  assert.equal(groupOf("blocked", undefined, true), "halted");
+  assert.equal(actionOf("blocked", undefined, true), "none");
+  assert.equal(groupOf("in_progress", undefined, true), "halted", "在跑的单也归已终止（成员已被停）");
+  // 已经结案的不该被终止状态翻出来：历史照旧进归档带
+  assert.equal(groupOf("done", undefined, true), "archived");
+  assert.equal(groupOf("canceled", undefined, true), "archived");
+  // 未终止时行为完全不变
+  assert.equal(groupOf("in_review", "user", false), "waiting");
+  assert.equal(actionOf("in_review", "user", false), "accept");
 });
 
 /*

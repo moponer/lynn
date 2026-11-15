@@ -418,7 +418,7 @@ rpc("app.openData", (params, ctx) => {
 
 // ---------- 内核异步面（handle 是同步路由，这几个要真发 HTTP，单独 await） ----------
 
-export const KERNEL_ASYNC_METHODS = ["model.discover", "model.health", "gateway.list"] as const;
+export const KERNEL_ASYNC_METHODS = ["model.discover", "model.health", "gateway.list", "connectors.test"] as const;
 
 export function isKernelAsyncMethod(method: string): boolean {
   return (KERNEL_ASYNC_METHODS as readonly string[]).includes(method);
@@ -428,5 +428,7 @@ export function handleKernelAsync(method: string, params: unknown, ctx: ShellRpc
   if (method === "model.discover") return ctx.kernel.modelDiscover(params as never);
   if (method === "model.health") return ctx.kernel.modelHealth(params as never);
   if (method === "gateway.list") return ctx.kernel.listGateways();
+  // 外部应用探测要真发请求/连端口（8s 超时），走异步面而不是同步 switch
+  if (method === "connectors.test") return ctx.kernel.connectorsTest(params as never);
   return undefined;
 }

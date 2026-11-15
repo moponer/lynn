@@ -87,6 +87,10 @@ function setup(withAcceptor) {
   return { root, kernel, teams: new TeamStore(root), tasks: new TaskStore(root) };
 }
 
+/**
+ * 判据给 3 条 = 中任务（2026-11-15 起小任务不另起验收员，验收下沉只对中/大任务生效）。
+ * 这里测的是「验收下沉的路由」，不是规模判定，所以用中任务。
+ */
 const assign = (kernel, taskId) =>
   kernel.runTool("assign_task", {
     teamId: "t1",
@@ -94,6 +98,7 @@ const assign = (kernel, taskId) =>
     member: "执行员",
     brief: "【目标】写一份报告\n【完成标准】输出 report.md 且结论清楚\n【材料与位置】工作区\n【限制】只读不改源",
     deadline: "30 分钟",
+    acceptance: ["report.md 存在", "结论清楚", "无占位符"],
   });
 
 const start = (kernel, taskId) => {

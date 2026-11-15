@@ -278,6 +278,66 @@ test("播报是她本人在说话：模板一律第一人称，不出现「她 /
   assert.ok(pickCardSpeech({ kind: "tool", badge: "回报", title: "阿明 回报 · WO-2418" }, prefs()).text.includes("我"));
 });
 
+test("播报不念工单号：真单号是 base36（task-mf3k9x2a-1），剥完只剩人名就不播（2026-11-15 实机投诉）", () => {
+  const brief = prefs();
+  // 里程碑仍要播，但一个字符的工单号都不许进耳朵
+  const step = pickCardSpeech({ kind: "tool", badge: "进度", title: "阿计 第 3 步 · task-mf3k9x2a-1" }, brief);
+  assert.equal(step.text, "阿计已推进到第 3 步。");
+  assert.ok(!/task-/.test(step.text));
+
+  // 旧版把「阿计 · task-…」念成一声「阿计」——那不是进度，是噪音
+  assert.equal(
+    pickCardSpeech({ kind: "tool", badge: "进度", title: "阿计 · task-mf3k9x2a-1", text: "阿计 · task-mf3k9x2a-1" }, brief),
+    null,
+  );
+
+  // 审查卡旧版会把标题+正文首句整段念出来（"验收通过 · 阿计，阿计 回报 · task-… 交付了 report."）
+  assert.equal(pickCardSpeech({ kind: "tool", badge: "审查", title: "验收通过 · 阿计", body: "@阿计" }, brief), null);
+  const rejected = pickCardSpeech(
+    { kind: "tool", badge: "审查", title: "打回 · 阿计", body: "@阿计\n不合格：金额单位没统一\n期望：统一成万元" },
+    brief,
+  );
+  assert.equal(rejected.text, "阿计这单被打回了：金额单位没统一。");
+});
+
+test("回报要说得清结果如何：完成 / 有保留 / 受阻 / 缺材料（四种收尾口径）", () => {
+  const brief = prefs();
+  const cases = [
+    ["【完成】三张订单核对完了。", "阿计交回了结果，说已经做完，等我验收。"],
+    ["【完成有保留】汇总表还没导出。", "阿计交回了结果，说有几处没做到，等我验收。"],
+    ["【受阻】orders.csv 读不出来。", "阿计做不下去，报了受阻，我去看卡在哪。"],
+    ["【缺上下文】没拿到口径文档。", "阿计说材料不够，没往下做，我去补齐。"],
+  ];
+  for (const [body, expected] of cases) {
+    const got = pickCardSpeech({ kind: "tool", badge: "回报", title: "阿计 · task-mf3k9x2a-1", body }, brief);
+    assert.equal(got.text, expected);
+  }
+  // 交付待补充不是一次正常回报：说的是缺什么，不能念成"交付待补充交回了结果"
+  const pending = pickCardSpeech({ kind: "tool", badge: "回报", title: "交付待补充 · 阿计 · task-mf3k9x2a-1" }, brief);
+  assert.equal(pending.text, "阿计交的东西还差核验记录，我让他补上。");
+});
+
+test("落卡时写的 speak 优先：开工说清做什么，完成说清哪件事完了；写坏了就回落", () => {
+  const brief = prefs();
+  const dispatch = pickCardSpeech(
+    { kind: "tool", badge: "派单", title: "阿计 开工 · task-mf3k9x2a-1", speak: "我把「Q3 订单核对」交给阿计了，他开始做。" },
+    brief,
+  );
+  assert.equal(dispatch.text, "我把「Q3 订单核对」交给阿计了，他开始做。");
+  // speak 只有人名（等于没说）→ 不采信，回落到按字段推导的句子
+  const bad = pickCardSpeech(
+    { kind: "tool", badge: "派单", title: "阿计 开工 · task-mf3k9x2a-1", speak: "阿计。" },
+    brief,
+  );
+  assert.equal(bad.text, "我已把任务派给阿计，开始处理。");
+  const done = pickCardSpeech(
+    { kind: "tool", badge: "汇报", title: "系统汇总 · Q3 订单核对", speak: "「Q3 订单核对」做完了，阿计交的活我已经验收归档。" },
+    brief,
+  );
+  assert.equal(done.reason, "report");
+  assert.ok(done.text.includes("Q3 订单核对"));
+});
+
 test("闸口：重复不播、密集不补播、高优先级可打断、同轮汇报后不再念收尾白话", () => {
   const c = { text: "三张订单核对完成。", priority: "normal", reason: "delivery" };
   const now = 1_000_000;
@@ -303,6 +363,29 @@ test("闸口：重复不播、密集不补播、高优先级可打断、同轮�
   assert.equal(gateSpeech(low, lowFirst.next, now + 9000, 0).ok, false, "同类 25 秒内只播一条");
   assert.equal(gateSpeech({ ...low, reason: "tool", text: "技能激活，订单核对。" }, lowFirst.next, now + 9000, 1).ok, false, "有队列就不补播过程短句");
   assert.equal(gateSpeech({ ...low, reason: "team", text: "已组建执行小组。" }, lowFirst.next, now + 1000, 0).ok, false, "8 秒内不叠加");
+});
+
+test("内核落卡带上 speak：语音念的是人话，不是「成员 + 工单号」", async () => {
+  const kernel = new Kernel(tmp());
+  const said = [];
+  kernel.setVoice({
+    sayCard: (card) => said.push(pickCardSpeech(card, prefs())?.text ?? null),
+    sayReply: () => {},
+    stop: () => {},
+  });
+  try {
+    await kernel.init();
+    kernel.emit({
+      type: "tool",
+      badge: "派单",
+      title: "阿计 开工 · task-mf3k9x2a-1",
+      speak: "我把「Q3 订单核对」交给阿计了，他开始做。",
+    });
+    assert.equal(said.at(-1), "我把「Q3 订单核对」交给阿计了，他开始做。");
+    assert.ok(!/task-/.test(said.at(-1)), "单号不能进耳朵");
+  } finally {
+    await kernel.dispose();
+  }
 });
 
 test("内核接线：落卡过语音端口、配置真落盘、关开关立刻静音", async () => {

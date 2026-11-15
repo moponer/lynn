@@ -164,6 +164,8 @@ test("模拟任务全链路：派单 → 骨架稿被拒 → checks 回报 → �
     assert.match(kernel.systemPrompt(), /本项目月报口径/);
 
     // 7) 删除审批：第一次弹卡，点「这类以后都允许」后同族不再打扰
+    //    （自动档不弹卡是 2026-11-15 的口径；这一段要走"询问档"才测得到族放行）
+    kernel.handle("permission.set", { mode: "ask" });
     const before = kernel.handle("session.snapshot").board.decisions.length;
     const waiting = kernel.awaitCommandApproval("林工", "WO-SIM", "del data.csv.bak");
     await until(

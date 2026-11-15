@@ -105,8 +105,10 @@ test("workspace 有效目录：工单钉住它，契约卡明示（用户点开�
   assert.match(plan.detail, new RegExp(ws.replace(/\\/g, "\\\\")), "契约卡上要写清成员在哪个目录干活");
 });
 
-test("readRoots：不存在的目录拒绝；有效目录只登记，用户点「开始」才落权", () => {
+test("readRoots：不存在的目录拒绝；有效目录开工才落权（自动档由风铃授予）", () => {
   const { root, kernel, tasks } = setup();
+  // 2026-11-15 口径：授权归风铃，用户只管她的档位——自动/放手档她授予即生效，不再标成"申请"。
+  kernel.handle("permission.set", { mode: "auto" });
   const bad = kernel.runTool("assign_task", {
     teamId: "t1", taskId: "task-1", member: "林工", brief: GOOD, deadline: "周五",
     readRoots: [path.join(os.tmpdir(), "lynn-not-exist-abc")],
@@ -115,13 +117,13 @@ test("readRoots：不存在的目录拒绝；有效目录只登记，用户点�
 
   const grant = fs.mkdtempSync(path.join(os.tmpdir(), "lynn-grant-"));
   kernel.runTool("assign_task", { teamId: "t1", taskId: "task-2", member: "林工", brief: GOOD, deadline: "周五", readRoots: [grant] });
-  assert.equal(tasks.get("task-2").readRoots, undefined, "未批准前不落权");
+  assert.equal(tasks.get("task-2").readRoots, undefined, "开工前不落权（成员不能自己扩权）");
   const plan = kernel.handle("session.snapshot").board.decisions.find((d) => d.kind === "plan" && d.jobId === "task-2");
-  assert.match(plan.detail, /只读授权申请/, "契约卡上要明示授权申请");
+  assert.match(plan.detail, /只读授权（风铃判断风险后授予/, "自动档：卡上是告知她给了什么，不是征求");
 
   const r = kernel.handle("decision.resolve", { id: plan.id, action: "start" });
   assert.equal(r.ok, true);
-  assert.deepEqual(tasks.get("task-2").readRoots, [path.resolve(grant)], "用户批准后落权");
+  assert.deepEqual(tasks.get("task-2").readRoots, [path.resolve(grant)], "开工即落权");
 });
 
 test("maxTurns：非法值拒绝；合法值进派单上下文并钳到 40", () => {

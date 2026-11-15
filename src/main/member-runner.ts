@@ -32,6 +32,9 @@ export const MEMBER_EXEC_TOOLS = [
   "browser_extract",
   "browser_close",
   "kb_add",
+  // 外部应用（能力中心 · 连接器）：凭据在核心里，成员只给 app id + 路径/命令
+  "app_api",
+  "ssh_run",
 ] as const;
 
 export type MemberChatFn = typeof streamChat;
@@ -92,6 +95,11 @@ export interface MemberRunInput {
   priority?: string;
   /** 任务型态：execute = 要产物；explore = 要结论与依据（调研/选型，别硬凑产物） */
   mode?: "execute" | "explore";
+  /**
+   * 本轮只重做这些未过判据（打回后重派时给，2026-11-15）。
+   * 没有它，成员会把已通过的部分推翻重做——既费轮次，也让"改了什么"无法核对。
+   */
+  focus?: string[];
   /** 轮次上限覆盖（派单时指定）；缺省用岗位档案 limits.maxTurns */
   maxTurns?: number;
   /** 任务工作区：成员一切文件活动的边界（绝对路径） */
@@ -134,14 +142,24 @@ export interface MemberRunInput {
   onToolCall?: (ev: { name: string; args: string; outcome: string; ok: boolean; ms: number }) => void;
   /** 写前通知（M1-12 检查点） */
   onBeforeWrite?: (rel: string, full: string, existed: boolean) => void;
-  /** 写盘前的文本改写（2026-11-15 去 AI 味插件）：只作用于 write_file 的产出 */
+  /**
+   * 写盘前的文本改写（2026-11-15 旧「去 AI 味」插件遗留，现已无人注入）。
+   * 改写产出会让「交付物 ≠ 通过校验的文本」，保留字段只为兼容旧调用方。
+   */
   onWriteContent?: (rel: string, content: string) => string;
+  /**
+   * 写作规则（2026-11-15 重做）：约束生成的那段文本，拼进成员系统提示词。
+   * 空 = 插件没装，成员按原样写。
+   */
+  writingRules?: string;
   /** office 能力桥接（M2-06）：壳按引擎健康注入；不注入时成员调 office 工具会得到如实提示 */
   office?: ToolkitOptions["office"];
   /** browser 能力桥接（M2-07）：单例控制器；不注入时成员调 browser 工具会得到如实提示 */
   browser?: ToolkitOptions["browser"];
   /** 知识库写入桥接（M2-08） */
   kb?: ToolkitOptions["kb"];
+  /** 外部应用桥接（能力中心 · 连接器）：app_api / ssh_run 的实际执行方，未配置时工具如实拒绝 */
+  apps?: ToolkitOptions["apps"];
   /** 中止信号（用户点「停」/解散队伍）：模型流与工具轮都尽快收尾 */
   signal?: AbortSignal;
   /**
@@ -251,6 +269,8 @@ export function memberSystemPrompt(input: MemberRunInput): string {
     "- 找东西先看路径：简报给了目录就直接 list_dir 那个目录（必要时逐层往下）；要按模式找文件用 glob（如 `src/**/*.tsx`）。**不要用 Get-ChildItem -Recurse / dir /s 扫整个仓库**——node_modules、target 动辄几万文件，一条命令能跑一两分钟，白烧轮次和预算。",
     "- 命令行工具要窄：限定目录、只读、一次说清目的；单条命令超过 60s 还没输出就会被当「可能卡住」，超过 120s 直接超时终止——超时的命令不算证据。",
     "- 你没有 ask_user，不能问用户；口径拿不准就选一种并写明理由。需要升级时在回报正文里标 ESCALATE: 并说明。",
+    // 外部应用（2026-11-15）：凭据在核心里，成员只给 app id + 路径/命令
+    "- 外部应用：`app_api` 调用户已连接的 GitHub / Gitee / AtomGit / 网盘（只给 app id 与路径，令牌由内核带上，你拿不到也不需要）；`ssh_run` 在已连接的服务器上跑只读排查命令。两者都是只读为主，写操作前先说清对象与影响。",
     // 实机事故：用户要 Word，主代理说「没装 python-docx 就做不了」并反问路径。
     // 文档产出是成员能干的活：写脚本 + 跑命令，零依赖也能生成最小 docx。
     "- 文档产出：**Word 优先用 office_write_docx**（结构化标题/段落/列表/表格，进程内零依赖，毫秒级；表格列宽按内容自动分配）；图片、公式、目录域这类复杂排版再用 python-docx 脚本（先写脚本再执行）。python-docx 也没装就如实说做不到，**不要自己手写 OOXML**。Excel 用 office_write_table，PDF 用脚本或 html 转换。",
@@ -293,6 +313,24 @@ export function memberSystemPrompt(input: MemberRunInput): string {
           "- 别把猜测写成事实：不确定的地方明说「未验证」，比编一个像样的答案有用。",
         ]
       : []),
+    ...(input.focus?.length
+      ? [
+          "",
+          "【本轮只重做这些未过项（上一轮打回的）】",
+          ...input.focus.map((f) => `- ${f}`),
+          "- 已经通过的部分**不要推翻重做**：保持原样，把力气放在上面这几条。改完在回报里逐条说明改了什么、在哪能看出来。",
+        ]
+      : []),
+    // 权限/地点边界（2026-11-15）：实机里成员读不到系统目录会反复换路径硬试，
+    // 一条路失败十几次，最后交回一张"什么都找不到"的回报——空转的真正来源。
+    "",
+    "【地点与权限边界（读不到就停手，不要换路径硬试）】",
+    "- 你的读写地点就是工作区（写）与上面列出的只读根（读）；这两处之外的文件**读不到**，工具层会直接拒绝。",
+    "- 读不到时不要换绝对路径、不要换命令绕（cd / 通配符 / 递归搜索都不行）：**最多试两种写法**，仍失败就停手。",
+    "- 停手回报这么写：标【缺上下文】或【受阻】，并写明「需要授权：<绝对路径>（用途：…）」——风铃会补授权或换材料，比你猜着做有用得多。",
+    "- **授权归风铃，不归你，也不归用户**：她判断风险（只读、范围最小、不碰密钥与系统目录）后决定给不给。你不能自己扩权——换路径、改配置、调高自己的限额、绕过工具层都不行。",
+    "- **你没有「放手」级权限**：删除、对外发送这类动作永远过闸，别指望能免审批；风铃那一档的放行不会传到你这里。",
+    "- 同一条命令、同一个路径失败 2 次就停手：重复同样的失败不算努力，只会烧轮次。",
     `【本次任务简报（截止：${input.deadline}）】`,
     input.brief,
     "",
@@ -309,6 +347,8 @@ export function memberSystemPrompt(input: MemberRunInput): string {
     "- 缺关键材料、目标互相矛盾、工具不够用：**第一轮就停手回报**，不要猜着做、不要自行脑补——烂交付不如不交付，停下不会怪你。",
     "- 交回报前自审三问：①简报里的完成标准逐条过了吗？②交付物与证据里的文件真的存在、是本次产出的吗？③有没有「我觉得应该没问题」但没验证的地方？有就改成【完成有保留】并写明。",
     "- 没做完也要回报：写清楚做到了哪一步、卡在哪里。不要为了好看而虚报。",
+    // 写作规则（2026-11-15 重做）：约束的是措辞本身，交付物与回报正文都算
+    ...(input.writingRules?.trim() ? ["", input.writingRules.trim()] : []),
   ].join("\n");
 }
 
@@ -323,6 +363,7 @@ export async function runMemberTask(input: MemberRunInput): Promise<MemberRunRes
     office: input.office,
     browser: input.browser,
     kb: input.kb,
+    apps: input.apps,
     readRoots: input.readRoots,
     // 自清理分级：本单开工后新造的文件删除不打扰用户；全权档连工作区内删除也放行
     runStartedAt: input.runStartedAt,
