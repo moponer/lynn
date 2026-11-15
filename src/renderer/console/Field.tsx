@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import type { Desk, DeskJob } from "../desk/model";
+import { jobsInThread, type Desk, type DeskJob } from "../desk/model";
 
 /**
  * 态势球（Canvas 2D）：深景球面 + 神经图。
@@ -427,7 +427,9 @@ export function Field({
     const syncGraph = () => {
       const deskNow = dataRef.current;
       const { scope: sc, focusId: fid } = viewRef.current;
-      const all = deskNow.jobs.filter((j) => j.group !== "archived");
+      // 只画**本群**的簇（2026-11-15）：与值台同一口径，别群的单不占球面
+      // （否则在 B 群会看到 A 群的节点亮着，点开还是别群的单）。
+      const all = jobsInThread(deskNow).filter((j) => j.group !== "archived");
       // 节点视图：只画被锁定的那一簇（没锁就退回全量，别把球面清空）
       const live = sc === "node" && fid ? all.filter((j) => j.id === fid) : all;
       const G = g.current;

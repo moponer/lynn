@@ -1,43 +1,18 @@
-// 右键菜单族（2026-11-14）：从 Desk.tsx 拆出。含定位 hook（useMenuPlacement）。
+// 右键菜单族（2026-11-14）：从 Desk.tsx 拆出。
 //
-// 它们都只吃"坐标 + 回调 + 一条数据"，不碰 Sheet/Roster 的编排状态，所以可以整组搬。
-// 菜单内部自己调 window.lynn.rpc（删除交付物、置顶群等），不经过 Desk 的 props 链。
-import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
-import { createPortal } from "react-dom";
+// 2026-11-15 统一：外壳与交互（定位/关闭/键盘）全部交给 components/Menu，
+// 这里只剩"这张菜单有哪些项、怎么分组、哪一项危险"。
+// 分组口径（与确认卡片一致）：
+//   主动作 → 次要动作 → （发丝线）→ 不可恢复动作（永远在最后、永远单独一段）。
+// 危险动作不再在菜单里换页确认——统一交给 components/ConfirmCard 的卡片，
+// 菜单只负责把"要做危险动作"这个意图抛给调用方（onAsk / onDelete）。
+import { useState } from "react";
 import { useT } from "../i18n";
 import { Icon, type IconName } from "../components/Icon";
+import { Menu, MenuCap, MenuItem, MenuSep } from "../components/Menu";
 import { STATUS_KEY, statusChipClass, type DeskJob, type DeskMember, type DeskOutput } from "./model";
 
-/**
- * 右键菜单定位（2026-11-13）：默认在光标右下方展开；下方空间不够就翻到光标上方，
- * 否则菜单会溢出窗口底边、整块看不见。layout effect 在浏览器绘制前同步测量，无闪烁。
- */
-export function useMenuPlacement(ref: RefObject<HTMLElement>, x: number, y: number, estW = 228, estH = 200) {
-  const [style, setStyle] = useState<{ left: number; top: number }>(() => ({
-    left: Math.max(8, Math.min(x, (window.innerWidth || 1200) - estW)),
-    top: Math.max(8, Math.min(y, (window.innerHeight || 800) - 8)),
-  }));
-  useLayoutEffect(() => {
-    const el = ref.current;
-    const vh = window.innerHeight || 800;
-    const vw = window.innerWidth || 1200;
-    const w = el?.offsetWidth ?? estW;
-    const h = el?.offsetHeight ?? estH;
-    // 下方放不下就翻到光标上方：否则菜单溢出窗口底边，整块看不见（2026-11-13）
-    const above = y + h > vh - 8;
-    const top = above ? Math.max(8, y - h) : Math.min(y, Math.max(8, vh - h - 8));
-    const left = Math.max(8, Math.min(x, vw - w - 8));
-    setStyle({ left, top });
-  }, [x, y, ref, estW, estH]);
-  return style;
-}
-
-/**
- * 交付箱右键菜单（2026-11-13）：打开文件 / 打开所在目录 / 复制路径 / 查看所属 / 删除。
- *
- * 删除必须分清后果：**只移除记录**（文件还在）和**连文件一起删**是两件事，
- * 一句"删除"交代不了，所以第二段给两个明确按钮，不猜。
- */
+/** 交付箱右键菜单：打开 / 定位 / 复制 / 查看所属，删除单独成段 */
 export function OutputMenu({
   out,
   x,
@@ -46,7 +21,7 @@ export function OutputMenu({
   onOpen,
   onReveal,
   onInfo,
-  onRemove,
+  onDelete,
 }: {
   out: DeskOutput;
   x: number;
@@ -55,30 +30,13 @@ export function OutputMenu({
   onOpen: () => void;
   onReveal: () => void;
   onInfo: () => void;
-  onRemove: (deleteFile: boolean) => void;
+  /** 删除交给确认卡片（"只移除记录"和"连文件一起删"是两件事，卡片里说清） */
+  onDelete: () => void;
 }) {
-  const [confirm, setConfirm] = useState(false);
   const [copied, setCopied] = useState(false);
-  const box = useRef<HTMLDivElement | null>(null);
-  useEffect(() => {
-    const onDown = (e: MouseEvent) => {
-      if (box.current && !box.current.contains(e.target as Node)) onClose();
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("mousedown", onDown);
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("mousedown", onDown);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [onClose]);
-
   const name = out.abs.split(/[\\/]/).filter(Boolean).pop() ?? out.path;
-  const style = useMenuPlacement(box, x, y, 248, 270);
-  return createPortal(
-    <div className="jobmenu" ref={box} style={style} role="menu" aria-label={name}>
+  return (
+    <Menu x={x} y={y} estW={236} estH={280} label={name} onClose={onClose}>
       <div className="jobmenu-h">
         <Icon name="file" size="sm" />
         <span className="jobmenu-title" title={out.abs}>
@@ -88,65 +46,32 @@ export function OutputMenu({
       <div className="jobmenu-sub mono" title={out.job.title}>
         {out.job.title}
       </div>
-      {confirm ? (
-        <>
-          <p className="jobmenu-ask">「{name}」要怎么删？</p>
-          <button type="button" className="jobmenu-item" onClick={() => onRemove(false)}>
-            <Icon name="x" size="sm" />
-            只从交付箱移除（文件保留）
-          </button>
-          <button type="button" className="jobmenu-item danger" onClick={() => onRemove(true)}>
-            <Icon name="trash" size="sm" />
-            连磁盘文件一起删
-          </button>
-          <button type="button" className="jobmenu-item" onClick={() => setConfirm(false)}>
-            <Icon name="x" size="sm" />
-            取消
-          </button>
-        </>
-      ) : (
-        <>
-          <button type="button" className="jobmenu-item" onClick={onOpen}>
-            <Icon name="file" size="sm" />
-            打开文件
-          </button>
-          <button type="button" className="jobmenu-item" onClick={onReveal}>
-            <Icon name="folder" size="sm" />
-            打开所在目录
-          </button>
-          <button
-            type="button"
-            className="jobmenu-item"
-            onClick={() => {
-              void navigator.clipboard
-                ?.writeText(out.abs)
-                .then(() => {
-                  setCopied(true);
-                  window.setTimeout(onClose, 480);
-                })
-                .catch(() => setCopied(false));
-            }}
-          >
-            <Icon name="clip" size="sm" />
-            {copied ? "已复制" : "复制路径"}
-          </button>
-          <button type="button" className="jobmenu-item" onClick={onInfo}>
-            <Icon name="info" size="sm" />
-            查看所属
-          </button>
-          <button type="button" className="jobmenu-item danger" onClick={() => setConfirm(true)}>
-            <Icon name="trash" size="sm" />
-            删除…
-          </button>
-        </>
-      )}
-    </div>,
-    document.body,
+      <MenuCap>打开</MenuCap>
+      <MenuItem icon={<Icon name="file" size="sm" />} label="打开文件" lead onSelect={onOpen} />
+      <MenuItem icon={<Icon name="folder" size="sm" />} label="打开所在目录" onSelect={onReveal} />
+      <MenuCap>文件信息</MenuCap>
+      <MenuItem
+        icon={<Icon name="clip" size="sm" />}
+        label={copied ? "已复制" : "复制路径"}
+        onSelect={() => {
+          void navigator.clipboard
+            ?.writeText(out.abs)
+            .then(() => {
+              setCopied(true);
+              window.setTimeout(onClose, 480);
+            })
+            .catch(() => setCopied(false));
+        }}
+      />
+      <MenuItem icon={<Icon name="info" size="sm" />} label="查看所属" onSelect={onInfo} />
+      <MenuSep />
+      <MenuItem icon={<Icon name="trash" size="sm" />} label="删除…" danger onSelect={onDelete} />
+    </Menu>
   );
 }
 
 /**
- * 通用「文件」右键菜单（2026-11-13）：证据链、产物清单共用。
+ * 通用「文件」右键菜单：证据链、产物清单共用。
  *
  * 和交付箱那份的区别：这里只有"这个文件"能做的事——打开 / 定位 / 复制路径。
  * 「查看所属」「删除」是交付物才有的语义（交付物有归属、可移出交付箱），
@@ -173,27 +98,10 @@ export function RefMenu({
   onReveal: () => void;
   onCopied?: (msg: string) => void;
 }) {
-  const box = useRef<HTMLDivElement | null>(null);
   const [note, setNote] = useState<string | null>(null);
-  useEffect(() => {
-    const onDown = (e: MouseEvent) => {
-      if (box.current && !box.current.contains(e.target as Node)) onClose();
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("mousedown", onDown);
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("mousedown", onDown);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [onClose]);
-
   const name = fileRef.split(/[\\/]/).filter(Boolean).pop() ?? fileRef;
-  const style = useMenuPlacement(box, x, y, 248, 190);
-  return createPortal(
-    <div className="jobmenu" ref={box} style={style} role="menu" aria-label={name}>
+  return (
+    <Menu x={x} y={y} estW={236} estH={200} label={name} onClose={onClose}>
       <div className="jobmenu-h">
         <Icon name="file" size="sm" />
         <span className="jobmenu-title" title={fileRef}>
@@ -206,18 +114,14 @@ export function RefMenu({
           {label}
         </div>
       )}
-      <button type="button" className="jobmenu-item" onClick={onOpen}>
-        <Icon name="file" size="sm" />
-        打开文件
-      </button>
-      <button type="button" className="jobmenu-item" onClick={onReveal}>
-        <Icon name="folder" size="sm" />
-        打开所在目录
-      </button>
-      <button
-        type="button"
-        className="jobmenu-item"
-        onClick={() => {
+      <MenuCap>打开</MenuCap>
+      <MenuItem icon={<Icon name="file" size="sm" />} label="打开文件" lead onSelect={onOpen} />
+      <MenuItem icon={<Icon name="folder" size="sm" />} label="打开所在目录" onSelect={onReveal} />
+      <MenuSep />
+      <MenuItem
+        icon={<Icon name="clip" size="sm" />}
+        label={note === "已复制" ? "已复制" : "复制路径"}
+        onSelect={() => {
           // 绝对路径要主进程解析（渲染层只有卷宗内相对 ref）
           void window.lynn
             ?.rpc("app.resolveRef", { taskId, ref: fileRef })
@@ -236,19 +140,18 @@ export function RefMenu({
                 .catch(() => setNote("复制失败（剪贴板不可用）"));
             });
         }}
-      >
-        <Icon name="clip" size="sm" />
-        {note ?? "复制路径"}
-      </button>
-    </div>,
-    document.body,
+      />
+      {note && note !== "已复制" && <div className="jobmenu-note">{note}</div>}
+    </Menu>
   );
 }
 
 /**
  * 工单卡右键菜单（2026-11-04）：
  * 卡住的单一度只能挂在台账里——「停」只 abort 成员、不改状态，「新对话」也不动后台。
- * 这里给四件事：打开 / 去出发会话 / 停成员 / 取消或删除（二次确认）。
+ *
+ * 分组：看待这张单（打开 / 去出发会话）→ 成员（停 / 授权）→ 卷宗（沙箱 / 导出）
+ *       → 发丝线 → 撤回、删除（不可恢复，走确认卡片）。
  */
 export function JobMenu({
   job,
@@ -274,6 +177,7 @@ export function JobMenu({
   onOpen: () => void;
   onThread?: () => void;
   onStop?: () => void;
+  /** 撤回 / 删除：菜单不换页，调用方负责弹确认卡片 */
   onDismiss?: () => void;
   onRemove?: () => void;
   /** 只读授权（用户亲手选目录；写仍限工作区） */
@@ -285,28 +189,9 @@ export function JobMenu({
   onExport?: () => void;
 }) {
   const t = useT();
-  const [confirm, setConfirm] = useState<null | "dismiss" | "remove">(null);
-  const box = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    const onDown = (e: MouseEvent) => {
-      if (box.current && !box.current.contains(e.target as Node)) onClose();
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("mousedown", onDown);
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("mousedown", onDown);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [onClose]);
-
   const done = job.status === "done" || job.status === "canceled";
-  const style = useMenuPlacement(box, x, y, 240, 360);
   return (
-    <div className="jobmenu" ref={box} style={style} role="menu" aria-label={job.id}>
+    <Menu x={x} y={y} estW={236} estH={360} label={job.id} onClose={onClose}>
       <div className="jobmenu-h">
         <Icon name="cube" size="sm" />
         {/* 菜单头也用任务名：工单号放下面一行小字，审计时再认 */}
@@ -319,87 +204,50 @@ export function JobMenu({
         {job.id}
         {job.teamName ? ` · ${job.teamName}` : ""}
       </div>
-      {confirm ? (
-        <>
-          <p className="jobmenu-ask">{confirm === "dismiss" ? t("menu.dismissAsk") : t("menu.removeAsk")}</p>
-          <button
-            type="button"
-            className={`jobmenu-item${confirm === "remove" ? " danger" : ""}`}
-            onClick={() => {
-              if (confirm === "dismiss") onDismiss?.();
-              else onRemove?.();
-              onClose();
-            }}
-          >
-            {t("menu.confirm")}
-          </button>
-          <button type="button" className="jobmenu-item" onClick={() => setConfirm(null)}>
-            {t("common.cancel")}
-          </button>
-        </>
-      ) : (
-        <>
-          <button type="button" className="jobmenu-item" onClick={onOpen}>
-            <Icon name="eye" size="sm" />
-            {t("menu.open")}
-          </button>
-          {onThread && (
-            <button type="button" className="jobmenu-item" onClick={onThread}>
-              <Icon name="send" size="sm" />
-              {t("menu.thread")}
-            </button>
-          )}
-          {onStop && (
-            <button type="button" className="jobmenu-item" onClick={onStop}>
-              <Icon name="stop" size="sm" />
-              {t("menu.stop")}
-            </button>
-          )}
-          {onGrantRead && (
-            <button type="button" className="jobmenu-item" onClick={onGrantRead}>
-              <Icon name="lock" size="sm" />
-              {t("menu.grantRead")}
-            </button>
-          )}
-          {onRevokeRead && (
-            <button type="button" className="jobmenu-item" onClick={onRevokeRead}>
-              <Icon name="eye" size="sm" />
-              {t("menu.revokeRead")}
-            </button>
-          )}
-          {onSnapshotProject && (
-            <button type="button" className="jobmenu-item" onClick={onSnapshotProject}>
-              <Icon name="cube" size="sm" />
-              拷进任务沙箱跑测试…
-            </button>
-          )}
-          {onExport && (
-            <button type="button" className="jobmenu-item" onClick={onExport}>
-              <Icon name="archive" size="sm" />
-              导出卷宗 zip…
-            </button>
-          )}
-          {!done && onDismiss && (
-            <button type="button" className="jobmenu-item" onClick={() => setConfirm("dismiss")}>
-              <Icon name="undo" size="sm" />
-              {t("menu.dismiss")}
-            </button>
-          )}
-          {!running && job.status !== "in_progress" && onRemove && (
-            <button type="button" className="jobmenu-item danger" onClick={() => setConfirm("remove")}>
-              <Icon name="trash" size="sm" />
-              {t("menu.remove")}
-            </button>
-          )}
-        </>
+      <MenuItem icon={<Icon name="eye" size="sm" />} label={t("menu.open")} lead onSelect={onOpen} />
+      {onThread && <MenuItem icon={<Icon name="send" size="sm" />} label={t("menu.thread")} onSelect={onThread} />}
+      {(onStop || onGrantRead || onRevokeRead) && <MenuCap>成员</MenuCap>}
+      {onStop && <MenuItem icon={<Icon name="stop" size="sm" />} label={t("menu.stop")} onSelect={onStop} />}
+      {onGrantRead && (
+        <MenuItem icon={<Icon name="lock" size="sm" />} label={t("menu.grantRead")} onSelect={onGrantRead} />
       )}
-    </div>
+      {onRevokeRead && (
+        <MenuItem icon={<Icon name="eye" size="sm" />} label={t("menu.revokeRead")} onSelect={onRevokeRead} />
+      )}
+      {(onSnapshotProject || onExport) && <MenuCap>卷宗</MenuCap>}
+      {onSnapshotProject && (
+        <MenuItem
+          icon={<Icon name="cube" size="sm" />}
+          label="拷进任务沙箱跑测试…"
+          onSelect={onSnapshotProject}
+        />
+      )}
+      {onExport && <MenuItem icon={<Icon name="archive" size="sm" />} label="导出卷宗 zip…" onSelect={onExport} />}
+      {((!done && onDismiss) || (!running && job.status !== "in_progress" && onRemove)) && <MenuSep />}
+      {!done && onDismiss && (
+        <MenuItem
+          icon={<Icon name="undo" size="sm" />}
+          label={t("menu.dismiss")}
+          hint={t("menu.dismissAsk")}
+          onSelect={onDismiss}
+        />
+      )}
+      {!running && job.status !== "in_progress" && onRemove && (
+        <MenuItem
+          icon={<Icon name="trash" size="sm" />}
+          label={t("menu.remove")}
+          hint={t("menu.removeAsk")}
+          danger
+          onSelect={onRemove}
+        />
+      )}
+    </Menu>
   );
 }
 
 /**
  * 成员右键菜单（群聊模式）：资料 / 目标 / 进度 / @他 / 催一下。
- * 形态照工单卡右键（JobMenu）：fixed 定位 + 点外面关闭 + Esc 关闭。
+ * 分组：看他的状态 → 发丝线 → 找他说话。
  */
 export function MemberMenu({
   member,
@@ -422,31 +270,24 @@ export function MemberMenu({
   onAt: () => void;
   onNudge: () => void;
 }) {
-  const box = useRef<HTMLDivElement | null>(null);
-  useEffect(() => {
-    const onDown = (e: MouseEvent) => {
-      if (box.current && !box.current.contains(e.target as Node)) onClose();
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("mousedown", onDown);
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("mousedown", onDown);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [onClose]);
-  const style = useMenuPlacement(box, x, y, 228, 240);
-  const items: { label: string; icon: IconName; hint: string; on: () => void; off?: boolean }[] = [
-    { label: "查看资料", icon: "user", hint: "岗位档案 · 战绩", on: onProfile },
+  const items: {
+    label: string;
+    icon: IconName;
+    hint: string;
+    on: () => void;
+    off?: boolean;
+    lead?: boolean;
+  }[] = [
+    { label: "查看资料", icon: "user", hint: "岗位档案 · 战绩", on: onProfile, lead: true },
     { label: "任务目标", icon: "target", hint: member.jobId ? "他被要求做什么" : "他手上没单", on: onJob, off: !member.jobId },
     { label: "进度", icon: "clock", hint: "最近在干什么 · 卷宗时间线", on: onProgress, off: !member.jobId },
+  ];
+  const talk: typeof items = [
     { label: "@他说话", icon: "at", hint: "插到输入框里", on: onAt },
     { label: "催一下", icon: "bell", hint: "话转给他，下一轮生效", on: onNudge, off: !member.jobId || member.status !== "running" },
   ];
   return (
-    <div className="jobmenu" ref={box} style={style} role="menu" aria-label={member.name}>
+    <Menu x={x} y={y} estW={236} estH={260} label={member.name} onClose={onClose}>
       <div className="jobmenu-h">
         <Icon name="user" size="sm" />
         <span className="jobmenu-title">{member.name}</span>
@@ -457,23 +298,28 @@ export function MemberMenu({
         {member.jobId ? ` · ${member.jobId}` : ""}
       </div>
       {items.map((it) => (
-        <button
+        <MenuItem
           key={it.label}
-          type="button"
-          className="jobmenu-item"
+          icon={<Icon name={it.icon} size="sm" />}
+          label={it.label}
+          hint={it.hint}
+          lead={it.lead}
           disabled={it.off}
-          title={it.hint}
-          onClick={() => {
-            if (it.off) return;
-            it.on();
-            onClose();
-          }}
-        >
-          <Icon name={it.icon} size="sm" />
-          {it.label}
-        </button>
+          onSelect={it.on}
+        />
       ))}
-    </div>
+      <MenuSep />
+      {talk.map((it) => (
+        <MenuItem
+          key={it.label}
+          icon={<Icon name={it.icon} size="sm" />}
+          label={it.label}
+          hint={it.hint}
+          disabled={it.off}
+          onSelect={it.on}
+        />
+      ))}
+    </Menu>
   );
 }
 
@@ -501,62 +347,40 @@ export function ThreadMenu({
   onDelete: () => void;
 }) {
   const t = useT();
-  const box = useRef<HTMLDivElement | null>(null);
-  useEffect(() => {
-    const onDown = (e: MouseEvent) => {
-      if (box.current && !box.current.contains(e.target as Node)) onClose();
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("mousedown", onDown);
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("mousedown", onDown);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [onClose]);
-  const style = useMenuPlacement(box, x, y, 220, 150);
-  return createPortal(
-    <div className="jobmenu" ref={box} style={style} role="menu" aria-label={title}>
+  return (
+    <Menu x={x} y={y} estW={228} estH={170} label={title} onClose={onClose}>
       <div className="jobmenu-h">
         <Icon name="list" size="sm" />
         <span className="jobmenu-title">{title}</span>
       </div>
-      <button
-        type="button"
-        className="jobmenu-item"
-        onClick={() => {
+      <MenuCap>这个群</MenuCap>
+      <MenuItem
+        icon={<Icon name="pin" size="sm" />}
+        label={pinned ? "取消置顶" : "置顶"}
+        lead
+        onSelect={() => {
           onPin(!pinned);
           onClose();
         }}
-      >
-        <Icon name="pin" size="sm" />
-        {pinned ? "取消置顶" : "置顶"}
-      </button>
-      <button
-        type="button"
-        className="jobmenu-item"
-        onClick={() => {
+      />
+      <MenuItem
+        icon={<Icon name="pen" size="sm" />}
+        label={t("ledger.threadRename")}
+        onSelect={() => {
           onRename();
           onClose();
         }}
-      >
-        <Icon name="pen" size="sm" />
-        {t("ledger.threadRename")}
-      </button>
-      <button
-        type="button"
-        className="jobmenu-item danger"
-        onClick={() => {
+      />
+      <MenuSep />
+      <MenuItem
+        icon={<Icon name="trash" size="sm" />}
+        label={t("ledger.threadDelete")}
+        danger
+        onSelect={() => {
           onDelete();
           onClose();
         }}
-      >
-        <Icon name="trash" size="sm" />
-        {t("ledger.threadDelete")}
-      </button>
-    </div>,
-    document.body,
+      />
+    </Menu>
   );
 }

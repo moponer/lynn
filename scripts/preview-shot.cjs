@@ -12,6 +12,8 @@ const fs = require("node:fs");
 const out = process.argv[2] || path.join(__dirname, "..", "shots", "desk.png");
 // 走查「信任询问」：假装用户真选了一个目录（必须在窗口/preload 起来之前设，preload 拿的是进程启动时的环境）
 if (process.argv[3] === "trustask") process.env.LYNN_PREVIEW_PICKDIR = "F:/spiker/hermix-desktop";
+// 表格回报走查：夹具同样要在 preload 起来之前挂上
+if (process.argv[3] === "reporttable") process.env.LYNN_PREVIEW_TABLEREPORT = "1";
 const W = Number(process.env.LYNN_PREVIEW_WIDTH) || 1600;
 const H = Number(process.env.LYNN_PREVIEW_HEIGHT) || 1000;
 
@@ -88,8 +90,10 @@ app.whenReady().then(async () => {
   try {
   const isPet = process.argv[3] === "pet";
   const win = new BrowserWindow({
-    width: isPet ? 240 : W,
-    height: isPet ? 300 : H,
+    // 与 main.ts createPet() 的真实桌宠窗保持一致（300×450），
+    // 走查窗偏小会把角色下半身裁掉，误判成「素材看不到全身」。
+    width: isPet ? 300 : W,
+    height: isPet ? 450 : H,
     show: false,
     frame: !isPet,
     transparent: isPet,
@@ -226,6 +230,32 @@ app.whenReady().then(async () => {
     }))()`);
     console.log("OUTMENU", JSON.stringify(menu));
 
+    // 删除交付物 → 统一确认卡片（2026-11-15）：两个后果明确摆出来，不再二次弹系统确认
+    if (process.argv[3] === "outmenu") {
+      const clicked = await win.webContents.executeJavaScript(`(() => {
+        const it = [...document.querySelectorAll('.jobmenu-item')].find((x) => x.textContent.includes('删除'));
+        if (!it) return false;
+        it.click();
+        return true;
+      })()`);
+      await new Promise((r) => setTimeout(r, 450));
+      const card = await win.webContents.executeJavaScript(`(() => {
+        const c = document.querySelector('.ask-card');
+        if (!c) return null;
+        return {
+          title: c.querySelector('.ask-title')?.textContent.trim() ?? null,
+          body: c.querySelector('.ask-body')?.textContent.trim() ?? null,
+          note: c.querySelector('.ask-note')?.textContent.trim() ?? null,
+          btns: [...c.querySelectorAll('.ask-btn')].map((b) => ({
+            t: b.textContent.trim(),
+            cls: b.className.replace('ask-btn ', ''),
+            bg: getComputedStyle(b).backgroundColor,
+          })),
+          focused: document.activeElement?.textContent?.trim() ?? null,
+        };
+      })()`);
+      console.log("OUTDELETE", clicked, JSON.stringify(card, null, 1));
+    }
   }
 
   // 可选：交付箱（2026-11-13）：同一物理文件被多张单更新时只能有一行

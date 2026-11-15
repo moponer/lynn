@@ -156,6 +156,8 @@ export interface Member {
   turnLimit?: number;
   /** 最近一步动作（"正在跑什么命令 / 写了哪个文件"）：进度条回答不了"在干什么" */
   lastStep?: string;
+  /** 常驻验收员岗位（2026-11-15）：只做验收、不参与执行；风铃据此把验收下沉给成员 */
+  acceptor?: boolean;
 }
 
 export interface Team {
@@ -348,6 +350,8 @@ export type ToolCardBadge =
   | "回报"
   | "审查"
   | "汇报"
+  /** 常驻验收员开工验收（2026-11-15）：验收下沉给成员 */
+  | "验收"
   /** 独立模型的审阅意见（2026-11-14）：只提会返工的问题，不改状态 */
   | "顾问"
   | "需要你拍板"
@@ -379,8 +383,9 @@ export interface PreviewReadResult {
   /**
    * office：docx/xlsx/pptx 的原始字节（base64），渲染层用开源库
    * （docx-preview / @js-preview/excel / pptx-preview，全部懒加载）保真渲染。
+   * audio / video：常见音视频直接给 data URL，渲染层用原生 <audio>/<video> 播放（2026-11-15）。
    */
-  kind: "text" | "image" | "binary" | "empty" | "missing" | "office" | "pdf";
+  kind: "text" | "image" | "audio" | "video" | "binary" | "empty" | "missing" | "office" | "pdf";
   text?: string;
   /** 图片走 data URL，避免Electron file:// 协议与 CSP 打架 */
   dataUrl?: string;
@@ -504,6 +509,8 @@ export interface Decision {
   /** question=她问你；plan=任务契约待确认；approval=工具调用等你批准 */
   kind?: "question" | "plan" | "approval";
   jobId?: string;
+  /** 这张卡是哪个群在等你拍板（2026-11-15）：新建群不该看见别群的问题/契约/审批 */
+  threadId?: string;
   at?: string;
   checks?: { ok: boolean; text: string }[];
   plan?: TaskPlan;
@@ -554,7 +561,15 @@ export interface SessionSnapshot {
     gated?: { mcp: boolean; skills: boolean };
   };
   /** 当前会话线程与线程列表（M1-14） */
-  thread: { id: string; title: string; projectRoot?: string; projectId?: string; projectName?: string };
+  thread: {
+    id: string;
+    title: string;
+    projectRoot?: string;
+    projectId?: string;
+    projectName?: string;
+    /** 本群被用户「终止任务」了（2026-11-15）：后台一切停手，发新消息才恢复 */
+    halted?: boolean;
+  };
   /** C3：会话行显示"这个会话派出过多少单"（后端按 task.threadId 汇总） */
   threads: {
     id: string;
@@ -575,6 +590,8 @@ export interface SessionSnapshot {
     /** 这个群在做哪个项目（2026-11-12） */
     projectId?: string;
     projectName?: string;
+    /** 这个群被用户终止了（2026-11-15）：列表上要看得出来，别以为是它在闲着 */
+    halted?: boolean;
   }[];
   /** 真在跑的成员单（不只 status=in_progress：卡住但没在跑的不能算） */
   running?: string[];
@@ -606,7 +623,20 @@ export interface SessionSnapshot {
     voiceMaxChars?: number;
     voiceWhenHidden?: boolean;
     voiceProxy?: string;
+    /** 去 AI 味插件（2026-11-15）：缺省视为开；插件没装时无效 */
+    humanizer?: boolean;
   };
+}
+
+/** ---------- 去 AI 味插件（2026-11-15）：外部包 humanizer-stream 的加载状态 ---------- */
+export interface HumanizerStatus {
+  /** 用户在设置里是否勾选 */
+  enabled: boolean;
+  /** 插件是否真的加载成功（没装 / 版本不匹配 → false，界面要如实说） */
+  loaded: boolean;
+  /** 插件目录（loaded 时才有） */
+  dir: string | null;
+  version: string | null;
 }
 
 // ---------- 事件流（主进程 → 渲染层） ----------
@@ -1131,6 +1161,14 @@ export interface RpcContracts {
     params: { id: string; text: string };
     result: { ok: boolean; text: string };
   };
+  /**
+   * 终止本群所有进行中的工作（2026-11-15）：在跑的成员停机、当前回合中断、排队清空、
+   * 心跳/巡检/验收叫醒全部停手——直到用户在这个群发出新消息才恢复。
+   */
+  "thread.halt": {
+    params: { id?: string };
+    result: { ok: boolean; stopped: number; threadId: string; error?: string };
+  };
   /** 请风铃起草本群公告（用户不想自己写时用） */
   "thread.draftNotice": {
     params: { id?: string };
@@ -1391,6 +1429,8 @@ export interface RpcContracts {
       lang?: "zh" | "en";
       captureHotkey?: string;
       heartbeat?: boolean;
+      /** 去 AI 味插件开关（2026-11-15）：只影响展示层文本，不动上下文与 token */
+      humanizer?: boolean;
       voiceEnabled?: boolean;
       voiceId?: string;
       voiceRate?: string;
@@ -1403,6 +1443,8 @@ export interface RpcContracts {
       advisorEnabled?: boolean;
       /** 角色模型：值为模型库条目 id（advisor 已用；worker/smol/tiny 留位） */
       modelRoles?: Partial<Record<"worker" | "smol" | "advisor" | "tiny", string>>;
+      /** 风铃单轮工具轮次上限（4–80；触顶只总结不硬停） */
+      maxAgentRounds?: number;
     };
     result: {
       ok: true;
@@ -1414,6 +1456,8 @@ export interface RpcContracts {
       lang: "zh" | "en";
       captureHotkey: string;
       heartbeat: boolean;
+      /** 去 AI 味开关（2026-11-15）：与 humanizer.status 的 loaded 一起看才知道是否真生效 */
+      humanizer?: boolean;
       voiceEnabled: boolean;
       voiceId: string;
       voiceRate: string;
@@ -1424,6 +1468,7 @@ export interface RpcContracts {
       voiceProxy: string;
       advisorEnabled: boolean;
       modelRoles?: Partial<Record<"worker" | "smol" | "advisor" | "tiny", string>>;
+      maxAgentRounds: number;
     };
   };
   /** 语音：可选音色（Edge 神经音色 ID） */
@@ -1456,6 +1501,14 @@ export interface RpcContracts {
   "config.clearKey": {
     params: void;
     result: { ok: boolean };
+  };
+  /**
+   * 去 AI 味插件状态（2026-11-15）：外部包 humanizer-stream 的真实加载情况。
+   * 界面必须区分「用户关了」「没装」「在跑」三种——不装却显示"已启用"是最坏的一种谎。
+   */
+  "humanizer.status": {
+    params: void;
+    result: HumanizerStatus;
   };
   "session.new": {
     /** projectRoot：这个会话的工作区（开会话时选；不传 = 沿用当前） */

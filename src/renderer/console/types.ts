@@ -20,10 +20,21 @@ export interface ConsoleViewProps {
    */
   onCd?: (arg: string) => Promise<string>;
   onAbort: () => void;
+  /**
+   * 终止本群（2026-11-15）：成员停机 + 当前回合中断 + 心跳/巡检/验收叫醒/定时任务全停。
+   * 与「停止本轮」是两件事，值台在频道标题栏有入口，控制台放在底栏。
+   */
+  onHalt?: () => void;
   onOpenSettings: () => void;
   /** 底栏权限档（plan / ask / auto / full）：与值台同一个 RPC，控制台不另存一份状态 */
   onPermission: (mode: PermissionMode) => void;
-  onDecisionResolve: (id: string, action: "answer" | "start" | "revise" | "reject", text?: string) => void;
+  onDecisionResolve: (
+    id: string,
+    action: "answer" | "start" | "revise" | "reject",
+    text?: string,
+    /** 工具审批「这一类以后都允许」：不传就是只放行这一次 */
+    always?: boolean,
+  ) => void;
   /**
    * 验收 / 打回（task.decide）。打回必须带三要素，后端会校验：
    * 哪里不合格 / 期望是什么 / 多久内重交。

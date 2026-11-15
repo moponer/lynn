@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { PreviewReadResult } from "../../shared/contract";
 import { Icon } from "./Icon";
+import { FileIcon } from "./FileIcon";
 import { useT } from "../i18n";
 import { HighlightedCode, RichText } from "./RichText";
 
@@ -9,6 +10,7 @@ import { HighlightedCode, RichText } from "./RichText";
  *  - Markdown / HTML 默认渲染视图，一键切源码（带语法高亮与行号）；
  *  - 代码 / 文本 / 日志 / JSON 一律本地高亮，不交给外部关联程序；
  *  - 图片内嵌显示（点图 1:1 ⇄ 适宽）；
+ *  - 常见音频/视频用原生 <audio>/<video> 直接播放（2026-11-15：不用另开外部播放器）；
  *  - docx/xlsx/pptx 交给开源库保真渲染（docx-preview / @js-preview/excel /
  *    pptx-preview，全部动态 import 懒加载——只在真的预览该格式时才载入代码包）；
  *  - PDF 走应用内独立窗口（Chromium 自带阅读器）；其余二进制如实说明，外部打开只作为可选出口。
@@ -176,14 +178,21 @@ export function PreviewDrawer({
   }, [onClose]);
 
   const text = data?.text ?? "";
-  const bytes = data?.bytes ? `${data.bytes >= 1024 ? `${Math.round(data.bytes / 1024)}KB` : `${data.bytes}B`}` : "";
+  // 音视频动辄几 MB：一律 KB 会在"20480KB"这种读数上失去量感（2026-11-15）
+  const bytes = data?.bytes
+    ? data.bytes >= 1024 * 1024
+      ? `${(data.bytes / 1024 / 1024).toFixed(1)}MB`
+      : data.bytes >= 1024
+        ? `${Math.round(data.bytes / 1024)}KB`
+        : `${data.bytes}B`
+    : "";
 
   return (
     <div className="pv-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
       <aside className={`pv-drawer${wide ? " wide" : ""}`} role="dialog" aria-label={`预览 ${name}`}>
         <header className="pv-head">
           <div className="pv-name">
-            <Icon name="eye" size="sm" />
+            <FileIcon name={name} size="sm" />
             <strong title={fileRef}>{name}</strong>
             <span className="mono">{bytes}</span>
           </div>
@@ -257,6 +266,24 @@ export function PreviewDrawer({
                 title={zoomed ? t("pv.zoomFit") : t("pv.zoomFull")}
                 onClick={() => setZoomed((v) => !v)}
               />
+            </div>
+          )}
+          {/* 音频（2026-11-15）：原生播放器 + 一份类型/体积信息，不再让用户"用系统程序打开" */}
+          {data?.kind === "audio" && data.dataUrl && (
+            <div className="pv-media">
+              <FileIcon name={name} size="lg" />
+              <div className="pv-media-name" title={name}>{name}</div>
+              <div className="pv-media-meta mono">
+                {[(data.ext ?? ext).toUpperCase(), bytes].filter(Boolean).join(" · ")}
+              </div>
+              <audio className="pv-audio" src={data.dataUrl} controls preload="metadata" />
+              <div className="pv-hint">{t("pv.audioHint")}</div>
+            </div>
+          )}
+          {data?.kind === "video" && data.dataUrl && (
+            <div className="pv-media">
+              <video className="pv-video" src={data.dataUrl} controls preload="metadata" />
+              <div className="pv-hint">{t("pv.videoHint")}</div>
             </div>
           )}
           {data?.kind === "office" && data.dataBase64 && (

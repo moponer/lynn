@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { type CaptureShot, type FeedCard, type PermissionMode } from "../../shared/contract";
-import type { Desk, OpenPreview } from "./model";
+import { jobsInThread, type Desk, type OpenPreview } from "./model";
 
 import { AmbientLayer } from "./AmbientLayer";
 import type { AmbientMode, AmbientParams } from "../../shared/ambient";
@@ -59,6 +59,7 @@ export function DeskView({
   onThreadPin,
   onAnnounce,
   onDraftNotice,
+  onHalt,
   onTaskFeed,
   onCreateTeam,
   onManageTeam,
@@ -116,6 +117,8 @@ export function DeskView({
   onAnnounce?: (text: string) => void;
   /** 请风铃起草群公告 */
   onDraftNotice?: () => void;
+  /** 终止本群所有进行中的工作（2026-11-15）：成员停机 + 心跳/巡检/验收叫醒全停 */
+  onHalt?: () => void;
   /** 工单往来（跨会话追溯）：工单出发会话 ≠ 当前会话时按 threadId 回读 */
   onTaskFeed?: (taskId: string) => Promise<{ cards: FeedCard[]; threadId?: string; threadTitle?: string }>;
   /** 建团队（§4.10.3 修正）：用户只给名字，ID 由系统生成 */
@@ -143,12 +146,15 @@ export function DeskView({
   /** 发送/新建失败时的可见提示（不允许静默失败） */
   notice?: string | null;
 }) {
+  /** 本群的活（2026-11-15）：右栏印章、顶栏待办数、频道提示都只认它，别群的单不串进来。
+   *  口径统一在 model.jobsInThread——控制台与态势球也走同一处，避免各写一遍后漂移。 */
+  const jobsHere = useMemo(() => jobsInThread(desk), [desk]);
   const waitingFirst = useMemo(() => {
     // 归档/已取消的单不能再被默认选中：否则左栏「工单 0」，主区却霸着一张旧单的详情，
     // 看起来像"凭空冒出一张单"（2026-11-11 修）。用户显式点归档项仍可打开。
-    const live = desk.jobs.filter((j) => j.group !== "archived");
+    const live = jobsHere.filter((j) => j.group !== "archived");
     return live.find((j) => j.action !== "none") ?? live[0];
-  }, [desk.jobs]);
+  }, [jobsHere]);
   /**
    * 群里可点名的人（@ 补全候选）：本群工单的承办成员排前面。
    * 本群先、别群后——群里 @ 一个听不见的人没有意义。
@@ -175,10 +181,10 @@ export function DeskView({
    */
   const prevPending = useRef(0);
   useEffect(() => {
-    const n = desk.decisions.length + desk.jobs.filter((j) => j.action === "accept").length;
+    const n = desk.decisions.length + jobsHere.filter((j) => j.action === "accept").length;
     if (n > prevPending.current) setRightOpen(true);
     prevPending.current = n;
-  }, [desk.decisions.length, desk.jobs]);
+  }, [desk.decisions.length, jobsHere]);
   // E6：Ctrl+K 命令面板 / Ctrl+/ 快捷键清单——能力实际存在就必须可发现
   const [cmdkOpen, setCmdkOpen] = useState(false);
   const [keymapOpen, setKeymapOpen] = useState(false);
@@ -203,7 +209,7 @@ export function DeskView({
   }, []);
   const current = activeId ? desk.jobs.find((j) => j.id === activeId) : undefined;
   const reviewJob = desk.jobs.find((j) => j.id === reviewId);
-  const pendingCount = desk.decisions.length + desk.jobs.filter((j) => j.action === "accept").length;
+  const pendingCount = desk.decisions.length + jobsHere.filter((j) => j.action === "accept").length;
 
   // 选中的单被删掉/不再上台账时回到频道，别留一张"幽灵详情"在中间。
   useEffect(() => {
@@ -293,6 +299,8 @@ export function DeskView({
               threadId={desk.thread.id}
               threadTitle={desk.threads.find((x) => x.id === current?.threadId)?.title}
               channelTitle={desk.thread.title}
+              halted={desk.thread.halted}
+              onHalt={onHalt}
               onTaskFeed={onTaskFeed}
               onThread={onThread}
               onFeedAction={onFeedAction}
@@ -320,6 +328,8 @@ export function DeskView({
             queue={desk.queue}
             members={mentionMembers}
             pendingAt={atTarget}
+            usage={desk.usage}
+            tokensUsed={desk.tokensUsed}
             onStandby={onStandby}
             onSend={onSend}
             onFileSearch={onFileSearch}

@@ -48,6 +48,11 @@ export interface ThreadMeta {
    * 而不是藏在某一张单的简报里。
    */
   announcement?: string;
+  /**
+   * 被用户「终止任务」的时刻（2026-11-15）：本群的后台动作（成员执行、心跳、巡检、
+   * 验收叫醒、定时任务注入）全部停手，直到用户在这个群发出新消息才清掉。
+   */
+  haltedAt?: string;
 }
 
 export interface ThreadState {
@@ -229,6 +234,22 @@ export class ThreadStore {
     else delete t.announcement;
     t.updatedAt = new Date().toISOString();
     this.writeIndex(threads);
+  }
+
+  /** 终止 / 恢复这个群的后台动作（2026-11-15）：恢复 = 用户发了新消息 */
+  setHalted(id: string, halted: boolean): void {
+    const threads = this.list();
+    const t = threads.find((x) => x.id === id);
+    if (!t) return;
+    if (halted) t.haltedAt = new Date().toISOString();
+    else delete t.haltedAt;
+    t.updatedAt = new Date().toISOString();
+    this.writeIndex(threads);
+  }
+
+  /** 这个群现在是不是被终止了（读盘口径，内核另有内存副本） */
+  isHalted(id: string): boolean {
+    return Boolean(this.get(id)?.haltedAt);
   }
 
   remove(id: string): void {

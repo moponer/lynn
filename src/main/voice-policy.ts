@@ -159,6 +159,8 @@ export function cleanSpeechText(raw: string, maxChars = 120): string {
   s = s.replace(/^\s*(?:结论|证据|未完成|待你拍板|等你拍板|产物|交付物|材料|简报)[：:]\s*/gm, "");
   s = s.replace(/[A-Za-z]:[\\/][^\s，。；、）)]+/g, " ");
   s = s.replace(/\b[\w./\\-]+\.(?:md|json|csv|tsx?|jsx?|mjs|cjs|docx|xlsx|pptx|pdf|png|jpe?g|log)\b/gi, " ");
+  // 工单/任务内部编号（task-20261115-a1b2c3）：念出来是噪音，用户不记这些
+  s = s.replace(/\b[\w]*-\d{6,}[\w-]*/g, " ");
   s = s.replace(/\b(?:[0-9a-f]{8,}|[0-9a-f-]{16,})\b/gi, " ");
   s = s.replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, " ");
   s = s.replace(/[ \t]+/g, " ");
@@ -220,8 +222,6 @@ function detailSpeech(card: SpeechCard, badge: string): SpeechCandidate | null {
         "low", "team",
       );
     }
-    case "派单":
-      return candidate(who ? `${SELF}已把任务派给${who}，开始处理。` : `${SELF}已派单，开始处理。`, "low", "dispatch");
     case "工具": {
       // 只念有中文语义的工具卡（技能激活 / 预算提示 / 已退出安全模式）；
       // 纯英文工具名、插件 ID、失败堆栈一律跳过
@@ -262,6 +262,8 @@ export function pickCardSpeech(card: SpeechCard, prefs: VoicePrefs): SpeechCandi
   if (!prefs.voiceEnabled) return null;
   const badge = card.badge ?? "";
   const limit = prefs.voiceMaxChars;
+  /** 这张卡的主体是谁（成员名）：`阿明 开工 · task-x` → 阿明；取不到就是空 */
+  const who = memberOf(card.title);
 
   if (card.kind === "user" || card.kind === "lynn") return null;
 
@@ -270,8 +272,10 @@ export function pickCardSpeech(card: SpeechCard, prefs: VoicePrefs): SpeechCandi
     return candidate(cleanSpeechText(raw, Math.min(limit, 80)), "normal", "reminder");
   }
 
-  // system 卡绝大多数是内务状态，只放行拍板与异常；详细档额外放行心跳巡检
-  const systemAllowed = ["需要你拍板", "崩溃", "未完成"];
+  // system 卡绝大多数是内务状态，只放行拍板、异常与**进度**。
+  // 「进度」必须进来（2026-11-15）：卡住 / 无交付物关单这三张卡都是 system+进度，
+  // 此前被这一行整类拦掉——开着语音也听不到任务停了，这是"进度播报"最大的一个洞。
+  const systemAllowed = ["需要你拍板", "崩溃", "未完成", "进度"];
   if (prefs.voiceScope === "detail") systemAllowed.push("心跳");
   if (card.kind === "system" && !systemAllowed.includes(badge)) return null;
 
@@ -297,10 +301,22 @@ export function pickCardSpeech(card: SpeechCard, prefs: VoicePrefs): SpeechCandi
       const member = memberOf(card.title);
       return candidate(member ? `${member}交回了结果，等${SELF}验收。` : `成员交回了结果，等${SELF}验收。`, "normal", "delivery");
     }
+    case "派单":
+      // 开工本身就是第一个进度节点：默认档就要听见"派给谁了"，
+      // 否则耳朵里的第一条进度永远是"交回了结果"，中间发生了什么一无所知。
+      return candidate(who ? `${SELF}已把任务派给${who}，开始处理。` : `${SELF}已派单，开始处理。`, "normal", "dispatch");
     case "进度": {
-      const raw = cleanSpeechText(card.title ?? "", 60);
+      const raw = cleanSpeechText(card.title || card.text || "", Math.min(limit, 80));
+      // 里程碑卡：`阿计 第 3 步 · task-x` → `阿计已推进到第 3 步。`
       const m = raw.match(/^(.+?)\s*第\s*(\d+)\s*步/);
-      return candidate(m ? `${m[1].trim()}已推进到第 ${m[2]} 步。` : raw, "normal", "progress");
+      if (m) return candidate(`${m[1].trim()}已推进到第 ${m[2]} 步。`, "normal", "progress");
+      // 系统进度卡（卡住 / 没有交付物关单）：正文是给眼睛看的长句，这里只念一句结论
+      const note = String(card.text ?? card.title ?? "");
+      if (/卡住/.test(note)) return candidate("有一张单卡住了，我先判断是重做还是收尾。", "normal", "progress");
+      if (/没有任何交付物|未完成|已关单/.test(note)) {
+        return candidate("有一张单没交出交付物，我先收尾了。", "normal", "progress");
+      }
+      return candidate(raw, "normal", "progress");
     }
     case "审查": {
       const raw = cleanSpeechText([card.title, firstSentence(card.body ?? "")].filter(Boolean).join("，"), Math.min(limit, 60));

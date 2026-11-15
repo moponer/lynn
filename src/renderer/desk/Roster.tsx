@@ -73,8 +73,13 @@ export function Roster({
     for (const d of decisions) seenRef.current.add(d.id);
     if (fresh) setDIdx(Math.max(0, decisions.findIndex((d) => d.id === fresh.id)));
   }, [decisions]);
-  // 只有 in_review 可验收；blocked 只给"停掉/继续"，绝不出现"验收归档"
-  const sealJob = current && current.action !== "none" ? current : desk.jobs.find((j) => j.action !== "none");
+  // 只有 in_review 可验收；blocked 只给"停掉/继续"，绝不出现"验收归档"。
+  // 用户从台账主动点开别群的单时才跟着走（印章头带回程入口）；自动兜底只挑本群的单，
+  // 否则新建群会莫名其妙冒出别群的验收/卡住印章（2026-11-15）。
+  const sealJob =
+    current && current.action !== "none"
+      ? current
+      : desk.jobs.find((j) => j.action !== "none" && (!j.threadId || j.threadId === desk.thread.id));
   // C3：印章头要报"这张单来自哪个会话"——跨会话时给回程入口，同会话不啰嗦
   const sealSource =
     sealJob?.threadId && sealJob.threadId !== desk.thread.id
@@ -466,39 +471,110 @@ export function Roster({
         {(() => {
           const u = desk.usage;
           const rawHit = cacheHitRate(u);
-          const hit = rawHit === undefined ? undefined : Math.round(rawHit * 10) / 10;
-          const hasLynn = hit !== undefined || (u.contextPercent ?? 0) > 0 || u.contextTokens > 0;
-          const used = rosterMembers.filter((m) => m.hitRate !== undefined);
-          if (!hasLynn && used.length === 0) return null;
-          const pct = (n?: number | null) => (typeof n === "number" ? `${n}%` : "—");
+          const lynnHit = rawHit === undefined ? undefined : Math.round(rawHit * 1000) / 10;
+          // 计费 token（不含缓存写）；上下文占比单独成一行
+          const lynnTokens = u.sessionIn + u.sessionOut;
+          const lynnTokensK = lynnTokens / 1000;
+          const ctxPct = u.contextPercent;
+          const members = rosterMembers.filter((m) => (m.budgetUsed ?? 0) > 0 || m.hitRate !== undefined);
+          if (lynnTokens <= 0 && lynnHit === undefined && members.length === 0) return null;
+          const fmtK = (k: number) => `${Math.round(k * 10) / 10}`;
+          const tokenMax = Math.max(lynnTokensK, ...members.map((m) => m.budgetUsed ?? 0), 0.001);
+          const barW = (k: number) => `${Math.max(2, Math.round((k / tokenMax) * 100))}%`;
           return (
             <div className="usage-board" aria-label={t("board.cap")}>
-              <div className="usage-cap">{t("board.cap")}</div>
-              {hasLynn && (
-                <div
-                  className="usage-row lynn"
-                  title={
-                    u.contextTokens > 0
-                      ? `${t("board.ctx")} ${Math.round(u.contextTokens / 1000)}K / ${Math.round(u.contextWindow / 1000)}K${
-                          typeof u.turnHitRate === "number" ? ` · ${t("board.hit")} ${u.turnHitRate}%` : ""
-                        }`
-                      : undefined
-                  }
-                >
-                  <span className="usage-name">{t("board.lynn")}</span>
-                  <span className="usage-vals">
-                    {t("board.ctx")} {pct(u.contextPercent)} · {t("board.hit")} {pct(hit)}
-                  </span>
-                </div>
-              )}
-              {used.map((m) => (
-                <div className="usage-row" key={`${m.teamId}::${m.name}`} title={m.role}>
-                  <span className="usage-name">{m.name}</span>
-                  <span className="usage-vals">
-                    {(m.budgetUsed ?? 0) > 0 ? `${m.budgetUsed}K` : "—"} · {t("board.hit")} {pct(m.hitRate)}
-                  </span>
-                </div>
-              ))}
+              {/* 模块一：Token 消耗（风铃指挥 + 各成员，带占比条） */}
+              <div className="ub-mod">
+                <div className="ub-mod-cap">{t("board.token")}</div>
+                {lynnTokens > 0 && (
+                  <div
+                    className="ub-row lynn"
+                    title={`${t("board.ctx")} ${fmtK(lynnTokensK)}K / ${Math.round(u.contextWindow / 1000)}K`}
+                  >
+                    <span className="ub-name">
+                      <span className="ub-tag">{t("board.lead")}</span>
+                      {t("board.lynn")}
+                    </span>
+                    <span className="ub-bar">
+                      <i style={{ width: barW(lynnTokensK) }} />
+                    </span>
+                    <span className="ub-val">
+                      {fmtK(lynnTokensK)}
+                      <i className="u">K</i>
+                    </span>
+                  </div>
+                )}
+                {ctxPct != null && ctxPct > 0 && lynnTokens > 0 && (
+                  <div className="ub-sub">
+                    {t("board.ctx")} {Math.round(ctxPct)}%
+                  </div>
+                )}
+                {members
+                  .filter((m) => (m.budgetUsed ?? 0) > 0)
+                  .map((m) => (
+                    <div className="ub-row" key={`${m.teamId}::${m.name}`} title={m.role}>
+                      <span className="ub-name">
+                        {m.name}
+                        {m.acceptor && <span className="ub-tag accept">{t("roster.acceptor")}</span>}
+                      </span>
+                      <span className="ub-bar">
+                        <i style={{ width: barW(m.budgetUsed ?? 0) }} />
+                      </span>
+                      <span className="ub-val">
+                        {fmtK(m.budgetUsed ?? 0)}
+                        <i className="u">K</i>
+                      </span>
+                    </div>
+                  ))}
+              </div>
+              {/* 模块二：缓存命中（风铃指挥 + 各成员） */}
+              <div className="ub-mod">
+                <div className="ub-mod-cap">{t("board.cache")}</div>
+                {lynnHit !== undefined && (
+                  <div className="ub-row lynn">
+                    <span className="ub-name">
+                      <span className="ub-tag">{t("board.lead")}</span>
+                      {t("board.lynn")}
+                    </span>
+                    <span className="ub-bar cache">
+                      <i style={{ width: `${lynnHit}%` }} />
+                    </span>
+                    <span className="ub-val">
+                      {typeof lynnHit === "number" ? (
+                        <>
+                          {lynnHit}
+                          <i className="u">%</i>
+                        </>
+                      ) : (
+                        "—"
+                      )}
+                    </span>
+                  </div>
+                )}
+                {members
+                  .filter((m) => m.hitRate !== undefined)
+                  .map((m) => (
+                    <div className="ub-row" key={`${m.teamId}::${m.name}`} title={m.role}>
+                      <span className="ub-name">
+                        {m.name}
+                        {m.acceptor && <span className="ub-tag accept">{t("roster.acceptor")}</span>}
+                      </span>
+                      <span className="ub-bar cache">
+                        <i style={{ width: `${m.hitRate}%` }} />
+                      </span>
+                      <span className="ub-val">
+                        {typeof m.hitRate === "number" ? (
+                          <>
+                            {m.hitRate}
+                            <i className="u">%</i>
+                          </>
+                        ) : (
+                          "—"
+                        )}
+                      </span>
+                    </div>
+                  ))}
+              </div>
             </div>
           );
         })()}
@@ -638,6 +714,7 @@ export function MemberCard({
       <div className="mcard-txt">
         <div className="mcard-name">
           {m.name}
+          {m.acceptor && <span className="mcard-badge acceptor">{t("roster.acceptor")}</span>}
           {m.status === "running" && <span className="mcard-live" aria-label={t("feed.live")} />}
         </div>
         <div className="mcard-brief" title={brief}>

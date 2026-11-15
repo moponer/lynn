@@ -134,6 +134,8 @@ export interface MemberRunInput {
   onToolCall?: (ev: { name: string; args: string; outcome: string; ok: boolean; ms: number }) => void;
   /** 写前通知（M1-12 检查点） */
   onBeforeWrite?: (rel: string, full: string, existed: boolean) => void;
+  /** 写盘前的文本改写（2026-11-15 去 AI 味插件）：只作用于 write_file 的产出 */
+  onWriteContent?: (rel: string, content: string) => string;
   /** office 能力桥接（M2-06）：壳按引擎健康注入；不注入时成员调 office 工具会得到如实提示 */
   office?: ToolkitOptions["office"];
   /** browser 能力桥接（M2-07）：单例控制器；不注入时成员调 browser 工具会得到如实提示 */
@@ -317,6 +319,7 @@ export async function runMemberTask(input: MemberRunInput): Promise<MemberRunRes
   const toolkit = new Toolkit(input.workdir, {
     onAudit: input.onAudit,
     onBeforeWrite: input.onBeforeWrite,
+    onWriteContent: input.onWriteContent,
     office: input.office,
     browser: input.browser,
     kb: input.kb,

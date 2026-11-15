@@ -125,6 +125,8 @@ export interface DeskMember {
   progress: number;
   /** 最近一步动作（进度条答不了"在干什么"） */
   lastStep?: string;
+  /** 常驻验收员岗位（2026-11-15）：只做验收、不参与执行 */
+  acceptor?: boolean;
   foot: string;
   /** 累计消耗（K token）：看板行 */
   budgetUsed?: number;
@@ -139,6 +141,8 @@ export interface DeskDecision {
   id: string;
   kind: "question" | "plan" | "approval";
   jobId?: string;
+  /** 这张卡属于哪个群（2026-11-15）：右栏只画本群的裁决 */
+  threadId?: string;
   who: string;
   at: string;
   question: string;
@@ -193,7 +197,7 @@ export interface Desk {
   /** 任务契约是否自动开始（设置页可改） */
   autoStart: boolean;
   /** 当前会话线程与列表（M1-14） */
-  thread: { id: string; title: string };
+  thread: { id: string; title: string; halted?: boolean };
   /** C3：会话行带"这个会话里在办 / 已归档的单"计数（后端汇总，前端不猜） */
   threads: {
     id: string;
@@ -285,6 +289,7 @@ function toDecision(d: Decision): DeskDecision {
     id: d.id,
     kind: d.kind ?? "question",
     jobId: d.jobId,
+    threadId: d.threadId,
     who: d.from,
     at: d.at ?? "",
     question: d.title + (d.detail ? `——${d.detail}` : ""),
@@ -324,6 +329,7 @@ export function deskFromSnapshot(snap: SessionSnapshot): Desk {
           model: m.model ?? "未指定",
           color: m.color,
           avatarId: m.avatarId,
+          acceptor: m.acceptor,
           status: m.status,
           statusLabel: MEMBER_STATE_LABEL[m.status] ?? m.status,
           jobId: job?.id,
@@ -372,8 +378,12 @@ export function deskFromSnapshot(snap: SessionSnapshot): Desk {
       .map((j) => ({ id: j.id, title: j.title, status: j.status, threadId: j.threadId, at: j.at })),
     members,
     teamCount: board.teams.filter((t) => t.status !== "dissolved").length,
-    // 解散的团队不再出现在任何"等你拍板"里：印章只对在职的队伍生效
+    // 解散的团队不再出现在任何"等你拍板"里：印章只对在职的队伍生效。
+    // 群隔离（2026-11-15）：带群标记的裁决只画本群的——新建群不该冒出别群的问题/契约/审批。
+    // 没有标记的是老数据/预览假桥，照旧显示（真内核从现在起每张卡都带标记）。
     decisions: board.decisions.filter((d) => {
+      const cur = snap.thread?.id;
+      if (cur && d.threadId && d.threadId !== cur) return false;
       const teamId = board.track.find((t) => t.id === d.jobId)?.teamId;
       const team = board.teams.find((t) => t.id === teamId);
       return !team || team.status !== "dissolved";
@@ -409,6 +419,55 @@ export interface DeskOutput {
   /** 总共被几张单产出/更新过 */
   jobs: number;
   updatedAt?: string;
+}
+
+/**
+ * 本群工单（2026-11-15 统一口径）：没有 threadId 的老数据算本群，带 threadId 的
+ * 必须与当前群一致。值台、控制台、态势球都走这一处——此前控制台直接读 desk.jobs，
+ * 把别群的单算进「任务 / 待办 / 球面」，在 B 群提示「有交付等你验收」点开却是 A 群的单。
+ */
+export function jobsInThread(desk: Desk): DeskJob[] {
+  return desk.jobs.filter((j) => !j.threadId || j.threadId === desk.thread.id);
+}
+
+/**
+ * 交付箱口径（值台与控制台共用，2026-11-15 抽出）：
+ *  - 只认 **deliverables**（用户要带走的东西），不再把 command 证据当产物；
+ *  - 去重键是**解析后的绝对路径**（同一物理文件被多张单更新过 = 一条，后写的上位）；
+ *  - 含归档单：验收归档之后产物不会从柜子里消失。
+ */
+export function outputsOf(desk: Desk): DeskOutput[] {
+  const resolvePath = (workspaceRoot: string | undefined, p: string): string => {
+    const isAbs = /^[a-zA-Z]:[\\/]/.test(p) || p.startsWith("/") || p.startsWith("\\\\");
+    const base = (workspaceRoot ?? "").replace(/[\\/]+$/, "");
+    return isAbs || !base ? p : `${base}/${p.replace(/^[\\/]+/, "")}`;
+  };
+  const byPath = new Map<string, DeskOutput>();
+  for (const j of desk.jobs) {
+    for (const d of j.deliverables ?? []) {
+      const path = d.path || d.ref;
+      if (!path) continue;
+      const abs = resolvePath(j.workspaceRoot, path);
+      const key = abs.replace(/\\/g, "/").replace(/\/{2,}/g, "/").toLowerCase();
+      // 固化时刻优先（同一文件被两张单更新过时，它才知道谁更晚）
+      const stamp = d.at ?? j.at;
+      const hit = byPath.get(key);
+      if (!hit) {
+        byPath.set(key, { path, abs, ref: d.ref, bytes: d.bytes, job: j, jobs: 1, updatedAt: stamp });
+        continue;
+      }
+      hit.jobs += 1;
+      // 后写入的那张单上位：它的 ref/大小才是文件现在的样子
+      if ((stamp ?? "") >= (hit.updatedAt ?? "")) {
+        hit.job = j;
+        hit.abs = abs;
+        hit.ref = d.ref;
+        hit.bytes = d.bytes ?? hit.bytes;
+        hit.updatedAt = stamp;
+      }
+    }
+  }
+  return [...byPath.values()].sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""));
 }
 
 export function statusChipClass(job: DeskJob): string {

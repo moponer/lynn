@@ -256,6 +256,42 @@ rpc("preview.read", async (params, ctx) => {
     const buf = fs.readFileSync(target);
     return { ok: true, kind: "image", dataUrl: `data:${mime[ext]};base64,${buf.toString("base64")}`, ext, bytes };
   }
+  /**
+   * 音频 / 视频（2026-11-15）：常见格式直接给 data URL，渲染层用原生 <audio>/<video> 播放。
+   * 只认 Chromium 真能解码的容器/编码——把 .wma/.mkv 这类塞进 <audio> 只会得到一块黑着的控件，
+   * 不如如实说"没有内置播放"并给系统程序出口。
+   * 上限压在 IPC 能一次带动的量级（base64 膨胀 33%），超了不硬塞。
+   */
+  const audioMime: Record<string, string> = {
+    mp3: "audio/mpeg", wav: "audio/wav", ogg: "audio/ogg", oga: "audio/ogg",
+    m4a: "audio/mp4", aac: "audio/aac", flac: "audio/flac", opus: "audio/ogg", weba: "audio/webm",
+  };
+  const videoMime: Record<string, string> = {
+    mp4: "video/mp4", m4v: "video/mp4", webm: "video/webm", ogv: "video/ogg",
+  };
+  if (audioMime[ext] || videoMime[ext]) {
+    if (bytes === 0) return { ok: true, kind: "empty", ext, bytes };
+    const isAudio = Boolean(audioMime[ext]);
+    const limit = (isAudio ? 20 : 32) * 1024 * 1024;
+    if (bytes > limit) {
+      return {
+        ok: true,
+        kind: "binary",
+        ext,
+        bytes,
+        error: `文件超过 ${isAudio ? 20 : 32}MB，内置播放器带不动（一次性搬运整份字节会卡住界面），请用系统程序打开。`,
+      };
+    }
+    const buf = await fs.promises.readFile(target);
+    const mimeType = isAudio ? audioMime[ext] : videoMime[ext];
+    return {
+      ok: true,
+      kind: isAudio ? "audio" : "video",
+      ext,
+      bytes,
+      dataUrl: `data:${mimeType};base64,${buf.toString("base64")}`,
+    };
+  }
   // PDF：沙箱 iframe 里开不了 Chromium 阅读器，返回标记由抽屉引导开独立预览窗口
   if (ext === "pdf") return { ok: true, kind: "pdf", ext, bytes };
   // Office 三件套（docx/xlsx/pptx）：渲染层用开源库保真渲染（docx-preview /
@@ -284,11 +320,21 @@ rpc("preview.read", async (params, ctx) => {
   if (bytes === 0) return { ok: true, kind: "empty", ext, bytes };
   // 二进制（xlsx/pptx/zip…）不做乱码文本预览，如实说清有什么替代路径
   if (buf.includes(0)) {
+    // 常见但浏览器解不了的格式：说清"为什么看不了 + 替代路径"，比一句"二进制文件"有用
     const hint: Record<string, string> = {
       xlsx: "Excel 文件暂无内置预览。可以让风铃用 office_read_table 把数据读出来，或转存成 CSV 再看。",
       pptx: "演示文稿暂无内置预览，可用系统程序打开。",
       doc: "旧版 .doc 不支持内置预览；让风铃转存成 .docx 就能直接看。",
+      xls: "旧版 .xls 不支持内置预览；让风铃转存成 .xlsx 或 CSV 就能直接看。",
+      ppt: "旧版 .ppt 不支持内置预览；让风铃转存成 .pptx 就能直接看。",
       zip: "压缩包不做解包预览，可用系统程序打开。",
+      rar: "压缩包不做解包预览，可用系统程序打开。",
+      "7z": "压缩包不做解包预览，可用系统程序打开。",
+      exe: "可执行文件不做内置预览（也不该在预览里点开它），需要时用系统程序打开。",
+      wma: "这个音频编码（.wma）内置播放器解不了，可用系统程序打开的播放器听。",
+      mkv: "这个视频容器（.mkv）内置播放器解不了，可用系统程序打开的播放器看。",
+      avi: "这个视频容器（.avi）内置播放器解不了，可用系统程序打开的播放器看。",
+      mov: "这个视频容器（.mov）内置播放器解不了，可用系统程序打开的播放器看。",
     };
     return { ok: true, kind: "binary", ext, bytes, error: hint[ext] };
   }

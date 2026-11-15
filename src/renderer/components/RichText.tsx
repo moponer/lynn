@@ -135,6 +135,18 @@ const COMPONENTS: Components = {
   pre({ children }) {
     return <>{children}</>;
   },
+  /**
+   * 表格外面套一层横向滚动壳（2026-11-15）：
+   * 窄卡片里的表格不该靠"把列压到一列一个字"来适配宽度——
+   * 宁可整张表横向滚动，也不让表头变成竖排、单词被切成两半。
+   */
+  table({ children }) {
+    return (
+      <div className="md-table-wrap">
+        <table>{children}</table>
+      </div>
+    );
+  },
   code({ className, children, ...props }) {
     const text = nodeText(children).replace(/\n$/, "");
     const lang = /language-([\w+-]+)/.exec(className ?? "")?.[1];

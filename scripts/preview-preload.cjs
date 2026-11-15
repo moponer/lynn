@@ -212,6 +212,36 @@ if (process.env.LYNN_PREVIEW_LONGREPORT) {
   });
 }
 
+// 表格回报走查（2026-11-15）：成员把环境自检写成 Markdown 表格。
+// 此前表头被压成竖排（"实测结果"一列一个字）、python 被切成 pyt/hon，
+// 展开后仍被 320px 的内层滚动框截住，还看不到滚动条。
+if (process.env.LYNN_PREVIEW_TABLEREPORT) {
+  feed.push({
+    id: "c-tablereport",
+    kind: "tool",
+    badge: "回报",
+    title: "环境检测员 回报 · task-env",
+    meta: "6 轮 · 78s",
+    jobId: "WO-2419",
+    author: { kind: "member", name: "环境检测员", memberId: "环境检测员", role: "环境核查", avatarId: "a05", teamId: "t1" },
+    body:
+      "【完成】环境自检已跑完，逐项实测结果如下（只读检查，未改动任何系统配置）。\n\n" +
+      "| 项 | 实测结果 | 关键原始输出 |\n" +
+      "| --- | --- | --- |\n" +
+      "| python | 存在 | Python 3.13.12（exit=0） |\n" +
+      "| python3 | 不存在 | ERR：无法将“python3”项识别为 cmdlet、函数、脚本文件或可运行程序的名称。 |\n" +
+      "| py | 存在 | Python 3.13.12（exit=0） |\n" +
+      "| node | 可用 | v26.12.1（exit=0） |\n" +
+      "| npm | 可用 | 11.20.0（exit=0） |\n" +
+      "| ffmpeg | 可用 | ffmpeg version 8.1.1-essentials_build-www.gyan.dev（-version 被当作参数，报 Unrecognized option；编码实测正常） |\n" +
+      "| ffprobe | 可用 | ffprobe version 8.1.1-essentials_build-www.gyan.dev（同上，命令可执行） |\n" +
+      "| git | 可用 | git version 2.51.0.windows.1（exit=0） |\n\n" +
+      "结论：Python 与 Node 工具链齐备；python3 这个别名在本机不存在，脚本里统一写 python 或 py。\n" +
+      "未做：没有跑任何需要联网的安装命令。",
+    createdAt: "14:52",
+  });
+}
+
 const avatarPicks = {};
 const snapshot = {
   workspace: {
@@ -380,9 +410,16 @@ const snapshot = {
         workspaceRoot: "F:/spiker/hermix-desktop",
         evidenceCount: process.env.LYNN_PREVIEW_HEAVY ? 22 : 2,
         // 内置预览走查：交付箱里有一份可点开的报告
+        // 彩色类型图标走查（2026-11-15）：一份交付里凑齐表格/PDF/图片/音频/压缩包/文档
         deliverables: [
           { path: "report_0914.md", ref: "artifacts/report_0914.md", bytes: 2048 },
           { path: "rowcount.log", ref: "artifacts/rowcount.log", bytes: 512 },
+          { path: "季度汇总.xlsx", ref: "artifacts/quarterly.xlsx", bytes: 18240 },
+          { path: "评审结论.pdf", ref: "artifacts/review.pdf", bytes: 220000 },
+          { path: "封面.png", ref: "artifacts/cover.png", bytes: 96000 },
+          { path: "会议录音.mp3", ref: "artifacts/meeting.mp3", bytes: 3145728 },
+          { path: "交付包.zip", ref: "artifacts/delivery.zip", bytes: 745000 },
+          { path: "说明.docx", ref: "artifacts/readme.docx", bytes: 12000 },
         ],
         // 详情区走查：时间线只留两条有信息量的（session 与最后一条 transition 会被过滤）
         round: 2,
@@ -485,6 +522,7 @@ const snapshot = {
         ? [
             {
               id: "dc-approve",
+              threadId: "t-main",
               from: "顾明",
               title: "顾明 要删除文件（WO-2418）",
               detail: "命令：del issues_0914.bak\n工作区：tasks/WO-2418/workspace",
@@ -497,6 +535,7 @@ const snapshot = {
         : []),
       {
         id: "dc-plan",
+        threadId: "t-main",
         from: "顾明",
         title: "把 issues_0914.csv 整理成周报第 3 节",
         detail: "计划：清洗两行脏数据 → 按周聚合 → 出周报草稿",
@@ -511,10 +550,14 @@ const snapshot = {
           member: "顾明",
           budgetTokens: 30000,
           deadline: "15:00",
+          // 契约卡要回答「动哪个项目、落在哪个目录」（2026-11-15 控制台补齐）
+          projectName: "我的笔记",
+          workspaceRoot: "F:/spiker/my-notes",
         },
       },
       {
         id: "dc-ask",
+        threadId: "t-main",
         from: "顾明",
         title: "周报要按自然周还是按交付周聚合？",
         detail: "影响第 3 节的分桶口径",
@@ -523,11 +566,14 @@ const snapshot = {
       },
       {
         id: "dc-appr",
+        threadId: "t-main",
         from: "顾明",
         title: "允许运行 run_command：node scripts/aggregate.mjs",
         detail: "只读工作区脚本，输出落 tasks/WO-2418/workspace/",
         kind: "approval",
         jobId: "WO-2418",
+        // 族级放行：控制台要给出「这类以后都准」（2026-11-15）
+        family: "delete",
         at: "11-02 14:41",
       },
     ].filter(Boolean),
@@ -556,7 +602,9 @@ const snapshot = {
     gated: { mcp: false, skills: false },
   },
   // LYNN_PREVIEW_EMPTY=1：走查"最后一条会话也删掉"之后的空场
-  thread: process.env.LYNN_PREVIEW_EMPTY ? { id: "", title: "" } : { id: "t-main", title: "月报整理" },
+  thread: process.env.LYNN_PREVIEW_EMPTY
+    ? { id: "", title: "" }
+    : { id: "t-main", title: "月报整理", halted: false },
   threads: process.env.LYNN_PREVIEW_EMPTY
     ? []
     : [
@@ -802,21 +850,71 @@ contextBridge.exposeInMainWorld("lynn", {
   onVoice: () => () => {},
   rpc: async (method, params) => {
     if (method === "session.snapshot") return snapshot;
+    // 新建群（2026-11-15）：假桥也得真的换当前群，才能走查「新群右栏不该挂着别群的等你拍板」。
+    // 裁决保留在 board 里（带 threadId=t-main），由渲染层按当前群过滤，跟真内核的快照口径一致。
+    if (method === "session.new") {
+      const id = `th-new-${Date.now().toString(36)}`;
+      snapshot.threads.unshift({ id, title: "新群", updatedAt: new Date().toISOString(), unread: 0 });
+      snapshot.thread = { id, title: "新群" };
+      snapshot.announcement = "";
+      snapshot.feed = [];
+      return { ok: true, threadId: id };
+    }
     // 切群（2026-11-12）：右栏「去那个群」组头要真能跳——假桥也得认这件事
     if (method === "thread.switch") {
       const id = String(params?.id ?? "");
       const target = snapshot.threads.find((t) => t.id === id);
       if (!target) return { ok: false, error: "没有这个群" };
-      snapshot.thread = { id: target.id, title: target.title };
+      snapshot.thread = { id: target.id, title: target.title, ...(target.halted ? { halted: true } : {}) };
       // 公告跟着当前群走（否则公告永远停在第一个群）
       snapshot.announcement = target.announcement ?? "";
       return { ok: true, thread: { id: target.id, title: target.title } };
+    }
+    // 终止本群（2026-11-15）：成员停机 + 心跳/巡检全停，发消息才恢复
+    if (method === "thread.halt") {
+      const id = String(params?.id || snapshot.thread?.id || "");
+      if (!id) return { ok: false, stopped: 0, threadId: "", error: "没有可终止的群" };
+      if (snapshot.thread && snapshot.thread.id === id) snapshot.thread.halted = true;
+      const meta = snapshot.threads.find((t) => t.id === id);
+      if (meta) meta.halted = true;
+      snapshot.running = [];
+      return { ok: true, stopped: 1, threadId: id };
     }
     // 内置预览走查：假桥按后缀给内容，渲染层照常排版/高亮，不启外部程序
     if (method === "preview.pdfWindow") return { ok: true };
     if (method === "preview.read") {
       const ref = String(params?.ref || "report.md");
       const ext = ref.split(".").pop().toLowerCase();
+      // 音频走查（2026-11-15）：现场合成 1 秒 440Hz WAV，播放器能真点开
+      if (ext === "mp3" || ext === "wav" || ext === "m4a" || ext === "flac" || ext === "ogg") {
+        // 注意：preload 里没有 Node 的 Buffer（沙箱环境），只用 Uint8Array + DataView + btoa
+        const rate = 8000;
+        const n = rate;
+        const bytes = new Uint8Array(44 + n * 2);
+        const dv = new DataView(bytes.buffer);
+        const ascii = (off, s) => {
+          for (let i = 0; i < s.length; i += 1) bytes[off + i] = s.charCodeAt(i);
+        };
+        ascii(0, "RIFF");
+        dv.setUint32(4, 36 + n * 2, true);
+        ascii(8, "WAVE");
+        ascii(12, "fmt ");
+        dv.setUint32(16, 16, true);
+        dv.setUint16(20, 1, true);
+        dv.setUint16(22, 1, true);
+        dv.setUint32(24, rate, true);
+        dv.setUint32(28, rate * 2, true);
+        dv.setUint16(32, 2, true);
+        dv.setUint16(34, 16, true);
+        ascii(36, "data");
+        dv.setUint32(40, n * 2, true);
+        for (let i = 0; i < n; i += 1) {
+          dv.setInt16(44 + i * 2, Math.round(Math.sin(((i / rate) * 2 * Math.PI * 440)) * 8000), true);
+        }
+        let bin = "";
+        for (let i = 0; i < bytes.length; i += 1) bin += String.fromCharCode(bytes[i]);
+        return { ok: true, kind: "audio", ext, bytes: bytes.length, dataUrl: `data:audio/wav;base64,${btoa(bin)}` };
+      }
       if (ext === "ts" || ext === "tsx") {
         return {
           ok: true, kind: "text", ext, bytes: 512,
@@ -1183,6 +1281,9 @@ contextBridge.exposeInMainWorld("lynn", {
       };
     }
     if (method === "model.test") return { ok: false, error: "预览模式不连接真实端点" };
+    // 关于页要显示版本号（走查里不假装能检查更新，理由如实写）
+    if (method === "update.status")
+      return { supported: false, reason: "走查环境不检查更新", version: "0.0.1", phase: "idle" };
     if (method === "model.save") return { ok: true, id: "m-preview" };
     if (method.startsWith("model.")) return { ok: true };
     if (method === "ui.plugins") {
@@ -1242,6 +1343,8 @@ contextBridge.exposeInMainWorld("lynn", {
     }
     if (method === "persona.get") return { text: "## 语气与人设\n\n- 称呼用户为「你」；提到自己用「我」或「风铃」。\n- 简洁。汇报用短段落；不确定就问，不编造。\n" };
     if (method === "persona.versions") return { versions: [{ id: "p-abc", savedAt: new Date().toISOString(), chars: 128 }] };
+  // 去 AI 味（2026-11-15）：预览里插件是真装着的（仓库就在旁边），所以如实报 loaded
+  if (method === "humanizer.status") return { enabled: true, loaded: true, dir: "~/.lynn/plugins/humanizer-stream", version: "0.1.0" };
     if (method === "workshop.list") return { drafts: [] };
     if (method === "window.control") return { ok: true, maximized: false };
     if (method === "i18n.get") {

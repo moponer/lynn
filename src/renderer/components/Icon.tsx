@@ -45,6 +45,7 @@ const PATHS: Record<string, string> = {
   file: '<path d="M6 2h8l6 6v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z"/><path d="M14 2v6h6"/>',
   stop: '<rect x="6" y="6" width="12" height="12" rx="2"/>',
   megaphone: '<path d="M3 11v2l11 4V7L3 11z"/><path d="M14 7v10"/><path d="M17 9a3 3 0 0 1 0 6"/>',
+  gauge: '<path d="M3 13a9 9 0 0 1 18 0"/><path d="M12 13l4-4"/>',
 };
 
 export type IconName = keyof typeof PATHS;

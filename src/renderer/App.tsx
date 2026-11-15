@@ -24,6 +24,7 @@ import { BootScreen } from "./boot/BootScreen";
 import { ambientForTheme, type AmbientMode } from "../shared/ambient";
 import { ZH_STRINGS } from "../shared/i18n-strings";
 import { useVoicePlayer } from "./voice/useVoicePlayer";
+import { AskHost, askConfirm } from "./components/ConfirmCard";
 
 /** 舞台视图选择（跨会话记住）：值台 = 原来的桌面，控制台 = stage.console 视图 */
 const STAGE_KEY = "lynn.stage.view";
@@ -457,6 +458,29 @@ export default function App() {
     }
   }, [refresh]);
 
+  /**
+   * 终止本群（2026-11-15）：成员停机 + 当前回合中断 + 心跳/巡检/验收叫醒/定时任务全停，
+   * 直到用户在这个群发出新消息。与「停止本轮」（只停当前回合）是两件事。
+   */
+  const onHalt = useCallback(async () => {
+    setNotice(null);
+    try {
+      const r = await rpc("thread.halt", {});
+      if (!r.ok) {
+        setNotice(r.error ?? "终止失败");
+        return;
+      }
+      setNotice(
+        r.stopped > 0
+          ? `已终止本群：${r.stopped} 张在跑的单已停机，心跳与巡检也停了。发一条消息即可恢复。`
+          : "已终止本群：心跳、巡检、验收叫醒与排队全部暂停。发一条消息即可恢复。",
+      );
+      await refresh();
+    } catch (err) {
+      setNotice(`终止失败：${err instanceof Error ? err.message : String(err)}`);
+    }
+  }, [refresh]);
+
   const onQueue = useCallback(
     async (action: "clear" | "remove", id?: string) => {
       await rpc("session.queue", { action, id });
@@ -493,9 +517,13 @@ export default function App() {
         const drives = paths.filter((p) => /^[a-zA-Z]:[\\/]?$/.test(p));
         let allowDriveRoot = false;
         if (drives.length) {
-          const ok = window.confirm(
-            `将把整个磁盘授权为只读：${drives.join("、")}\n\n成员能读盘上的所有文件（写仍然只能在任务工作区）。确定吗？`,
-          );
+          const ok = await askConfirm({
+            title: "把整个磁盘授权为只读？",
+            body: `${drives.join("、")} 会被整盘授权：成员能读盘上的所有文件。`,
+            note: "写仍然只能在任务工作区；读的范围一旦放开，等于把整台机器的文件摊开给她看。",
+            confirmLabel: "仍然授权",
+            danger: true,
+          });
           if (!ok) return;
           allowDriveRoot = true;
         }
@@ -566,7 +594,13 @@ export default function App() {
       const isDrive = (p: string) => /^[a-zA-Z]:[\\/]?$/.test(p);
       const drives = paths.filter(isDrive);
       if (drives.length) {
-        const ok = window.confirm(`将把整个磁盘作为只读根：${drives.join("、")}\n\n成员能读盘上所有文件（写仍然只能在工作区）。继续？`);
+        const ok = await askConfirm({
+          title: "把整个磁盘作为只读根？",
+          body: `${drives.join("、")} 会作为本群的可读根：成员能读盘上所有文件。`,
+          note: "写仍然只能在工作区。",
+          confirmLabel: "仍然添加",
+          danger: true,
+        });
         if (!ok) return;
       }
       for (const p of paths) {
@@ -590,9 +624,11 @@ export default function App() {
   const onSnapshotProject = useCallback(
     async (taskId: string) => {
       setNotice(null);
-      const ok = window.confirm(
-        "把这张单的工作区复制进任务沙箱？\n\n会排除 node_modules / .git / dist 等大目录，原项目一个字节都不动。之后成员在副本里跑构建和测试。",
-      );
+      const ok = await askConfirm({
+        title: "把工作区复制进任务沙箱？",
+        body: "会排除 node_modules / .git / dist 等大目录，原项目一个字节都不动；之后成员在副本里跑构建和测试。",
+        confirmLabel: "复制进沙箱",
+      });
       if (!ok) return;
       try {
         const r = await rpc("task.snapshotProject", { taskId });
@@ -656,11 +692,8 @@ export default function App() {
   const onRemoveDeliverable = useCallback(
     async (taskId: string, ref: string, deleteFile: boolean) => {
       setNotice(null);
-      // 连文件一起删是不可恢复的：先让用户明确点头（不是靠菜单里的那一句）
-      if (deleteFile) {
-        const ok = window.confirm("删除磁盘上的这个文件？此操作不可恢复。");
-        if (!ok) return;
-      }
+      // 确认已经在交付箱的确认卡片里点过了（"只移除记录"与"连文件一起删"是卡片上的两个按钮），
+      // 这里不再叠第二次系统弹窗（2026-11-15）。
       try {
         const r = await rpc("task.removeDeliverable", { taskId, ref, deleteFile });
         if (!r.ok) setNotice(rpcResultError(r, "移除失败"));
@@ -863,6 +896,8 @@ export default function App() {
 
   return (
     <I18nProvider strings={i18nStrings}>
+      {/* 确认卡片宿主：所有"做了就回不去"的动作都走这一张卡（2026-11-15） */}
+      <AskHost />
       {staleBackend && (
         <div className="stale-bar" role="status">
           <Icon name="warn" size="sm" />
@@ -890,12 +925,13 @@ export default function App() {
           onSend={(t) => void onSend(t, "queue")}
           onCd={onCd}
           onAbort={() => void onAbort()}
+          onHalt={() => void onHalt()}
           onPermission={(m) => void onPermission(m)}
           onOpenSettings={() => {
             setSettingsTab(undefined);
             setSettingsOpen(true);
           }}
-          onDecisionResolve={(id, a, t) => void onDecisionResolve(id, a, t)}
+          onDecisionResolve={(id, a, t, always) => void onDecisionResolve(id, a, t, always)}
           onDecision={(taskId, action, reason) => void onDecision(taskId, action, reason)}
           onCancelTask={(taskId) => {
             void rpc("task.cancel", { taskId }).then(async (r) => {
@@ -956,6 +992,7 @@ export default function App() {
         onDecision={(id, a, reason) => void onDecision(id, a, reason)}
         onDecisionResolve={(id, a, text) => void onDecisionResolve(id, a, text)}
         onFeedAction={onFeedAction}
+        onHalt={() => void onHalt()}
         onOpenSettings={() => {
           setSettingsTab(undefined);
           setSettingsOpen(true);

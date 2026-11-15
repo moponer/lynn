@@ -2034,15 +2034,13 @@ button:disabled,
 .sf-pane { display: flex; flex-direction: column; gap: 18px; padding: 22px 30px 30px; overflow-y: auto; min-height: 0; }
 .sf-pane h3 { margin: 0; font-family: var(--f-display); font-size: var(--fs-title); letter-spacing: 0; color: var(--ink); }
 .sf-lede { margin: -10px 0 0; font-size: var(--fs-meta); color: var(--ink-3); line-height: 1.6; max-width: 56ch; }
-/* 关于页（2026-11-15）：字标 + 一句话定位，下面按组读；不做卡片墙，"她怎么工作"用行、"能做什么"用格 */
-.sf-about-hero { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: -6px; }
-.sf-about-mark { font-family: var(--f-display); font-size: var(--fs-display); line-height: 1; letter-spacing: 0; color: var(--ink); }
-.sf-about-tag { font-size: var(--fs-meta); color: var(--ink-3); }
-.sf-about-pitch { margin: 0; font-size: var(--fs-body); color: var(--ink-2); line-height: 1.75; max-width: 60ch; }
-.sf-about-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 6px 0 8px; }
-.sf-about-cell { background: var(--sheet-3); border-radius: var(--r-m); padding: 10px 12px; display: flex; flex-direction: column; gap: 3px; }
-.sf-about-cell b { font-size: var(--fs-body); font-weight: 500; color: var(--ink); }
-.sf-about-cell small { font-size: var(--fs-label); color: var(--ink-3); line-height: 1.6; }
+/* 关于页（2026-11-15）：定义段 + 账目式两列（左小标 / 右正文）+ 免责清单。
+   不做卡片墙，也不给每一条配"加粗标题 + 一句解释" */
+.sf-about-head { display: flex; flex-direction: column; gap: 9px; }
+.sf-about-lead { margin: 0; font-size: var(--fs-body); color: var(--ink-2); line-height: 1.8; max-width: 68ch; }
+.sf-about-meta { font-family: var(--f-mono); font-size: var(--fs-label); color: var(--ink-4); }
+.sf-about-k { flex: none; align-self: flex-start; padding-top: 1px; width: 96px; font-size: var(--fs-label); color: var(--ink-4); }
+.sf-about-v { flex: 1; min-width: 0; font-size: var(--fs-meta); color: var(--ink-2); line-height: 1.65; }
 .sf-about-lines { display: flex; flex-direction: column; gap: 7px; padding: 4px 0 10px; }
 .sf-about-line { margin: 0; font-size: var(--fs-meta); color: var(--ink-3); line-height: 1.7; position: relative; padding-left: 12px; }
 .sf-about-line::before { content: "·"; position: absolute; left: 0; color: var(--ink-4); }
@@ -3242,7 +3240,9 @@ html[data-mode="light"] { color-scheme: light; }
 .job-mark { width: 6px; height: 6px; border-radius: 50%; background: var(--ink-4); opacity: .55; flex: none; }
 .job[data-status="in_progress"] .job-mark { background: var(--blue); opacity: 1; }
 .job[data-status="in_review"] .job-mark { background: var(--seal); opacity: 1; }
-.job[data-status="blocked"] .job-mark { background: var(--brass); opacity: 1; }
+/* 卡住=朱砂（2026-11-15 用户拍板）：与 blocked 徽章 .st-wait 同色，
+   铜色（--brass）从此只表示预算/消耗，不再兼职状态。 */
+.job[data-status="blocked"] .job-mark { background: var(--seal); opacity: 1; }
 .job-top { gap: 7px; }
 .job-top .st { margin-left: auto; flex: none; }
 .job-title {
@@ -3310,4 +3310,119 @@ html[data-mode="light"] { color-scheme: light; }
 .seal-actions .seal-allow-family {
   flex: 1 0 100%;
   margin-top: 2px;
+}
+
+/* ==================== 桌宠动效引擎（对齐 dsh-pet 灵动度） ====================
+   结构：pet-stage > pet-shadow / pet-roam > pet-orient > pet-layers > 双缓冲 img
+   - 漫游/朝向/倾斜/特效分属不同层，transform 不互相覆盖
+   - 窗体移动仍由系统 -webkit-app-region: drag 负责，这里只做精灵层视觉反馈
+   - 全量走 token，零描边，reduced-motion 下动画全停 */
+.pet-stage {
+  position: relative;
+  width: 100%;
+  display: grid;
+  place-items: end center;
+}
+/* 角色主体交互热区：drag 区域会吞 DOM 指针事件，这里单独开 no-drag。
+   只盖中间主体，四周留白仍归系统窗体拖拽（保留之前修好的拖动行为）。 */
+.pet-hit {
+  -webkit-app-region: no-drag;
+  position: absolute;
+  left: 16%; right: 16%; top: 12%; bottom: 4%;
+  z-index: 2;
+  cursor: pointer;
+  touch-action: none;
+}
+.pet-roam {
+  position: absolute; inset: 0;
+  transition: transform .22s ease-out;
+}
+.pet-orient {
+  position: absolute; inset: 0;
+  transform-origin: 50% 92%;
+  transition: scale .18s ease-out, rotate .18s ease-out;
+}
+.pet-flip { scale: -1 1; }
+.pet-lean-l { rotate: -9deg; }
+.pet-lean-r { rotate: 9deg; }
+.pet-layers {
+  position: absolute; inset: 0;
+  transform-origin: 50% 92%;
+}
+.pet-layer {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+  object-fit: contain;
+  object-position: center bottom;
+  filter: saturate(1.15) contrast(1.05) drop-shadow(0 8px 12px rgba(0, 0, 0, .25));
+  user-select: none;
+  -webkit-user-drag: none;
+}
+/* 交叉淡入：顶层淡入的同时底层必须淡出。
+   精灵是透明 PNG，底层若不淡出会永远从顶层透明区透出来 → 双重人影。 */
+.pet-layer-base { animation: pet-fade-out .17s ease-out both; }
+.pet-layer-top { animation: pet-fade-in .17s ease-out both; }
+@keyframes pet-fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes pet-fade-out { from { opacity: 1; } to { opacity: 0; } }
+
+/* 影子：腾空时缩小变淡，落地时压扁回弹；不跟着镜像/倾斜 */
+.pet-shadow {
+  position: absolute;
+  bottom: 4%; left: 50%;
+  width: 42%; height: 2.4%;
+  transform: translateX(-50%);
+  border-radius: 50%;
+  background: rgba(18, 22, 28, .28);
+  filter: blur(4px);
+  transition: transform .2s ease-out, opacity .2s ease-out;
+  pointer-events: none;
+}
+.pet-shadow-hop,
+.pet-shadow-stretch { transform: translateX(-50%) scale(.62); opacity: .45; }
+.pet-shadow-squash,
+.pet-shadow-land { transform: translateX(-50%) scaleX(1.18) scaleY(.7); opacity: .9; }
+
+/* 帧级特效：Q 弹 / 起跳 / 挤压 / 摇摆 / 落地回弹 */
+@keyframes pet-fx-pop { 0% { transform: scale(1); } 32% { transform: scale(1.09, .91); } 68% { transform: scale(.95, 1.06); } 100% { transform: scale(1); } }
+@keyframes pet-fx-squash { 0% { transform: scaleY(1); } 40% { transform: scale(1.08, .9); } 100% { transform: scale(1); } }
+@keyframes pet-fx-stretch { 0% { transform: scaleY(1); } 45% { transform: scale(.93, 1.09) translateY(-3%); } 100% { transform: scale(1); } }
+@keyframes pet-fx-hop { 0% { transform: translateY(0) scaleY(1); } 30% { transform: translateY(-9%) scale(.96, 1.05); } 70% { transform: translateY(-7%) scale(1, .98); } 100% { transform: translateY(0) scale(1.04, .96); } }
+@keyframes pet-fx-land { 0% { transform: scale(1.08, .88); } 55% { transform: scale(.96, 1.05); } 100% { transform: scale(1); } }
+@keyframes pet-fx-sway { 0%, 100% { transform: rotate(0deg); } 50% { transform: rotate(4deg); } }
+.pet-fx-pop { animation: pet-fx-pop .36s ease-out both; }
+.pet-fx-squash { animation: pet-fx-squash .26s ease-out both; }
+.pet-fx-stretch { animation: pet-fx-stretch .32s ease-out both; }
+.pet-fx-hop { animation: pet-fx-hop .42s ease-out both; }
+.pet-fx-land { animation: pet-fx-land .4s ease-out both; }
+/* 单次摇而非 infinite：特效层每帧重建会重置动画，infinite 会一直卡在起点发抖 */
+.pet-fx-sway { animation: pet-fx-sway 1.1s ease-in-out both; }
+.pet-dragging { filter: brightness(1.06); }
+
+/* 状态气泡：沿主界面 av-bubble 的文案层级，不抢焦点 */
+.pet-bubble {
+  position: absolute; top: 6%; left: 50%;
+  transform: translateX(-50%);
+  max-width: 84%;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: var(--sheet-2);
+  color: var(--ink-2);
+  font: inherit;
+  font-size: var(--fs-meta);
+  line-height: 1.5;
+  box-shadow: 0 6px 18px -12px #000;
+  white-space: nowrap;
+  pointer-events: none;
+  animation: pet-bubble-in .22s ease-out both;
+}
+@keyframes pet-bubble-in { from { opacity: 0; transform: translate(-50%, 5px); } to { opacity: 1; transform: translate(-50%, 0); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .pet-roam, .pet-orient, .pet-shadow { transition: none; }
+  .pet-layer-top, .pet-bubble,
+  .pet-fx-pop, .pet-fx-squash, .pet-fx-stretch, .pet-fx-hop, .pet-fx-land, .pet-fx-sway {
+    animation: none;
+  }
+  /* 关掉淡出后底层必须直接藏掉，否则同样会透出重影 */
+  .pet-layer-base { display: none; }
 }

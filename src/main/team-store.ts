@@ -45,6 +45,8 @@ export interface MemberProfile {
   escalateWhen: string;
   /** 头像库 id（见 shared/avatars）：用户可在设置→团队里改，招募时自动分配 */
   avatarId?: string;
+  /** 常驻验收员岗位（2026-11-15）：只做验收、不参与执行；风铃据此把验收下沉给成员 */
+  acceptor?: boolean;
   /** 正文：这个岗位怎么做事的说明（由风铃写，可迭代） */
   body: string;
 }
@@ -72,6 +74,7 @@ export function serializeMemberProfile(p: MemberProfile): string {
     `  acceptance:`,
     yamlList(p.outputContract.acceptance, "    "),
     `escalate_when: ${JSON.stringify(p.escalateWhen)}`,
+    ...(p.acceptor ? [`acceptor: true`] : []),
     ...(p.avatarId ? [`avatar_id: ${JSON.stringify(p.avatarId)}`] : []),
   ].join("\n");
   return `---\n${fm}\n---\n\n${p.body.trim()}\n`;
@@ -159,6 +162,12 @@ export function parseMemberProfile(md: string): MemberProfile {
     escalateWhen: str("escalate_when"),
     ...(lines.some((l) => l.startsWith("avatar_id:"))
       ? { avatarId: JSON.parse(lines.find((l) => l.startsWith("avatar_id:"))!.slice(10).trim()) as string }
+      : {}),
+    ...(lines.some((l) => l.startsWith("acceptor:"))
+      ? { acceptor: (() => {
+          const raw = lines.find((l) => l.startsWith("acceptor:"))!.slice(9).trim();
+          return raw === "true";
+        })() }
       : {}),
     body: body.trim(),
   };

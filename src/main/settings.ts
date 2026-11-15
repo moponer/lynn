@@ -44,10 +44,21 @@ export interface Prefs {
   lang: "zh" | "en";
   /** 同时最多几个成员在跑（默认 4）：三个任务并行是常态，2 会把第三张单直接拒掉 */
   maxParallelMembers: number;
+  /**
+   * 风铃自己一轮对话里最多跑几个工具轮次（默认 24）：审查→派单→激活技能→验收→汇报
+   * 一条龙轻松超过 8 轮，旧值 8 会把她中途掐断；给足后极少触顶，且触顶也只总结不硬停。
+   */
+  maxAgentRounds: number;
   /** 指挥者巡检（默认开）：成员长时间没动静或被边界反复拦下时，让风铃自己跟进一步 */
   supervisor: boolean;
   /** 心跳巡检（默认开）：机械层聚合待审查/停滞工单/定时任务异常，有事才起一轮由风铃自主处置 */
   heartbeat: boolean;
+  /**
+   * 去 AI 味（2026-11-15）：加载外部插件 humanizer-stream，把模型文本在展示前过滤一遍。
+   * 只影响界面与写盘文本，**不改提示词、不改上下文、不额外消耗 token**。
+   * 插件没装时这个开关无效（如实显示"未安装"，不假装有效果）。
+   */
+  humanizer?: boolean;
   /** 停用的技能名（M2-10）：停用后不参与 matchSkills 激活，也不会进 allowed-tools 强制 */
   disabledSkills: string[];
   /** 心跳最小间隔（分钟，默认 5）：同一批事实 30 分钟内不重复注入，token 消耗有事才有 */
@@ -107,9 +118,12 @@ const DEFAULT_PREFS: Prefs = {
   fallbackModel: "",
   lang: "zh",
   maxParallelMembers: 4,
+  /** 风铃单轮工具轮次上限（默认 24，给足避免中途被掐断；触顶也只总结不硬停） */
+  maxAgentRounds: 24,
   supervisor: true,
   heartbeat: true,
   heartbeatMinutes: 5,
+  humanizer: true,
   // 秒级心跳（2026-11-11）：探针只读内存态，唤醒仍受合并窗口与每小时配额约束
   heartbeatProbeMs: 1000,
   heartbeatWakeMinMs: 20_000,

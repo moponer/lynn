@@ -111,28 +111,39 @@ function ThinkingBlock({ text, live }: { text: string; live: boolean }) {
 }
 
 /**
- * 长正文折叠（2026-11-13）：成员回报动辄 1000+ 字，全铺开时一屏就只剩这张卡，
- * 后面的动作全被挤到看不见。超过一屏的量先收成前几行，要读全文再点开。
+ * 长正文折叠（2026-11-15 重做）：
+ *  - 收起 = 按块裁切（CSS 限高 + 底部渐隐），不再按 420 字硬切——
+ *    硬切会把 Markdown 表格从半行切开，渲染出一张残表，那才是"展开后也不完整"的根源；
+ *  - 展开 = 彻底解除限高：此前展开态被 `.feed-item.tool .feed-body` 的 320px 限高盖住
+ *    （那条选择器更具体），点了「展开全文」还是半截、还看不到滚动条；
+ *  - 双击正文即可展开 / 收起，按钮旁写明这条捷径（按钮本身也留着，键盘可达）。
  */
 function FoldBody({ text }: { text: string }) {
+  const t = useT();
   const [open, setOpen] = useState(false);
-  const LIMIT = 420;
-  if (text.length <= LIMIT) {
-    return (
+  const long = text.length > 420;
+  const toggle = () => setOpen((v) => !v);
+  return (
+    <div
+      className={`feed-fold${long ? " long" : ""}${open ? " open" : ""}`}
+      onDoubleClick={(e) => {
+        if (!long) return;
+        // 正文里的链接/开关有自己的双击语义（选中、打开），不跟它们抢
+        if ((e.target as HTMLElement).closest("a, button, input, textarea")) return;
+        toggle();
+      }}
+    >
       <div className="feed-body md-wrap">
         <RichText text={text} />
       </div>
-    );
-  }
-  return (
-    <div className="feed-fold">
-      <div className={`feed-body md-wrap${open ? " open" : ""}`}>
-        <RichText text={open ? text : `${text.slice(0, LIMIT)}…`} />
-      </div>
-      {/* 开关放在正文框外：放在里面会被 260px 的滚动框吞掉，用户根本看不到「展开」 */}
-      <button type="button" className="feed-more" onClick={() => setOpen((v) => !v)}>
-        {open ? "收起" : `展开全文（${text.length} 字）`}
-      </button>
+      {long && (
+        <div className="feed-fold-bar">
+          <span className="feed-fold-hint">{open ? t("feed.foldHintLess") : t("feed.foldHintMore")}</span>
+          <button type="button" className="feed-more" aria-expanded={open} onClick={toggle}>
+            {open ? t("feed.foldLess") : t("feed.foldMore", { n: text.length })}
+          </button>
+        </div>
+      )}
     </div>
   );
 }

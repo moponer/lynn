@@ -9,12 +9,16 @@ import type { SealedPhase } from "./useConsoleFeed";
  * 印章压在核心下沿——和原型一致，不各自占一行。
  */
 
+/**
+ * 色阶与值台一致（2026-11-15）：进行中（拆解/研判/推进/已交付）= 青瓷；
+ * 「待你拍板」与「需干预（卡点）」= 朱砂。铜色只表示预算/消耗，不参与状态。
+ */
 const LABEL: Record<SealedPhase, { cn: string; en: string; tone: "blue" | "brass" | "seal" | "quiet" }> = {
   listen: { cn: "侦听中", en: "LISTENING", tone: "quiet" },
-  pick: { cn: "拆解中", en: "PARSING", tone: "brass" },
-  analyze: { cn: "研判中", en: "ANALYZING", tone: "brass" },
+  pick: { cn: "拆解中", en: "PARSING", tone: "blue" },
+  analyze: { cn: "研判中", en: "ANALYZING", tone: "blue" },
   dispatch: { cn: "推进中", en: "DISPATCHING", tone: "blue" },
-  decide: { cn: "待你拍板", en: "AWAITING YOU", tone: "brass" },
+  decide: { cn: "待你拍板", en: "AWAITING YOU", tone: "seal" },
   intervene: { cn: "需干预", en: "INTERVENE", tone: "seal" },
   done: { cn: "已交付", en: "DELIVERED", tone: "blue" },
 };

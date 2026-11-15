@@ -126,6 +126,28 @@
   box-shadow: 0 0 8px 1px var(--blue-wash);
   animation: cs-blink 2.2s ease-in-out infinite;
 }
+/* 本群已终止（2026-11-15）：静态朱砂点，不闪——停住的东西不该看着还在动 */
+.cs-live.halted,
+.cs-live.halted i {
+  color: var(--seal);
+}
+.cs-live.halted i {
+  background: var(--seal);
+  box-shadow: 0 0 6px 1px var(--seal-wash);
+}
+/* 顶栏的项目身份：名字为主，路径进 title（控制台发命令前得知道动哪个目录） */
+.cs-proj {
+  flex: none;
+  max-width: 168px;
+  padding: 2px 7px;
+  border-radius: 2px;
+  font-size: var(--fs-label);
+  color: var(--ink-2);
+  background: var(--desk-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .cs-top-r {
   display: flex;
   align-items: center;
@@ -148,6 +170,17 @@
 }
 .cs-readout.hot.on b {
   color: var(--seal);
+}
+/* 卡住=朱砂（2026-11-15 用户拍板）：卡住就是要你管，不跟"待拍板"分两色。
+   别群：整组压暗只报数 */
+.cs-readout.bad b {
+  color: var(--seal);
+}
+.cs-readout.quiet {
+  opacity: .62;
+}
+.cs-readout.quiet b {
+  color: var(--ink-3);
 }
 .cs-tool {
   font-family: var(--f-mono);
@@ -416,7 +449,8 @@
 }
 .cs-cid {
   font-size: var(--fs-label);
-  color: var(--brass);
+  /* 来令编号是弱信息（值台工单号也是 ink-3），不该用消耗色抢眼 */
+  color: var(--ink-3);
   letter-spacing: .04em;
 }
 .cs-ctime {
@@ -445,12 +479,15 @@
   width: 5px;
   height: 5px;
   border-radius: 50%;
-  background: var(--brass);
+  /* 排队待捞=中性（值台 queued 组头是 ink-4），铜色不兼职状态 */
+  background: var(--ink-4);
   animation: cs-blink 1.3s ease-in-out infinite;
   flex: none;
 }
 
 /* ---------------- 战局：拆解条 + 任务卡 ---------------- */
+/* 拆解中=进行中，用青瓷（与值台 .st-run/.st-live/.step.live 同一语义）。
+   朱砂在两侧一律只表示「要你拍板 / 卡住」，常规过程不许占用。 */
 .cs-analyzing {
   position: relative;
   display: flex;
@@ -461,7 +498,7 @@
   overflow: hidden;
   border-radius: var(--r-s);
   background: var(--desk-3);
-  box-shadow: inset 0 0 0 1px var(--seal-wash);
+  box-shadow: inset 0 0 0 1px var(--blue-line);
 }
 .cs-analyzing::after {
   content: '';
@@ -470,15 +507,15 @@
   top: 0;
   bottom: 0;
   width: 40%;
-  background: var(--seal-wash);
+  background: var(--blue-wash);
   animation: cs-scan-x 1.3s linear infinite;
 }
 .cs-analyzing i {
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: var(--seal);
-  box-shadow: 0 0 8px 2px var(--seal-wash);
+  background: var(--blue);
+  box-shadow: 0 0 8px 2px var(--blue-wash);
   animation: cs-blink .8s ease-in-out infinite;
   flex: none;
 }
@@ -686,9 +723,16 @@
   box-shadow: none;
 }
 .cs-ticks i.live {
-  background: var(--brass);
+  background: var(--blue);
   box-shadow: none;
   animation: cs-blink 1s ease-in-out infinite;
+}
+/* 打回轮次：红（值台 .rounds .sq.on 同色）。0 次保持中性，别把"没打回过"染成告警 */
+.cs-t-rej {
+  color: var(--ink-3);
+}
+.cs-t-rej.hot {
+  color: var(--red);
 }
 .cs-stamp {
   flex: none;
@@ -797,6 +841,14 @@
 }
 .cs-ar-row.static {
   cursor: default;
+}
+/* 归档行可点开战果（可重开）：指针与 hover 都要给出来，别让人以为只是清单 */
+.cs-ar-row.openable {
+  cursor: pointer;
+}
+.cs-ar-row.openable:focus-visible {
+  outline: none;
+  background: var(--blue-wash);
 }
 .cs-ar-id {
   font-size: var(--fs-label);
@@ -1353,15 +1405,17 @@
   --ring-c: var(--rule);
   --glow-c: var(--blue-wash);
 }
+/* 印章色阶（2026-11-15 与值台对齐）：进行中的三个相位一律青瓷，
+   只有「待你拍板」与「需干预」用朱砂。铜色不再参与状态。 */
 .cs-stage[data-mode="pick"] {
-  --core-c: var(--brass);
-  --ring-c: var(--brass);
-  --glow-c: var(--brass-wash);
+  --core-c: var(--blue);
+  --ring-c: var(--blue);
+  --glow-c: var(--blue-wash);
 }
 .cs-stage[data-mode="analyze"] {
-  --core-c: var(--seal);
-  --ring-c: var(--seal);
-  --glow-c: var(--seal-wash);
+  --core-c: var(--blue);
+  --ring-c: var(--blue);
+  --glow-c: var(--blue-wash);
 }
 .cs-stage[data-mode="dispatch"] {
   --core-c: var(--blue);
@@ -1369,9 +1423,9 @@
   --glow-c: var(--blue-wash);
 }
 .cs-stage[data-mode="decide"] {
-  --core-c: var(--brass);
-  --ring-c: var(--brass);
-  --glow-c: var(--brass-wash);
+  --core-c: var(--seal);
+  --ring-c: var(--seal);
+  --glow-c: var(--seal-wash);
 }
 .cs-stage[data-mode="intervene"] {
   --core-c: var(--seal);
@@ -1523,9 +1577,7 @@
 .cs-seal:hover {
   box-shadow: 0 0 0 3px var(--desk-2), 0 0 0 4px currentColor, 0 0 28px 3px var(--glow-c, var(--blue-wash));
 }
-.cs-seal.tone-brass {
-  color: var(--brass);
-}
+
 .cs-seal.tone-seal {
   color: var(--seal);
   animation: cs-seal-alert 1.6s ease-in-out infinite;
@@ -1688,7 +1740,8 @@
 /* ---------------- 底栏：权限档 + 下令 ---------------- */
 .cs-bottom {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  /* 四列：权限档 / 下令行 / 整群止损 / 派出（2026-11-15 加终止入口） */
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 14px;
   padding: 0 20px;
@@ -1798,6 +1851,30 @@
 .cs-send.stop:hover {
   background: var(--seal);
   color: var(--desk);
+}
+/* 整群止损：常态是弱按钮（止损不该抢"派出"的视线），上膛后才变朱砂实心 */
+.cs-halt {
+  font-size: var(--fs-label);
+  color: var(--ink-3);
+  padding: 7px 12px;
+  border-radius: 2px;
+  box-shadow: inset 0 0 0 1px var(--rule);
+  white-space: nowrap;
+  transition: color var(--dur-fast) var(--ease-out), background var(--dur-fast) var(--ease-out);
+}
+.cs-halt:hover {
+  color: var(--seal);
+  box-shadow: inset 0 0 0 1px var(--seal-wash);
+}
+.cs-halt.armed {
+  color: var(--desk);
+  background: var(--seal);
+  box-shadow: none;
+}
+.cs-halt-note {
+  font-size: var(--fs-label);
+  color: var(--seal);
+  white-space: nowrap;
 }
 
 /* ---------------- 抽屉 ---------------- */
@@ -2125,6 +2202,16 @@
   line-height: 1.55;
   color: var(--ink);
 }
+/* 契约卡的读数（承接/截止/预算 与 项目/落点）：拍板依据，不能只有一句标题 */
+.cs-dec-meta {
+  margin: -3px 0 7px;
+  font-size: var(--fs-label);
+  line-height: 1.5;
+  color: var(--ink-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .cs-dec-checks {
   list-style: none;
   margin: 0 0 10px;
@@ -2294,6 +2381,21 @@
   font-size: var(--fs-label);
   line-height: 1.6;
   color: var(--ink-3);
+}
+/* 验收凭证（2026-11-15）：第几轮 / 打回几次 / 证据核了几条 / 交付物几件——决定收不收的依据 */
+.cs-dj-proof {
+  margin-top: 6px;
+  font-size: var(--fs-label);
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+}
+.cs-dj-files {
+  margin-top: 3px;
+  font-size: var(--fs-label);
+  color: var(--blue);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .cs-dj-acts {
   display: flex;

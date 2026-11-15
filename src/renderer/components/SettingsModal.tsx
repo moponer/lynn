@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { CSSProperties } from "react";
 import type { GatewayView, ModelConfigView, ModelEntryView, TeamAdminView, UsageView } from "../../shared/contract";
 import { THEMES, type ThemeId, type ThemeMode } from "../desk/theme";
 import { fmtTime } from "../desk/model";
@@ -10,6 +11,7 @@ import type { AvatarState } from "../../shared/avatar";
 import { AMBIENT_MODE_LABEL, type AmbientMode } from "../../shared/ambient";
 import { AVATARS, avatarById, avatarFor } from "../../shared/avatars";
 import { MemberAvatar } from "../desk/MemberAvatar";
+import { askConfirm } from "./ConfirmCard";
 import { useT } from "../i18n";
 import type { I18nKey } from "../../shared/i18n-strings";
 import { Icon, type IconName } from "./Icon";
@@ -32,7 +34,7 @@ const PRESETS = [
   { name: "MiniMax", baseUrl: "https://api.minimax.chat/v1", model: "MiniMax-M2" },
 ];
 
-type Tab = "overview" | "model" | "persona" | "memory" | "team" | "auto" | "skills" | "plugins" | "safety" | "look" | "data";
+type Tab = "overview" | "model" | "persona" | "memory" | "team" | "auto" | "skills" | "plugins" | "safety" | "look" | "data" | "about";
 
 /** 定时任务（M2-02）：界面只回读调度器的真实状态 */
 type ScheduleRow = {
@@ -355,7 +357,8 @@ export function SettingsModal({
   } | null>(null);
 
   useEffect(() => {
-    if (tab === "data" || tab === "overview") void window.lynn.rpc("update.status").then(setUpdateInfo);
+    // 关于页也读一次：版本号只在壳层 update.status 里，不另造一份
+    if (tab === "data" || tab === "overview" || tab === "about") void window.lynn.rpc("update.status").then(setUpdateInfo);
   }, [tab]);
 
   // 工作区（2026-11-10）：默认主根 + 常用只读根（L0），保存后对新会话与成员生效
@@ -383,6 +386,25 @@ export function SettingsModal({
   }, [tab]);
   const fmtBytes = (n: number) =>
     n >= 1024 ** 3 ? `${(n / 1024 ** 3).toFixed(1)} GB` : n >= 1024 ** 2 ? `${(n / 1024 ** 2).toFixed(1)} MB` : n >= 1024 ? `${Math.round(n / 1024)} KB` : `${n} B`;
+  /** 数字呈现（2026-11-15）：数值亮、单位弱化成小字——不再糊成一团 "1.1 MB" */
+  const Byte = ({ n }: { n: number }) => {
+    const s = fmtBytes(n);
+    const i = s.lastIndexOf(" ");
+    return (
+      <span className="num">
+        {s.slice(0, i)}
+        <i className="u">{s.slice(i + 1)}</i>
+      </span>
+    );
+  };
+  /** 带归属名的数字段：「过程 0 B」而不是一串 slash 里数第几个 */
+  const ByteSeg = ({ k, n }: { k: string; n: number }) => (
+    <>
+      <span className="num seg-label">{k}</span>
+      <Byte n={n} />
+    </>
+  );
+  const Dot = () => <span className="num seg-label">·</span>;
   useEffect(() => {
     if (tab !== "data") return;
     let dead = false;
@@ -509,6 +531,7 @@ export function SettingsModal({
     if (tab === "memory" && memText === null) void refreshMemory(memKind);
     if (tab === "skills") void refreshSkills();
     if (tab === "safety" && heartbeat === null) void refreshHeartbeat();
+    if (tab === "safety" && agentRounds === null) setAgentRounds(24);
     if (tab === "look") void refreshVoices();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab]);
@@ -523,12 +546,23 @@ export function SettingsModal({
   const [heartbeat, setHeartbeat] = useState<boolean | null>(null);
   /** 顾问审阅开关（2026-11-14）：成员交回报后另一个模型独立审一遍 */
   const [advisor, setAdvisor] = useState<boolean | null>(null);
+  /** 工具轮次上限（2026-11-15）：风铃单轮最多跑几个工具轮次 */
+  const [agentRounds, setAgentRounds] = useState<number | null>(null);
+  /** 去 AI 味（2026-11-15）：开关在 prefs 里，加载状态在插件那边 */
+  const [humanizer, setHumanizer] = useState<boolean | null>(null);
+  const [hzStatus, setHzStatus] = useState<{ loaded: boolean; version: string | null; dir: string | null } | null>(null);
   const refreshHeartbeat = async () => {
     try {
       const r = await window.lynn.rpc("config.prefs", { autoStart });
       setHeartbeat(r.heartbeat);
+      // 同一次调用顺带读工具轮次上限（都是 prefs，不用多打一次 RPC）
+      setAgentRounds(r.maxAgentRounds ?? 24);
       // 同一次调用顺带读顾问开关（都是 prefs，不用多打一次 RPC）
       setAdvisor(r.advisorEnabled ?? true);
+      // 去 AI 味开关（同样在 prefs 里）
+      setHumanizer(r.humanizer ?? true);
+      // 插件到底装没装，单独问一次：装不上时开关是空转，界面必须如实说
+      void window.lynn.rpc("humanizer.status").then(setHzStatus).catch(() => setHzStatus(null));
     } catch {
       setHeartbeat(null);
     }
@@ -545,6 +579,18 @@ export function SettingsModal({
     void window.lynn.rpc("config.prefs", { autoStart, heartbeat: next }).then((r) => {
       setHeartbeat(r.heartbeat);
       setResult({ ok: true, text: r.heartbeat ? t("safety.heartbeatOn") : t("safety.heartbeatOff") });
+    });
+  };
+  /** 去 AI 味（2026-11-15）：插件 humanizer-stream 的开关；没装时按钮如实说明 */
+  const toggleHumanizer = () => {
+    if (hzStatus && !hzStatus.loaded) {
+      setResult({ ok: false, text: t("safety.humanizerMissing") });
+      return;
+    }
+    const next = !(humanizer ?? true);
+    void window.lynn.rpc("config.prefs", { autoStart, humanizer: next }).then((r) => {
+      setHumanizer(r.humanizer ?? next);
+      setResult({ ok: true, text: r.humanizer === false ? t("safety.humanizerOff") : t("safety.humanizerOn") });
     });
   };
   /** 技能管理（M2-10）：发现列表 + 启停（禁用落 prefs.disabledSkills） */
@@ -968,7 +1014,17 @@ export function SettingsModal({
   };
 
   const actOnModel = async (action: "remove" | "setDefault" | "setThread", id: string | null) => {
-    if (action === "remove" && !window.confirm("确定删除这条模型配置？本机保存的 Key 也会一起移除。")) return;
+    if (
+      action === "remove" &&
+      !(await askConfirm({
+        title: "删除这条模型配置？",
+        body: "本机保存的 Key 也会一起移除；之后的对话不能再选它。",
+        note: "删除后不可恢复。",
+        confirmLabel: "删除",
+        danger: true,
+      }))
+    )
+      return;
     setBusy("list");
     try {
       let r: { ok: boolean; error?: string };
@@ -2261,6 +2317,61 @@ export function SettingsModal({
                 {advisor === false ? t("common.enable") : t("plugins.disable")}
               </button>
             </div>
+            <div className="sf-row">
+              <div className="sf-row-main">
+                <b>{t("safety.humanizerTitle")}</b>
+                <small>
+                  {t("safety.humanizerHint")}
+                  {hzStatus?.loaded
+                    ? ` · ${t("safety.humanizerLoaded")}${hzStatus.version ? ` ${hzStatus.version}` : ""}`
+                    : hzStatus
+                      ? ` · ${t("safety.humanizerMissing")}`
+                      : ""}
+                </small>
+              </div>
+              <button
+                type="button"
+                className={`sf-btn${humanizer === false || (hzStatus && !hzStatus.loaded) ? "" : " primary"}`}
+                onClick={toggleHumanizer}
+                disabled={Boolean(hzStatus && !hzStatus.loaded)}
+                title={hzStatus?.dir ?? undefined}
+              >
+                {humanizer === false ? t("common.enable") : t("plugins.disable")}
+              </button>
+            </div>
+          </div>
+          <div className="sf-group">
+            <div className="sf-group-head">
+              <b>{t("safety.behaviorTitle")}</b>
+              <small>{t("safety.behaviorHint")}</small>
+            </div>
+            <div className="sf-row sf-row-slider">
+              <div className="sf-row-main">
+                <b>{t("safety.roundsTitle")}</b>
+                <small>{t("safety.roundsHint")}</small>
+              </div>
+              <div className="sf-slider">
+                <input
+                  type="range"
+                  min={4}
+                  max={80}
+                  step={1}
+                  value={agentRounds ?? 24}
+                  style={{ "--fill": `${Math.round((((agentRounds ?? 24) - 4) / 76) * 100)}%` } as CSSProperties}
+                  onChange={(e) => {
+                    const v = Number(e.target.value);
+                    setAgentRounds(v);
+                    void window.lynn
+                      .rpc("config.prefs", { autoStart, maxAgentRounds: v })
+                      .then((r) => setAgentRounds(r.maxAgentRounds ?? v));
+                  }}
+                />
+                <span className="sf-slider-val">
+                  {agentRounds ?? 24}
+                  <i className="u">轮</i>
+                </span>
+              </div>
+            </div>
           </div>
           <div className="sf-group">
             <div className="sf-group-head">
@@ -2598,6 +2709,107 @@ export function SettingsModal({
       );
     }
 
+    if (tab === "about") {
+      // 写法照 tether-ai 的 README：一句定义 + 事实清单 + 主动免责，版本号从壳层读，不写死。
+      // 版式是"左侧小标 + 右侧正文"的账目式两列：不给每一项配一句解释，也不做卡片墙。
+      const way: { k: I18nKey; v: I18nKey }[] = [
+        { k: "about.wayDispatchK", v: "about.wayDispatchV" },
+        { k: "about.wayReportK", v: "about.wayReportV" },
+        { k: "about.wayApproveK", v: "about.wayApproveV" },
+        { k: "about.wayPipeK", v: "about.wayPipeV" },
+      ];
+      const caps: { k: I18nKey; v: I18nKey }[] = [
+        { k: "about.capTeamK", v: "about.capTeamV" },
+        { k: "about.capSkillK", v: "about.capSkillV" },
+        { k: "about.capPluginK", v: "about.capPluginV" },
+        { k: "about.capMemoryK", v: "about.capMemoryV" },
+        { k: "about.capPreviewK", v: "about.capPreviewV" },
+        { k: "about.capAutoK", v: "about.capAutoV" },
+      ];
+      const privacy: { k: I18nKey; v: I18nKey }[] = [
+        { k: "about.privRootK", v: "about.privRootV" },
+        { k: "about.privKeyK", v: "about.privKeyV" },
+        { k: "about.privUninstallK", v: "about.privUninstallV" },
+        { k: "about.privSignK", v: "about.privSignV" },
+      ];
+      const limits: I18nKey[] = ["about.limit1", "about.limit2", "about.limit3", "about.limit4"];
+      const credits: I18nKey[] = ["about.creditLicense", "about.creditThird", "about.creditFont"];
+      return (
+        <div className="sf-pane">
+          <div className="sf-about-head">
+            <h3>{t("about.title")}</h3>
+            <p className="sf-about-lead">{t("about.lead")}</p>
+            <div className="sf-about-meta">
+              {updateInfo?.version ? `v${updateInfo.version} · ` : ""}
+              {t("about.meta")}
+            </div>
+          </div>
+
+          <div className="sf-group">
+            <div className="sf-group-head">
+              <b>{t("about.wayTitle")}</b>
+            </div>
+            {way.map((r) => (
+              <div className="sf-row" key={r.k}>
+                <span className="sf-about-k">{t(r.k)}</span>
+                <span className="sf-about-v">{t(r.v)}</span>
+              </div>
+            ))}
+          </div>
+
+          <div className="sf-group">
+            <div className="sf-group-head">
+              <b>{t("about.capTitle")}</b>
+            </div>
+            {caps.map((r) => (
+              <div className="sf-row" key={r.k}>
+                <span className="sf-about-k">{t(r.k)}</span>
+                <span className="sf-about-v">{t(r.v)}</span>
+              </div>
+            ))}
+          </div>
+
+          <div className="sf-group">
+            <div className="sf-group-head">
+              <b>{t("about.privacyTitle")}</b>
+            </div>
+            {privacy.map((r) => (
+              <div className="sf-row" key={r.k}>
+                <span className="sf-about-k">{t(r.k)}</span>
+                <span className="sf-about-v">{t(r.v)}</span>
+              </div>
+            ))}
+          </div>
+
+          <div className="sf-group">
+            <div className="sf-group-head">
+              <b>{t("about.limitTitle")}</b>
+            </div>
+            <div className="sf-about-lines">
+              {limits.map((k) => (
+                <p className="sf-about-line" key={k}>
+                  {t(k)}
+                </p>
+              ))}
+            </div>
+          </div>
+
+          <div className="sf-group">
+            <div className="sf-group-head">
+              <b>{t("about.creditTitle")}</b>
+            </div>
+            <div className="sf-about-lines">
+              {credits.map((k) => (
+                <p className="sf-about-line" key={k}>
+                  {t(k)}
+                </p>
+              ))}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
     if (tab === "data") {
       const upd = updateInfo;
       const updMsg = upd?.error ? t("data.updateErr", { msg: upd.error }) : upd?.reason ?? "";
@@ -2649,12 +2861,22 @@ export function SettingsModal({
                 onClick={() => {
                   void window.lynn
                     .rpc("app.pickDirs", { title: "选择常用只读目录（可多选）" })
-                    .then((r) => {
+                    .then(async (r) => {
                       const paths = r.paths ?? [];
                       if (!paths.length) return;
                       const isDrive = (p: string) => /^[a-zA-Z]:[\\/]?$/.test(p);
                       const drives = paths.filter(isDrive);
-                      if (drives.length && !window.confirm(`将把整个磁盘作为只读根：${drives.join("、")}。继续？`)) return;
+                      if (
+                        drives.length &&
+                        !(await askConfirm({
+                          title: "把整个磁盘作为只读根？",
+                          body: `${drives.join("、")} 会作为常用只读根：成员能读盘上所有文件。`,
+                          note: "写仍然只能在工作区。",
+                          confirmLabel: "仍然添加",
+                          danger: true,
+                        }))
+                      )
+                        return;
                       setWsRoots((prev) => [...new Set([...prev, ...paths])]);
                     });
                 }}
@@ -2696,23 +2918,28 @@ export function SettingsModal({
                   <span className="sf-label" style={{ flex: 1 }}>
                     总占用
                   </span>
-                  <span className="mono">{fmtBytes(dataUsage.totalBytes)}</span>
+                  <Byte n={dataUsage.totalBytes} />
                 </div>
                 <div className="sf-row">
                   <span className="sf-label" style={{ flex: 1 }}>
-                    任务（过程 / 证据 / 沙箱）
+                    任务目录
                   </span>
-                  <span className="mono">
-                    {fmtBytes(dataUsage.scratchBytes)} / {fmtBytes(dataUsage.artifactsBytes)} /{" "}
-                    {fmtBytes(dataUsage.sandboxBytes)}
+                  <span className="sf-nums">
+                    <ByteSeg k="过程" n={dataUsage.scratchBytes} />
+                    <Dot />
+                    <ByteSeg k="证据" n={dataUsage.artifactsBytes} />
+                    <Dot />
+                    <ByteSeg k="沙箱" n={dataUsage.sandboxBytes} />
                   </span>
                 </div>
                 <div className="sf-row">
                   <span className="sf-label" style={{ flex: 1 }}>
-                    日志 / 检查点
+                    日志与检查点
                   </span>
-                  <span className="mono">
-                    {fmtBytes(dataUsage.logsBytes)} / {fmtBytes(dataUsage.checkpointsBytes)}
+                  <span className="sf-nums">
+                    <ByteSeg k="日志" n={dataUsage.logsBytes} />
+                    <Dot />
+                    <ByteSeg k="检查点" n={dataUsage.checkpointsBytes} />
                   </span>
                 </div>
               </>
@@ -2798,11 +3025,18 @@ export function SettingsModal({
               type="button"
               className="sf-btn"
               onClick={() => {
-                if (!window.confirm(t("data.clearConfirm"))) return;
-                void window.lynn.rpc("session.new", {}).then(() => {
+                void (async () => {
+                  const ok = await askConfirm({
+                    title: t("data.clearSession"),
+                    body: t("data.clearConfirm"),
+                    confirmLabel: t("data.clearSession"),
+                    danger: true,
+                  });
+                  if (!ok) return;
+                  await window.lynn.rpc("session.new", {});
                   setPackMsg(t("data.cleared"));
                   onSaved();
-                });
+                })();
               }}
             >
               {t("data.clearSession")}
@@ -3001,6 +3235,13 @@ export function SettingsModal({
                 ))}
               </div>
             ))}
+            {/* 关于不归任何一组：贴在导航底部，是"整件事是什么"而不是"哪项设置" */}
+            <div className="sf-nav-foot">
+              <button type="button" className={`sf-nav-item${tab === "about" ? " on" : ""}`} onClick={() => setTab("about")}>
+                <Icon name="info" size="sm" />
+                {t("nav.about")}
+              </button>
+            </div>
           </nav>
           <div className="sf-body">{page}</div>
         </div>

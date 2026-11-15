@@ -145,6 +145,46 @@ test("成员回报与进度里程碑改写成短句，不念回报正文和步�
   assert.equal(progress.text, "阿明已推进到第 3 步。");
 });
 
+test("简洁档也播任务进度：派单开工、里程碑、卡住与无交付物关单（2026-11-15）", () => {
+  const brief = prefs();
+
+  // 开工：默认档就要听见「派给谁了」，否则第一条进度永远是"交回了结果"
+  const dispatch = pickCardSpeech(
+    { kind: "tool", badge: "派单", title: "阿明 开工 · task-20261115-a1b2c3", meta: "工具：read_file" },
+    brief,
+  );
+  assert.ok(dispatch);
+  assert.equal(dispatch.text, "我已把任务派给阿明，开始处理。");
+  assert.notEqual(dispatch.priority, "high", "开工不打断汇报");
+
+  const milestone = pickCardSpeech(
+    { kind: "tool", badge: "进度", title: "阿计 第 2 步 · task-20261115-a1b2c3", meta: "已用时 132s" },
+    brief,
+  );
+  assert.equal(milestone.text, "阿计已推进到第 2 步。");
+
+  // 卡住是 system + 进度：此前被 systemAllowed 整类拦掉——开着语音也听不到任务停了
+  const stuck = pickCardSpeech(
+    { kind: "system", badge: "进度", text: "task-20261115-a1b2c3 卡住了（连续两个节点没交新证据）。我会自己判断：重做 / 换策略 / 关单。" },
+    brief,
+  );
+  assert.ok(stuck, "卡住必须播");
+  assert.ok(stuck.text.includes("卡住"));
+  assert.ok(!stuck.text.includes("task-"), "任务号不念");
+
+  const empty = pickCardSpeech(
+    { kind: "system", badge: "进度", text: "未完成：task-20261115-a1b2c3 没有任何交付物，已关单（卷宗保留）。" },
+    brief,
+  );
+  assert.ok(empty, "没交付物关单必须播");
+  assert.ok(empty.text.includes("没交出交付物"));
+
+  // 其余 system 内务仍然闭嘴：压缩、心跳（详细档才念）、停止
+  assert.equal(pickCardSpeech({ kind: "system", badge: "心跳", text: "巡检发现 8 张单待处理" }, brief), null);
+  assert.equal(pickCardSpeech({ kind: "system", text: "上下文接近上限，正在压缩" }, brief), null);
+  assert.equal(pickCardSpeech({ kind: "system", text: "已停止本轮（已产出的内容保留）。" }, brief), null);
+});
+
 test("简洁档：提醒照播；过程明细、系统内务、用户卡、内部巡检只留在界面上", () => {
   const reminder = pickCardSpeech({ kind: "system", badge: "提醒", title: "定时任务 · 日报", meta: "该交日报了" }, prefs());
   assert.ok(reminder);
@@ -153,7 +193,6 @@ test("简洁档：提醒照播；过程明细、系统内务、用户卡、内�
   const silent = [
     { kind: "user", text: "帮我核对订单" },
     { kind: "lynn", text: "", streaming: true },
-    { kind: "tool", badge: "派单", title: "已派给阿明", body: "工作区 /tmp/a" },
     { kind: "tool", badge: "组队", title: "已建团队" },
     { kind: "tool", badge: "工具", title: "read_file", body: "a.json" },
     { kind: "tool", badge: "已拦截", title: "rm -rf" },
@@ -195,12 +234,13 @@ test("详细档：过程卡改写成中文短句，命令 / 路径 / 工单号 /
     [{ kind: "system", badge: "心跳", text: "有 8 张单堆着（待审 3 / 停滞 5）。WO-2418、WO-2419" }, "巡检发现 8 张单待处理，我已开始跟进。"],
   ];
   for (const [card, expected] of cases) {
-    assert.equal(pickCardSpeech(card, brief), null, `简洁档不念 ${card.badge}`);
     const got = pickCardSpeech(card, detailed);
     assert.ok(got, `详细档要播 ${card.badge}`);
     assert.equal(got.text, expected);
     assert.notEqual(got.priority, "high", "过程卡不打断汇报");
     assert.ok(!got.text.includes("WO-2418") && !got.text.includes("rm -rf") && !got.text.includes("C:\\"), "不能念 ID / 命令 / 路径");
+    // 简洁档仍不念过程明细；只有「派单」因为是任务进度的起点被放行（见下一条用例）
+    if (card.badge !== "派单") assert.equal(pickCardSpeech(card, brief), null, `简洁档不念 ${card.badge}`);
   }
   // 英文工具名 / 插件 ID / 系统内务 / 用户卡 / 思考：详细档也不念
   for (const card of [

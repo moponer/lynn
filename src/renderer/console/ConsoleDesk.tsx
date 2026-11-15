@@ -1,7 +1,17 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { PermissionMode } from "../../shared/contract";
-import type { Desk, DeskDecision, DeskEvidence, DeskJob } from "../desk/model";
-import { fmtTime } from "../desk/model";
+import {
+  STATUS_LABEL,
+  fmtTime,
+  fmtTokens,
+  jobsInThread,
+  outputsOf,
+  type Desk,
+  type DeskDecision,
+  type DeskEvidence,
+  type DeskJob,
+  type DeskOutput,
+} from "../desk/model";
 import { WindowControls } from "../components/WindowControls";
 import { PreviewDrawer } from "../components/PreviewDrawer";
 import { Field } from "./Field";
@@ -45,6 +55,13 @@ function clock(): string {
 }
 
 const PERMISSIONS: PermissionMode[] = ["plan", "ask", "auto", "full"];
+/** 底栏印中文档位：`plan/ask/auto/full` 是枚举值，不是给人读的字（与值台一致） */
+const PERMISSION_LABEL: Record<PermissionMode, string> = {
+  plan: "计划",
+  ask: "询问",
+  auto: "自动",
+  full: "全权",
+};
 
 type Drawer = "result" | "decide" | "usage" | "config" | "archive" | null;
 
@@ -60,6 +77,7 @@ export function ConsoleDesk(props: ConsoleViewProps) {
     onSend,
     onCd,
     onAbort,
+    onHalt,
     onOpenSettings,
     onPermission,
     onDecisionResolve,
@@ -97,6 +115,8 @@ export function ConsoleDesk(props: ConsoleViewProps) {
   const [picked, setPicked] = useState<{ job: DeskJob; left: number; top: number } | null>(null);
   /** 已上膛的删除（第一下上膛、第二下执行）：不可恢复的动作不做静默单击 */
   const [armedRemove, setArmedRemove] = useState<string | null>(null);
+  /** 终止本群同样两段确认：3.6 秒内不点第二下自动收回（与值台标题栏同一手感） */
+  const [armedHalt, setArmedHalt] = useState(false);
   /** 全量 / 节点（只留锁定那一簇） */
   const [scope, setScope] = useState<"all" | "node">("all");
   /** 中列流水栏：与原型一致，默认收着（A/B 用顶栏「流水」切换） */
@@ -118,6 +138,13 @@ export function ConsoleDesk(props: ConsoleViewProps) {
     return () => window.clearInterval(t);
   }, []);
 
+  // 「确认终止」3.6 秒后自己收回：上膛不能永久挂着
+  useEffect(() => {
+    if (!armedHalt) return;
+    const t = window.setTimeout(() => setArmedHalt(false), 3600);
+    return () => window.clearTimeout(t);
+  }, [armedHalt]);
+
   // Esc：先收抽屉 → 再解锁节点 → 最后退值台
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -130,16 +157,29 @@ export function ConsoleDesk(props: ConsoleViewProps) {
     return () => window.removeEventListener("keydown", onKey);
   }, [drawer, picked, onExit]);
 
-  const active = useMemo(() => desk.jobs.filter((j) => j.group !== "archived"), [desk.jobs]);
+  /** 本群的单（2026-11-15）：控制台不再把别群的单算进任务/待办/球面 */
+  const mine = useMemo(() => jobsInThread(desk), [desk]);
+  const active = useMemo(() => mine.filter((j) => j.group !== "archived"), [mine]);
   /** 能直接拍板的单（in_review）：验收 / 打回 */
   const waiting = useMemo(() => active.filter((j) => j.group === "waiting"), [active]);
+  /**
+   * 卡住的单（blocked）：用户不必动手，但必须知道。值台把它放在右栏印章的第一等位置，
+   * 控制台此前既不算待办、也不触发告警，卡到半小时用户可能永远看不见。
+   */
+  const stuck = useMemo(() => active.filter((j) => j.group === "stuck"), [active]);
+  /** 别群在办的张数：只报个数（不混进待办、不参与播报），点开值台才能管 */
+  const others = desk.jobs.filter((j) => j.group !== "archived" && j.threadId && j.threadId !== desk.thread.id).length;
   const pending = desk.decisions;
+  const halted = Boolean(desk.thread.halted);
   /**
    * 有效相位：只要有单在等你验收、或有事等你拍板，印章就必须先报「待你拍板」。
    * 光靠 turn.phase 不够——成员交完回报后 turn 可能已经回 idle，单子却还挂在台账里等验收，
    * 那时印章显示「侦听中」会让人以为没事，实际全在主界面上等你。
+   * 没有待判的事、但有单卡住时，印章报「卡点」——那也是用户在等的一个答案。
    */
-  const phaseEff = pending.length > 0 || waiting.length > 0 ? "decide" : phase;
+  const phaseEff = pending.length > 0 || waiting.length > 0 ? "decide" : stuck.length > 0 ? "intervene" : phase;
+  /** 只有卡住（没有待拍板/待验收）：文案说"卡点"，颜色仍是朱砂（用户 2026-11-15 拍板：卡住=朱砂） */
+  const stuckOnly = stuck.length > 0 && pending.length === 0 && waiting.length === 0;
   const turnBusy = desk.turn.busy;
   const ctxPct = desk.usage.contextPercent ?? null;
   const currentJobId = desk.turn.taskId ?? null;
@@ -184,44 +224,15 @@ export function ConsoleDesk(props: ConsoleViewProps) {
   const mergeCmds = active.reduce((n, j) => n + (cmdCount.get(j.id) ?? 0), 0);
 
   /**
-   * 产出柜 = 真实落盘的文件，不是"成员说过的话"。
-   * 口径（2026-11-11 重做：之前按证据条目出卡，把 command 证据的整句 ref 当成文档名，
-   * 卡片上全是「成员回报正文结论：…」+「文档 未核 …qnj8-5」，对用户零信息量）：
-   *  1. 先取这张单登记的交付物（deliverables，验收后永久保留）；
-   *  2. 没有交付物再退回真文件形态的证据（ref 形如 artifacts/xxx，有扩展名）；
-   *  3. `kind: "command"` 的证据 ref 是一整句命令输出，不是路径 —— 一律不进产出柜；
-   *  4. 同一份文件在多张单里各存一份副本：按 ref 合并成一张卡并标张数，不铺一屏重复卡。
+   * 产出柜 = 真实落盘的交付物，与值台交付箱同一口径（model.outputsOf，2026-11-15 抽出）：
+   *  1. 只认 deliverables（用户要带走的东西），command 证据不是产物；
+   *  2. 按**解析后的绝对路径**合并 —— 此前按 ref（artifacts/report.md）合并，会把
+   *     两张单的同名产物并成一张，点开看到的是别人的副本；
+   *  3. **含归档单**：验收归档之后产物不会从柜子里消失（此前只扫非归档单）。
    */
-  const outputs = useMemo(() => {
-    const seen = new Map<string, OutItem>();
-    for (const j of active) {
-      const add = (rawRef: string | undefined, filePath: string | undefined, bytes: number | undefined) => {
-        const ref = rawRef ?? "";
-        if (!isFileRef(ref)) return;
-        const hit = seen.get(ref);
-        if (hit) {
-          // 同一张单里"交付物 + 证据"会各登记一次，别把它算成两张单
-          hit.jobIds.add(j.id);
-          hit.jobs = hit.jobIds.size;
-          if (hit.bytes == null && bytes != null) hit.bytes = bytes;
-          return;
-        }
-        seen.set(ref, {
-          taskId: j.id,
-          ref,
-          name: baseName(filePath || ref),
-          path: filePath || ref,
-          bytes,
-          from: j.title,
-          jobs: 1,
-          jobIds: new Set([j.id]),
-        });
-      };
-      for (const d of j.deliverables ?? []) add(d.ref, d.path, d.bytes);
-      for (const e of j.evidence) add(e.ref, e.title, undefined);
-    }
-    return [...seen.values()].slice(-6).reverse();
-  }, [active]);
+  const allOutputs = useMemo(() => outputsOf(desk), [desk]);
+  /** 柜面只铺最近 6 件（一屏看得完），全部在「全部 N 件」的战果抽屉里 */
+  const outputs = useMemo(() => allOutputs.slice(0, 6), [allOutputs]);
 
   /** 流水栏：优先锁定单，其次当前回合单，最后是第一张在办单 */
   const streamJobId = picked?.job.id ?? currentJobId ?? active[0]?.id ?? null;
@@ -359,22 +370,48 @@ export function ConsoleDesk(props: ConsoleViewProps) {
           <span className="cs-thread" title={desk.thread.title || "没有会话"}>
             {desk.thread.title || "没有会话"}
           </span>
-          <span className={`cs-live${turnBusy ? " on" : ""}`}>
-            <i />
-            {turnBusy ? "在跑" : "侦听"}
+          {/* 项目身份（2026-11-15）：在控制台发一条命令，得知道它动的是哪个目录 */}
+          <span
+            className="cs-proj mono"
+            title={[
+              desk.workspaceProjectName ? `项目：${desk.workspaceProjectName}` : "",
+              desk.workspacePrimary ?? "本次不用工作区（产出落任务卷宗）",
+              desk.workspaceExtras.length ? `+${desk.workspaceExtras.length} 个只读/附加根` : "",
+            ]
+              .filter(Boolean)
+              .join("\n")}
+          >
+            {desk.workspaceProjectName || desk.project || "未选目录"}
           </span>
+          {halted ? (
+            <span className="cs-live halted" title="本群已终止：成员、心跳、巡检与验收叫醒都停了。发一条消息即可恢复。">
+              <i />
+              已终止
+            </span>
+          ) : (
+            <span className={`cs-live${turnBusy ? " on" : ""}`}>
+              <i />
+              {turnBusy ? "在跑" : "侦听"}
+            </span>
+          )}
           {/* 军印的顶栏缩写：窄窗才出现（宽窗右栏有完整军印，不重复） */}
           <button
             type="button"
-            className={`cs-seal-mini${pending.length + waiting.length ? " hot" : ""}`}
-            onClick={() => setDrawer(pending.length || waiting.length ? "decide" : "result")}
+            className={`cs-seal-mini${pending.length + waiting.length + stuck.length ? " hot" : ""}`}
+            onClick={() => setDrawer(pending.length || waiting.length || stuck.length ? "decide" : "result")}
             title={
               pending.length + waiting.length
                 ? "有需要你动手的事（拍板 / 验收）"
-                : "她很安静，点开看最近战果"
+                : stuck.length
+                  ? `${stuck.length} 张单卡住了，点开看是重做还是收尾`
+                  : "她很安静，点开看最近战果"
             }
           >
-            {pending.length + waiting.length ? `待办 ${pending.length + waiting.length}` : "侦听中"}
+            {pending.length + waiting.length
+              ? `待办 ${pending.length + waiting.length}`
+              : stuck.length
+                ? `卡点 ${stuck.length}`
+                : "侦听中"}
           </button>
         </div>
         <div className="cs-top-r">
@@ -384,6 +421,18 @@ export function ConsoleDesk(props: ConsoleViewProps) {
           <span className={`cs-readout hot${pending.length + waiting.length ? " on" : ""}`}>
             待办<b>{pending.length + waiting.length}</b>
           </span>
+          {/* 卡住的单：不动手，但必须看得见（此前既不计数也不告警） */}
+          {stuck.length > 0 && (
+            <span className="cs-readout bad" title="成员卡住了：点开看是哪张单，风铃会处置">
+              卡住<b>{stuck.length}</b>
+            </span>
+          )}
+          {/* 别群在办的张数：只报个数，不混进待办（语音也只播本群，避免"屏幕上有、耳朵里没有"） */}
+          {others > 0 && (
+            <span className="cs-readout quiet" title={`其他群还有 ${others} 张在办：切到那个群才管得了，也不会播报`}>
+              别群<b>{others}</b>
+            </span>
+          )}
           <button
             type="button"
             className={`cs-tool${desk.orphans > 0 ? " alert" : ""}`}
@@ -609,32 +658,43 @@ export function ConsoleDesk(props: ConsoleViewProps) {
             <Stream side="left" lines={lines.filter((l) => l.kind !== "cmd")} max={7} />
             <Stream side="right" lines={lines.filter((l) => l.kind === "cmd" || l.kind === "tool")} max={5} />
 
-            {/* 球心告警：有待判 / 待验收就压在球心；一旦锁定某张单，让位给详情卡（Esc 关掉再回来）。
-                凡是需要用户动手的，都必须在这里一步直达——不能只藏在右栏小印章里让人到处找。 */}
-            {(pending.length > 0 || waiting.length > 0) && !picked && (
+            {/* 球心告警：待判 / 待验收 / 卡住三类都压在球心；一旦锁定某张单，让位给详情卡。
+                凡是需要用户动手（或必须知情）的，都必须在这里一步直达——不能只藏在角落里让人到处找。 */}
+            {(pending.length > 0 || waiting.length > 0 || stuck.length > 0) && !picked && (
               <div className="cs-alert">
                 <div className="cs-alert-top">
                   <i className="cs-alert-led" />
-                  ALERT / 需介入
-                  <span className="n mono">{String(pending.length + waiting.length).padStart(2, "0")}</span>
+                  {stuckOnly ? "ALERT / 卡点" : "ALERT / 需介入"}
+                  <span className="n mono">{String(pending.length + waiting.length + stuck.length).padStart(2, "0")}</span>
                 </div>
                 <div className="cs-alert-t">
                   {pending.length > 0
                     ? pending.length > 1
                       ? `${pending.length} 项待你拍板 · 风铃已停在卡点`
                       : "风铃已停在当前节点，等待拍板"
-                    : `${waiting.length} 张交付等你验收 · 成员已交回报`}
+                    : waiting.length > 0
+                      ? `${waiting.length} 张交付等你验收 · 成员已交回报`
+                      : `${stuck.length} 张单卡住了 · 风铃会自己判断重做还是收尾`}
                 </div>
                 <div className="cs-alert-d mono">
                   {pending.length > 0
                     ? `${pending[0].who} · ${pending[0].question}`
-                    : `${shortId(waiting[0].id)} · ${waiting[0].title}`}
+                    : waiting.length > 0
+                      ? `${shortId(waiting[0].id)} · ${waiting[0].title}`
+                      : `${shortId(stuck[0].id)} · ${stuck[0].title}${stuck[0].statusNote ? ` · ${stuck[0].statusNote}` : ""}`}
                 </div>
                 <div className="cs-alert-acts">
-                  <button type="button" onClick={() => setDrawer("decide")}>
-                    {pending.length > 0 ? "查看并处置" : "去验收"}
+                  <button
+                    type="button"
+                    onClick={() => (pending.length > 0 || waiting.length > 0 ? setDrawer("decide") : pickJob(stuck[0].id))}
+                  >
+                    {pending.length > 0 ? "查看并处置" : waiting.length > 0 ? "去验收" : "看这张单"}
                   </button>
-                  <button type="button" className="ghost" onClick={() => openResult()}>
+                  <button
+                    type="button"
+                    className="ghost"
+                    onClick={() => openResult(pending.length === 0 && waiting.length === 0 ? stuck[0].id : undefined)}
+                  >
                     看战果
                   </button>
                 </div>
@@ -759,12 +819,20 @@ export function ConsoleDesk(props: ConsoleViewProps) {
             <div className="cs-lynn">
               <LynnCore
                 phase={phaseEff}
-                onClick={() => setDrawer(pending.length || waiting.length ? "decide" : "result")}
+                onClick={() => setDrawer(pending.length || waiting.length || stuck.length ? "decide" : "result")}
               />
             </div>
             <div className="cs-lynn-foot">
               <span className="cs-lynn-state">
-                <b>{phaseEff === "decide" ? "待你拍板" : turnBusy ? "在推进" : "侦听中"}</b>
+                <b>
+                  {phaseEff === "decide"
+                    ? "待你拍板"
+                    : phaseEff === "intervene"
+                      ? "卡点"
+                      : turnBusy
+                        ? "在推进"
+                        : "侦听中"}
+                </b>
                 <span className="cs-beat" aria-hidden="true">
                   <i />
                   <i />
@@ -781,7 +849,7 @@ export function ConsoleDesk(props: ConsoleViewProps) {
             <div className="cs-panel-h">
               <h2>产出</h2>
               <button type="button" className="cs-linkbtn" onClick={() => openResult()}>
-                全部 {outputs.length} 件
+                全部 {allOutputs.length} 件
               </button>
             </div>
             <div className="cs-panel-b">
@@ -794,9 +862,9 @@ export function ConsoleDesk(props: ConsoleViewProps) {
                 <div className="cs-out-grid">
                   {outputs.map((o) => (
                     <OutCard
-                      key={`${o.taskId}-${o.ref}`}
+                      key={o.abs}
                       item={o}
-                      onOpen={() => setPreviewFile({ taskId: o.taskId, ref: o.ref })}
+                      onOpen={() => setPreviewFile({ taskId: o.job.id, ref: o.ref })}
                     />
                   ))}
                 </div>
@@ -816,9 +884,9 @@ export function ConsoleDesk(props: ConsoleViewProps) {
               className={m === "full" ? "danger" : undefined}
               aria-pressed={permission === m}
               onClick={() => onPermission(m)}
-              title={`切到 ${m}`}
+              title={`切到 ${PERMISSION_LABEL[m]}（${m}）`}
             >
-              {m}
+              {PERMISSION_LABEL[m]}
             </button>
           ))}
         </div>
@@ -842,6 +910,28 @@ export function ConsoleDesk(props: ConsoleViewProps) {
             </span>
           )}
         </div>
+        {/* 整群止损：已终止时只报状态（发一条消息即恢复），没终止才给两段确认的按钮 */}
+        {halted ? (
+          <span className="cs-halt-note mono" title="成员、心跳、巡检与验收叫醒都停了；在这个群发一条消息即可恢复。">
+            已终止 · 发消息恢复
+          </span>
+        ) : onHalt ? (
+          <button
+            type="button"
+            className={`cs-halt${armedHalt ? " armed" : ""}`}
+            title={armedHalt ? "再点一次：本群所有在跑的成员与后台巡检立即停机" : "终止本群（不只是这一轮）"}
+            onClick={() => {
+              if (armedHalt) {
+                setArmedHalt(false);
+                onHalt();
+                return;
+              }
+              setArmedHalt(true);
+            }}
+          >
+            {armedHalt ? "确认终止" : "终止本群"}
+          </button>
+        ) : null}
         {turnBusy ? (
           <button type="button" className="cs-send stop" onClick={onAbort}>
             停止
@@ -873,11 +963,11 @@ export function ConsoleDesk(props: ConsoleViewProps) {
               </span>
               <h2>
                 {drawer === "decide"
-                  ? `${pending.length} 项待你拍板`
+                  ? `${pending.length + waiting.length + stuck.length} 件等你处置`
                   : drawer === "result"
                     ? resultJob
                       ? (desk.jobs.find((j) => j.id === resultJob.id)?.title ?? "这张单的战果")
-                      : "本轮交付"
+                      : "全部交付"
                     : drawer === "usage"
                       ? "Token 与缓存"
                       : drawer === "config"
@@ -902,42 +992,105 @@ export function ConsoleDesk(props: ConsoleViewProps) {
                 />
               )}
               {drawer === "decide" &&
-                (pending.length === 0 && waiting.length === 0 ? (
+                (pending.length === 0 && waiting.length === 0 && stuck.length === 0 ? (
                   <div className="cs-note">没有待判的事，她在自己推进。</div>
                 ) : (
                   <>
-                    {/* 先给能直接拍板的单：验收 / 打回，不用再去值台找 */}
-                    {waiting.map((j) => (
+                    {/* 先给能直接拍板的单：验收 / 打回，不用再去值台找。
+                        验收前必须看得见**要收什么**：交付物、证据核了几条、这是第几次打回。 */}
+                    {waiting.map((j) => {
+                      const verified = j.evidence.filter((e) => e.verified).length;
+                      const files = (j.deliverables ?? []).map((d) => baseName(d.path || d.ref));
+                      return (
+                        <div className="cs-dj" key={j.id}>
+                          <div className="cs-dj-h">
+                            <span className="mono">{shortId(j.id)}</span>
+                            <span className="cs-dj-t">{j.title}</span>
+                            <span className="cs-dj-m mono">{j.member ?? "未派"}</span>
+                          </div>
+                          <div className="cs-dj-proof mono">
+                            第 {j.round ?? 1} 轮 · 打回 {j.rejections}/{j.rejectLimit} · 证据已核{" "}
+                            {verified}/{j.evidenceCount} · 交付物 {files.length} 件
+                          </div>
+                          {files.length > 0 && (
+                            <div className="cs-dj-files mono" title={files.join("\n")}>
+                              {files.slice(0, 3).join("、")}
+                              {files.length > 3 ? ` 等 ${files.length} 件` : ""}
+                            </div>
+                          )}
+                          {j.statusNote && <div className="cs-dj-note">{j.statusNote}</div>}
+                          {reject?.id === j.id ? (
+                            <RejectForm
+                              reject={reject}
+                              onChange={(patch) =>
+                                setReject((cur) => (cur && cur.id === j.id ? { ...cur, ...patch } : cur))
+                              }
+                              onSubmit={submitReject}
+                              onCancel={() => setReject(null)}
+                            />
+                          ) : (
+                            <div className="cs-dj-acts">
+                              <button
+                                type="button"
+                                className="cs-act"
+                                onClick={() => {
+                                  setResultJob({ id: j.id });
+                                  setDrawer("result");
+                                }}
+                              >
+                                看交付物
+                              </button>
+                              {actsOf(j).map((a) => (
+                                <button
+                                  key={a.key}
+                                  type="button"
+                                  className={`cs-act${a.tone ? ` ${a.tone}` : ""}`}
+                                  onClick={a.run}
+                                >
+                                  {a.label}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                    {/* 卡住的单：不用你动手，但必须看得见是谁、卡了多久、为什么（此前整块不出现在处置里） */}
+                    {stuck.map((j) => (
                       <div className="cs-dj" key={j.id}>
                         <div className="cs-dj-h">
                           <span className="mono">{shortId(j.id)}</span>
                           <span className="cs-dj-t">{j.title}</span>
                           <span className="cs-dj-m mono">{j.member ?? "未派"}</span>
                         </div>
+                        <div className="cs-dj-proof mono">
+                          卡住{staleOf(j) ? ` ${staleOf(j)!.text}` : ""} · 证据 {j.evidenceCount} 条 · 交付物{" "}
+                          {(j.deliverables ?? []).length} 件
+                        </div>
                         {j.statusNote && <div className="cs-dj-note">{j.statusNote}</div>}
-                        {reject?.id === j.id ? (
-                          <RejectForm
-                            reject={reject}
-                            onChange={(patch) =>
-                              setReject((cur) => (cur && cur.id === j.id ? { ...cur, ...patch } : cur))
-                            }
-                            onSubmit={submitReject}
-                            onCancel={() => setReject(null)}
-                          />
-                        ) : (
-                          <div className="cs-dj-acts">
-                            {actsOf(j).map((a) => (
-                              <button
-                                key={a.key}
-                                type="button"
-                                className={`cs-act${a.tone ? ` ${a.tone}` : ""}`}
-                                onClick={a.run}
-                              >
-                                {a.label}
-                              </button>
-                            ))}
-                          </div>
-                        )}
+                        <div className="cs-dj-acts">
+                          <button
+                            type="button"
+                            className="cs-act"
+                            onClick={() => {
+                              setDrawer(null);
+                              pickJob(j.id);
+                            }}
+                          >
+                            看这张单
+                          </button>
+                          <button
+                            type="button"
+                            className="cs-act"
+                            title="给卡住的单授权一个只读目录（目录由你在系统选择框里点）"
+                            onClick={() => onGrantRead(j.id)}
+                          >
+                            授权目录
+                          </button>
+                          <button type="button" className="cs-act" onClick={() => onCancelTask(j.id)}>
+                            停下
+                          </button>
+                        </div>
                       </div>
                     ))}
                     {pending.map((d) => (
@@ -948,7 +1101,15 @@ export function ConsoleDesk(props: ConsoleViewProps) {
               {drawer === "usage" && <UsageTab desk={desk} />}
               {drawer === "config" && <ConfigTab desk={desk} onOpenSettings={onOpenSettings} />}
               {drawer === "archive" && (
-                <ArchiveTab desk={desk} onPurgeOrphans={onPurgeOrphans} onRemoveTask={onRemoveTask} />
+                <ArchiveTab
+                  desk={desk}
+                  onPurgeOrphans={onPurgeOrphans}
+                  onRemoveTask={onRemoveTask}
+                  onOpen={(id) => {
+                    setResultJob({ id });
+                    setDrawer("result");
+                  }}
+                />
               )}
             </div>
           </aside>
@@ -1007,7 +1168,8 @@ function RejectForm({
         />
       </label>
       <div className="cs-rj-acts">
-        <button type="button" className="cs-act ok" onClick={onSubmit} disabled={!ready}>
+        {/* 打回是次级动作（值台 .btn-reject 也是中性），红只落在"第几次打回"这个读数上 */}
+        <button type="button" className="cs-act" onClick={onSubmit} disabled={!ready}>
           发回去
         </button>
         <button type="button" className="cs-act" onClick={onCancel}>
@@ -1086,8 +1248,11 @@ function TaskCard({
           {job.status === "in_review" && job.reviewer === "lynn" ? "风铃验中" : job.statusLabel}
         </span>
         {stale && <span className={`cs-t-stale${stale.hot ? " hot" : ""}`}>{stale.text}</span>}
-        <span className="cs-t-note">
-          {job.member ?? "未派"} · 证据 {job.evidenceCount} · v{job.version}
+        <span className="cs-t-note" title="第几轮 · 承办 · 证据 · 打回（剩下的重交次数）">
+          {job.member ?? "未派"} · 第 {job.round ?? 1} 轮 · 证据 {job.evidenceCount} ·{" "}
+          <span className={`cs-t-rej${job.rejections > 0 ? " hot" : ""}`}>
+            打回 {job.rejections}/{job.rejectLimit}
+          </span>
         </span>
       </div>
       {cmds.length > 0 && (
@@ -1134,24 +1299,10 @@ function TaskCard({
       )}
 
       <div className="cs-t-foot mono">
-        {cmds.length} 命令 · {job.evidenceCount} 证据 · v{job.version}
+        {cmds.length} 命令 · {job.evidenceCount} 证据 · {(job.deliverables ?? []).length} 交付
       </div>
     </div>
   );
-}
-
-/** 产出柜里的一张卡：一件真文件（已按 ref 合并多单副本） */
-interface OutItem {
-  taskId: string;
-  ref: string;
-  name: string;
-  path: string;
-  bytes?: number;
-  /** 来源工单标题：只放提示里当出处，卡面上不铺整句 */
-  from: string;
-  /** 这件东西在几张单里各存了一份（同一张单里"交付物 + 证据"重复登记不算两张单） */
-  jobs: number;
-  jobIds: Set<string>;
 }
 
 /**
@@ -1220,7 +1371,7 @@ function excerptOf(text: string): string {
 }
 
 /** 卡面缩略图：图片真渲染、文本给真摘要、其余给类型牌子。不再画随机骨架条——那不是预览，是装饰。 */
-function useThumb(item: OutItem, kind: FileKind) {
+function useThumb(item: DeskOutput, kind: FileKind) {
   const [thumb, setThumb] = useState<{ dataUrl?: string; text?: string; bytes?: number }>({});
   useEffect(() => {
     if (kind !== "image" && kind !== "text" && kind !== "code") {
@@ -1229,7 +1380,7 @@ function useThumb(item: OutItem, kind: FileKind) {
     }
     let gone = false;
     void window.lynn
-      .rpc("preview.read", { taskId: item.taskId, ref: item.ref })
+      .rpc("preview.read", { taskId: item.job.id, ref: item.ref })
       .then((r) => {
         if (gone) return;
         const bytes = typeof r.bytes === "number" ? r.bytes : undefined;
@@ -1245,22 +1396,31 @@ function useThumb(item: OutItem, kind: FileKind) {
     return () => {
       gone = true;
     };
-  }, [item.taskId, item.ref, kind]);
+  }, [item.job.id, item.ref, kind]);
   return thumb;
 }
 
 /** 产出卡：缩略图在上（真内容），下面是文件名 + 类型/大小；点开就是内置预览 */
-function OutCard({ item, onOpen }: { item: OutItem; onOpen: () => void }) {
-  const kind = fileKindOf(item.name);
-  const ext = extOf(item.name);
+function OutCard({ item, onOpen }: { item: DeskOutput; onOpen: () => void }) {
+  const name = baseName(item.abs);
+  const kind = fileKindOf(name);
+  const ext = extOf(name);
   const thumb = useThumb(item, kind);
   const size = fmtBytes(item.bytes ?? thumb.bytes);
+  const updated = item.updatedAt ? fmtTime(item.updatedAt) : "";
   return (
     <button
       type="button"
       className={`cs-out k-${kind}`}
       onClick={onOpen}
-      title={`${item.path}${item.from ? `\n来自：${item.from}` : ""}`}
+      title={[
+        item.abs,
+        `来自：${item.job.title || item.job.id}`,
+        item.jobs > 1 ? `这个文件被更新过 ${item.jobs} 次` : "",
+        updated ? `最近更新 ${updated}` : "",
+      ]
+        .filter(Boolean)
+        .join("\n")}
     >
       <span className="cs-thumb" aria-hidden="true">
         {thumb.dataUrl ? (
@@ -1271,11 +1431,11 @@ function OutCard({ item, onOpen }: { item: OutItem; onOpen: () => void }) {
           <span className="cs-thumb-ext mono">{(ext || "FILE").toUpperCase()}</span>
         )}
       </span>
-      <span className="cs-oname">{shortName(item.name)}</span>
+      <span className="cs-oname">{shortName(name)}</span>
       <span className="cs-ometa">
         <span className="cs-otype mono">{ext ? ext.toUpperCase() : "文件"}</span>
         {size && <span className="cs-osize mono">{size}</span>}
-        {item.jobs > 1 && <span className="cs-ojobs mono">{item.jobs} 单</span>}
+        {item.jobs > 1 && <span className="cs-ojobs mono">更新 {item.jobs} 次</span>}
       </span>
     </button>
   );
@@ -1297,6 +1457,21 @@ function DecisionCard({
     setText("");
   };
 
+  // 契约卡：拍板前得看清「谁做、什么时候要、多少钱、动哪个项目、落在哪个目录」。
+  // 值台的 PlanSeal 一直有这几项，控制台此前只有一句标题——用户等于闭眼点「批准」。
+  const plan = d.kind === "plan" ? d.plan : undefined;
+  const planMeta = plan
+    ? [
+        plan.member ? `承接 ${plan.member}` : "",
+        plan.deadline ? `截止 ${plan.deadline}` : "",
+        plan.budgetTokens ? `预算 ${Math.round(plan.budgetTokens / 1000)}K tok` : "",
+      ]
+        .filter(Boolean)
+        .join(" · ")
+    : "";
+  const planWhere = plan
+    ? [plan.projectName ? `项目 ${plan.projectName}` : "", plan.workspaceRoot ?? ""].filter(Boolean).join(" · ")
+    : "";
   return (
     <div className={`cs-dec kind-${d.kind}`}>
       <div className="cs-dec-top">
@@ -1304,6 +1479,12 @@ function DecisionCard({
         <span className="cs-dec-at mono">{hhmm(d.at)}</span>
       </div>
       <div className="cs-dec-q">{d.question}</div>
+      {planMeta && <div className="cs-dec-meta mono">{planMeta}</div>}
+      {planWhere && (
+        <div className="cs-dec-meta mono" title={plan?.workspaceRoot ?? ""}>
+          {planWhere}
+        </div>
+      )}
       {d.checks.length > 0 && (
         <ul className="cs-dec-checks">
           {d.checks.map((c, i) => (
@@ -1349,6 +1530,12 @@ function DecisionCard({
             >
               {d.kind === "plan" ? "打回" : "驳"}
             </button>
+            {/* 审批：这一类命令以后都放行（值台一直有，控制台漏了就会逼用户反复点） */}
+            {d.kind === "approval" && d.family && (
+              <button type="button" className="cs-act" onClick={() => onResolve(d.id, "start", undefined, true)}>
+                这类以后都准
+              </button>
+            )}
           </>
         )}
       </div>
@@ -1438,6 +1625,16 @@ function ResultTab({
     const fileEvs = evs.filter((e) => isFileRef(e.ref));
     const otherEvs = evs.filter((e) => !isFileRef(e.ref));
     const verified = fileEvs.filter((e) => e.verified).length;
+    // 交付物优先：那是用户要带走的东西；证据只是"我核对过"的记录
+    const products: DeskEvidence[] = (job.deliverables ?? []).length
+      ? (job.deliverables ?? []).map((d) => ({
+          level: "ok" as const,
+          title: d.path || d.ref,
+          detail: d.path || d.ref,
+          ref: d.ref,
+          verified: true,
+        }))
+      : fileEvs;
     return (
       <>
         <div className="cs-lead">
@@ -1450,8 +1647,8 @@ function ResultTab({
         </div>
         <div className="cs-cells">
           <div className="cs-cell">
-            <b className="mono">{fileEvs.length}</b>
-            <span>落盘产物</span>
+            <b className="mono">{products.length}</b>
+            <span>交付物</span>
           </div>
           <div className="cs-cell">
             <b className="mono">{verified}</b>
@@ -1479,11 +1676,11 @@ function ResultTab({
           </div>
         )}
 
-        {fileEvs.length > 0 && (
+        {products.length > 0 && (
           <>
-            <div className="cs-sec mono">产物清单</div>
+            <div className="cs-sec mono">交付物</div>
             <div className="cs-evs">
-              {fileEvs.map((e) => (
+              {products.map((e) => (
                 <EvRow
                   key={e.ref}
                   ev={e}
@@ -1560,17 +1757,18 @@ function ResultTab({
     );
   }
 
-  /* ---------------- 本轮汇总 ---------------- */
-  const done = desk.jobs.filter((j) => j.group === "archived");
+  /* ---------------- 全部汇总（本群） ---------------- */
+  const scope = jobsInThread(desk);
+  const done = scope.filter((j) => j.group === "archived");
   const withReport = done.filter((j) => j.report);
-  // 只算真文件：命令证据的 ref 是一句话，算进去"落盘 N 件"就是在虚报
-  const files = desk.jobs.flatMap((j) =>
-    j.evidence.filter((e) => isFileRef(e.ref)).map((e) => ({ j, e })),
-  );
+  // 交付物口径与值台交付箱一致（按绝对路径合并、含归档单）。
+  // **不按群过滤**：交付物是文件不是群内记录——柜面写「全部 N 件」就必须真的列全部，
+  // 否则点进去是空的（此前汇总与柜面用了两种口径）。
+  const files = outputsOf(desk);
   return (
     <>
       <div className="cs-lead">
-        <div className="cs-lead-k mono">本轮结论</div>
+        <div className="cs-lead-k mono">最近结论</div>
         <div className="cs-lead-v">
           {withReport[0]?.report?.conclusion ??
             (files.length > 0
@@ -1585,7 +1783,7 @@ function ResultTab({
         </div>
         <div className="cs-cell">
           <b className="mono">{files.length}</b>
-          <span>落盘产物</span>
+          <span>交付物</span>
         </div>
         <div className="cs-cell">
           <b className="mono">{desk.members.length}</b>
@@ -1595,14 +1793,14 @@ function ResultTab({
 
       {files.length > 0 && (
         <>
-          <div className="cs-sec mono">本轮产物</div>
+          <div className="cs-sec mono">全部交付物</div>
           <div className="cs-evs">
-            {files.map(({ j, e }) => (
+            {files.map((o) => (
               <EvRow
-                key={`${j.id}-${e.ref}`}
-                ev={e}
-                src={j.id}
-                onOpen={onOpenFile ? () => onOpenFile(j.id, e.ref ?? "") : undefined}
+                key={o.abs}
+                ev={{ level: "ok", title: o.abs, detail: o.abs, ref: o.ref, verified: true }}
+                src={o.job.id}
+                onOpen={onOpenFile ? () => onOpenFile(o.job.id, o.ref) : undefined}
               />
             ))}
           </div>
@@ -1678,17 +1876,28 @@ function UsageTab({ desk }: { desk: Desk }) {
 }
 
 function ConfigTab({ desk, onOpenSettings }: { desk: Desk; onOpenSettings: () => void }) {
+  const gated = desk.projectGated;
+  const trustNeed = Boolean(gated?.mcp || gated?.skills);
   return (
     <>
       <div className="cs-kv">
-        <dt>工作区</dt>
-        <dd>{desk.project}</dd>
-        <dt>子目录</dt>
-        <dd>{desk.subdir || "—"}</dd>
+        <dt>项目</dt>
+        <dd>{desk.workspaceProjectName || desk.project || "未选"}</dd>
+        <dt>主根</dt>
+        <dd className="mono">{desk.workspacePrimary ?? "本次不用工作区（产出落任务卷宗）"}</dd>
+        <dt>附加根</dt>
+        <dd className="mono">
+          {desk.workspaceExtras.length
+            ? desk.workspaceExtras.map((x) => `${x.path}（${x.mode === "rw" ? "可写" : "只读"}）`).join("；")
+            : "—"}
+        </dd>
+        {/* 信任：只有目录里真有「被信任才生效」的东西时才说，别对普通目录报警 */}
+        <dt>信任</dt>
+        <dd>{trustNeed ? (desk.projectTrusted ? "已信任（项目级 MCP/技能生效）" : "未信任（项目级 MCP/技能不加载）") : "无需信任"}</dd>
         <dt>自动开工</dt>
         <dd>{desk.autoStart ? "开" : "关"}</dd>
         <dt>软预算</dt>
-        <dd>{desk.budget ? `${desk.budget.spent} / ${desk.budget.soft}` : "未设上限"}</dd>
+        <dd>{desk.budget ? `${fmtTokens(desk.budget.spent)} / ${fmtTokens(desk.budget.soft)}` : "未设上限"}</dd>
         <dt>会话</dt>
         <dd>{desk.thread.title || "没有会话"}</dd>
       </div>
@@ -1703,10 +1912,13 @@ function ArchiveTab({
   desk,
   onPurgeOrphans,
   onRemoveTask,
+  onOpen,
 }: {
   desk: Desk;
   onPurgeOrphans?: () => void;
   onRemoveTask?: (taskId: string) => void;
+  /** 点开一张归档单的战果（风铃代验可能判错，「重开」是唯一回退路） */
+  onOpen?: (taskId: string) => void;
 }) {
   /** 批量删除不可恢复：第一次点只换文案，第二次才真删（不弹窗打断沉浸） */
   const [armed, setArmed] = useState(false);
@@ -1743,16 +1955,32 @@ function ArchiveTab({
       {orphanNote}
       <div className="cs-archive">
         {desk.archived.map((a) => (
-          <div className="cs-ar-row static" key={a.id}>
+          <div
+            className={`cs-ar-row${onOpen ? " openable" : " static"}`}
+            key={a.id}
+            role={onOpen ? "button" : undefined}
+            tabIndex={onOpen ? 0 : undefined}
+            title={onOpen ? "打开这张单的战果（可重开）" : undefined}
+            onClick={() => onOpen?.(a.id)}
+            onKeyDown={(e) => {
+              if (!onOpen) return;
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                onOpen(a.id);
+              }
+            }}
+          >
             <span className="cs-ar-id mono">{shortId(a.id)}</span>
             <span className="cs-ar-t">{a.title}</span>
-            <span className="cs-ar-m mono">{a.status ?? ""}</span>
+            {/* 状态用中文标签（此前直接印 done / canceled 原码） */}
+            <span className="cs-ar-m mono">{a.status ? (STATUS_LABEL[a.status] ?? a.status) : ""}</span>
             {onRemoveTask && (
               <button
                 type="button"
                 className={`cs-ar-del${delId === a.id ? " sure" : ""}`}
                 title={delId === a.id ? "再点一次：连卷宗一起彻底删掉" : "删除这张归档单"}
-                onClick={() => {
+                onClick={(e) => {
+                  e.stopPropagation();
                   if (delId !== a.id) {
                     setDelId(a.id);
                     return;

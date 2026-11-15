@@ -50,6 +50,8 @@ import { detectTrailingRepetition, stripTrailingRepetition } from "./repetition"
 import { estimateTaskScale, scaleLimits, type EvidencePolicy } from "./task-scale";
 import { findDuplicateAssignment } from "./assignment-guard";
 import { readDocxText } from "./docx-read";
+// 去 AI 味（2026-11-15）：可选外部插件 humanizer-stream，只改展示层文本，上下文与 token 不受影响
+import { humanizeDisplay, humanizeFileText, humanizerStatus, loadHumanizer, setHumanizerEnabled } from "./humanizer";
 import { avatarById, avatarFor, isAvatarId } from "../shared/avatars";
 import {
   buildInjection,
@@ -265,6 +267,11 @@ const TOOL_JSON: ToolSchema[] = [
           deliverable: { type: "string" },
           acceptance: { type: "array", items: { type: "string" } },
           avatarId: { type: "string", description: "头像库 id（a01…a12，可省略：系统按名字自动挑一张本队没用过的）" },
+          acceptor: {
+            type: "boolean",
+            description:
+              "是否设为常驻验收员岗位（2026-11-15）：true = 只做验收、不参与执行。验收会下沉给这名成员，风铃据此不必逐一读所有执行成员的全文汇报，只等它那张紧凑的【验收结论】。验收员实际工具面会被收窄到 read_file / list_dir / submit_report，这里填的 tools 仅作档案记录。",
+          },
           justification: { type: "string", description: "超过 6 人编制时必填" },
         },
       },
@@ -673,6 +680,8 @@ type DecisionEntry = Decision;
 /** 待确认的任务契约（只存一次派单所需的最小上下文） */
 interface PendingPlan {
   decisionId?: string;
+  /** 契约是哪个群在等你拍板（2026-11-15）：切到别的群不该再看见它 */
+  threadId?: string;
   teamId: string;
   taskId: string;
   member: string;
@@ -845,6 +854,12 @@ export class Kernel {
   private heartbeatPending: string | null = null;
   /** 成员交回报后待风铃验收的队列（2026-11-12）：忙时先挂着，收尾再叫 */
   private reviewPending: { taskId: string; member: string; text: string }[] = [];
+  /**
+   * 被用户「终止任务」的群（2026-11-15）：这些群里的一切后台动作停手——
+   * 成员执行、心跳/巡检、验收叫醒、定时任务注入、排队输入，直到用户在这个群发出新消息。
+   * 内存副本由 init 从 threads/index.json 的 haltedAt 恢复（重启也不该偷偷复活）。
+   */
+  private haltedThreads = new Set<string>();
   /** 探针已报过的「沉默成员」，避免每秒重复触发 */
   private silentNoted = new Map<string, number>();
   private lastHeartbeatAt = Date.now(); // init 后先静默一个间隔，不抢启动窗口
@@ -1198,6 +1213,18 @@ export class Kernel {
   }
 
   private card(c: Omit<FeedCard, "id" | "createdAt">): FeedCard {
+    /**
+     * 去 AI 味（2026-11-15）：只有「人说的话」才过滤——她的回复（kind=lynn）与群里带 author 的发言。
+     * 系统卡是代码写的，不是模型输出，一个字都不动。
+     *
+     * 过滤只作用于**这张展示卡**：history 与落盘仍是原文（见 settleAssistant）。
+     * 否则上下文会被改写、前缀缓存会被打穿——那正是这个功能最容易犯的错。
+     */
+    if (c.kind === "lynn" || c.author) {
+      const text = c.text ? humanizeDisplay(c.text) : c.text;
+      const body = c.body ? humanizeDisplay(c.body) : c.body;
+      if (text !== c.text || body !== c.body) c = { ...c, text, body };
+    }
     // 同一张单反复出同一种事件（权限拦截 / 外呼审计）：聚合成一张卡计数，不再一屏刷 N 条
     if (AGGREGATED_BADGES.has(c.badge ?? "") && this.feed.length > 0) {
       const last = this.feed[this.feed.length - 1];
@@ -1667,6 +1694,8 @@ export class Kernel {
 
   /** 定时任务 tick（M2-02）：单飞——一次至多派一个；错过 >10 分钟如实标 missed 补跑 */
   private tickSchedules(): void {
+    // 本群已终止：定时任务也延后（恢复后按 missed 补跑，不偷偷把她的活叫回来）
+    if (this.isThreadHalted()) return;
     const due = this.scheduler.due(new Date());
     if (!due.length) return;
     const first: DueItem = due[0];
@@ -2081,6 +2110,8 @@ export class Kernel {
   /** 切线程：先存当前，再装载目标；Pi 会话目录按线程隔离 */
   private switchThread(id: string): void {
     if (id === this.currentThreadId) return;
+    // 老卡没有群标记：趁当前群还在，先把它们认领到这里，别跟到新群去
+    this.stampDecisionScope();
     // 切群要换 Pi 会话目录（--continue 指向新目录），前缀必然作废，记下来供命中率回查
     this.cacheBreakReason = "thread_switch";
     const meta = this.threads.get(id);
@@ -2146,6 +2177,7 @@ export class Kernel {
    * 用户说第一句话时再由 submitTurn 就地开一条（见那里的注释）。
    */
   private enterEmptySession(): void {
+    this.stampDecisionScope();
     this.currentThreadId = "";
     // 空场回到默认工作区：不让"上一条会话的目录"残留在内存里变成隐式继承
     this.applyRoots({ primary: this.defaultWorkspace, extras: [] });
@@ -2302,8 +2334,51 @@ export class Kernel {
       if (this.decisions.some((x) => x.id === d.id)) continue;
       // 指向的单已经没了，问题也就没意义
       if (d.jobId && !this.taskStore.get(d.jobId)) continue;
+      // 老版本落盘时没写群标记：能从工单反查就反查，实在查不到归给启动时的当前群，
+      // 绝不能变成一张"每个群都弹"的卡。
+      if (!d.threadId) d.threadId = this.decisionThreadId(d) || this.currentThreadId;
       this.decisions.push(d);
     }
+    // 补上的归属回写一次，下次重启不用再猜
+    this.persistPending();
+  }
+
+  /**
+   * 一张「等你拍板」属于哪个群（2026-11-15）。
+   * 新卡自带标记；老卡按它指向的工单或派单契约反查，不猜、不默认给所有群。
+   */
+  private decisionThreadId(d: Decision): string {
+    if (d.threadId) return d.threadId;
+    if (d.jobId) {
+      const t = this.taskStore.get(d.jobId);
+      if (t?.threadId) return t.threadId;
+    }
+    const p = this.pendingPlans.get(d.id);
+    if (p) return p.threadId ?? this.taskStore.get(p.taskId)?.threadId ?? "";
+    return "";
+  }
+
+  /** 切群前把没标记的老卡认领到切走前的群：不让它们跟着用户串到新群 */
+  private stampDecisionScope(): void {
+    const from = this.currentThreadId;
+    let changed = false;
+    for (const d of this.decisions) {
+      if (d.threadId) continue;
+      const owner = this.decisionThreadId(d) || from;
+      if (!owner) continue;
+      d.threadId = owner;
+      changed = true;
+    }
+    if (changed) this.persistPending();
+  }
+
+  /** 快照只出本群的挂起卡：新建群/切群后不该看见别群的问题、契约、审批 */
+  private decisionsForCurrentThread(): DecisionEntry[] {
+    const id = this.currentThreadId;
+    return this.decisions.filter((d) => {
+      const owner = this.decisionThreadId(d);
+      return !owner || owner === id;
+    });
   }
 
   /**
@@ -2335,6 +2410,8 @@ export class Kernel {
   }
 
   async init(): Promise<void> {
+    // 上次被用户「终止任务」的群：重启后仍然停手，等用户发新消息才恢复（2026-11-15）
+    this.haltedThreads = new Set(this.threads.list().filter((t) => t.haltedAt).map((t) => t.id));
     // 先把上次没拍板的契约/提问捞回来：否则它们在内存里消失，重启后会被当成"停滞"误处置
     this.loadPending();
     // 上次没收尾的单先对账（放在最前：界面一打开就该是真实状态）
@@ -2357,6 +2434,11 @@ export class Kernel {
     }
     // 内置技能种子（M3-01）：缺才写入（用户改过不覆盖；删除后下次启动还原）
     this.seedBuiltinSkills();
+    // 去 AI 味插件（2026-11-15）：外部包，找不到就当没装（不影响启动，也不影响输出）
+    setHumanizerEnabled(this.settings.getPrefs().humanizer !== false);
+    void loadHumanizer(this.dataRoot).then((h) => {
+      if (h && this.settings.getPrefs().humanizer !== false) this.log("humanizer_loaded", { dir: h.dir, version: h.version });
+    });
     // 本地日历提醒扫描（M2-01）：分钟级
     this.reminderTimer = setInterval(() => this.scanReminders(), 60_000);
     this.reminderTimer.unref?.();
@@ -2586,6 +2668,7 @@ export class Kernel {
     if (this.advisorReviewed.has(taskId)) return;
     const rec = this.taskStore.get(taskId);
     if (!rec) return;
+    if (this.isThreadHalted(threadId)) return;
     const model = this.modelForRole("advisor");
     if (!model) {
       this.log("advisor_skipped", { taskId, why: "no_model" });
@@ -2612,6 +2695,8 @@ export class Kernel {
           return `**${severityLabel(n.severity)}** · ${n.title}${ev}${sg}`;
         })
         .join("\n\n");
+      // 本轮顾问意见回来时这个群可能已经被终止：不再往停住的群里丢卡
+      if (this.isThreadHalted(threadId)) return;
       this.cardTo(threadId, {
         kind: "tool",
         badge: "顾问",
@@ -2747,11 +2832,21 @@ export class Kernel {
      * 带「轮次/耗时」的回报卡落地——实机看到的就是"她的结论夹在成员回报中间"。
      * 挪到微任务里：调用方的卡先写完（cardTo 是同步的），再叫醒她。
      */
-    // 成员自己交的（notifyLynn）记一笔：风铃再 review_result 同名单据就不许重复登记
-    if (notifyLynn) this.selfReported.add(taskId);
+    // 成员自己交的（notifyLynn）记一笔：风铃再 review_result 同名单据就不许重复登记。
+    // 2026-11-15：按「成员」记，不再只按单——同一张单上验收员（另一名成员）也要回报，
+    // 不能因为执行成员先报过就把验收员的回报拦掉。
+    if (notifyLynn) this.selfReported.add(`${taskId}::${member}`);
     const kickReview = () => {
       this.requestHeartbeat("report");
-      if (notifyLynn) this.wakeLynnForReview(taskId, member, text);
+      if (!notifyLynn) return;
+      const reporterIsAcceptor = this.isAcceptor(teamId, member);
+      // 执行成员回报 → 交给本队验收员验收（不叫醒风铃读全文）；验收员回报 → 才叫醒风铃看结论。
+      // 队里没设验收员时回落老行为：直接叫醒风铃。
+      if (!reporterIsAcceptor && this.teamHasAcceptor(teamId)) {
+        this.engageAcceptor(teamId, taskId, member, text);
+      } else {
+        this.wakeLynnForReview(taskId, member, text);
+      }
     };
     queueMicrotask(kickReview);
     return moved
@@ -2767,6 +2862,8 @@ export class Kernel {
    * 忙的时候先挂着，别打断正在跑的活。
    */
   private wakeLynnForReview(taskId: string, member: string, text: string): void {
+    // 本群被用户终止：不叫醒（成员都已停机，这条只是迟到的事件）
+    if (this.isThreadHalted(this.taskStore.get(taskId)?.threadId)) return;
     this.reviewPending.push({ taskId, member, text: text.slice(0, 300) });
     this.drainReviewPending();
   }
@@ -2774,6 +2871,7 @@ export class Kernel {
   /** 忙、或用户正在拍板契约时先挂着：这轮收尾再叫 */
   private drainReviewPending(): void {
     if (!this.reviewPending.length) return;
+    if (this.isThreadHalted()) return; // 本群已终止：叫醒也不叫（发新消息才恢复）
     if (this.busy) return; // 别打断正在跑的活
     if (this.turn.phase === "awaiting_plan") return; // 用户正在拍板，别插队
     const item = this.reviewPending.shift();
@@ -2788,6 +2886,68 @@ export class Kernel {
       undefined,
       { internal: true, ephemeral: true },
     );
+  }
+
+  /** 这名成员是不是本队的常驻验收员（2026-11-15） */
+  private isAcceptor(teamId: string, member: string): boolean {
+    try {
+      return !!this.teamStore.readMember(teamId, member)?.acceptor;
+    } catch {
+      return false;
+    }
+  }
+
+  /** 本队有没有常驻验收员 */
+  private teamHasAcceptor(teamId: string): boolean {
+    try {
+      return this.teamStore.listMembers(teamId).some((m) => m.acceptor);
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * 执行成员回报后，交给本队验收员做最终验收（2026-11-15）。
+   * 验收在验收员自己的 runMemberTask 上下文里跑——风铃不必逐一读所有执行成员的全文汇报，
+   * 只等验收员那张紧凑的【验收结论】。验收员只读不写（工具面收窄到 read_file/list_dir/submit_report）。
+   * 队里没验收员、或派不动时回落：直接叫醒风铃去验。
+   */
+  private engageAcceptor(teamId: string, taskId: string, workerMember: string, workerReport: string): void {
+    const acc = this.teamStore.listMembers(teamId).find((m) => m.acceptor);
+    if (!acc) {
+      this.wakeLynnForReview(taskId, workerMember, workerReport);
+      return;
+    }
+    const task = this.taskStore.get(taskId);
+    const acceptance = task?.acceptance && task.acceptance.length ? task.acceptance : ["完成标准全部满足"];
+    const brief =
+      `你是本队的常驻验收员，现在验收 ${taskId}（执行成员：${workerMember}）。\n` +
+      `执行成员的回报如下：\n"""\n${workerReport.slice(0, 2000)}\n"""\n` +
+      `对照完成标准逐条核对：\n${acceptance.map((a, i) => `${i + 1}. ${a}`).join("\n")}\n` +
+      `做法：用 list_dir 看工作区产物是否齐全，用 read_file 把关键交付物正文读一遍——` +
+      `「文件存在 + 成员说齐全」不是验收，骨架稿 / 占位符 / 空章节只有读了正文才看得见。\n` +
+      `核实后用 submit_report 给结论，正文务必以【验收结论】开头：通过 / 打回 + 逐项核对结果 + 证据（哪个文件 / 哪一段）+ ` +
+      `打回时写清改什么与期望什么。你只验收并汇报，不要替执行成员重做——风铃会按你的结论决定下一步。`;
+    // 执行成员的 run 还没走完 .finally()（memberRuns 要等它清）——宏任务里再派，
+    // 否则 dispatchMember 会撞上"已有成员在执行中"把验收误挡掉。
+    setTimeout(() => {
+      // 验收员在「同一张单」上跑验收：它不参与执行，只做验收；工具面收窄到只读 + 回报。
+      const res = this.dispatchMember(teamId, taskId, acc.name, brief, "", [
+        "read_file",
+        "list_dir",
+        "submit_report",
+      ]);
+      if (!res.ok) {
+        this.wakeLynnForReview(taskId, workerMember, workerReport);
+        return;
+      }
+      this.cardTo(this.currentThreadId, {
+        kind: "tool",
+        badge: "验收",
+        title: `验收 · ${acc.name} · ${taskId}`,
+        body: `验收员开始核对 ${workerMember} 的交付物，结论出来后会汇报给你。`,
+      });
+    }, 0);
   }
 
   /** 没在跑就立刻提交，在跑就进队列（用户确认计划/回答问题时用） */
@@ -2829,6 +2989,7 @@ export class Kernel {
       title: `允许「${name}」吗？`,
       detail: JSON.stringify(args).slice(0, 300),
       kind: "approval",
+      threadId: this.currentThreadId,
       at: new Date().toISOString(),
     });
     this.setTurn({ phase: "awaiting_plan" });
@@ -2959,7 +3120,7 @@ export class Kernel {
       };
     }
     // 重派 = 新一轮：清掉"成员已自交回报"的标记，这一轮可以重新登记
-    this.selfReported.delete(taskId);
+    this.selfReported.delete(`${taskId}::${member}`);
     // 后台执行可能跨会话：出发时的线程记下来，回报要写回那一个，不能落到用户当前看的会话里
     const runThreadId = this.currentThreadId;
     // 同一个成员同时跟两张单 = 工具层互相堵死（真实事故：13:24 与 13:26 各派一张，然后两边都不动了）
@@ -3111,6 +3272,9 @@ export class Kernel {
           outcome: ev.outcome,
         }),
       onBeforeWrite: (rel, full, existed) => this.checkpoints.beforeWrite(rel, full, existed),
+      // 去 AI 味（2026-11-15）：成员写的文档/文案/代码注释在落盘前过一遍。
+      // 走 code 档时只碰注释，代码本体零改动；插件没装时是恒等变换。
+      onWriteContent: (rel, content) => humanizeFileText(rel, content),
       office: {
         read: (file) => readTable(file, this.officeHealth),
         write: (file, table) => writeTable(file, table),
@@ -3336,8 +3500,10 @@ export class Kernel {
    * 之前第二次点「停掉这张单」会回"停不下来：没有在跑的 …"（实机报障），
    * 因为它把"已经没有在跑"当成了错误，而界面上的卡在成功停机后并没有换掉按钮。
    */
-  cancelMemberTask(taskId: string): { ok: boolean; error?: string } {
+  cancelMemberTask(taskId: string, opts: { quiet?: boolean } = {}): { ok: boolean; error?: string } {
     const controller = this.memberAborts.get(taskId);
+    // 已经在停（信号已发、成员还没交出收手回执）：幂等返回，不重复收口也不重复计数
+    if (controller?.signal.aborted) return { ok: true };
     const rec0 = this.taskStore.get(taskId);
     if (!controller) {
       if (!rec0) return { ok: false, error: `没有这张单：${taskId}` };
@@ -3359,8 +3525,11 @@ export class Kernel {
       const note = fixed
         ? `${taskId} 本来就没人在跑，已把状态收口为「卡住」。`
         : `${taskId} 现在没有成员在跑（可能已经结束），不需要再停。`;
-      if (rec0.threadId) this.cardTo(rec0.threadId, { kind: "system", jobId: taskId, text: note });
-      else this.card({ kind: "system", text: note });
+      // quiet：整群终止时逐张报一遍就是刷屏，由调用方出一条汇总卡
+      if (!opts.quiet) {
+        if (rec0.threadId) this.cardTo(rec0.threadId, { kind: "system", jobId: taskId, text: note });
+        else this.card({ kind: "system", text: note });
+      }
       return { ok: true };
     }
     controller.abort();
@@ -3385,10 +3554,89 @@ export class Kernel {
       : `已停 ${taskId}：成员在本轮模型调用结束后收手，已写出的文件留在工作区。`;
     if (moved) this.escalateBlockedToLynn(taskId, "成员已停机");
     // C2 原则：工单相关卡片归出发会话——在别的会话点「停」不该把过程噪音写进当前会话
-    const owner = this.taskStore.get(taskId)?.threadId;
-    if (owner) this.cardTo(owner, { kind: "system", text });
-    else this.card({ kind: "system", text });
+    if (!opts.quiet) {
+      const owner = this.taskStore.get(taskId)?.threadId;
+      if (owner) this.cardTo(owner, { kind: "system", text });
+      else this.card({ kind: "system", text });
+    }
     return { ok: true };
+  }
+
+  /** 这个群现在是不是被终止了（内存副本，O(1)） */
+  isThreadHalted(id = this.currentThreadId): boolean {
+    return Boolean(id) && this.haltedThreads.has(id);
+  }
+
+  /**
+   * 用户点「终止任务」（2026-11-15）：本群所有进行中的工作全部停手。
+   *
+   * 停到哪一层：
+   *  1) 本群在跑的成员单逐张 abort（别的群的单不碰）；
+   *  2) 当前回合就地中断 + 清空排队输入；
+   *  3) 待验收叫醒队列里本群的条目丢掉；
+   *  4) 之后心跳 / 指挥者巡检 / 秒级探针 / 定时任务注入 / 卡住升级全部对本群静默；
+   *  5) 状态落盘（haltedAt），重启也仍然停手。
+   * 恢复条件只有一个：用户在这个群发出新消息（feed.send 里 resumeThread）。
+   */
+  haltThread(id?: string): { ok: boolean; stopped: number; threadId: string; error?: string } {
+    const tid = String(id ?? this.currentThreadId ?? "").trim();
+    if (!tid) return { ok: false, stopped: 0, threadId: "", error: "没有可终止的群" };
+    this.haltedThreads.add(tid);
+    try {
+      this.threads.setHalted(tid, true);
+    } catch {
+      /* 群已被删：内存标记照生效，别再抛 */
+    }
+    // 1) 本群在跑的成员单
+    const stoppedIds: string[] = [];
+    for (const taskId of [...this.memberRuns.keys()]) {
+      const rec = this.taskStore.get(taskId);
+      if (rec?.threadId !== tid) continue;
+      // 已经在停 / 已经收口的不重复计数（连点两次「终止任务」不该报停了两张）
+      if (rec.status !== "in_progress") continue;
+      if (this.memberAborts.get(taskId)?.signal.aborted) continue;
+      if (this.cancelMemberTask(taskId, { quiet: true }).ok) stoppedIds.push(taskId);
+    }
+    // 2) 待验收的回报：本群的丢掉（恢复后靠台账与卷宗继续，不靠这半条队列）
+    this.reviewPending = this.reviewPending.filter((p) => this.taskStore.get(p.taskId)?.threadId !== tid);
+    // 3) 当前回合属于这个群：就地中断
+    if (tid === this.currentThreadId) {
+      this.abortRequested = true;
+      this.queue = [];
+      this.voice?.stop();
+      this.setTurn({ pending: 0 });
+      this.chatAbort?.abort();
+      if (this.host?.isRunning()) void this.host!.abort().catch(() => undefined);
+      if (this.liveCard) {
+        this.liveCard.streaming = false;
+        this.patchCard(this.liveCard, { streaming: false });
+        this.liveCard = null;
+      }
+    }
+    // 4) 一条汇总卡说清"停的是什么、怎么恢复"，不给每张单都留一张
+    const head = stoppedIds.length
+      ? `已终止本群：${stoppedIds.length} 张在跑的单已停机（${stoppedIds.join("、")}）`
+      : "已终止本群：没有成员在跑";
+    this.cardTo(tid, {
+      kind: "system",
+      systemTone: "notice",
+      text:
+        `${head}。心跳巡检、自动跟进、验收叫醒与排队输入全部暂停——` +
+        `在这个群发一条消息即可恢复。`,
+    });
+    this.log("thread_halt", { threadId: tid, stopped: stoppedIds.length });
+    return { ok: true, stopped: stoppedIds.length, threadId: tid };
+  }
+
+  /** 用户在这个群发出新消息 = 恢复：只清状态，不主动叫醒（这一轮本身就是新需求） */
+  private resumeThread(id: string): void {
+    if (!id || !this.haltedThreads.delete(id)) return;
+    try {
+      this.threads.setHalted(id, false);
+    } catch {
+      /* 群不在了也无所谓 */
+    }
+    this.log("thread_resume", { threadId: id });
   }
 
   /**
@@ -3513,6 +3761,8 @@ export class Kernel {
         detail: `命令：${command}\n${root}\n删除不可撤销；本单新造的临时文件已由系统自动放行，走到这里的都算既有文件。`,
         kind: "approval",
         jobId: taskId,
+        // 后台成员可能在别群跑：审批归工单的群，不归用户当下正看的群
+        threadId: owner,
         ...(family ? { family } : {}),
         at: new Date().toISOString(),
       });
@@ -3532,12 +3782,26 @@ export class Kernel {
   }
 
   /**
+   * 风铃单轮工具轮次上限（settings.prefs.maxAgentRounds，4–80；非法值回退默认 24）。
+   * 旧值写死 8，审查→派单→激活技能→验收→汇报一条龙轻松超 8 轮，会把她中途掐断；
+   * 给足后极少触顶，且触顶只总结不硬停（见 runChatDirect 末轮强制无工具）。
+   */
+  private agentRounds(): number {
+    const raw = Number(this.settings.getPrefs().maxAgentRounds);
+    if (!Number.isFinite(raw) || raw < 4) return 24;
+    return Math.min(Math.floor(raw), 80);
+  }
+
+  /**
    * 工单卡住 → 交回风铃自己处置，不把「要不要取消」推给用户。
    * 每单只注入一次（重做时清掉），正在生成时不叠加新回合。
    */
   private escalateBlockedToLynn(taskId: string, reason: string, owner?: string): void {
     if (this.blockedHandled.has(taskId)) return;
     this.blockedHandled.add(taskId);
+    // 本群已终止：卡住也不许把她叫回来（2026-11-15）
+    const ownerThread = owner ?? this.taskStore.get(taskId)?.threadId ?? this.currentThreadId;
+    if (this.isThreadHalted(ownerThread)) return;
     const note = `${taskId} 卡住了（${reason}）。风铃会自己判断：重做 / 换策略 / 关单 / 汇报，不需要你来点取消。`;
     const card = { kind: "system" as const, badge: "进度" as const, jobId: taskId, text: note };
     if (owner) this.cardTo(owner, card);
@@ -3892,6 +4156,8 @@ export class Kernel {
    */
   private supervisorTick(): void {
     if (!this.settings.getPrefs().supervisor) return;
+    // 本群被用户终止：自动跟进也停手（2026-11-15）
+    if (this.isThreadHalted()) return;
     if (this.busy || this.memberRuns.size === 0) return;
     const now = Date.now();
     if (now - this.lastSupervisorAt < 5 * 60_000) return;
@@ -3953,6 +4219,8 @@ export class Kernel {
   private heartbeatTick(trigger: "timer" | "event" = "timer"): void {
     const prefs = this.settings.getPrefs();
     if (!prefs.heartbeat) return;
+    // 本群被用户终止：心跳是"她主动找事做"，必须先停（2026-11-15）
+    if (this.isThreadHalted()) return;
     if (this.busy) return;
     const now = Date.now();
     const minutes = Math.max(1, Math.round(prefs.heartbeatMinutes || 5));
@@ -4094,6 +4362,8 @@ export class Kernel {
   private requestHeartbeat(reason: string): void {
     const prefs = this.settings.getPrefs();
     if (!prefs.heartbeat) return;
+    // 本群已终止：事件驱动的唤醒同样闭嘴（否则成员退出/工单变化会把她叫回来）
+    if (this.isThreadHalted()) return;
     let facts: HeartbeatFacts;
     try {
       facts = collectHeartbeatFacts({
@@ -4135,7 +4405,7 @@ export class Kernel {
   private probeTick(): void {
     const prefs = this.settings.getPrefs();
     const base = prefs.heartbeatProbeMs ?? 1000;
-    if (prefs.heartbeat && base > 0) {
+    if (prefs.heartbeat && base > 0 && !this.isThreadHalted()) {
       const now = Date.now();
       for (const taskId of this.memberRuns.keys()) {
         if (this.toolBusy(taskId)) {
@@ -4198,6 +4468,7 @@ export class Kernel {
           // 实机 31 份档案全部被这样污染，跨任务复用与经验沉淀都无从谈起。
           body: MEMBER_WORK_STYLE_BODY,
           ...(isAvatarId(args.avatarId) ? { avatarId: args.avatarId } : {}),
+          ...(args.acceptor === true ? { acceptor: true } : {}),
         };
         // 闸放在建队之前：不合格就不该顺手多建一支空队。
         const issues = validateMemberProfile(profile);
@@ -4456,6 +4727,7 @@ export class Kernel {
         // 本群用到的队显式绑到本群（首次绑定）：本群成员、"其他团队折叠"都靠它
         this.bindGroup(teamId);
         const ctx: PendingPlan = {
+          threadId: this.currentThreadId,
           teamId,
           taskId,
           member,
@@ -4536,6 +4808,7 @@ export class Kernel {
           detail: `${brief}\n\n工作区（可读写）：${wsFinal}${permNote}${methodNote}${scaleNote}`,
           kind: "plan",
           jobId: taskId,
+          threadId: this.currentThreadId,
           at: new Date().toISOString(),
           plan,
           checks: plan.acceptance.map((a) => ({ ok: true, text: a })),
@@ -4750,7 +5023,7 @@ export class Kernel {
          * 重复登记会在群里落第二张一模一样的「回报」卡，用户看到"同一份结果两个头"。
          * 这时她该做的是验收，不是再写一遍回报。
          */
-        if (this.selfReported.has(taskId)) {
+        if (this.selfReported.has(`${taskId}::${member}`)) {
           return `${taskId} 的回报已经由成员自己交上来了（群里那张「回报」卡就是），不要重复登记。直接 read_artifact 读正文后 accept_or_reject 验收。`;
         }
         if (!text) return "回报正文不能为空：写清成员交回了什么、证据是什么。";
@@ -4924,7 +5197,8 @@ export class Kernel {
         if (isAskingUserForOutputDetails(String(args.question ?? ""))) return REPLY_GUARD_HINT;
         // 刚呈上任务契约又问"是否确认开工"= 重复确认：契约卡自己带「开始/修改/驳回」，
         // 再来一问只会把用户的回答变成一轮新对话（真实事故：一次派单问了两遍）
-        if (this.pendingPlans.size > 0 && Date.now() - this.lastPlanAt < 120_000) {
+        // 只挡"本群"刚呈上的契约：别群在等拍板，不该堵住这个群问别的问题
+        if (this.decisionsForCurrentThread().some((d) => d.kind === "plan") && Date.now() - this.lastPlanAt < 120_000) {
           return "任务契约已经在等用户确认（卡片上有「开始 / 修改 / 驳回」三个按钮），不要再用 ask_user 重复问是否开工。把需要补充的说明写进下一次回复即可。";
         }
         const q = this.tools.askUser(String(args.question), String(args.context ?? ""));
@@ -4934,6 +5208,7 @@ export class Kernel {
           title: String(args.question).slice(0, 60),
           detail: String(args.context ?? ""),
           kind: "question",
+          threadId: this.currentThreadId,
           at: new Date().toISOString(),
         });
         this.persistPending();
@@ -5476,13 +5751,16 @@ export class Kernel {
   /** 落一轮助手回复（两条路径共用，顺序固定：history → 落盘 → 卡片收尾） */
   private settleAssistant(live: FeedCard, text: string): void {
     if (text.trim()) {
-      live.text = text;
+      // 展示层去 AI 味（2026-11-15）：卡片上是过滤后的，history 与落盘仍是原文。
+      // 这一行和下一行是同一个约定的两半——把 humanizeDisplay 挪到 history 上，
+      // 上下文就会被改写、前缀缓存会随插件版本变化而失效。
+      live.text = humanizeDisplay(text);
       this.history.push({ role: "assistant", content: text });
       // 巡检轮的助手回复也不落时间线：它只服务这一轮，不进长期上下文
       if (this.ephemeralFrom < 0) this.persist("assistant", text);
       this.patchCard(live, { streaming: false });
       // 巡检轮（心跳/卡住处置）不念：那是她自己在盘账，不是给用户的汇报
-      this.voice?.sayReply(text, this.ephemeralFrom >= 0);
+      this.voice?.sayReply(live.text ?? text, this.ephemeralFrom >= 0);
     } else {
       /**
        * 本轮一个字都没说（2026-11-13 实机）：模型只出了思考就结束，界面上留下
@@ -5699,7 +5977,7 @@ export class Kernel {
       if (streaming && now - this.lastDeltaEmit >= DELTA_FRAME_MS) {
         this.lastDeltaEmit = now;
         // cardId 必须带：渲染层只认带 cardId 的 delta，否则降级路径等于没有流式
-        this.notify({ type: "delta", text, cardId: live.id });
+        this.notify({ type: "delta", text: humanizeDisplay(text), cardId: live.id });
       }
       if (streaming) this.guardRepetition();
     };
@@ -5730,15 +6008,19 @@ export class Kernel {
       }
     })();
     try {
-      for (let round = 0; round < 8; round++) {
+      const maxRounds = this.agentRounds();
+      for (let round = 0; round < maxRounds; round++) {
         let roundText = "";
+        // 末轮强制无工具：即便前面一直在跑工具，最后一轮也逼风铃落一段总结，
+        // 而不是"硬停在半路"。这样触顶也只算"先总结到这里"，用户说"继续"就能接上。
+        const isLast = round === maxRounds - 1;
         const result = await streamChatWithRetry(
           {
             baseUrl: cfg.baseUrl,
             apiKey,
             model: usedModel,
             messages,
-            tools: this.allTools(),
+            tools: isLast ? [] : this.allTools(),
             signal: controller.signal,
             onDelta: (t) => {
               roundText += t;
@@ -5845,7 +6127,12 @@ export class Kernel {
         this.emit({ type: "done", tokens: result.promptTokens + result.completionTokens });
         return;
       }
-      patchLive((live.text || "") + "\n\n（工具轮次达到上限，先停在这里。）", false);
+      // 安全网：理论上末轮强制无工具后模型一定会落总结（上面已 return），
+      // 这里只在极端情况（模型无视空工具集仍带工具调用）兜底——温和提示而非硬停。
+      patchLive(
+        (live.text || "") + "\n\n（本轮工具轮次已用尽，风铃先总结到这里；需要继续就直接说「继续」。）",
+        false,
+      );
       this.emit({ type: "done", tokens: 0 });
     } catch (err) {
       // 用户主动停止：只收掉流状态，保留已产出文本；session.abort 已经发过 done，不再报错误
@@ -6188,6 +6475,7 @@ export class Kernel {
             avatarId: face.id,
             model: p.model,
             turnLimit: p.limits.maxTurns,
+            acceptor: p.acceptor ?? false,
           };
         });
       teams.push({
@@ -6345,7 +6633,9 @@ export class Kernel {
     return {
       teams: this.listTeams(),
       track: this.buildTrack(),
-      decisions: this.decisions.map((d) => ({ ...d })),
+      // 2026-11-15：待拍板卡只给当前群——新建群/切群不该冒出别群的问题、契约、审批。
+      // 内核这一层过滤是唯一真相源，渲染层、待机页、计数都跟着它走。
+      decisions: this.decisionsForCurrentThread().map((d) => ({ ...d })),
       tokensUsed: this.tokensUsed,
     };
   }
@@ -6631,6 +6921,7 @@ export class Kernel {
           detail: "继续加一轮、换个人做、还是你自己接手？",
           kind: "question",
           jobId: p.taskId,
+          threadId: this.taskStore.get(p.taskId)?.threadId ?? this.currentThreadId,
           at: new Date().toISOString(),
         });
         this.persistPending();
@@ -6740,6 +7031,8 @@ export class Kernel {
             title: this.currentThreadId ? (this.threads.get(this.currentThreadId)?.title ?? "新群") : "",
             projectRoot: this.threads.get(this.currentThreadId)?.projectRoot,
             ...(curProject ? { projectId: curProject.id, projectName: curProject.name } : {}),
+            // 本群被「终止任务」了（2026-11-15）：界面据此把按钮换成状态
+            halted: this.isThreadHalted(this.currentThreadId),
           },
           threads: this.threads
             .list()
@@ -6753,6 +7046,7 @@ export class Kernel {
               lastAt: t.lastAt,
               unread: t.unread ?? 0,
               announcement: t.announcement,
+              halted: this.haltedThreads.has(t.id),
               ...(() => {
                 const p = this.projects.resolve(t.projectId);
                 return p ? { projectId: p.id, projectName: p.name } : {};
@@ -6809,6 +7103,8 @@ export class Kernel {
         };
         const trimmed = text.trim();
         if (!trimmed) return { ok: true, queued: false } as RpcContracts[M]["result"];
+        // 用户在这个群开口 = 解除「终止任务」（2026-11-15）：只有他明确的新需求能恢复
+        if (this.isThreadHalted()) this.resumeThread(this.currentThreadId);
         const hasAtt = Boolean(attachments && (attachments.files?.length || attachments.images?.length));
         // 群内 @（2026-11-12）：只认本群成员，陌生名字丢弃并如实说清——@ 谁由内核定，不信前端
         const { mentions, unknown } = this.resolveMentions(trimmed, mentionHint);
@@ -6822,8 +7118,10 @@ export class Kernel {
         // 用户开口 = 对挂起问询的回答（2026-11-13 实机）：ask_user 的拍板卡不再死等
         // 「提交回答」——用户直接在群里把话说清，卡还悬着只会诱导她再点一次卡造成重复回答。
         // 契约卡（kind=plan）不动：派单必须点「开始」，打字不算拍板。
-        if (this.decisions.some((d) => d.kind === "question")) {
-          this.decisions = this.decisions.filter((d) => d.kind !== "question");
+        // 只撤本群的问询：在新群说句话，不该把别群那个还没人答的问题一起抹掉
+        const answered = new Set(this.decisionsForCurrentThread().filter((d) => d.kind === "question").map((d) => d.id));
+        if (answered.size) {
+          this.decisions = this.decisions.filter((d) => !answered.has(d.id));
           this.persistPending();
           this.setTurn({});
         }
@@ -7441,6 +7739,9 @@ export class Kernel {
         };
         const d = this.decisions.find((x) => x.id === id);
         if (!d) return { ok: false, error: "这个问题已经处理过了" } as RpcContracts[M]["result"];
+        // 用户拍板（开始/回答/改一版）= 明确的新需求（2026-11-15）：终止状态下要恢复，
+        // 否则点了「开始」成员也不会动、心跳也不会来验收。
+        if (action !== "reject" && this.isThreadHalted()) this.resumeThread(this.currentThreadId);
         this.decisions = this.decisions.filter((x) => x.id !== id);
         // 处理掉一条就同步落盘：重启后不该再弹一张已经拍过的问询
         this.persistPending();
@@ -7719,8 +8020,16 @@ export class Kernel {
       case "model.test":
         return this.settingsRpc.modelTest(params) as RpcContracts[M]["result"];
 
-      case "config.prefs":
-        return this.settingsRpc.savePrefs(params) as RpcContracts[M]["result"];
+      case "config.prefs": {
+        const savedPrefs = this.settingsRpc.savePrefs(params as Partial<Prefs>);
+        // 去 AI 味开关热生效：插件加载与否是另一回事，没装时开关空转（界面会如实说明）
+        const hz = (params as { humanizer?: boolean }).humanizer;
+        if (typeof hz === "boolean") setHumanizerEnabled(hz);
+        return savedPrefs as RpcContracts[M]["result"];
+      }
+
+      case "humanizer.status":
+        return humanizerStatus() as RpcContracts[M]["result"];
 
       // M3-08：界面语言字典——内置（zh 源语言 / en 渐进）⊕ 启用的语言包插件覆盖
       case "i18n.get": {
@@ -7856,6 +8165,20 @@ export class Kernel {
        */
       case "thread.draftNotice":
         return this.threadRpc.draftNotice(params) as RpcContracts[M]["result"];
+
+      /**
+       * 终止本群（2026-11-15）：成员停机 + 当前回合中断 + 心跳/巡检/验收叫醒/定时任务
+       * 全部停手，直到用户在这个群发出新消息。整群级动作，不接受"停别群"的越权用法：
+       * 不传 id 就停当前群；传了也必须是现有群。
+       */
+      case "thread.halt": {
+        const { id } = (params ?? {}) as { id?: string };
+        const target = String(id ?? this.currentThreadId ?? "");
+        if (target && !this.threads.get(target)) {
+          return { ok: false, stopped: 0, threadId: target, error: `没有这个群：${target}` } as RpcContracts[M]["result"];
+        }
+        return this.haltThread(target) as RpcContracts[M]["result"];
+      }
 
       case "thread.remove":
         return this.threadRpc.remove(params) as RpcContracts[M]["result"];

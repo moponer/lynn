@@ -5,8 +5,9 @@ import { useEffect, useRef, useState } from "react";
 import { useT } from "../i18n";
 import { Icon } from "../components/Icon";
 import { Slot, SandboxAction } from "./ui-host";
+import { UsageMeter } from "../components/UsageMeter";
 import { useTick } from "./use-tick";
-import type { CaptureShot, QueueItem } from "../../shared/contract";
+import type { CaptureShot, QueueItem, UsageView } from "../../shared/contract";
 import type { Desk } from "./model";
 
 export function ComposerZone({
@@ -22,6 +23,8 @@ export function ComposerZone({
   captureShot,
   members,
   pendingAt,
+  usage,
+  tokensUsed,
 }: {
   configured: boolean;
   turn: Desk["turn"];
@@ -39,6 +42,9 @@ export function ComposerZone({
   members?: { name: string; role?: string }[];
   /** 右键成员「@他说话」：把名字插进输入框 */
   pendingAt?: { name: string; nonce: number } | null;
+  /** 会话用量（顶栏用量计与这里共用同一套口径） */
+  usage: UsageView;
+  tokensUsed: number;
 }) {
   const [draft, setDraft] = useState("");
   const [mode, setMode] = useState<"queue" | "steer">("queue");
@@ -227,6 +233,11 @@ export function ComposerZone({
           ))}
         </div>
       )}
+
+      {/* 输入框上方的用量计：与顶栏同一套口径，点开看「缓存 + token 消耗」明细 */}
+      <div className="composer-usage">
+        <UsageMeter usage={usage} tokensUsed={tokensUsed} side="top" />
+      </div>
 
       <div className="composer-row" style={{ position: "relative" }}>
         {mention && mentionItems.length > 0 && (

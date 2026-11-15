@@ -13,12 +13,48 @@ import type { I18nKey } from "../../shared/i18n-strings";
 import type { FeedCard } from "../../shared/contract";
 import type { IconName } from "../components/Icon";
 
+/**
+ * 「终止任务」（2026-11-15）：整群止损是重动作，不做"点一下就全停"——
+ * 第一次点亮成「确认终止」，3.6 秒内不点第二下自动收回；失焦同样收回。
+ * 这两下都在同一颗按钮里，不弹窗、不遮对话。
+ */
+function HaltButton({ onHalt }: { onHalt: () => void }) {
+  const t = useT();
+  const [armed, setArmed] = useState(false);
+  useEffect(() => {
+    if (!armed) return;
+    const timer = window.setTimeout(() => setArmed(false), 3600);
+    return () => window.clearTimeout(timer);
+  }, [armed]);
+  return (
+    <button
+      type="button"
+      className={`halt-btn${armed ? " armed" : ""}`}
+      title={armed ? t("sheet.haltConfirmHint") : t("sheet.haltHint")}
+      onClick={() => {
+        if (armed) {
+          setArmed(false);
+          onHalt();
+          return;
+        }
+        setArmed(true);
+      }}
+      onBlur={() => setArmed(false)}
+    >
+      <Icon name="stop" size="sm" />
+      {armed ? t("sheet.haltConfirm") : t("sheet.halt")}
+    </button>
+  );
+}
+
 export function Sheet({
   job,
   feed,
   threadId,
   threadTitle,
   channelTitle,
+  halted,
+  onHalt,
   onTaskFeed,
   onThread,
   onFeedAction,
@@ -69,6 +105,9 @@ export function Sheet({
   onRenameProject?: (name: string) => void;
   /** 右键产物：定位文件 / 复制路径（2026-11-13） */
   onRefMenu?: (taskId: string, ref: string, label: string, x: number, y: number) => void;
+  /** 本群是否已被「终止任务」停住（2026-11-15）：按钮换成状态，发一条消息恢复 */
+  halted?: boolean;
+  onHalt?: () => void;
 }) {
   // 打开工单先看「本会话对话」：用户要改口/调简报时，得先看见自己与风铃说了什么
   const [tab, setTab] = useState("channel");
@@ -130,8 +169,21 @@ export function Sheet({
           {/* 眉标删掉（2026-11-13）：它和下面的标题说的是同一个名字，一个页面两个标题就是噪音。
               有群就报群名（此前永远写「还没有选中工单」，下面还压着常驻的「说吧，要办什么」——
               那本来是空态引导，有对话时还挂着，整栏看着像一个没开始过的页面）。 */}
-          <h1 className="sheet-title">{channelTitle || t("sheet.emptyTitle")}</h1>
+          {/* 标题右侧是整群唯一的止损入口（2026-11-15）：本群成员/心跳/验收叫醒一次全停 */}
+          <div className="sheet-head-row">
+            <h1 className="sheet-title">{channelTitle || t("sheet.emptyTitle")}</h1>
+            {onHalt &&
+              (halted ? (
+                <span className="halt-state" title={t("sheet.haltStateHint")}>
+                  <Icon name="stop" size="sm" />
+                  {t("sheet.halted")}
+                </span>
+              ) : (
+                <HaltButton onHalt={onHalt} />
+              ))}
+          </div>
           {!channelTitle && <div className="sheet-sub">{t("sheet.emptySub")}</div>}
+          {halted && <div className="sheet-sub">{t("sheet.haltStateBody")}</div>}
           {pendingJob && (
             <div className="sheet-sub" style={{ marginTop: 8 }}>
               {t("sheet.pendingJob", { n: 1 })}{" "}

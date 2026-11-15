@@ -7,12 +7,14 @@ import { createPortal } from "react-dom";
 import { useT } from "../i18n";
 import type { I18nKey } from "../../shared/i18n-strings";
 import { Icon } from "../components/Icon";
+import { FileIcon } from "../components/FileIcon";
 import { MemberAvatar } from "./MemberAvatar";
 import type { TaskStatus } from "../../shared/contract";
 import type { JobGroup } from "../../shared/task-groups";
 import {
   STATUS_KEY,
   fmtTime,
+  outputsOf,
   statusChipClass,
   type Desk,
   type DeskJob,
@@ -20,6 +22,7 @@ import {
   type OpenPreview,
 } from "./model";
 import { JobMenu, OutputMenu, ThreadMenu } from "./Menus";
+import { ask, askConfirm } from "../components/ConfirmCard";
 import { groupArchived } from "../../shared/archive-groups";
 
 
@@ -77,8 +80,10 @@ export function Ledger({
 }) {
   const [q, setQ] = useState("");
   const [showAllArchive, setShowAllArchive] = useState(false);
+  // 归档行右键删除确认（改动进行中）：先落状态位让编译过，确认 UI 接上后读这个值
+  const [, setArchDeleting] = useState<string | null>(null);
   /** 归档删除两段确认：第一次点亮「确认」，第二次才真删 */
-  const [archDeleting, setArchDeleting] = useState<string | null>(null);
+
   /** 归档折叠：按「会话 + 归一化标题」分组，多记录的组默认收起；只影响展示，不合并、不删除数据 */
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
   /** 左栏三视图：会话 / 工单 / 交付箱（跨任务汇总的交付物） */
@@ -86,7 +91,6 @@ export function Ledger({
   const [tq, setTq] = useState("");
   const [hits, setHits] = useState<{ id: string; title: string; hits: string[] }[]>([]);
   const [renaming, setRenaming] = useState<{ id: string; title: string } | null>(null);
-  const [deleting, setDeleting] = useState<string | null>(null);
   /** 群操作菜单（群列表行尾的 ⋯ 或右键群行都走它） */
   const [threadMenu, setThreadMenu] = useState<{ id: string; x: number; y: number } | null>(null);
   /** 工单卡右键菜单：卡住的单原来只能在台账里干瞪眼 */
@@ -112,47 +116,78 @@ export function Ledger({
    * （实机：audit-report.md 出现两次，任务号不同）。产出是**文件**不是记录——
    * 按物理路径合并成一条，后更新的那张单上位，并标出被更新过几次。
    */
-  const outputs = useMemo<DeskOutput[]>(() => {
-    /**
-     * 去重键必须是**解析后的绝对路径**：`d.path` 存的是成员交上来的原始串，
-     * 有时是相对工作区的 "audit-report.md"，有时是绝对路径——直接拿字符串比会漏合并。
-     * 同目录同名 = 同一个文件（用户 2026-11-13 确认的口径）。
-     */
-    const resolvePath = (workspaceRoot: string | undefined, p: string): string => {
-      const isAbs = /^[a-zA-Z]:[\\/]/.test(p) || p.startsWith("/") || p.startsWith("\\\\");
-      const base = (workspaceRoot ?? "").replace(/[\\/]+$/, "");
-      return isAbs || !base ? p : `${base}/${p.replace(/^[\\/]+/, "")}`;
-    };
-    const byPath = new Map<string, DeskOutput>();
-    for (const j of desk.jobs) {
-      for (const d of j.deliverables ?? []) {
-        const path = d.path || d.ref;
-        if (!path) continue;
-        const abs = resolvePath(j.workspaceRoot, path);
-        const key = abs.replace(/\\/g, "/").replace(/\/{2,}/g, "/").toLowerCase();
-        // 固化时刻优先（同一文件被两张单更新过时，它才知道谁更晚）
-        const stamp = d.at ?? j.at;
-        const hit = byPath.get(key);
-        if (!hit) {
-          byPath.set(key, { path, abs, ref: d.ref, bytes: d.bytes, job: j, jobs: 1, updatedAt: stamp });
-          continue;
-        }
-        hit.jobs += 1;
-        // 后写入的那张单上位：它的 ref/大小才是文件现在的样子
-        if ((stamp ?? "") >= (hit.updatedAt ?? "")) {
-          hit.job = j;
-          hit.abs = abs;
-          hit.ref = d.ref;
-          hit.bytes = d.bytes ?? hit.bytes;
-          hit.updatedAt = stamp;
-        }
-      }
-    }
-    return [...byPath.values()].sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""));
-  }, [desk.jobs]);
+  // 交付箱口径抽到 model.outputsOf（值台与控制台共用）：按解析后的绝对路径合并，
+  // 只认 deliverables，含归档单，后写的单上位。
+  const outputs = useMemo<DeskOutput[]>(() => outputsOf(desk), [desk]);
   const openableRef = (ref: string) => !!ref && !/^[a-zA-Z]:[\\/]/.test(ref) && !ref.startsWith("/");
   const fmtB = (n?: number) =>
     !n ? "" : n >= 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)}MB` : n >= 1024 ? `${Math.round(n / 1024)}KB` : `${n}B`;
+
+  /**
+   * 三处删除共用同一张确认卡片（2026-11-15）：
+   * 标题写清"删的是哪一个"，正文写清"连带什么、什么会留"，不可恢复单独一行警示。
+   * 之前分别是：群列表里一行小字 + 两个小按钮、归档行按钮自己变红字、菜单里换一页。
+   */
+  const askRemoveThread = async (th: { id: string; title: string }) => {
+    const ok = await askConfirm({
+      title: `删除群「${th.title || t("ledger.untitled")}」？`,
+      body: "群里的往来与工单会一并移除（在跑的先停），群列表里不再有它。",
+      note: "删除后不可恢复。",
+      confirmLabel: t("ledger.threadDelete"),
+      danger: true,
+    });
+    if (ok) onThreadRemove?.(th.id);
+  };
+
+  const askRemoveArchived = async (id: string, title: string) => {
+    const ok = await askConfirm({
+      title: `删除归档单 ${id}？`,
+      body: `「${title}」的工单、卷宗与临时文件会一并移除；工作区不在卷宗里就保留。`,
+      note: "删除后不可恢复。",
+      confirmLabel: "删除",
+      danger: true,
+    });
+    if (ok) onRemoveTask?.(id);
+  };
+
+  /** 工单撤回：不是删除，卷宗留着；所以语气是普通的，按钮也不标红 */
+  const askDismissJob = async (job: DeskJob) => {
+    const ok = await askConfirm({
+      title: `撤回工单 ${job.id}？`,
+      body: `「${job.title}」不再出现在台账里，也不再追进度；卷宗与成员已交的东西保留。`,
+      confirmLabel: "撤回",
+    });
+    if (ok) onDismissTask?.(job.id);
+  };
+
+  const askRemoveJob = async (job: DeskJob) => {
+    const ok = await askConfirm({
+      title: `删除工单 ${job.id}？`,
+      body: `「${job.title}」的工单、卷宗与临时文件会一并移除；工作区不在卷宗里就保留。`,
+      note: "删除后不可恢复。",
+      confirmLabel: "删除",
+      danger: true,
+    });
+    if (ok) onRemoveTask?.(job.id);
+  };
+
+  /** 交付物删除有两种后果：只移除记录 / 连磁盘文件一起删——卡片里给两个明确按钮，不猜 */
+  const askRemoveOutput = async (out: DeskOutput) => {
+    const name = out.abs.split(/[\\/]/).filter(Boolean).pop() ?? out.path;
+    const pick = await ask({
+      title: `删除交付物「${name}」`,
+      body: `「${out.job.title}」的这条交付物要从交付箱移除。文件怎么处理，由你定：`,
+      note: "连磁盘文件一起删后不可恢复。",
+      danger: true,
+      // 只有"真正不可恢复"那一项上强色：三项都上色会变成一排等重的按钮
+      actions: [
+        { label: "只移除记录（文件保留）", value: "record", tone: "ghost" },
+        { label: "连磁盘文件一起删", value: "file", tone: "danger" },
+      ],
+    });
+    if (!pick) return;
+    onRemoveDeliverable?.(out.job.id, out.ref, pick === "file");
+  };
 
   return (
     <aside className="ledger">
@@ -313,26 +348,6 @@ export function Ledger({
                         </span>
                       </>
                     )}
-                    {deleting === th.id && (
-                      <div className="thread-ask">
-                        <span>{t("ledger.threadDeleteAsk")}</span>
-                        <span className="thread-ask-acts">
-                          <button type="button" className="ghost-btn" onClick={() => setDeleting(null)}>
-                            {t("common.cancel")}
-                          </button>
-                          <button
-                            type="button"
-                            className="ghost-btn thread-danger"
-                            onClick={() => {
-                              setDeleting(null);
-                              onThreadRemove?.(th.id);
-                            }}
-                          >
-                            {t("ledger.threadDelete")}
-                          </button>
-                        </span>
-                      </div>
-                    )}
                   </div>
                 );
               })}
@@ -440,19 +455,12 @@ export function Ledger({
                     </button>
                     <button
                       type="button"
-                      className={`arch-del${archDeleting === a.id ? " sure" : ""}`}
-                      title={archDeleting === a.id ? "再点一次：连卷宗一起彻底删掉" : "删除这张归档单（也可右键本行）"}
-                      aria-label={archDeleting === a.id ? "确认删除" : "删除这张归档单"}
-                      onClick={() => {
-                        if (archDeleting !== a.id) {
-                          setArchDeleting(a.id);
-                          return;
-                        }
-                        onRemoveTask?.(a.id);
-                        setArchDeleting(null);
-                      }}
+                      className="arch-del"
+                      title="删除这张归档单（也可右键本行）"
+                      aria-label="删除这张归档单"
+                      onClick={() => void askRemoveArchived(a.id, a.title ?? a.id)}
                     >
-                      {archDeleting === a.id ? "确认删除" : <Icon name="x" size="sm" />}
+                      <Icon name="x" size="sm" />
                     </button>
                   </li>
                 ));
@@ -499,13 +507,10 @@ export function Ledger({
               y={threadMenu.y}
               onClose={() => setThreadMenu(null)}
               onPin={(p) => onThreadPin?.(th.id, p)}
-              onRename={() => {
-                setDeleting(null);
-                setRenaming({ id: th.id, title: th.title });
-              }}
+              onRename={() => setRenaming({ id: th.id, title: th.title })}
               onDelete={() => {
                 setRenaming(null);
-                setDeleting(th.id);
+                void askRemoveThread({ id: th.id, title: th.title });
               }}
             />
           );
@@ -540,16 +545,18 @@ export function Ledger({
           onDismiss={
             onDismissTask
               ? () => {
-                  onDismissTask(menu.job.id);
+                  const job = menu.job;
                   setMenu(null);
+                  void askDismissJob(job);
                 }
               : undefined
           }
           onRemove={
             onRemoveTask
               ? () => {
-                  onRemoveTask(menu.job.id);
+                  const job = menu.job;
                   setMenu(null);
+                  void askRemoveJob(job);
                 }
               : undefined
           }
@@ -605,9 +612,10 @@ export function Ledger({
             setOutInfo(outMenu.out);
             setOutMenu(null);
           }}
-          onRemove={(deleteFile) => {
-            onRemoveDeliverable?.(outMenu.out.job.id, outMenu.out.ref, deleteFile);
+          onDelete={() => {
+            const out = outMenu.out;
             setOutMenu(null);
+            void askRemoveOutput(out);
           }}
         />
       )}
@@ -642,20 +650,24 @@ export function Ledger({
                   setOutMenu({ out: o, x: e.clientX, y: e.clientY });
                 }}
               >
-                {/* 第一行只放文件名：此前 <b> 不截断，长名字被挤成 "audit-" / "report.md" 两行 */}
-                <b title={o.abs}>{name}</b>
-                {/* 第二行回答"这是什么"：出自哪张单（标题占满一行，时间移到第三行，
-                    否则长标题会把时间挤成省略号，两个都读不出来） */}
-                <small title={o.job.title}>{o.job.title}</small>
-                <small className="mono out-meta">
-                  {[
-                    o.jobs > 1 ? `更新 ${o.jobs} 次` : "",
-                    o.updatedAt ? fmtTime(o.updatedAt) : "",
-                    o.bytes ? fmtB(o.bytes) : "",
-                  ]
-                    .filter(Boolean)
-                    .join(" · ")}
-                </small>
+                {/* 第一行只放文件名：此前 <b> 不截断，长名字被挤成 "audit-" / "report.md" 两行。
+                    左侧彩色类型图标（2026-11-15）：资源管理器那样按扩展名分色，扫一眼就知道是表格还是音频。 */}
+                <FileIcon name={name} />
+                <span className="out-body">
+                  <b title={o.abs}>{name}</b>
+                  {/* 第二行回答"这是什么"：出自哪张单（标题占满一行，时间移到第三行，
+                      否则长标题会把时间挤成省略号，两个都读不出来） */}
+                  <small title={o.job.title}>{o.job.title}</small>
+                  <small className="mono out-meta">
+                    {[
+                      o.jobs > 1 ? `更新 ${o.jobs} 次` : "",
+                      o.updatedAt ? fmtTime(o.updatedAt) : "",
+                      o.bytes ? fmtB(o.bytes) : "",
+                    ]
+                      .filter(Boolean)
+                      .join(" · ")}
+                  </small>
+                </span>
               </button>
             );
           })}
@@ -754,7 +766,8 @@ const ARCHIVE_PREVIEW = 5;
 /** 台账分组（数组顺序即渲染顺序）；空组直接不渲染，不留占位假条目 */
 const GROUP_META: { k: Exclude<JobGroup, "archived">; labelKey: I18nKey; color: string; stoppable: boolean }[] = [
   { k: "waiting", labelKey: "ledger.awaiting", color: "var(--seal)", stoppable: false },
-  { k: "stuck", labelKey: "ledger.stuck", color: "var(--brass)", stoppable: true },
+  // 卡住=朱砂（2026-11-15 拍板）：与"等你拍板"同色，靠文案区分；铜色只留给预算
+  { k: "stuck", labelKey: "ledger.stuck", color: "var(--seal)", stoppable: true },
   { k: "running", labelKey: "ledger.running", color: "var(--blue)", stoppable: true },
   { k: "queued", labelKey: "ledger.queued", color: "var(--ink-4)", stoppable: false },
 ];

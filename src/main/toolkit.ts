@@ -38,6 +38,11 @@ export interface ToolkitOptions {
   /** 写之前通知壳（M1-12 检查点）：existed=false 表示这轮新建 */
   onBeforeWrite?: (rel: string, full: string, existed: boolean) => void;
   /**
+   * 写盘前的文本改写（2026-11-15 去 AI 味插件用）：返回原文即不改。
+   * 只对 write_file 生效——edit_file 是补丁语义，改写会打乱 old_string 匹配。
+   */
+  onWriteContent?: (rel: string, content: string) => string;
+  /**
    * 出站/联网命令闸（2026-11-13 审计 #2）：返回 false = OUTBOUND 命中直接拒。
    * 内核按权限档接：计划/询问档不自动放行出站；自动/全权档保持"只审计不拦"。
    * 不传 = 保持旧行为（只审计），测试与直用方不受影响。
@@ -335,6 +340,7 @@ export class Toolkit {
   private readonly outputCap: number;
   private readonly onAudit?: ToolkitOptions["onAudit"];
   private readonly onBeforeWrite?: ToolkitOptions["onBeforeWrite"];
+  private readonly onWriteContent?: ToolkitOptions["onWriteContent"];
   private readonly outboundAllowed?: () => boolean;
   private readonly office?: ToolkitOptions["office"];
   private readonly browser?: ToolkitOptions["browser"];
@@ -353,6 +359,7 @@ export class Toolkit {
     this.outputCap = opts.outputCap ?? 8_000;
     this.onAudit = opts.onAudit;
     this.onBeforeWrite = opts.onBeforeWrite;
+    this.onWriteContent = opts.onWriteContent;
     this.outboundAllowed = opts.outboundAllowed;
     this.office = opts.office;
     this.browser = opts.browser;
@@ -551,7 +558,10 @@ export class Toolkit {
 
   writeFile(args: Record<string, unknown>): Promise<string> {
     const rel = String(args.path ?? "");
-    const content = String(args.content ?? "");
+    // 去 AI 味插件注入（可选）：产出文档/文案/注释在落盘前过一遍。
+    // 只影响写出去的文件，不碰模型上下文；插件缺失时这行是恒等变换。
+    const raw = String(args.content ?? "");
+    const content = this.onWriteContent ? this.onWriteContent(rel, raw) : raw;
     const full = resolveWithin(this.root, rel);
     this.assertWritable(full);
     return this.serialize(full, () => {
