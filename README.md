@@ -89,7 +89,7 @@ src/
 │   └── BootScreen.tsx     # 启动页：字距收拢 + 真实快照进度条
 scripts/
 │   ├── shots/*.cjs        # 44 个走查模式（注册表，主文件 297 行）
-│   ├── make-icon.py       # 图标生成（Archivo + 项目 token 色）
+│   ├── make-icon.py       # 图标生成（几何切角 L，纯 Pillow）
 │   ├── shot-boot.cjs      # 启动页走查截图
 │   └── live-*probe*.cjs   # 真模型 / 真 Pi / 真 UI 对照探针
 tests/                     # 724 条 node --test（含整链路模拟任务）
@@ -99,12 +99,12 @@ tests/                     # 724 条 node --test（含整链路模拟任务）
 
 ## 图标与启动页
 
-`build/icon.ico` 是含 **16 / 24 / 32 / 48 / 64 / 128 / 256 七帧**的真位图图标（不是 SVG）。全部取自 `dispatch.css` 的真实 token，不自编配色、不把预算色 `--brass` 当品牌色：
+`build/icon.ico` 是含 **16 / 24 / 32 / 48 / 64 / 128 / 256 七帧**的真位图图标（不是 SVG）。字母是**几何构造**出来的，不是排版字体：
 
-- 底 `--desk #0a0d0f`、字 `--ink #e6ebee`、小尺寸首字母 `--blue #6fa892`
-- 字体用 `--f-display` 指定的 **Archivo**（wght=700，由 woff2 实例化成 `assets/fonts/archivo-700.ttf`）
-- ≤64px 只留青瓷 `L`；≥128px 是干净的 `Lynn` 字标 —— 没有变形 L、细线、菱形或 tagline
-- 托盘 `assets/tray.png`、`tray-icon.ts` 的 base64 兜底、窗口/安装包、顶栏标记、`public/favicon.ico` **全部同源**（一次定义、四处复用）
+- 所有外凸角统一 45° 切角，字母撑到版面边缘；内凹角不切，保住 L 的结构
+- 只用两个 token：底 `--desk #0a0d0f`、形 `--ink #e6ebee`，**零功能色**（黄铜是预算语义、青瓷是结构语义，都不当品牌主色）
+- ≤64px 单独一版：切角比例放大到 10%、笔画加粗、留白收窄，16px 才认得出
+- 托盘 `assets/tray.png`、`tray-icon.ts` 的 base64 兜底、窗口/安装包、顶栏标记（`clip-path` 用同一组坐标）、`public/favicon.ico` **全部同源**（一次定义、四处复用）
 
 ![启动页](./docs/screenshots/boot.png)
 

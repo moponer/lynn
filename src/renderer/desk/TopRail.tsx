@@ -1,8 +1,8 @@
 // 顶栏（2026-11-14）：Desk 与审查台都用它，所以独立成文件（放 Desk 里会造成循环引用）。
-import { useEffect, useRef, useState } from "react";
-import { createPortal } from "react-dom";
+import { useRef, useState } from "react";
 import { useT } from "../i18n";
 import { Icon } from "../components/Icon";
+import { Menu, MenuCap } from "../components/Menu";
 import { WindowControls } from "../components/WindowControls";
 import { Slot, SandboxHtml } from "./ui-host";
 import { fmtTokens } from "./model";
@@ -58,26 +58,6 @@ export function TopRail({
   const [wsPos, setWsPos] = useState({ top: 0, left: 0 });
   const wsRef = useRef<HTMLDivElement | null>(null);
   const wsBtnRef = useRef<HTMLButtonElement | null>(null);
-  const wsMenuRef = useRef<HTMLDivElement | null>(null);
-  useEffect(() => {
-    if (!wsMenu) return;
-    const onDown = (e: MouseEvent) => {
-      const t = e.target as Node;
-      // 菜单已 portal 到 body，不在 wsRef 里：两处都要判，否则点菜单项会被当成「点外面」
-      if (wsRef.current?.contains(t) || wsMenuRef.current?.contains(t)) return;
-      setWsMenu(false);
-    };
-    const close = () => setWsMenu(false);
-    document.addEventListener("mousedown", onDown);
-    // fixed 菜单不跟滚动/缩放走：位置一变就关掉，避免悬在错的地方
-    window.addEventListener("resize", close);
-    window.addEventListener("scroll", close, true);
-    return () => {
-      document.removeEventListener("mousedown", onDown);
-      window.removeEventListener("resize", close);
-      window.removeEventListener("scroll", close, true);
-    };
-  }, [wsMenu]);
   const shortName = (p: string) => p.split(/[\\/]/).filter(Boolean).pop() ?? p;
   const extras = desk.workspaceExtras;
   /** 信任：只有目录里真有"被信任才生效"的东西时才给入口（2026-11-13） */
@@ -97,9 +77,7 @@ export function TopRail({
       }}
     >
       <div className="brand">
-        <div className="brand-mark" aria-label="Lynn">
-          L
-        </div>
+        <div className="brand-mark" aria-label="Lynn" />
         <div>
           <div className="brand-name">{t("top.brand")}</div>
           <div className="brand-sub">Lynn</div>
@@ -129,12 +107,32 @@ export function TopRail({
             {extras.length > 0 && <span className="wsmenu-badge">{extras.length}</span>}
             <Icon name="chev" size="sm" />
           </button>
-          {wsMenu &&
-            createPortal(
-            <div ref={wsMenuRef} className="wsmenu" role="menu" style={{ top: wsPos.top, left: wsPos.left }}>
+          {wsMenu && (
+            <Menu
+              x={wsPos.left}
+              y={wsPos.top}
+              estW={286}
+              estH={320}
+              className="wsmenu"
+              label={desk.project}
+              onClose={() => setWsMenu(false)}
+              // 触发按钮由它自己 toggle，不能被"点外面"先关一次
+              ignore={wsRef}
+            >
+              {/* 头和右键菜单同一套：先回答"这是哪个目录"，再列能做的事 */}
+              <div className="jobmenu-h">
+                <Icon name="folder" size="sm" />
+                <span className="jobmenu-title">{desk.project}</span>
+              </div>
+              {desk.workspacePrimary && (
+                <div className="jobmenu-sub mono" title={desk.workspacePrimary}>
+                  {desk.workspacePrimary}
+                </div>
+              )}
               <button
                 type="button"
-                className="jobmenu-item"
+                role="menuitem"
+                className="jobmenu-item lead"
                 onClick={() => {
                   setWsMenu(false);
                   onPickProject?.();
@@ -144,6 +142,7 @@ export function TopRail({
               </button>
               <button
                 type="button"
+                role="menuitem"
                 className="jobmenu-item"
                 onClick={() => {
                   setWsMenu(false);
@@ -155,9 +154,10 @@ export function TopRail({
               {/* 信任：只在目录里真有"被信任才生效"的东西时才出现（2026-11-13） */}
               {projectGated?.mcp || projectGated?.skills ? (
                 <>
-                  <div className="wsmenu-cap">这个项目</div>
+                  <MenuCap>这个项目</MenuCap>
                   <button
                     type="button"
+                    role="menuitem"
                     className="jobmenu-item"
                     onClick={() => {
                       setWsMenu(false);
@@ -176,7 +176,7 @@ export function TopRail({
                   </button>
                 </>
               ) : null}
-              <div className="wsmenu-cap">可读目录</div>
+              <MenuCap>可读目录</MenuCap>
               {extras.length === 0 && <div className="wsmenu-empty">还没有；需要读外部资料时加一个。</div>}
               {extras.map((x) => (
                 <div className="wsmenu-row" key={x.path}>
@@ -196,6 +196,7 @@ export function TopRail({
               ))}
               <button
                 type="button"
+                role="menuitem"
                 className="jobmenu-item"
                 onClick={() => {
                   setWsMenu(false);
@@ -204,9 +205,8 @@ export function TopRail({
               >
                 添加只读目录…
               </button>
-            </div>,
-            document.body,
-            )}
+            </Menu>
+          )}
         </div>
       </div>
       <div className="spacer" />

@@ -155,6 +155,11 @@ svg.ic.sm { width: 13px; height: 13px; }
 svg.ic.lg { width: 20px; height: 20px; }
 
 .mono { font-family: var(--f-mono); font-variant-numeric: tabular-nums; }
+/* 数字统一口径（2026-11-15）：数值亮、单位弱化、等宽对齐——"1.1 MB"不再糊成一团 */
+.num { font-family: var(--f-mono); font-variant-numeric: tabular-nums; color: var(--ink); }
+.num .u { font-style: normal; color: var(--ink-4); font-size: var(--fs-label); margin-left: 3px; }
+.num.seg-label { color: var(--ink-4); font-size: var(--fs-label); }
+.sf-nums { display: inline-flex; align-items: baseline; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
 .tnum { font-variant-numeric: tabular-nums; }
 
 /* ============================ TOP RAIL ============================ */
@@ -173,13 +178,20 @@ svg.ic.lg { width: 20px; height: 20px; }
 }
 
 .brand { display: flex; align-items: center; gap: 9px; }
-/* 品牌标记与 build/icon.ico 小尺寸帧同源：深底 + 青瓷结构色 L；不再用铃铛图标和硬编码渐变 */
+/* 品牌标记与 build/icon.ico 同源：同一套切角 L（纯几何，不是字体）。
+   百分比取自图标里 L 的归一化坐标 —— 改图标就要同步这里，否则两处形状会分叉。 */
 .brand-mark {
   width: 28px; height: 28px; border-radius: var(--r-m);
   background: var(--desk); display: grid; place-items: center;
-  color: var(--blue); font-family: var(--f-display);
-  font-size: var(--fs-brand); font-weight: 700; line-height: 1;
   box-shadow: 0 2px 6px -2px #000;
+}
+.brand-mark::after {
+  content: ""; width: 19px; height: 19px; background: var(--ink);
+  clip-path: polygon(
+    20% 13.7%, 31.3% 13.7%, 31.3% 64.9%, 36.6% 70.3%,
+    89.4% 70.3%, 89.4% 75.7%, 84% 86.4%, 20% 86.4%,
+    14.7% 81.1%, 14.7% 19%
+  );
 }
 .brand-name {
   font-family: var(--f-display);
@@ -595,6 +607,30 @@ svg.ic.lg { width: 20px; height: 20px; }
 }
 .sheet-sub { font-size: var(--fs-meta); color: var(--ink-3); margin-top: 6px; }
 
+/* 群标题行：左侧群名，右侧唯一的整群止损入口（2026-11-15） */
+.sheet-head-row { display: flex; align-items: flex-start; gap: 12px; margin-top: 8px; }
+.sheet-head-row .sheet-title { flex: 1; min-width: 0; margin: 0; }
+.halt-btn {
+  flex: none; display: inline-flex; align-items: center; gap: 5px;
+  padding: 4px 10px; border-radius: var(--r-s); cursor: pointer;
+  background: var(--sheet-2); color: var(--ink-3);
+  font-family: var(--f-cjk); font-size: var(--fs-label); letter-spacing: 0;
+  box-shadow: inset 0 0 0 1px var(--edge);
+  transition: color var(--dur-fast) ease, background var(--dur-fast) ease;
+}
+.halt-btn:hover { color: var(--ink); background: var(--hover-bg-2); }
+.halt-btn .ic { opacity: .8; }
+/* 第一下只是"准备"，第二下才真停：重动作不做单击即执行 */
+.halt-btn.armed { color: var(--seal); background: var(--seal-wash); box-shadow: inset 0 0 0 1px var(--seal); }
+.halt-btn.armed .ic { opacity: 1; }
+.halt-state {
+  flex: none; display: inline-flex; align-items: center; gap: 5px;
+  padding: 4px 10px; border-radius: var(--r-s);
+  background: var(--sheet-2); color: var(--ink-4);
+  font-family: var(--f-cjk); font-size: var(--fs-label); letter-spacing: 0;
+}
+.halt-state .ic { opacity: .7; }
+
 /* 项目条（2026-11-12）：这段对话在动哪个项目——名字可改，路径是事实 */
 .proj-bar {
   display: flex; align-items: center; gap: 8px;
@@ -856,6 +892,11 @@ svg.ic.lg { width: 20px; height: 20px; }
 .mcard[data-state="running"] .mcard-avatar { box-shadow: 0 0 0 2px var(--blue); animation: live-ring 2.2s ease-in-out infinite; }
 .mcard[data-state="running"] .mcard-name { color: var(--blue); }
 .mcard-live { width: 6px; height: 6px; border-radius: 50%; background: var(--blue); margin-left: 5px; flex: none; animation: live-pulse 1.6s ease-in-out infinite; }
+.mcard-badge {
+  font-family: var(--f-mono); font-size: var(--fs-label); line-height: 1;
+  padding: 1px 4px; border-radius: 2px; margin-left: 5px; flex: none;
+}
+.mcard-badge.acceptor { color: var(--brass); background: var(--brass-wash); }
 
 /* ---------- 在跑成员：动态信号（2026-11-13） ----------
    用户要“看得出在跑”。这里只做两件事，都是信息不是装饰：
@@ -967,11 +1008,12 @@ svg.ic.lg { width: 20px; height: 20px; }
 /* 全权确认：一张不抢戏的居中卡片，警告色只落在标题与确认按钮 */
 .perm-overlay {
   position: fixed; inset: 0; z-index: 90;
-  background: rgba(0, 0, 0, .42);
+  background: rgba(0, 0, 0, .44);
   display: grid; place-items: center;
 }
 .perm-ask {
-  width: min(420px, 90vw);
+  /* 与 .ask-card 同一把尺子：全权 / 信任两张卡和删除确认卡一样宽、一样的内外边距 */
+  width: min(440px, 92vw);
   background: var(--sheet); border-radius: var(--r-l);
   box-shadow: 0 24px 70px rgba(0, 0, 0, .38);
   padding: 20px 22px 18px;
@@ -1904,11 +1946,9 @@ button:disabled,
 /* 工具行是"日志"，不是"消息"：meta 跟在标题后面，不再右浮制造锯齿状视线 */
 .feed-meta { font-size: var(--fs-label); color: var(--ink-4); margin-left: 0; }
 .feed-body { margin: 8px 0 0; padding: 8px 10px; border-radius: var(--r-s); background: var(--desk); color: var(--ink-2); font-family: var(--f-mono); font-size: var(--fs-meta); line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 260px; overflow: auto; }
-/* 展开全文后不再限高：否则"展开"了还是被 260px 的框截住，等于没展开 */
-.feed-body.open { max-height: none; }
-/* 长正文折叠开关（2026-11-13）：回报动辄千字，全铺开时一屏只剩这一张卡 */
+/* 长正文折叠开关（2026-11-15）：回报动辄千字，全铺开时一屏只剩这一张卡 */
 .feed-more {
-  display: block; margin-top: 6px; padding: 0; border: 0; background: none; cursor: pointer;
+  padding: 0; border: 0; background: none; cursor: pointer;
   font-family: var(--f-cjk); font-size: var(--fs-label); color: var(--blue);
 }
 .feed-more:hover { text-decoration: underline; }
@@ -1994,6 +2034,20 @@ button:disabled,
 .sf-pane { display: flex; flex-direction: column; gap: 18px; padding: 22px 30px 30px; overflow-y: auto; min-height: 0; }
 .sf-pane h3 { margin: 0; font-family: var(--f-display); font-size: var(--fs-title); letter-spacing: 0; color: var(--ink); }
 .sf-lede { margin: -10px 0 0; font-size: var(--fs-meta); color: var(--ink-3); line-height: 1.6; max-width: 56ch; }
+/* 关于页（2026-11-15）：字标 + 一句话定位，下面按组读；不做卡片墙，"她怎么工作"用行、"能做什么"用格 */
+.sf-about-hero { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: -6px; }
+.sf-about-mark { font-family: var(--f-display); font-size: var(--fs-display); line-height: 1; letter-spacing: 0; color: var(--ink); }
+.sf-about-tag { font-size: var(--fs-meta); color: var(--ink-3); }
+.sf-about-pitch { margin: 0; font-size: var(--fs-body); color: var(--ink-2); line-height: 1.75; max-width: 60ch; }
+.sf-about-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 6px 0 8px; }
+.sf-about-cell { background: var(--sheet-3); border-radius: var(--r-m); padding: 10px 12px; display: flex; flex-direction: column; gap: 3px; }
+.sf-about-cell b { font-size: var(--fs-body); font-weight: 500; color: var(--ink); }
+.sf-about-cell small { font-size: var(--fs-label); color: var(--ink-3); line-height: 1.6; }
+.sf-about-lines { display: flex; flex-direction: column; gap: 7px; padding: 4px 0 10px; }
+.sf-about-line { margin: 0; font-size: var(--fs-meta); color: var(--ink-3); line-height: 1.7; position: relative; padding-left: 12px; }
+.sf-about-line::before { content: "·"; position: absolute; left: 0; color: var(--ink-4); }
+/* 导航底部的「关于」：不归属任何一组，贴底是为了不打断上面三组的分组节奏 */
+.sf-nav-foot { margin-top: auto; padding-top: 12px; }
 /* 组：一张案卷。组头小帽说明"这组管什么"，组内行用账目式分隔线，不再满屏碎卡 */
 .sf-group { background: var(--desk); border-radius: var(--r-m); padding: 0 16px 8px; display: flex; flex-direction: column; }
 .sf-group-head { padding: 14px 0 4px; display: flex; flex-direction: column; gap: 2px; }
@@ -2024,6 +2078,45 @@ button:disabled,
 .sf-badge.ok { background: var(--blue-wash); color: var(--blue); }
 .sf-badge.warn { background: var(--brass-wash); color: var(--brass); }
 .sf-badge.bad { background: var(--seal-wash); color: var(--seal); }
+/* 设置页滑块（2026-11-15）：工具轮次上限。
+   轨道用 --fill 画已填充段；拇指亮芯 + 蓝环（box-shadow 当环，不碰零描边红线）。 */
+.sf-row-slider { align-items: center; }
+.sf-slider { flex: none; display: flex; align-items: center; gap: 12px; min-width: 250px; }
+.sf-slider input[type="range"] {
+  -webkit-appearance: none; appearance: none;
+  --fill: 0%; /* 已填充段终点；JSX 按当前值内联覆盖 */
+  flex: 1; height: 4px; border-radius: 2px;
+  background: linear-gradient(90deg, var(--blue) var(--fill), var(--desk-3) var(--fill));
+  outline: none; cursor: pointer;
+}
+.sf-slider input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 16px; height: 16px; border-radius: 50%;
+  background: var(--ink); border: none; cursor: grab;
+  box-shadow: 0 0 0 2px var(--blue), 0 1px 4px rgba(0, 0, 0, .4);
+  transition: box-shadow .15s ease;
+}
+.sf-slider input[type="range"]:hover::-webkit-slider-thumb,
+.sf-slider input[type="range"]:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 2px var(--blue), 0 0 0 6px var(--blue-wash), 0 1px 4px rgba(0, 0, 0, .4);
+}
+.sf-slider input[type="range"]:active::-webkit-slider-thumb { cursor: grabbing; }
+.sf-slider input[type="range"]::-moz-range-thumb {
+  width: 16px; height: 16px; border-radius: 50%;
+  background: var(--ink); border: none; cursor: grab;
+  box-shadow: 0 0 0 2px var(--blue), 0 1px 4px rgba(0, 0, 0, .4);
+}
+.sf-slider input[type="range"]:hover::-moz-range-thumb {
+  box-shadow: 0 0 0 2px var(--blue), 0 0 0 6px var(--blue-wash), 0 1px 4px rgba(0, 0, 0, .4);
+}
+.sf-slider-val {
+  flex: none; min-width: 58px; text-align: center;
+  font-family: var(--f-mono); font-variant-numeric: tabular-nums;
+  font-size: var(--fs-body); color: var(--ink);
+  background: var(--desk-3); border-radius: var(--r-s);
+  padding: 3px 8px;
+}
+.sf-slider-val .u { font-style: normal; color: var(--ink-4); font-size: var(--fs-label); margin-left: 2px; }
 /* 插件市场：已安装即卡片，本地无云端 */
 .sf-market { display: grid; grid-template-columns: repeat(auto-fill, minmax(244px, 1fr)); gap: 10px; padding: 6px 0 2px; }
 .sf-market-card {
@@ -2141,9 +2234,14 @@ button.ev:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 /* 交付箱行（2026-11-13）：文件名独占一行并截断，下面两行说明"这是什么/多大"。
    此前是横向 flex（名称 + 任务号），窄栏里 "audit-report.md" 被挤成 "audit-" / "report.md"。 */
 .out-row {
-  display: flex; flex-direction: column; align-items: stretch; gap: 1px;
+  display: flex; flex-direction: row; align-items: center; gap: 9px;
   width: 100%; min-width: 0;
 }
+/* 彩色类型图标（2026-11-15）：资源管理器那样一眼分清表格/音频/压缩包 */
+.fic { flex: none; width: 22px; height: 22px; display: block; }
+.fic.sm { width: 16px; height: 16px; }
+.fic.lg { width: 44px; height: 44px; }
+.out-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
 .out-row b {
   display: block; min-width: 0;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -2172,15 +2270,6 @@ button.ev:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 .thread-more { font-size: var(--fs-body); line-height: 1; padding-bottom: 4px; }
 .thread-act:focus-visible { outline: 1.5px solid var(--blue); outline-offset: 1px; }
 .thread-rename { flex: 1; min-width: 0; }
-.thread-ask {
-  flex: 0 0 100%; display: flex; flex-direction: column; gap: 6px;
-  padding: 6px 8px; border-radius: var(--r-s); background: var(--sheet);
-  font-size: var(--fs-meta); color: var(--ink-2);
-}
-.thread-ask-acts { display: flex; gap: 6px; justify-content: flex-end; }
-.thread-ask .ghost-btn { padding: 3px 9px; font-size: var(--fs-label); }
-.thread-danger { color: var(--red); }
-.thread-danger:hover { color: var(--red); background: var(--hover-bg-2); }
 
 /* ---------- 版本握手提示（界面新、内核旧）：右下角提示卡，不压顶栏与图纸 ---------- */
 .stale-bar {
@@ -2195,38 +2284,54 @@ button.ev:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 .stale-bar .ghost-btn { padding: 3px 9px; font-size: var(--fs-label); margin-left: auto; flex: none; }
 .stale-bar .icon-btn { background: none; width: 24px; height: 24px; flex: none; }
 
-/* ---------- 工单右键菜单（卡住的单必须能取消/删除） ---------- */
+/* ---------- 弹出菜单（右键 / 下拉共用一把尺子，2026-11-15） ----------
+   结构固定：头部（是什么）→ 小节帽 → 主动作 → 次要动作 → 发丝线 → 危险动作。
+   层次只靠间距与底色；危险项用 seal 色，永远单独一段、永远排最后。 */
 .jobmenu {
-  position: fixed; z-index: 60; width: 228px; padding: 6px;
+  position: fixed; z-index: 60; width: 236px; max-width: calc(100vw - 16px); padding: 5px;
   background: var(--sheet); border-radius: var(--r-m);
   box-shadow: 0 1px 2px rgba(0,0,0,.4), 0 18px 40px -24px #000;
-  display: flex; flex-direction: column; gap: 2px;
+  display: flex; flex-direction: column; gap: 1px;
 }
 .jobmenu-h {
-  display: flex; align-items: center; justify-content: space-between; gap: 8px;
-  padding: 4px 6px 6px; color: var(--ink-3); font-size: var(--fs-label);
+  display: flex; align-items: center; justify-content: space-between; gap: 7px;
+  padding: 4px 7px 6px; color: var(--ink-3); font-size: var(--fs-label);
 }
+.jobmenu-h .ic { flex: none; color: var(--ink-4); }
 .jobmenu-title {
   flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   color: var(--ink-2); font-size: var(--fs-meta);
 }
-.jobmenu-sub { padding: 0 6px 6px; color: var(--ink-4); font-size: var(--fs-label); opacity: .7; }
-.jobmenu-ask { margin: 4px 6px 6px; font-size: var(--fs-meta); color: var(--ink-2); line-height: 1.5; }
+.jobmenu-sub { padding: 0 7px 5px; color: var(--ink-4); font-size: var(--fs-label); opacity: .7; }
+/* 小节帽：分组名只有这一种形态（等宽小字，中文不加字距） */
+.jobmenu-cap {
+  padding: 7px 8px 3px; color: var(--ink-4);
+  font-family: var(--f-mono); font-size: var(--fs-label);
+}
+.jobmenu-cap:first-of-type { padding-top: 5px; }
+/* 组间线：用底色画 1px（零描边规则），两侧留白比项内边距更宽一点 */
+.jobmenu-sep { height: 1px; margin: 4px 6px; background: var(--rule-soft); }
 .jobmenu-item {
-  display: flex; align-items: center; gap: 9px; text-align: left; padding: 6px 8px; border-radius: var(--r-s);
+  display: flex; align-items: center; gap: 9px; text-align: left;
+  padding: 7px 9px; border-radius: var(--r-s);
   background: none; color: var(--ink-2); font: inherit; font-size: var(--fs-meta); cursor: pointer;
 }
+.jobmenu-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .jobmenu-item .ic { flex: none; color: var(--ink-4); }
+/* 主动作：同一组里最常用的那条，字色抬一档（不加底色，否则每条都像按钮） */
+.jobmenu-item.lead { color: var(--ink); }
+.jobmenu-item.lead .ic { color: var(--ink-2); }
 .jobmenu-item:hover { background: var(--hover-bg); color: var(--ink); }
 .jobmenu-item:hover .ic { color: var(--ink-2); }
+/* 不可用：说清"现在做不了"，但不抢颜色的视线 */
+.jobmenu-item:disabled { opacity: .42; cursor: default; background: none; }
+.jobmenu-item:disabled:hover { background: none; color: var(--ink-2); }
 .jobmenu-item.danger { color: var(--seal); }
 .jobmenu-item.danger .ic { color: var(--seal); }
 .jobmenu-item.danger:hover { background: var(--seal-wash); color: var(--seal); }
 .jobmenu-item:focus-visible { outline: 1.5px solid var(--blue); outline-offset: -1px; }
-/* 菜单头：标题行左对齐，图标与文字成组，状态/关闭推到右侧 */
-.jobmenu-h { gap: 7px; }
-.jobmenu-h .ic { flex: none; color: var(--ink-4); }
-.jobmenu-h .jobmenu-title { margin-left: 0; }
+/* 菜单里的临时回执（"复制失败""已复制"）：一行小字，不占一个可点项 */
+.jobmenu-note { padding: 2px 8px 4px; color: var(--ink-4); font-size: var(--fs-label); line-height: 1.5; }
 
 /* ---------- 顶栏工作区菜单（换目录 / 不用工作区 / 可读目录） ---------- */
 .wsmenu-wrap { position: relative; display: flex; align-items: center; }
@@ -2236,17 +2341,8 @@ button.ev:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 }
 /* 工作区菜单里的信任入口（2026-11-13）：右边小标说明"信任会放行什么" */
 .wsmenu .jobmenu-item .wsmenu-badge { margin-left: auto; }
-/* fixed：顶栏与图纸各自有 overflow / 层叠上下文，absolute 下拉会被裁掉或压到图纸下面 */
-.wsmenu {
-  position: fixed; z-index: 200; width: 286px; padding: 6px;
-  background: var(--sheet); border-radius: var(--r-m);
-  box-shadow: 0 1px 2px rgba(0,0,0,.4), 0 18px 40px -24px #000;
-  display: flex; flex-direction: column; gap: 2px;
-}
-.wsmenu-cap {
-  padding: 8px 8px 4px; color: var(--ink-3);
-  font-family: var(--f-mono); font-size: var(--fs-label); letter-spacing: 0;
-}
+/* 工作区菜单：surface / 定位 / 分组全部复用 .jobmenu（这里只定它更宽） */
+.wsmenu { z-index: 200; width: 286px; }
 .wsmenu-empty { padding: 2px 8px 6px; color: var(--ink-4); font-size: var(--fs-label); }
 .wsmenu-row {
   display: flex; align-items: center; gap: 6px;
@@ -2264,6 +2360,65 @@ button.ev:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 }
 .wsmenu-x:hover { background: var(--seal-wash); color: var(--seal); }
 .wsmenu-x:focus-visible { outline: 1.5px solid var(--blue); outline-offset: -1px; }
+
+/* ---------- 确认卡片（危险动作统一走这里，2026-11-15） ----------
+   层级：图标 + 标题（做什么）→ 说明（影响谁）→ 红底警示（不可恢复）→ 按钮行。
+   按钮位置恒定：取消在最左（弱），确认在最右（强）；危险动作整卡走 danger 语气。
+   尺寸与 .perm-ask 完全一致——全权/信任两张确认卡也在同一把尺子上。 */
+.ask-overlay {
+  position: fixed; inset: 0; z-index: 120;
+  background: rgba(0, 0, 0, .44);
+  display: grid; place-items: center; padding: 24px;
+}
+.ask-card {
+  /* 两个中文长选项并排时 420 会把按钮挤成两行，440 是"两个动作 + 取消"一行的下限 */
+  width: min(440px, 92vw);
+  background: var(--sheet); border-radius: var(--r-l);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, .38);
+  padding: 20px 22px 18px;
+  display: flex; flex-direction: column; gap: 13px;
+}
+.ask-hd { display: flex; align-items: center; gap: 8px; color: var(--ink); }
+.ask-hd .ic { flex: none; color: var(--ink-3); }
+.ask-card[data-tone="danger"] .ask-hd { color: var(--seal); }
+.ask-card[data-tone="danger"] .ask-hd .ic { color: var(--seal); }
+.ask-ht { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.ask-title { margin: 0; font-size: var(--fs-title); font-weight: 600; line-height: 1.35; }
+.ask-body { margin: 0; font-size: var(--fs-body); line-height: 1.7; color: var(--ink-2); white-space: pre-line; }
+.ask-note {
+  display: flex; align-items: flex-start; gap: 6px;
+  padding: 7px 10px; border-radius: var(--r-s);
+  background: var(--red-wash); color: var(--red);
+  font-size: var(--fs-meta); line-height: 1.5;
+}
+.ask-note .ic { flex: none; margin-top: 2px; }
+/* 按钮永远右对齐、取消永远在最左；放不下时整颗换行，不把标签劈成两行 */
+.ask-acts { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 2px; }
+.ask-btn {
+  padding: 7px 14px; border-radius: var(--r-m);
+  font: inherit; font-size: var(--fs-body); cursor: pointer; white-space: nowrap;
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+}
+.ask-btn.ghost { background: var(--desk-3); color: var(--ink-2); box-shadow: 0 1px 2px rgba(0,0,0,.35); }
+.ask-btn.ghost:hover { background: var(--sheet-3); color: var(--ink); }
+/* 强弱只靠底色：主操作蓝、不可恢复 seal（与 .perm-btn.go 同一条口径） */
+.ask-btn.primary { background: var(--blue); color: var(--on-accent); font-weight: 600; }
+.ask-btn.danger { background: var(--seal); color: var(--on-accent); font-weight: 600; }
+.ask-btn.primary:hover,
+.ask-btn.danger:hover { filter: brightness(1.1); }
+.ask-btn:focus-visible { outline: 1.5px solid var(--blue); outline-offset: 2px; }
+/* 窄屏：卡片占满可用宽，按钮等分排一行（顺序不变：取消在左、确认在右） */
+@media (max-width: 560px) {
+  .ask-overlay { padding: 16px; }
+  .ask-card { width: 100%; padding: 16px 16px 14px; }
+  .ask-title { font-size: var(--fs-body-lg); }
+  .ask-acts { gap: 6px; }
+  .ask-btn { flex: 1; padding: 8px 10px; }
+  /* 菜单：触屏上点得准比排得紧重要，项高与左右留白各放大一点 */
+  .jobmenu { width: min(264px, calc(100vw - 16px)); padding: 6px; }
+  .jobmenu-item { padding: 9px 10px; }
+  .jobmenu-sep { margin: 5px 4px; }
+}
 
 /* ---- M1-16 本轮随附条 + @ 文件补全 ---- */
 .attach-strip {
@@ -2532,23 +2687,55 @@ html[data-mode="light"] { color-scheme: light; }
 .rf-chip .n { font-family: var(--f-mono); font-variant-numeric: tabular-nums; opacity: .75; }
 .rf-chip.zero { opacity: .5; }
 
-/* ---------- 消耗看板（2026-11-13）：风铃上下文/命中率 + 本群成员 token 消耗。
-   没人跑过活就整块不渲染（JSX 侧控制），这里只管有数时的节奏。 ---------- */
-.usage-board { padding: 2px 12px 8px; }
-.usage-cap {
+/* ---------- 消耗看板（2026-11-15）：拆成「Token 消耗」与「缓存命中」两个模块，
+   风铃（指挥）与成员分行，带占比条，层次更清楚。没人跑过活就整块不渲染（JSX 侧控制）。 ---------- */
+.usage-board { padding: 2px 12px 10px; display: flex; flex-direction: column; gap: 10px; }
+.ub-mod { display: flex; flex-direction: column; gap: 3px; }
+.ub-mod-cap {
   font-family: var(--f-mono); font-size: var(--fs-label); color: var(--ink-4);
-  padding: 4px 0 2px;
+  letter-spacing: 0; padding: 2px 0;
 }
-.usage-row {
-  display: flex; align-items: baseline; gap: 8px;
+.ub-row {
+  display: flex; align-items: center; gap: 8px;
   padding: 3px 0; font-size: var(--fs-label);
 }
-.usage-row .usage-name { flex: none; color: var(--ink-2); }
-.usage-row.lynn .usage-name { color: var(--ink); }
-.usage-row .usage-vals {
-  margin-left: auto; color: var(--ink-3);
-  font-family: var(--f-mono); font-variant-numeric: tabular-nums;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+.ub-row.lynn {
+  background: var(--desk-3); border-radius: var(--r-s);
+  padding: 4px 6px; margin: 0 -6px;
+}
+.ub-name {
+  flex: none; color: var(--ink-2); min-width: 58px;
+  display: flex; align-items: center; gap: 5px;
+}
+.ub-row.lynn .ub-name { color: var(--ink); }
+.ub-tag {
+  font-family: var(--f-mono); font-size: var(--fs-label); line-height: 1;
+  color: var(--blue); background: var(--blue-wash);
+  padding: 1px 4px; border-radius: 2px;
+}
+.ub-tag.accept {
+  color: var(--brass); background: var(--brass-wash);
+}
+.ub-bar {
+  flex: 1; min-width: 0; height: 4px; border-radius: 2px;
+  background: var(--desk-3); overflow: hidden;
+}
+.ub-row.lynn .ub-bar { background: var(--desk); }
+.ub-bar i {
+  display: block; height: 100%; border-radius: 2px; background: var(--ink-3);
+  transition: width .35s ease;
+}
+.ub-bar.cache i { background: var(--blue); }
+.ub-row.lynn .ub-bar i { background: var(--brass); }
+.ub-val {
+  flex: none; color: var(--ink-3); font-family: var(--f-mono);
+  font-variant-numeric: tabular-nums; min-width: 46px; text-align: right;
+}
+.ub-val .u { font-style: normal; color: var(--ink-4); font-size: var(--fs-label); margin-left: 1px; }
+.ub-row.lynn .ub-val { color: var(--ink); }
+.ub-sub {
+  font-size: var(--fs-label); color: var(--ink-4);
+  padding: 0 0 1px 64px;
 }
 .rf-chip:hover { color: var(--ink-2); }
 .rf-chip.on { color: var(--ink); background: var(--hover-bg); }
@@ -2838,6 +3025,37 @@ html[data-mode="light"] { color-scheme: light; }
   font-family: var(--f-cjk); font-size: var(--fs-body); color: var(--ink-2);
   line-height: 1.66;
 }
+/* ---------- 成员回报正文（2026-11-15 重做）----------
+   此前回报走的是作者卡，正文落在 .feed-body 的默认值上：等宽 13px、限高 260px 内层滚动
+   —— 一段中文汇报被当成日志在排，字号与正文不一致，看着就"乱"。
+   现在与工具卡同源：CJK 正文字面、正文档字号、行高 1.7，卡里不套内层滚动框。 */
+.feed-item.talk .feed-body {
+  margin: 8px 0 0; padding: 12px 14px;
+  background: var(--sheet-3); border-radius: var(--r-s);
+  font-family: var(--f-cjk); font-size: var(--fs-body); color: var(--ink-2);
+  line-height: 1.72;
+}
+/* 折叠/展开（用户主诉：展开后还是不完整、也没有滚动条）
+   —— 收起态按块裁切 + 底部渐隐；展开态彻底解除限高，全文一次读完。
+   注意：这两条必须排在 `.feed-item.tool .feed-body` 之后，否则同权重会被它盖回 320px。 */
+.feed-item .feed-fold > .feed-body { position: relative; max-height: none; overflow: visible; }
+.feed-item .feed-fold.long:not(.open) > .feed-body { max-height: 300px; overflow: hidden; }
+.feed-fold.long:not(.open) > .feed-body::after {
+  content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 46px;
+  pointer-events: none;
+  background: linear-gradient(to bottom, transparent, var(--sheet-3));
+}
+.feed-fold-bar {
+  display: flex; align-items: center; gap: 10px; margin-top: 6px;
+}
+/* 卡片内的滚动区（四段回报尚未展开时）：全局 4px 近乎隐形，这里加粗到 6px 并给实色拇指，
+   否则用户只会看到"内容被截断、又没有滚动条"。 */
+.feed-report::-webkit-scrollbar,
+.feed-body::-webkit-scrollbar { width: 6px; }
+.feed-report::-webkit-scrollbar-thumb,
+.feed-body::-webkit-scrollbar-thumb { background: var(--scroll-thumb-hover); border-radius: 999px; }
+.feed-fold-hint { font-size: var(--fs-label); color: var(--ink-4); }
+.feed-fold-bar .feed-more { margin-left: auto; }
 .feed-members { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0 2px; }
 .feed-member { display: inline-flex; align-items: center; gap: 5px; font-size: var(--fs-label); color: var(--ink-3); }
 .feed-member .mcard-avatar { flex: none; }
@@ -2895,10 +3113,39 @@ html[data-mode="light"] { color-scheme: light; }
 .md img { max-width: 100%; height: auto; border-radius: var(--r-s); }
 .md blockquote { padding-left: 12px; color: var(--ink-3); }
 .md input[type="checkbox"] { accent-color: var(--blue); margin-right: 6px; }
-.md table { width: 100%; border-collapse: collapse; font-size: var(--fs-meta); }
-.md th, .md td { padding: 6px 10px; text-align: left; background: var(--sheet-2); }
-.md th { color: var(--ink-2); font-weight: 600; }
-.md td { color: var(--ink); box-shadow: inset 0 -1px 0 var(--rule); }
+/* 表格（2026-11-15 重排）：成员把自检结果写成表格，此前被压成"表头竖排、单词切成两半"。
+   两个真原因：① 单元格继承了 .feed-body 的 overflow-wrap:anywhere，浏览器把列压到 1 个字宽；
+                ② 表头没有 nowrap、也没有最小宽度，列可以缩到无意义。
+   现在：列有最小宽度、表头不折行、单元格按词换行；整表放不下时横向滚动（外面那层壳）。 */
+.md-table-wrap {
+  /* min-width:0 是关键：.md 是 flex 列，flex 子项默认 min-width:auto → 滚动壳会被表格的
+     min-content 撑到比容器还宽，overflow-x 永远不触发，表就被祖先裁掉（窄窗实测右半边直接消失）。 */
+  min-width: 0; max-width: 100%;
+  margin: 6px 0 2px; overflow-x: auto; overflow-y: hidden;
+}
+.md-table-wrap::-webkit-scrollbar { height: 8px; }
+.md-table-wrap::-webkit-scrollbar-thumb { background: var(--scroll-thumb-hover); border-radius: 999px; }
+.md table {
+  width: 100%; border-collapse: separate; border-spacing: 0;
+  font-family: var(--f-cjk); font-size: var(--fs-meta);
+}
+.md th, .md td {
+  padding: 8px 12px; text-align: left; vertical-align: top;
+  line-height: 1.62; min-width: 3.6em;
+  overflow-wrap: normal; word-break: normal;
+}
+.md th {
+  background: var(--sheet-2); color: var(--ink-2); font-weight: 600;
+  white-space: nowrap; box-shadow: inset 0 -1px 0 var(--rule);
+}
+.md th:first-child { border-top-left-radius: var(--r-s); }
+.md th:last-child { border-top-right-radius: var(--r-s); }
+/* 数据行不铺底：表头的浅带子负责"这是表头"，行与行只靠发丝线分（零描边规则） */
+.md td { color: var(--ink); background: transparent; box-shadow: inset 0 -1px 0 var(--rule); }
+.md tbody tr:last-child td { box-shadow: none; }
+.md th[align="center"], .md td[align="center"] { text-align: center; }
+.md th[align="right"], .md td[align="right"] { text-align: right; }
+.md table code { font-size: var(--fs-label); }
 .md .md-code-wrap { margin: 2px 0; }
 .md .hl-code { background: var(--sheet-3); }
 .md pre { margin: 0; }
@@ -2955,6 +3202,21 @@ html[data-mode="light"] { color-scheme: light; }
 /* 点图 1:1：不再压缩，横向滚动细看 */
 .pv-image.full { max-width: none; cursor: zoom-out; }
 .pv-frame { width: 100%; min-height: 70vh; background: var(--read); border: 0; }
+/* 音视频预览（2026-11-15）：一张居中的播放卡，播放器交给浏览器原生控件 */
+.pv-media {
+  display: flex; flex-direction: column; align-items: center; gap: 10px;
+  padding: 26px 18px; margin-top: 6px; border-radius: var(--r-m);
+  background: var(--sheet-2);
+}
+.pv-media-name {
+  max-width: 100%; font-family: var(--f-cjk); font-size: var(--fs-body);
+  color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.pv-media-meta { font-size: var(--fs-label); color: var(--ink-4); }
+.pv-audio { width: min(520px, 100%); color-scheme: dark light; }
+.pv-video { width: 100%; max-height: 70vh; border-radius: var(--r-s); background: #000; }
+.pv-media .pv-hint { padding: 4px 0 0; text-align: center; }
+.pv-name .fic { flex: none; }
 /* Office 三件套（docx-preview / @js-preview/excel / pptx-preview）：白纸容器，样式由各库自带 */
 .pv-office { background: #fff; border-radius: var(--r-m); min-height: 78vh; box-shadow: 0 1px 3px rgba(0, 0, 0, .12); overflow: auto; }
 .pv-office-holder { min-height: 78vh; }
@@ -3005,15 +3267,12 @@ html[data-mode="light"] { color-scheme: light; }
   border-radius: var(--r-s); cursor: pointer;
   transition: opacity var(--dur) var(--ease-out);
 }
-/* 常驻位但不常驻色：鼠标不在这一行时列表里不出现一排「删除」，透明按钮也不吃点击 */
-.arch-row:hover .arch-del, .arch-del:focus-visible, .arch-del.sure {
+/* 常驻位但不常驻色：鼠标不在这一行时列表里不出现一排「删除」，透明按钮也不吃点击。
+   确认交给统一的确认卡片（2026-11-15），按钮不再自己变成红字。 */
+.arch-row:hover .arch-del, .arch-del:focus-visible {
   opacity: 1; pointer-events: auto;
 }
 .arch-del:hover { background: var(--hover-bg); color: var(--seal); }
-.arch-del.sure {
-  padding: 3px 6px; background: var(--seal-wash); color: var(--seal);
-  font-weight: 600; white-space: nowrap;
-}
 /* 旧 hover 规则写死了深色值，这里收口到主题 token */
 .job:hover { background: var(--sheet-3); }
 /* 系统卡旧规则是 flex 行，会把「谁 + 时间」挤到正文左侧中部；改成块级 */
