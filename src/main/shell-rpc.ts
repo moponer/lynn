@@ -17,6 +17,7 @@ import type { Kernel } from "./kernel";
 import { discoverModels } from "./providers";
 import { endpointRiskError } from "./endpoint";
 import { insideBase, openPathBlockReason, taskIdError } from "./path-guard";
+import { issueAssetToken, validateAssetTarget } from "./asset-protocol";
 
 export interface ShellRpcCtx {
   kernel: Kernel;
@@ -300,19 +301,24 @@ rpc("preview.read", async (params, ctx) => {
   }
   // PDF：沙箱 iframe 里开不了 Chromium 阅读器，返回标记由抽屉引导开独立预览窗口
   if (ext === "pdf") return { ok: true, kind: "pdf", ext, bytes };
-  // Office 三件套（docx/xlsx/pptx）：渲染层用开源库保真渲染（docx-preview /
+  // Office 三件套（docx/docm/xlsx/xlsm/pptx）：渲染层用开源库保真渲染（docx-preview /
   // @js-preview/excel / pptx-preview，懒加载），主进程只递字节。此前自研的
   // docx→HTML 只能出"素颜正文"，图片样式全丢；正文提取仍走 docx-read（read_artifact）。
+  // 已改为 lynn-asset:// 一次性令牌协议流式下发：消除 base64 膨胀、IPC 大字符串克隆、
+  // 主进程整份读内存峰值。但渲染库仍需完整 ArrayBuffer，不是"边下边渲染"。
   if (ext === "docx" || ext === "docm" || ext === "xlsx" || ext === "xlsm" || ext === "pptx") {
-    // 审计 #12：16MB → 8MB（base64 膨胀 33% 后约 10.7MB 字符串 + 渲染层同份 Uint8Array）；
-    // 同步 readFileSync 换异步，避免主进程事件循环上一次大分配停顿。
-    // 真正的流式方案（自定义协议按块下发）留作后续，不假装已解决。
     const OFFICE_LIMIT = 8 * 1024 * 1024;
     if (bytes > OFFICE_LIMIT) {
       return { ok: true, kind: "binary", ext, bytes, error: "文件超过 8MB，内置预览带不动，请用系统程序打开。" };
     }
-    const buf = await fs.promises.readFile(target);
-    return { ok: true, kind: "office", ext, bytes, dataBase64: buf.toString("base64") };
+    // 路径守卫与 evidence.open 一致：只在 tasks/<taskId>/ 内解析，realpath 后仍在授权根内
+    const allowedRoots = [path.join(ctx.kernel.dataRoot, "tasks")];
+    const validated = validateAssetTarget(target, allowedRoots);
+    if (!validated.ok) {
+      return { ok: true, kind: "binary", ext, bytes, error: "文件不在当前任务工作区内，无法预览。" };
+    }
+    const token = issueAssetToken(validated.payload);
+    return { ok: true, kind: "office", ext, bytes, assetUrl: `lynn-asset://preview/${token}` };
   }
   const LIMIT = 600_000;
   const fd = fs.openSync(target, "r");

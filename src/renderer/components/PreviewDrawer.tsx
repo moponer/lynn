@@ -20,13 +20,19 @@ import { HighlightedCode, RichText } from "./RichText";
 const RENDERABLE = new Set(["md", "markdown", "mdx", "html", "htm", "csv", "tsv", "json", "jsonc"]);
 
 /**
- * Office 三件套：开源库懒加载渲染。字节由主进程 base64 搭车过来，
- * 这里解码成 ArrayBuffer 喂给对应库。
+ * Office 三件套：开源库懒加载渲染。字节由主进程通过 lynn-asset:// 一次性令牌协议流式下发，
+ * 这里 fetch().arrayBuffer() 拿完整 ArrayBuffer 喂给对应库。
  *   docx  → docx-preview（Apache-2.0）保真渲染样式/图片/表格/分页
  *   xlsx  → @js-preview/excel（MIT）多 sheet 页签 + 合并单元格 + 样式
  *   pptx  → pptx-preview（npm 包可商用）幻灯片渲染
+ *
+ * 收益（注释里如实写，不假装已解决）：
+ *   - 消除 base64 膨胀 33%（8MB 文件从 10.7MB 字符串变回 8MB buffer）
+ *   - 消除 IPC 结构化克隆大字符串的峰值内存与序列化停顿
+ *   - 主进程不再整份读文件到内存后转 base64，峰值内存减半
+ * 但渲染库仍需完整 ArrayBuffer，所以这不是"边下边渲染"——渲染层仍是等整份 buffer 到手才喂库。
  */
-function OfficePane({ ext, base64 }: { ext: string; base64: string }) {
+function OfficePane({ ext, assetUrl }: { ext: string; assetUrl: string }) {
   const holder = useRef<HTMLDivElement>(null);
   const excelRef = useRef<{ destroy: () => void } | null>(null);
   const pptxRef = useRef<{ destroy: () => void } | null>(null);
@@ -38,21 +44,27 @@ function OfficePane({ ext, base64 }: { ext: string; base64: string }) {
     let gone = false;
     setErr(null);
     setBusy(true);
-    const bin = atob(base64);
-    const bytes = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i += 1) bytes[i] = bin.charCodeAt(i);
 
     (async () => {
       try {
+        const res = await fetch(assetUrl);
+        if (!res.ok) {
+          if (!gone) {
+            setBusy(false);
+            setErr(`预览失败（${res.status} ${res.statusText}）：文件可能已过期或不在当前任务工作区内。`);
+          }
+          return;
+        }
+        const bytes = new Uint8Array(await res.arrayBuffer());
+        if (gone || !holder.current) return;
+
         if (ext === "docx" || ext === "docm") {
           const docx = await import("docx-preview");
           if (gone || !holder.current) return;
           holder.current.innerHTML = "";
           await docx.renderAsync(bytes.buffer, holder.current, undefined, {
             inWrapper: true,
-            // altChunk（外链/嵌套文档）不展开：docx-preview@0.4.1 展开会带出整段无关内容
             renderAltChunks: false,
-            // 图片一律 base64 内嵌：blob: URL 在抽屉重开/容器销毁后会裂图
             useBase64URL: true,
           });
         } else if (ext === "xlsx" || ext === "xlsm") {
@@ -69,9 +81,7 @@ function OfficePane({ ext, base64 }: { ext: string; base64: string }) {
           holder.current.innerHTML = "";
           const previewer = pptx.init(holder.current, { width: 960 });
           pptxRef.current = previewer;
-          // pptx-preview 的 preview 是异步的：必须 await，否则 busy 提前复位、失败也接不到
           await previewer.preview(bytes.buffer);
-          // 响应到达时组件可能已卸载/换了文件：先查 gone，别再碰 state
           if (gone) return;
         }
         if (!gone) setBusy(false);
@@ -91,7 +101,6 @@ function OfficePane({ ext, base64 }: { ext: string; base64: string }) {
         /* 实例可能已随容器销毁 */
       }
       excelRef.current = null;
-      // pptx 实例同样要收：pptx-preview@1.0.7 自带 destroy，关掉定时器与内部监听
       try {
         pptxRef.current?.destroy();
       } catch {
@@ -99,13 +108,25 @@ function OfficePane({ ext, base64 }: { ext: string; base64: string }) {
       }
       pptxRef.current = null;
     };
-  }, [ext, base64]);
+  }, [ext, assetUrl]);
 
+  if (err) {
+    return (
+      <div className="pv-err">
+        <div className="pv-err-head">{t("pv.missing")}</div>
+        <div className="pv-err-msg">{err}</div>
+      </div>
+    );
+  }
   return (
     <div className="pv-office">
-      {busy && !err && <div className="pv-hint">{t("pv.reading")}</div>}
-      {err && <div className="pv-hint">{t("pv.officeFail", { ext })}（{err}）</div>}
-      <div ref={holder} className="pv-office-holder" />
+      <div className="pv-office-holder" ref={holder} />
+      {busy && (
+        <div className="pv-office-loading">
+          <div className="pv-spinner" />
+          <span>{t("pv.reading")}</span>
+        </div>
+      )}
     </div>
   );
 }
@@ -304,8 +325,8 @@ export function PreviewDrawer({
               <div className="pv-hint">{t("pv.videoHint")}</div>
             </div>
           )}
-          {data?.kind === "office" && data.dataBase64 && (
-            <OfficePane ext={data.ext ?? ext} base64={data.dataBase64} />
+          {data?.kind === "office" && data.assetUrl && (
+            <OfficePane ext={data.ext ?? ext} assetUrl={data.assetUrl} />
           )}
           {data?.kind === "text" && (
             <>

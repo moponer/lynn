@@ -389,8 +389,10 @@ export interface PreviewReadResult {
   text?: string;
   /** 图片走 data URL，避免Electron file:// 协议与 CSP 打架 */
   dataUrl?: string;
-  /** office：文件原始字节（base64），渲染层解码后交给对应开源库 */
+  /** office：文件原始字节（base64，旧客户端兼容；新客户端优先用 assetUrl 流式下发） */
   dataBase64?: string;
+  /** office：lynn-asset:// 一次性令牌 URL，渲染层 fetch().arrayBuffer() 拿完整 ArrayBuffer（消除 base64 膨胀与 IPC 大字符串克隆） */
+  assetUrl?: string;
   ext?: string;
   bytes?: number;
   /** 超大文本只取开头一段，界面要如实标注 */
