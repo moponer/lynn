@@ -89,6 +89,7 @@ import {
 import { mergeStrings } from "../shared/i18n";
 import { createSettingsRpc, type SettingsRpc } from "./rpc/settings-rpc";
 import { createThreadRpc, type ThreadRpc } from "./rpc/thread-rpc";
+import { buildKernelRegistry, type RpcRegistry } from "./rpc-registry";
 import { BUILTIN_SKILLS } from "./builtin-skills";
 import { ConnectorStore, CONNECTOR_CATALOG, probeConnector as probeConnectorLive } from "./connectors";
 import { allPresets, buildSkillMd, installPreset, presetInstalled, SCHEDULE_PRESETS } from "./capability-catalog";
@@ -7505,7 +7506,7 @@ export class Kernel {
    * 懒建：构造函数里 settings/threads 还没就绪时不能提前取，首次调用时它们一定已经赋值。
    */
   private settingsRpcCache: SettingsRpc | null = null;
-  private get settingsRpc(): SettingsRpc {
+  get settingsRpc(): SettingsRpc {
     if (!this.settingsRpcCache) {
       this.settingsRpcCache = createSettingsRpc({
         settings: this.settings,
@@ -7541,7 +7542,20 @@ export class Kernel {
     return this.threadRpcCache;
   }
 
+  /** RPC 方法注册表（第一批：model.* 已委托给 settingsRpc） */
+  private rpcRegistryCache: RpcRegistry | null = null;
+  private get rpcRegistry(): RpcRegistry {
+    if (!this.rpcRegistryCache) {
+      this.rpcRegistryCache = buildKernelRegistry();
+    }
+    return this.rpcRegistryCache;
+  }
+
   handle<M extends RpcMethod>(method: M, params: unknown): RpcContracts[M]["result"] {
+    // 第一批：model.* 已委托给 settingsRpc，通过注册表处理
+    if (this.rpcRegistry.has(method)) {
+      return this.rpcRegistry.handle(method, params as Record<string, unknown>, { kernel: this });
+    }
     switch (method) {
       case "app.info": {
         // 内核构建时间：__filename 是编译产物 dist/main/kernel.js，mtime 就是这次构建的时刻
@@ -8722,27 +8736,10 @@ export class Kernel {
         return probeEndpoint({ ...p, apiKey }) as unknown as RpcContracts[M]["result"];
       }
 
-      // ---------- 模型库：多条配置 / 全局默认 / 每对话覆盖 ----------
+       // ---------- 模型库：多条配置 / 全局默认 / 每对话覆盖 ----------
+       // （已迁移到 rpc-registry.ts，此处保留注释位置以便后续批次参考）
 
-      case "model.list":
-        return this.settingsRpc.modelList() as RpcContracts[M]["result"];
-
-      case "model.save":
-        return this.settingsRpc.modelSave(params) as RpcContracts[M]["result"];
-
-      case "model.remove":
-        return this.settingsRpc.modelRemove(params) as RpcContracts[M]["result"];
-
-      case "model.setDefault":
-        return this.settingsRpc.modelSetDefault(params) as RpcContracts[M]["result"];
-
-      case "model.setThread":
-        return this.settingsRpc.modelSetThread(params) as RpcContracts[M]["result"];
-
-      case "model.test":
-        return this.settingsRpc.modelTest(params) as RpcContracts[M]["result"];
-
-      case "config.prefs": {
+       case "config.prefs": {
         const savedPrefs = this.settingsRpc.savePrefs(params as Partial<Prefs>);
         // 写作规则开关（2026-11-15）：开=下一轮起系统提示词里带上约束。
         // 已经在跑的 Pi 会话要热同步一次，否则用户点了开关却要等重开会话才生效。

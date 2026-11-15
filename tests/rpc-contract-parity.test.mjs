@@ -38,7 +38,16 @@ function contractKeys() {
 
 function kernelCases() {
   const src = read("src/main/kernel.ts");
-  return [...src.matchAll(new RegExp(String.raw`^\s+case\s+${KEY}\s*:`, "gm"))].map((m) => m[1]);
+  const cases = [...src.matchAll(new RegExp(String.raw`^\s+case\s+${KEY}\s*:`, "gm"))].map((m) => m[1]);
+  // 新增：匹配 kernel.ts 中的 registry.register() 调用（kernel 拆域后，部分方法从 switch 迁移到注册表）
+  const registryCalls = [...src.matchAll(new RegExp(String.raw`registry\.register\(\s*${KEY}`, "g"))].map((m) => m[1]);
+  return [...new Set([...cases, ...registryCalls])];
+}
+
+/** rpc-registry.ts 里的注册调用（kernel 拆域第一批：model.* 方法） */
+function registryCases() {
+  const src = read("src/main/rpc-registry.ts");
+  return [...src.matchAll(new RegExp(String.raw`registry\.register\(\s*${KEY}`, "g"))].map((m) => m[1]);
 }
 
 function shellHandlers() {
@@ -62,7 +71,7 @@ function mainHandlers() {
   return [...src.matchAll(new RegExp(String.raw`method\s*===\s*${KEY}`, "g"))].map((m) => m[1]);
 }
 
-const allImplemented = () => [...kernelCases(), ...shellHandlers(), ...mainHandlers()];
+const allImplemented = () => [...kernelCases(), ...registryCases(), ...shellHandlers(), ...mainHandlers()];
 const uniq = (xs) => [...new Set(xs)].sort();
 
 test("契约里声明的每个 RPC 都有实现（kernel / 壳层注册表 / main 的 if 链）", () => {
