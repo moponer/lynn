@@ -38,7 +38,7 @@ npm start       # electron .
 ## 验证链
 
 ```bash
-npm run verify          # typecheck → oxlint → lint:design → 720 条 node --test
+npm run verify          # typecheck → oxlint → lint:design → 724 条 node --test
 npm run lint            # oxlint，基线 0 warning / 0 error
 npm run build:main      # 主进程 CJS 产物
 npm run build:renderer  # vite 产物
@@ -85,23 +85,36 @@ src/
 │   ├── Ledger.tsx  Sheet.tsx  Roster.tsx  Composer.tsx
 │   ├── Seals.tsx   Menus.tsx  Review.tsx  Palette.tsx  TopRail.tsx
 │   └── model.ts / use-tick.ts
+├── renderer/boot/
+│   └── BootScreen.tsx     # 启动页：字距收拢 + 真实快照进度条
 scripts/
 │   ├── shots/*.cjs        # 44 个走查模式（注册表，主文件 297 行）
-│   ├── make-icon.py       # 图标生成（B 字标方案）
+│   ├── make-icon.py       # 图标生成（Archivo + 项目 token 色）
+│   ├── shot-boot.cjs      # 启动页走查截图
 │   └── live-*probe*.cjs   # 真模型 / 真 Pi / 真 UI 对照探针
-tests/                     # 720 条 node --test（含整链路模拟任务）
+tests/                     # 724 条 node --test（含整链路模拟任务）
 ```
 
 拆分划线原则：**按数据面 / 编排面拆，不按方法数量拆**。`task.*` 依赖 22 个成员（含可变状态集合），留在 kernel 里只做薄转发，避免状态所有权分裂。
 
-## 图标
+## 图标与启动页
 
-`build/icon.ico` 是含 **16 / 24 / 32 / 48 / 64 / 128 / 256 七帧**的真位图图标（不是 SVG）：
+`build/icon.ico` 是含 **16 / 24 / 32 / 48 / 64 / 128 / 256 七帧**的真位图图标（不是 SVG）。全部取自 `dispatch.css` 的真实 token，不自编配色、不把预算色 `--brass` 当品牌色：
 
-- ≤64px 用单个黄铜 `L` 字标（16px 任务栏仍可读）
-- ≥128px 用完整 **Lynn** 衬线字标 + 细线 + `A LYNN OF YOUR OWN`
+- 底 `--desk #0a0d0f`、字 `--ink #e6ebee`、小尺寸首字母 `--blue #6fa892`
+- 字体用 `--f-display` 指定的 **Archivo**（wght=700，由 woff2 实例化成 `assets/fonts/archivo-700.ttf`）
+- ≤64px 只留青瓷 `L`；≥128px 是干净的 `Lynn` 字标 —— 没有变形 L、细线、菱形或 tagline
+- 托盘 `assets/tray.png`、`tray-icon.ts` 的 base64 兜底、窗口/安装包、顶栏标记、`public/favicon.ico` **全部同源**（一次定义、四处复用）
 
-重做：`python scripts/make-icon.py`（Pillow + 系统字体），预览脚本 `scripts/preview-icon-options.py`。
+![启动页](./docs/screenshots/boot.png)
+
+启动页 `BootScreen.tsx` 按 C 方案：字距 28px→0 收拢 680ms，底部 2px 进度线由 `session.snapshot` **真实就绪**驱动（0→90% 后停住等，就绪才补满并淡出交接）。画面固定夜航底色，不随亮/暗主题变；遵守 `prefers-reduced-motion`。走查时用 `?boot=1` 让启动页常驻：
+
+```bash
+npm run build:renderer && npx electron scripts/shot-boot.cjs
+```
+
+重做图标：`python scripts/make-icon.py`（Pillow + fontTools/brotli）。
 
 ![审批卡：这类以后都允许](./docs/screenshots/approval.png)
 
@@ -116,6 +129,7 @@ tests/                     # 720 条 node --test（含整链路模拟任务）
 | 能力 | 魔法词、顾问第二模型 + 模型角色表、成员回报 `checks[]`、骨架稿拦截、项目级记忆、审批族长期放行 |
 | 可观测 | Pi 路径按次台账、`cacheFieldsReported`、成员台账、`cacheBreakReason`，三个真模型探针 |
 | 结构 | `Desk.tsx` ~5030 → **401** 行、`kernel.ts` 抽出 RPC 子模块、`preview-shot.cjs` 1205 → **297** 行 |
+| 品牌 | 图标配色回到项目 token、Archivo 字标、托盘/窗口/安装包/顶栏/favicon 同源、启动页 C 方案落地 |
 
 ![设置页：顾问审阅开关](./docs/screenshots/settings.png)
 

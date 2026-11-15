@@ -65,6 +65,8 @@
   --fs-head: 22px;     /* 图纸主标题 */
   --fs-display: 28px;  /* hero：只在启动 / 造铃界面 */
   --fs-clock: 48px;    /* 待机页时钟（时钟面板，不是文本） */
+  --fs-boot: 56px;     /* 启动页字标：只在 .boot 用，别处仍受 --fs-head 上限约束 */
+  --boot-ink: #e6ebee; /* 启动页固定冷白：品牌资产不随亮/暗主题变（lint:design 要求文本色走 token） */
 
   /* --- 交互时长与缓动：只表达状态，不循环 --- */
   --dur-fast: 120ms;
@@ -171,12 +173,13 @@ svg.ic.lg { width: 20px; height: 20px; }
 }
 
 .brand { display: flex; align-items: center; gap: 9px; }
+/* 品牌标记与 build/icon.ico 小尺寸帧同源：深底 + 青瓷结构色 L；不再用铃铛图标和硬编码渐变 */
 .brand-mark {
   width: 28px; height: 28px; border-radius: var(--r-m);
-  background: linear-gradient(160deg, #23323f, #16202a);
-  display: grid; place-items: center;
-  color: var(--blue);
-  box-shadow: inset 0 1px 0 rgba(255,255,255,.06), 0 2px 6px -2px #000;
+  background: var(--desk); display: grid; place-items: center;
+  color: var(--blue); font-family: var(--f-display);
+  font-size: var(--fs-brand); font-weight: 700; line-height: 1;
+  box-shadow: 0 2px 6px -2px #000;
 }
 .brand-name {
   font-family: var(--f-display);
@@ -298,6 +301,52 @@ svg.ic.lg { width: 20px; height: 20px; }
 .gauge-bar i:nth-child(n+11).on { background: var(--seal); }
 .gauge.near .gauge-read .v { color: var(--brass); }
 .gauge.warn .gauge-read .v { color: var(--seal); }
+
+/* ---------- 用量计（2026-11-15）：顶栏与输入框共用的「缓存 + token 消耗」入口 ---------- */
+.usage-meter { display: inline-flex; align-items: center; }
+.usage-meter-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 8px; border-radius: var(--r-m);
+  background: var(--desk-3); color: var(--ink-2);
+  font-family: var(--f-mono); font-size: var(--fs-label); letter-spacing: 0;
+  cursor: pointer; white-space: nowrap;
+  box-shadow: 0 1px 2px rgba(0,0,0,.35);
+}
+.usage-meter-btn .ic { color: var(--ink-3); }
+.usage-meter-btn:hover { background: #222d39; color: var(--ink); }
+.um-tokens { color: var(--ink); font-variant-numeric: tabular-nums; }
+.um-cache {
+  color: var(--blue); background: var(--blue-wash);
+  padding: 1px 5px; border-radius: var(--r-s); font-variant-numeric: tabular-nums;
+}
+.um-ctx {
+  color: var(--brass); background: var(--brass-wash);
+  padding: 1px 5px; border-radius: var(--r-s); font-variant-numeric: tabular-nums;
+}
+.usage-meter.over .usage-meter-btn,
+.usage-meter.over .um-tokens { color: var(--seal); }
+
+/* 用量明细弹层（顶栏在下、输入框在上，side 决定朝哪边展开） */
+.usage-pop {
+  position: fixed; z-index: 60; min-width: 240px; max-width: 280px;
+  background: var(--desk-2); border-radius: var(--r-m);
+  box-shadow: 0 1px 2px rgba(0,0,0,.4), 0 18px 40px -24px #000; padding: 10px 12px;
+}
+.usage-pop.side-top { transform: translateY(-100%); }
+.usage-pop-head {
+  font-family: var(--f-mono); font-size: var(--fs-label); letter-spacing: 0;
+  color: var(--ink-4); margin-bottom: 8px;
+}
+.usage-detail { display: flex; flex-direction: column; gap: 5px; }
+.usage-detail-row { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.usage-detail-row .uk { font-size: var(--fs-body); color: var(--ink-3); }
+.usage-detail-row .uv { font-size: var(--fs-body); color: var(--ink); font-variant-numeric: tabular-nums; }
+.usage-detail-row .uv.over { color: var(--seal); }
+.usage-detail-rule { height: 1px; background: var(--rule); margin: 3px 0; }
+.usage-detail-empty { font-size: var(--fs-body); color: var(--ink-4); }
+
+/* 输入框上方的用量计容器（右对齐，紧贴输入框） */
+.composer-usage { display: flex; justify-content: flex-end; padding: 0 2px 4px; }
 
 .icon-btn {
   width: 30px; height: 30px; border-radius: var(--r-m);
@@ -1279,16 +1328,39 @@ textarea.composer-in::placeholder { color: var(--ink-4); }
 }
 .sealcard-empty-quiet .ic { opacity: .7; }
 
-/* 启动态 */
+/* 启动态（方案 C · 字标排版）：只有字标、底色、一条进度线；
+   字距 28px→0 收拢，进度由 session.snapshot 真实就绪驱动（见 BootScreen.tsx）。 */
 .boot {
-  height: 100vh; display: grid; place-items: center; gap: 10px;
-  background: var(--desk); color: var(--ink-3);
+  position: relative; height: 100vh; display: grid; place-items: center;
+  /* 启动页是品牌资产，固定夜航底色：不随亮/暗主题切换，与 build/icon.ico 一致。
+     不能写 var(--desk) —— 亮色主题会把它变成白纸，实测启动页就成了白底灰字。 */
+  background: #0a0d0f; color: var(--boot-ink);
+  transition: opacity 280ms var(--ease-out);
 }
-.boot-mark {
-  font-family: var(--f-display); font-size: var(--fs-display); font-weight: 700;
-  letter-spacing: 0; color: var(--ink-2);
+.boot-ready { opacity: 0; }
+.boot-wordmark {
+  font-family: var(--f-display); font-size: var(--fs-boot); font-weight: 700;
+  color: var(--boot-ink); letter-spacing: 0;
+  animation: bootTracking 680ms var(--ease-out) both;
 }
-.boot p { font-size: var(--fs-label); letter-spacing: 0; color: var(--ink-4); }
+.boot-progress {
+  position: absolute; left: 0; bottom: 0; width: 100%; height: 2px;
+  background: rgba(162, 178, 176, .10);
+}
+.boot-progress i {
+  display: block; height: 100%; background: #6fa892;
+  transition: width 120ms linear;
+}
+@keyframes bootTracking {
+  from { letter-spacing: 28px; opacity: 0; }
+  30% { opacity: 1; }
+  to { letter-spacing: 0; opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .boot { transition: none; }
+  .boot-wordmark { animation: none; }
+  .boot-progress i { transition: none; }
+}
 
 /* 运行态基础（原聊天壳已移除，这里的重置只服务值台） */
 html, body { height: 100%; overflow: hidden; background: var(--desk); }

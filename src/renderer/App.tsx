@@ -20,6 +20,7 @@ import type { LynnPack } from "./desk/lynnpack";
 import { Wizard, type WizardResult } from "./desk/Wizard";
 import { Standby } from "./desk/Standby";
 import { Pet } from "./desk/Pet";
+import { BootScreen } from "./boot/BootScreen";
 import { ambientForTheme, type AmbientMode } from "../shared/ambient";
 import { ZH_STRINGS } from "../shared/i18n-strings";
 import { useVoicePlayer } from "./voice/useVoicePlayer";
@@ -393,6 +394,14 @@ export default function App() {
   }, [acceptShot]);
 
   const desk: Desk | null = useMemo(() => (snap ? deskFromSnapshot(snap) : null), [snap]);
+
+  /** 启动页 → 值台的交接：快照就绪后让进度补满并淡出，再切主界面（不是直接闪过去） */
+  const [bootDone, setBootDone] = useState(false);
+  useEffect(() => {
+    if (!desk || !snap) return;
+    const t = window.setTimeout(() => setBootDone(true), 280);
+    return () => window.clearTimeout(t);
+  }, [desk, snap]);
 
   const applyPermission = useCallback(
     async (mode: PermissionMode) => {
@@ -827,14 +836,10 @@ export default function App() {
 
   if (isPet) return <Pet />;
 
-  if (!desk || !snap) {
-    return (
-      <div className="boot">
-        <div className="boot-mark">风铃</div>
-        <p className="mono">正在展开图纸…</p>
-      </div>
-    );
-  }
+  // ?boot=1 是走查夹具：让启动页常驻（进度停在 90% 等真实快照），方便截图检查版式与动效
+  const bootPreview = typeof location !== "undefined" && new URLSearchParams(location.search).get("boot") === "1";
+  // 同时保留 !desk || !snap 这个收窄：下方所有分支都依赖 desk/snap 非空
+  if (!bootDone || bootPreview || !desk || !snap) return <BootScreen ready={!!(desk && snap) && !bootPreview} />;
 
   if (wizardOpen) {
     return (

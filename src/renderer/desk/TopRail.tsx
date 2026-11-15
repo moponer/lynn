@@ -6,7 +6,7 @@ import { Icon } from "../components/Icon";
 import { WindowControls } from "../components/WindowControls";
 import { Slot, SandboxHtml } from "./ui-host";
 import { fmtTokens } from "./model";
-import { cacheHitRate } from "../../shared/contract";
+import { UsageMeter } from "../components/UsageMeter";
 import type { Desk } from "./model";
 import type { PermissionMode } from "../../shared/contract";
 import type { I18nKey } from "../../shared/i18n-strings";
@@ -83,9 +83,6 @@ export function TopRail({
   /** 信任：只有目录里真有"被信任才生效"的东西时才给入口（2026-11-13） */
   const projectGated = desk.projectGated;
   const projectTrusted = desk.projectTrusted ?? false;
-  const ctx = desk.usage.contextWindow > 0 ? Math.min(1, desk.usage.contextTokens / desk.usage.contextWindow) : 0;
-  const contextPct = Math.round(ctx * 100);
-  const filled = Math.min(12, Math.max(0, Math.round(ctx * 12)));
   const t = useT();
   return (
     <header
@@ -100,8 +97,8 @@ export function TopRail({
       }}
     >
       <div className="brand">
-        <div className="brand-mark">
-          <Icon name="bell" />
+        <div className="brand-mark" aria-label="Lynn">
+          L
         </div>
         <div>
           <div className="brand-name">{t("top.brand")}</div>
@@ -278,49 +275,9 @@ export function TopRail({
         </span>
       )}
 
-      {/* D3：33% 必须自带名字，不能靠 hover 才知道是上下文 */}
-      <span className="gauge-label">{t("top.contextLabel")}</span>
-      <div
-        className={`gauge${contextPct >= 90 ? " warn" : contextPct >= 70 ? " near" : ""}`}
-        title={`${t("top.contextTitle", {
-          used: desk.usage.contextTokens,
-          total: desk.usage.contextWindow,
-          tokens: fmtTokens(desk.tokensUsed),
-        })}${contextPct >= 70 ? ` · ${t("top.contextHint")}` : ""}`}
-      >
-        {/* 只留百分比：含义由 title 说明，顶栏不再为一个标签挤出竖排 */}
-        <div className="gauge-read">
-          <div className="v">{contextPct}%</div>
-        </div>
-        <div className="gauge-bar">
-          {Array.from({ length: 12 }, (_, i) => (
-            <i
-              key={i}
-              className={i < filled ? "on" : ""}
-              style={{ height: `${8 + i}px` }}
-            />
-          ))}
-        </div>
-      </div>
-
-      {/* 缓存命中率：来自 Pi 的 session stats（cacheRead / (uncachedInput + cacheRead + cacheWrite)）；prompt 为 0 时隐藏，不显示假 0 */}
-      {(() => {
-        const rate = cacheHitRate(desk.usage);
-        if (rate === undefined) return null;
-        return (
-          <span
-            className="cache-badge"
-            title={t("top.cacheTitle", {
-              rate: rate.toFixed(0),
-              read: fmtTokens(desk.usage.cacheRead),
-              write: fmtTokens(desk.usage.cacheWrite),
-            })}
-          >
-            <i className="cache-dot" />
-            {t("top.cache")} {rate.toFixed(0)}%
-          </span>
-        );
-      })()}
+      {/* 用量计：会话 token 消耗 + 缓存命中率 + 上下文，点开看明细。
+          替代原来的「上下文 12 格仪表 + 缓存命中率徽章」两个分散元素，口径统一（D3）。 */}
+      <UsageMeter usage={desk.usage} budget={desk.budget} tokensUsed={desk.tokensUsed} />
 
       <div className="vr" />
       {desk.turn.canUndo && onUndo && (
