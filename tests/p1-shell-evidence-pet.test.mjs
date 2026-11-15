@@ -25,6 +25,14 @@ test("evidence.open 与 app.openPath 共用扩展名白名单，并保留 realpa
   assert.match(evidence, /path\.dirname\(r\.target\)/, "目录外已登记交付物只复查其自身 containment");
 });
 
+test("office 预览走 IPC TypedArray：不回到自定义协议，也不回 base64", () => {
+  // 2026-11-15 实测：file:// 页面 fetch 自定义 scheme 会被 Chromium 的 CORS 硬拦
+  // （Failed to fetch），这条路走不通；base64 又膨胀 33%。锁定 dataBytes 通道。
+  const branch = block(shellSource, 'if (ext === "docx"', "const LIMIT = 600_000");
+  assert.match(branch, /dataBytes: new Uint8Array\(buf\)/);
+  assert.doesNotMatch(branch, /assetUrl|dataBase64|lynn-asset/);
+});
+
 test("pet.open 暂时停用且不创建窗口；pet.close/focus 行为不变，契约允许错误返回", () => {
   const open = block(shellSource, 'rpc("pet.open"', 'rpc("pet.close"');
   assert.match(open, /ok:\s*false,\s*error:\s*"桌宠功能暂时停用"/);

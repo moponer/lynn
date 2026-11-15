@@ -389,10 +389,14 @@ export interface PreviewReadResult {
   text?: string;
   /** 图片走 data URL，避免Electron file:// 协议与 CSP 打架 */
   dataUrl?: string;
-  /** office：文件原始字节（base64，旧客户端兼容；新客户端优先用 assetUrl 流式下发） */
-  dataBase64?: string;
-  /** office：lynn-asset:// 一次性令牌 URL，渲染层 fetch().arrayBuffer() 拿完整 ArrayBuffer（消除 base64 膨胀与 IPC 大字符串克隆） */
-  assetUrl?: string;
+  /**
+   * office：文件原始字节（Uint8Array，走 IPC 结构化克隆）。
+   * 2026-11-15 修正：原 lynn-asset:// 令牌方案在渲染层被 Chromium 拦死——
+   * file:// 页面 fetch 自定义 scheme 一律 "blocked by CORS policy: Cross origin requests
+   * are only supported for protocol schemes: chrome, chrome-extension, chrome-untrusted,
+   * data, http, https"（实测，非配置问题）。改为直接传 TypedArray，仍避免 base64 膨胀 33%。
+   */
+  dataBytes?: Uint8Array;
   ext?: string;
   bytes?: number;
   /** 超大文本只取开头一段，界面要如实标注 */

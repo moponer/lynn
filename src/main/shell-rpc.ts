@@ -17,7 +17,6 @@ import type { Kernel } from "./kernel";
 import { discoverModels } from "./providers";
 import { endpointRiskError } from "./endpoint";
 import { insideBase, openPathBlockReason, taskIdError } from "./path-guard";
-import { issueAssetToken, validateAssetTarget } from "./asset-protocol";
 
 export interface ShellRpcCtx {
   kernel: Kernel;
@@ -304,24 +303,15 @@ rpc("preview.read", async (params, ctx) => {
   // Office 三件套（docx/docm/xlsx/xlsm/pptx）：渲染层用开源库保真渲染（docx-preview /
   // @js-preview/excel / pptx-preview，懒加载），主进程只递字节。此前自研的
   // docx→HTML 只能出"素颜正文"，图片样式全丢；正文提取仍走 docx-read（read_artifact）。
-  // 已改为 lynn-asset:// 一次性令牌协议流式下发：消除 base64 膨胀、IPC 大字符串克隆、
-  // 主进程整份读内存峰值。但渲染库仍需完整 ArrayBuffer，不是"边下边渲染"。
+  // 字节走 IPC 结构化克隆传 Uint8Array（2026-11-15 修正）：不走 base64（膨胀 33%），
+  // 也不走自定义协议（file:// 页面 fetch 自定义 scheme 被 Chromium CORS 拦死，实测）。
   if (ext === "docx" || ext === "docm" || ext === "xlsx" || ext === "xlsm" || ext === "pptx") {
     const OFFICE_LIMIT = 8 * 1024 * 1024;
     if (bytes > OFFICE_LIMIT) {
       return { ok: true, kind: "binary", ext, bytes, error: "文件超过 8MB，内置预览带不动，请用系统程序打开。" };
     }
-    // 路径守卫与 evidence.open 一致（2026-11-15）：卷宗内的文件以 tasks/<taskId>/ 为根；
-    // 目录外交付物（项目工作区里的原件）已由 resolveTaskRef 按 task.json 登记豁免验明，
-    // 它的根放宽到所在目录——否则项目里的 docx 会从"能预览"退化成"请用系统程序打开"。
-    const taskBase = path.resolve(ctx.kernel.dataRoot, "tasks", r.taskId);
-    const assetRoot = insideBase(taskBase, target) ? taskBase : path.dirname(target);
-    const validated = validateAssetTarget(target, [assetRoot]);
-    if (!validated.ok) {
-      return { ok: true, kind: "binary", ext, bytes, error: `无法预览该文件（${validated.error}）` };
-    }
-    const token = issueAssetToken(validated.payload);
-    return { ok: true, kind: "office", ext, bytes, assetUrl: `lynn-asset://preview/${token}` };
+    const buf = await fs.promises.readFile(target);
+    return { ok: true, kind: "office", ext, bytes, dataBytes: new Uint8Array(buf) };
   }
   const LIMIT = 600_000;
   const fd = fs.openSync(target, "r");

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, globalShortcut, ipcMain, Menu, nativeImage, Notification, protocol, safeStorage, screen, shell, Tray } from "electron";
+import { app, BrowserWindow, globalShortcut, ipcMain, Menu, nativeImage, Notification, safeStorage, screen, shell, Tray } from "electron";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { autoUpdater } from "electron-updater";
@@ -536,26 +536,8 @@ const singleInstance = app.requestSingleInstanceLock();
 if (!singleInstance) app.quit();
 app.on("second-instance", () => focusMain());
 
-// 注册 lynn-asset:// 自定义协议（一次性令牌，流式下发 Office 文件）
-// 必须在 app.whenReady() 之前调用 registerSchemesAsPrivileged
-protocol.registerSchemesAsPrivileged([
-  {
-    scheme: "lynn-asset",
-    privileges: {
-      secure: true,
-      supportFetchAPI: true,
-      stream: true,
-      bypassCSP: false,
-    },
-  },
-]);
-
 app.whenReady().then(async () => {
   if (!singleInstance) return;
-  // 注册 lynn-asset:// 协议处理器（一次性令牌，流式下发 Office 文件）
-  const { registerAssetProtocol } = await import("./asset-protocol");
-  registerAssetProtocol(protocol);
-
   // 首屏优先：窗口、托盘、快捷键、更新器先起来，不等内核的插件/MCP/office 探测。
   // 内核构造函数已经把会话、记忆、台账、工具面备好；后台 init 完成后，
   // L1/MCP 指纹变化会让下一条消息自动重建 Pi worker（不丢能力）。

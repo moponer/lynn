@@ -20,19 +20,22 @@ import { HighlightedCode, RichText } from "./RichText";
 const RENDERABLE = new Set(["md", "markdown", "mdx", "html", "htm", "csv", "tsv", "json", "jsonc"]);
 
 /**
- * Office 三件套：开源库懒加载渲染。字节由主进程通过 lynn-asset:// 一次性令牌协议流式下发，
- * 这里 fetch().arrayBuffer() 拿完整 ArrayBuffer 喂给对应库。
+ * Office 三件套：开源库懒加载渲染。字节随 preview.read 的 RPC 一次到手
+ * （Uint8Array，走 Electron IPC 结构化克隆），直接喂给对应库。
  *   docx  → docx-preview（Apache-2.0）保真渲染样式/图片/表格/分页
  *   xlsx  → @js-preview/excel（MIT）多 sheet 页签 + 合并单元格 + 样式
  *   pptx  → pptx-preview（npm 包可商用）幻灯片渲染
  *
- * 收益（注释里如实写，不假装已解决）：
- *   - 消除 base64 膨胀 33%（8MB 文件从 10.7MB 字符串变回 8MB buffer）
- *   - 消除 IPC 结构化克隆大字符串的峰值内存与序列化停顿
- *   - 主进程不再整份读文件到内存后转 base64，峰值内存减半
- * 但渲染库仍需完整 ArrayBuffer，所以这不是"边下边渲染"——渲染层仍是等整份 buffer 到手才喂库。
+ * 为什么不是自定义协议（2026-11-15 实测结论，写在这里免得有人再改回去）：
+ *   lynn-asset:// 一次性令牌 + fetch 的方案在本项目跑不通——渲染层页面是 file:// 源，
+ *   Chromium 对 fetch 的目标协议有硬限制：
+ *   "Cross origin requests are only supported for protocol schemes:
+ *    chrome, chrome-extension, chrome-untrusted, data, http, https"，
+ *   自定义 scheme 即使注册了 supportFetchAPI 也会被 CORS 拦死（Failed to fetch）。
+ *   base64 也不走（膨胀 33%），所以用结构化克隆的 TypedArray。
+ * 仍不是"边下边渲染"：渲染库要完整 buffer 才能出图，这里如实说明。
  */
-function OfficePane({ ext, assetUrl }: { ext: string; assetUrl: string }) {
+function OfficePane({ ext, content }: { ext: string; content: Uint8Array }) {
   const holder = useRef<HTMLDivElement>(null);
   const excelRef = useRef<{ destroy: () => void } | null>(null);
   const pptxRef = useRef<{ destroy: () => void } | null>(null);
@@ -47,15 +50,17 @@ function OfficePane({ ext, assetUrl }: { ext: string; assetUrl: string }) {
 
     (async () => {
       try {
-        const res = await fetch(assetUrl);
-        if (!res.ok) {
+        // 字节随 RPC 一次到手（结构化克隆的 Uint8Array）；空内容如实报，不喂库空转
+        if (!content.byteLength) {
           if (!gone) {
             setBusy(false);
-            setErr(`预览失败（${res.status} ${res.statusText}）：文件可能已过期或不在当前任务工作区内。`);
+            setErr("文件是空的，没有可渲染的内容。");
           }
           return;
         }
-        const bytes = new Uint8Array(await res.arrayBuffer());
+        // 复制成独立视图：IPC 来的可能是 subarray（会喂进相邻数据），
+        // 且渲染库要求 ArrayBuffer，直接拿 .buffer 可能是 SharedArrayBuffer 类型
+        const bytes = new Uint8Array(content);
         if (gone || !holder.current) return;
 
         if (ext === "docx" || ext === "docm") {
@@ -108,7 +113,7 @@ function OfficePane({ ext, assetUrl }: { ext: string; assetUrl: string }) {
       }
       pptxRef.current = null;
     };
-  }, [ext, assetUrl]);
+  }, [ext, content]);
 
   if (err) {
     return (
@@ -325,8 +330,8 @@ export function PreviewDrawer({
               <div className="pv-hint">{t("pv.videoHint")}</div>
             </div>
           )}
-          {data?.kind === "office" && data.assetUrl && (
-            <OfficePane ext={data.ext ?? ext} assetUrl={data.assetUrl} />
+          {data?.kind === "office" && data.dataBytes && (
+            <OfficePane ext={data.ext ?? ext} content={data.dataBytes} />
           )}
           {data?.kind === "text" && (
             <>
