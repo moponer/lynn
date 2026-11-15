@@ -190,11 +190,10 @@ export class AgentHost {
 
     try {
       await readyPromise;
-      const initResult = await this.request<{ tools: string[] }>("init", {
+      await this.request<{ tools: string[] }>("init", {
         tools: this.options.tools,
         ...(this.options.systemPrompt ? { systemPrompt: this.options.systemPrompt } : {}),
       });
-      void initResult;
     } catch (error) {
       // ready/init 任一步失败都要带走整棵进程树；只抛异常会把无人看管的 worker 留在后台。
       await this.stop();

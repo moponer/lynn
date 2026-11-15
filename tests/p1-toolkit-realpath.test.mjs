@@ -92,3 +92,25 @@ test("循环链接不放行，不在 realpath 回退中死循环", async (t) => 
   assert.equal(insideBase(root, path.join(a, "new.md")), false);
   await expectErrorText(async () => resolveWithin(root, "cycle-a/new.md"), /路径越界/);
 });
+
+test("cwd 链到根外：词法在根内也不行，命令不会在根外目录里跑", async (t) => {
+  const root = tmp();
+  const outside = tmp("lynn-p1-toolkit-cwd-outside-");
+  const dirLink = path.join(root, "cwd-link");
+  if (!linkOrSkip(t, outside, dirLink, "junction")) return;
+  const toolkit = new Toolkit(root);
+  const out = await toolkit.runCommand({ command: "echo hi", cwd: "cwd-link" });
+  assert.match(String(out), /cwd 越界（符号链接指向授权根之外）/);
+  assert.equal(fs.existsSync(path.join(outside, "hi")), false);
+});
+
+test("链到 .git 的目录不能绕过元数据写保护", async (t) => {
+  const root = tmp();
+  const gitDir = path.join(root, ".git");
+  fs.mkdirSync(gitDir, { recursive: true });
+  const link = path.join(root, "git-link");
+  if (!linkOrSkip(t, gitDir, link, "junction")) return;
+  const toolkit = new Toolkit(root);
+  await expectErrorText(() => toolkit.writeFile({ path: "git-link/config", content: "x" }), /拒绝写入/);
+  assert.equal(fs.existsSync(path.join(gitDir, "config")), false);
+});

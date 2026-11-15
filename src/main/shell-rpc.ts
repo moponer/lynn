@@ -311,11 +311,14 @@ rpc("preview.read", async (params, ctx) => {
     if (bytes > OFFICE_LIMIT) {
       return { ok: true, kind: "binary", ext, bytes, error: "文件超过 8MB，内置预览带不动，请用系统程序打开。" };
     }
-    // 路径守卫与 evidence.open 一致：只在 tasks/<taskId>/ 内解析，realpath 后仍在授权根内
-    const allowedRoots = [path.join(ctx.kernel.dataRoot, "tasks")];
-    const validated = validateAssetTarget(target, allowedRoots);
+    // 路径守卫与 evidence.open 一致（2026-11-15）：卷宗内的文件以 tasks/<taskId>/ 为根；
+    // 目录外交付物（项目工作区里的原件）已由 resolveTaskRef 按 task.json 登记豁免验明，
+    // 它的根放宽到所在目录——否则项目里的 docx 会从"能预览"退化成"请用系统程序打开"。
+    const taskBase = path.resolve(ctx.kernel.dataRoot, "tasks", r.taskId);
+    const assetRoot = insideBase(taskBase, target) ? taskBase : path.dirname(target);
+    const validated = validateAssetTarget(target, [assetRoot]);
     if (!validated.ok) {
-      return { ok: true, kind: "binary", ext, bytes, error: "文件不在当前任务工作区内，无法预览。" };
+      return { ok: true, kind: "binary", ext, bytes, error: `无法预览该文件（${validated.error}）` };
     }
     const token = issueAssetToken(validated.payload);
     return { ok: true, kind: "office", ext, bytes, assetUrl: `lynn-asset://preview/${token}` };

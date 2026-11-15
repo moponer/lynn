@@ -461,6 +461,22 @@ export class Toolkit {
       throw new Error(`cwd 不存在：${String(raw)}`);
     }
     if (!st.isDirectory()) throw new Error(`cwd 不是目录：${String(raw)}`);
+    // realpath 复核（2026-11-15）：上面是词法判定，工作区里的符号链接/联接点指到授权根之外时
+    // 词法仍在根内，命令就会真在那个目录里跑。文件读写已走 insideBase，cwd 不能是缺口。
+    let realFull: string;
+    try {
+      realFull = fs.realpathSync(full);
+    } catch {
+      throw new Error(`cwd 无法解析真实路径：${String(raw)}`);
+    }
+    const realOk = allowed.some((b) => {
+      try {
+        return insideBase(fs.realpathSync(b), realFull);
+      } catch {
+        return false;
+      }
+    });
+    if (!realOk) throw new Error(`cwd 越界（符号链接指向授权根之外）：${String(raw)}`);
     return full;
   }
 
@@ -469,7 +485,19 @@ export class Toolkit {
    * 不归成员改——改这两个等于改历史或改她自己的行为。
    */
   private assertWritable(full: string): void {
-    const rel = path.relative(this.root, full);
+    // 用真实路径判元数据目录（2026-11-15）：工作区里指向 .git/.lynn 的符号链接，
+    // 词法首段是链接名，按词法判会漏——写进去等于改了版本库或风铃自己的配置。
+    let real = full;
+    try {
+      real = fs.realpathSync(full);
+    } catch {
+      try {
+        real = path.join(fs.realpathSync(path.dirname(full)), path.basename(full));
+      } catch {
+        /* 父目录也不存在（还没创建）：退回词法路径，下面仍按首段判 */
+      }
+    }
+    const rel = path.relative(this.root, real);
     const head = rel.split(/[\\/]/)[0];
     if (head === ".git" || head === ".lynn") {
       throw new Error(`拒绝写入 ${rel}：${head}/ 是项目元数据 / 风铃配置，不归成员改（要改请让用户处理）。`);

@@ -76,3 +76,16 @@ test("validateAssetTarget：文件必须存在且为普通文件", () => {
   fs.mkdirSync(dir);
   assert.ok(!validateAssetTarget(dir, [root]).ok, "目录应拒绝");
 });
+
+// 壳层防漂移：office 分支的授权根要跟着 resolveTaskRef 的结果走——
+// 目录外已登记交付物（项目工作区里的 docx）以所在目录为根；
+// 一律按 dataRoot/tasks 拒会让这类文件从「能预览」退化成「请用系统程序打开」。
+test("preview.read 的 office 分支：目录外交付物以所在目录为根", () => {
+  const projectRoot = path.resolve(import.meta.dirname, "..");
+  const src = fs.readFileSync(path.join(projectRoot, "src/main/shell-rpc.ts"), "utf-8");
+  const at = src.indexOf('rpc("preview.read"');
+  assert.ok(at >= 0, "找不到 preview.read");
+  const branch = src.slice(at, src.indexOf("const LIMIT = 600_000", at));
+  assert.match(branch, /insideBase\(taskBase, target\) \? taskBase : path\.dirname\(target\)/);
+  assert.match(branch, /issueAssetToken\(validated\.payload\)/);
+});

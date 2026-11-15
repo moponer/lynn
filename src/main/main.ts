@@ -553,9 +553,8 @@ protocol.registerSchemesAsPrivileged([
 app.whenReady().then(async () => {
   if (!singleInstance) return;
   // 注册 lynn-asset:// 协议处理器（一次性令牌，流式下发 Office 文件）
-  const { registerAssetProtocol, validateAssetTarget, issueAssetToken } = await import("./asset-protocol");
+  const { registerAssetProtocol } = await import("./asset-protocol");
   registerAssetProtocol(protocol);
-  void validateAssetTarget; void issueAssetToken;
 
   // 首屏优先：窗口、托盘、快捷键、更新器先起来，不等内核的插件/MCP/office 探测。
   // 内核构造函数已经把会话、记忆、台账、工具面备好；后台 init 完成后，
