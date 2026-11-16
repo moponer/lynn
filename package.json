@@ -2,7 +2,7 @@
   "name": "lynn",
   "productName": "Lynn",
   "private": true,
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "风铃 Lynn — 本地优先、插件化的桌面 AI 个人助理（指挥者形态）。薄壳 + Pi 运行时 + 三档插件 + MCP。",
   "author": "Monlin <1318686166@qq.com>",
   "license": "MIT",
