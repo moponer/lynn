@@ -4,6 +4,7 @@
 // 纪律：可查看、可 diff、可删、可回滚——每次保存自动留版本；.lynnpack 永不含记忆。
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { redactSecrets } from "../shared/redact";
 
 export type MemoryKind = "user" | "memory";
 
@@ -12,13 +13,6 @@ const MAX_VERSIONS = 20;
 /** 项目记忆的条数上限与注入预算（2026-11-14） */
 const PROJECT_MAX_ENTRIES = 100;
 const PROJECT_PROMPT_BUDGET = 2_000;
-
-/** 写入前脱敏：这些形态基本只会是密钥，被注入到提示词里等于泄露 */
-function redactSecrets(s: string): string {
-  return s
-    .replace(/\b(sk-[A-Za-z0-9_-]{10,}|ghp_[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16})\b/g, "***")
-    .replace(/\b(api[_-]?key|token|secret|password)\s*[:=]\s*\S+/gi, "$1=***");
-}
 
 export interface MemoryVersion {
   id: string;

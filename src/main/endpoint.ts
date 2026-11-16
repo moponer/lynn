@@ -6,18 +6,17 @@
 export { endpointRiskLevel } from "../shared/endpoint-risk";
 export type { EndpointRisk } from "../shared/endpoint-risk";
 import { endpointRiskLevel } from "../shared/endpoint-risk";
+// 统一打码规则（2026-11-16）：本模块内继续用这个名字，对外仍从 endpoint 导出，
+// 老调用点（llm.ts / kernel.ts / 测试）不用改。
+import { redactSecrets } from "../shared/redact";
+export { redactSecrets };
 
 /**
  * 端点错误响应体脱敏（2026-11-13 审计 #16）：非 2xx 响应体原文会进错误消息 → feed 卡、
  * agent.log、系统通知。部分网关的 4xx 会回显请求内容（含 Authorization 头或 key 片段）。
- * 截断只是限长不是脱敏——这里把已知形状的凭据一律打码。
+ * 截断只是限长不是脱敏——统一规则在 src/shared/redact.ts（2026-11-16 与 memory 合并，
+ * 此前两处各写一份、覆盖的令牌形态不同）；上面已 import + re-export。
  */
-export function redactSecrets(text: string): string {
-  return text
-    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]{6,}/gi, "Bearer ***")
-    .replace(/\bsk-[A-Za-z0-9_-]{8,}/g, "sk-***")
-    .replace(/\b([A-Za-z0-9_-]*(?:api[_-]?key|apikey|token|secret|password)[A-Za-z0-9_-]*)["']?\s*[:=]\s*["']?[^\s"',;}\]]{6,}/gi, "$1=***");
-}
 
 /**
  * 携带 API Key 的出站探测统一风险闸（2026-11-13 审计 #6）：
