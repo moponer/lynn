@@ -21,6 +21,11 @@ export const MEMBER_EXEC_TOOLS = [
   "read_file",
   "write_file",
   "list_dir",
+  // 2026-11-16：提示词一直教成员「按模式找文件用 glob」，但这两个工具从来没进过执行面
+  // （memberToolSchemas 只发白名单 ∩ TOOLKIT_SCHEMAS，而白名单只能填 MEMBER_EXEC_TOOLS 里的名字）
+  // → 成员只能用 `Get-ChildItem -Recurse` 扫盘（实测 99 次，占全部命令 12.7%）。
+  "glob",
+  "grep",
   "run_command",
   "office_read_table",
   "office_write_table",
@@ -266,14 +271,26 @@ export function memberSystemPrompt(input: MemberRunInput): string {
     "- submit_report：回报通道（终局）。**剩最后 2 轮时必须停手交回**，哪怕没做完也要交：写清做到哪一步、卡在哪、需要什么。不交 = 这张单白跑。",
     // 实机事故：简报给了 `src/components`，成员却用 `Get-ChildItem -Recurse` 扫整个仓库找 components，
     // 一条命令跑 100s 无输出，用户以为成员死了。
-    "- 找东西先看路径：简报给了目录就直接 list_dir 那个目录（必要时逐层往下）；要按模式找文件用 glob（如 `src/**/*.tsx`）。**不要用 Get-ChildItem -Recurse / dir /s 扫整个仓库**——node_modules、target 动辄几万文件，一条命令能跑一两分钟，白烧轮次和预算。",
+    // 2026-11-16 复核：光在提示词里点名 glob 不够——glob/grep 当时根本不在执行面里，
+    // 成员只能退回扫盘（实测此类命令 99 条）。现在两个工具真发下来了，这条才成立。
+    "- 找东西用专用工具，别扫盘：看目录用 list_dir（必要时逐层往下）；按模式找文件用 glob（如 `src/**/*.tsx`）；搜内容用 grep（配 include 限定文件类型，比事后过滤省事）。**不要用 Get-ChildItem -Recurse / dir /s / findstr /s 扫整个仓库**——node_modules、target 动辄几万文件，一条命令能跑一两分钟，白烧轮次和预算。",
     "- 命令行工具要窄：限定目录、只读、一次说清目的；单条命令超过 60s 还没输出就会被当「可能卡住」，超过 120s 直接超时终止——超时的命令不算证据。",
     "- 你没有 ask_user，不能问用户；口径拿不准就选一种并写明理由。需要升级时在回报正文里标 ESCALATE: 并说明。",
+    // 命令载体口径（2026-11-16 按实测补齐）：run_command 的 shell 是 cmd.exe（非 Windows 是 sh），
+    // 不是 bash —— 实测成员混用 POSIX 工具与 Windows 通配/反斜杠路径，命令直接失败；
+    // 另有 74/88 条 python 命令是 `-c` 内联，多行与中文几乎必被引号层吃掉。
+    "",
+    "【命令与脚本（按这套选，别临时试）】",
+    "- shell 是 cmd.exe（非 Windows 是 sh），**不是 bash**：`ls`/`grep` 来自 Git，`*.tsx` 这类通配符不会被展开，反斜杠路径与 POSIX 命令混用会直接失败。要匹配就交给 glob / grep 工具，别在命令里拼通配符。",
+    "- 要写脚本先探运行时：`node -v` / `python --version`，用探到的那一个，**优先 node**（本机最常见，最不容易被编码和包管理搞挂）；两个都没有就退回专用工具，或如实说做不到。",
+    "- 脚本超过一两行就 write_file 落盘到过程目录再执行（`node xx.js` / `python xx.py`），**不要用 `-c` 塞多行**：命令要穿过 shell 一层引号，多行、中文、JSON 里的引号几乎必坏。",
+    "- 一条命令只做一件事，别把「下载 + 解析 + 落盘」串成一行；分几次调用，坏在哪一步一眼看得出来。",
+    "",
     // 外部应用（2026-11-15）：凭据在核心里，成员只给 app id + 路径/命令
     "- 外部应用：`app_api` 调用户已连接的 GitHub / Gitee / AtomGit / 网盘（只给 app id 与路径，令牌由内核带上，你拿不到也不需要）；`ssh_run` 在已连接的服务器上跑只读排查命令。两者都是只读为主，写操作前先说清对象与影响。",
     // 实机事故：用户要 Word，主代理说「没装 python-docx 就做不了」并反问路径。
     // 文档产出是成员能干的活：写脚本 + 跑命令，零依赖也能生成最小 docx。
-    "- 文档产出：**Word 优先用 office_write_docx**（结构化标题/段落/列表/表格，进程内零依赖，毫秒级；表格列宽按内容自动分配）；图片、公式、目录域这类复杂排版再用 python-docx 脚本（先写脚本再执行）。python-docx 也没装就如实说做不到，**不要自己手写 OOXML**。Excel 用 office_write_table，PDF 用脚本或 html 转换。",
+    "- 文档产出：**Word 优先用 office_write_docx**（结构化标题/段落/列表/表格，进程内零依赖，毫秒级；表格列宽按内容自动分配）；图片、公式、目录域这类复杂排版才用脚本兜底——python-docx 属这一类，先确认这台机器能不能 `import docx`，不能就如实说做不到，**不要自己手写 OOXML**。Excel 用 office_write_table。PDF 没有现成的生成工具：要么写脚本（先按上面的口径探运行时），要么先产出 HTML / Word 再转。",
     "- **内容型产物不许交骨架**：每个章节至少 2~3 句实质内容（结论、依据、具体处置）。只给章节标题加一句概括＝骨架稿，风铃会打回；宁可少写两章，也不要每章空的。拼接正文时检查有没有 undefined / 空字段——模板变量没取到值会原样印进文档。",
     "",
     "【工作区与文件去向】",
@@ -293,7 +310,7 @@ export function memberSystemPrompt(input: MemberRunInput): string {
       : []),
     ...(writableRoots.length
       ? [
-          `可写根（用户已批准，仅用于跑命令）：${writableRoots.join("、")}。run_command 可以用 cwd 指到这些目录里跑构建/测试；write_file / edit_file 仍然只能写工作区。`,
+          `可写根（用户已批准，仅用于跑命令）：${writableRoots.join("、")}。run_command 可以用 cwd 指到这些目录里跑构建/测试；write_file 仍然只能写工作区。`,
         ]
       : []),
     "",
@@ -473,7 +490,10 @@ export async function runMemberTask(input: MemberRunInput): Promise<MemberRunRes
       return "回报已收下，本轮执行结束。";
     }
     if (!(MEMBER_EXEC_TOOLS as readonly string[]).includes(name)) {
-      return `未知工具：${name}。成员没有这个工具。`;
+      // 只说"没有这个工具"会让它接着猜下一个名字（实测出现 read_dir 这种凭印象拼的名字）。
+      // 把这次真实可用的名字摆出来，一轮就能改对。
+      const mine = input.tools.filter((t) => (MEMBER_EXEC_TOOLS as readonly string[]).includes(t));
+      return `未知工具：${name}。本次可用的是：${[...mine, "submit_report"].join("、") || "submit_report（只有回报通道）"}。`;
     }
     if (!input.tools.includes(name)) {
       return `工具 ${name} 不在本次分配清单里（本次只有：${input.tools.join("、")}）。需要的话在回报里写 ESCALATE 说明原因。`;

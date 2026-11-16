@@ -581,11 +581,16 @@ export class Toolkit {
 
   async readFile(args: Record<string, unknown>): Promise<string> {
     const rel = String(args.path ?? "");
+    // 空 path 会被解析成工作区根目录，随后报「 是目录，请用 list_dir」——
+    // 报错里连路径都是空的，成员看不出是自己漏填参数（实测连撞 3 次）。这里先如实说清。
+    if (!rel.trim()) {
+      throw new Error("path 必填：给工作区内相对路径的文件名（要看目录请用 list_dir）。");
+    }
     // 读允许只读授权目录；写永远只走 resolveWithin
     const full = resolveReadable(this.root, this.getReadRoots(), rel).full;
     if (!fs.existsSync(full)) throw new Error(`文件不存在：${rel}`);
     const stat = fs.statSync(full);
-    if (stat.isDirectory()) throw new Error(`${rel} 是目录，请用 list_dir`);
+    if (stat.isDirectory()) throw new Error(`${rel} 是目录，read_file 只读文件；列目录请用 list_dir`);
     const buf = fs.readFileSync(full);
     // 记下"读到的是哪一版"：之后写入前会比对，别人中途改了要重读（assertFresh）
     this.markObserved(full);

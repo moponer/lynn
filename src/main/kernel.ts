@@ -338,7 +338,9 @@ const TOOL_JSON: ToolSchema[] = [
             type: "array",
             items: { type: "string" },
             description:
-              "执行类工具白名单，只能填这些真实工具名：read_file / write_file / list_dir / run_command / browser_navigate / browser_snapshot / browser_click / browser_fill / browser_extract / browser_close / office_read_table / office_write_table / office_write_docx / kb_add",
+              // 2026-11-16：这份清单以前是手写的，与 MEMBER_EXEC_TOOLS 漂移——glob/grep 实际可用却没写进来，
+              // 她因此从不分配，成员只能扫盘。改成从同一处生成，名字不会再对不上。
+              `执行类工具白名单，只能填这些真实工具名：${MEMBER_EXEC_TOOLS.join(" / ")}`,
           },
           deliverable: { type: "string" },
           acceptance: { type: "array", items: { type: "string" } },
@@ -3330,9 +3332,12 @@ export class Kernel {
       return { ok: false, message: `成员「${member}」正在跑 ${busyTask}，同一成员同时只能跟一张单。等它回报后再派，或换一个成员。` };
     }
     // 执行工具 = 本次分配 ∩ 内置执行工具；submit_report 是回报通道，不占白名单
-    const allowed = (toolsArg ?? profile.tools).filter((t) =>
-      (MEMBER_EXEC_TOOLS as readonly string[]).includes(t),
-    );
+    const assigned = toolsArg ?? profile.tools;
+    const allowed = assigned.filter((t) => (MEMBER_EXEC_TOOLS as readonly string[]).includes(t));
+    // 名字写错/工具已下架时，以前是静默过滤 → 成员带着缺件的工具集开工，谁都不知道少了一件。
+    // 不阻断派单（少一件往往还能干），但必须留痕，便于回查"为什么它没读到文件"。
+    const droppedTools = assigned.filter((t) => !(MEMBER_EXEC_TOOLS as readonly string[]).includes(t));
+    if (droppedTools.length) this.log("assign_tools_dropped", { taskId, member, dropped: droppedTools.join(",") });
     // M3-07：带 draftId 的派单（插件工程师），工作区即草稿区——产物只能写进草稿，
     // 不可能落进生效目录（plugin-host 扫描跳过 `_` 前缀目录，草稿永不自动生效）
     // 成员的读写工作区：插件工坊=草稿区；否则用派单时钉住的会话项目目录（可读写），老单补记后同样落在项目目录
