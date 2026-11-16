@@ -2339,6 +2339,9 @@ button.ev:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
   font-size: var(--fs-meta);
 }
 .stale-bar > svg { color: var(--brass); flex: none; }
+/* 错误条（2026-11-16）：版式与版本提示共用，但图标换成红线色——
+   铜色读作"提示"，出错要一眼看出来，不能和"后台是旧版本"混成一种语气 */
+.stale-bar.err-bar > svg { color: var(--red); }
 .stale-bar .ghost-btn { padding: 3px 9px; font-size: var(--fs-label); margin-left: auto; flex: none; }
 .stale-bar .icon-btn { background: none; width: 24px; height: 24px; flex: none; }
 

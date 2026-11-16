@@ -58,16 +58,20 @@ function OfficePane({ ext, content }: { ext: string; content: Uint8Array }) {
           }
           return;
         }
-        // 复制成独立视图：IPC 来的可能是 subarray（会喂进相邻数据），
-        // 且渲染库要求 ArrayBuffer，直接拿 .buffer 可能是 SharedArrayBuffer 类型
-        const bytes = new Uint8Array(content);
+        // 整块 buffer 直接复用，省一次 8MB 级拷贝；只有 subarray（自身只是窗口）才重新切一段，
+        // 否则会把相邻数据一起喂给渲染库。as ArrayBuffer 是必要的：TS 只认得 .buffer 可能是
+        // SharedArrayBuffer，而 IPC 结构化克隆不产生共享内存。
+        const ab: ArrayBuffer =
+          content.byteOffset === 0 && content.byteLength === content.buffer.byteLength
+            ? (content.buffer as ArrayBuffer)
+            : (content.slice().buffer as ArrayBuffer);
         if (gone || !holder.current) return;
 
         if (ext === "docx" || ext === "docm") {
           const docx = await import("docx-preview");
           if (gone || !holder.current) return;
           holder.current.innerHTML = "";
-          await docx.renderAsync(bytes.buffer, holder.current, undefined, {
+          await docx.renderAsync(ab, holder.current, undefined, {
             inWrapper: true,
             renderAltChunks: false,
             useBase64URL: true,
@@ -79,14 +83,14 @@ function OfficePane({ ext, content }: { ext: string; content: Uint8Array }) {
           holder.current.innerHTML = "";
           const previewer = excel.default.init(holder.current);
           excelRef.current = previewer;
-          await previewer.preview(bytes.buffer);
+          await previewer.preview(ab);
         } else {
           const pptx = await import("pptx-preview");
           if (gone || !holder.current) return;
           holder.current.innerHTML = "";
           const previewer = pptx.init(holder.current, { width: 960 });
           pptxRef.current = previewer;
-          await previewer.preview(bytes.buffer);
+          await previewer.preview(ab);
           if (gone) return;
         }
         if (!gone) setBusy(false);

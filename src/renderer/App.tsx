@@ -970,12 +970,18 @@ export default function App() {
       )}
       {/* 全局错误条（2026-11-15）：发送/裁决等失败必须值台、审查台、控制台都看得见——
           此前只挂在值台输入框下面，审查台与控制台里失败等于静默。
-          浮层复用 stale-bar 版式（固定在右下），可手动关掉；与旧版本提示条错开高度。 */}
+          版式复用 stale-bar，但 err-bar 把图标换成红线色：铜色读作"提示"，出事要一眼看出来。
+          固定在右下、与旧版本提示条错开高度；关闭按钮的说明走 i18n（不露英文 aria-label）。 */}
       {notice && (
-        <div className="stale-bar" role="alert" style={{ bottom: 16 }}>
+        <div className="stale-bar err-bar" role="alert" style={{ bottom: 16 }}>
           <Icon name="warn" size="sm" />
           <span>{notice}</span>
-          <button type="button" className="icon-btn" onClick={() => setNotice(null)} aria-label="close">
+          <button
+            type="button"
+            className="icon-btn"
+            onClick={() => setNotice(null)}
+            aria-label={i18nStrings["common.close"] ?? "关闭"}
+          >
             <Icon name="x" size="sm" />
           </button>
         </div>
