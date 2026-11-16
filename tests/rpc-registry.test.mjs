@@ -41,6 +41,14 @@ const HANDLER_OF = {
   "kb.list": ["kb", "list"],
   "kb.read": ["kb", "read"],
   "kb.reindex": ["kb", "reindex"],
+  "data.usage": ["data", "usage"],
+  "data.cleanup": ["data", "cleanup"],
+  "config.clearKey": ["config", "clearKey"],
+  "config.vision.get": ["config", "visionGet"],
+  "config.vision.save": ["config", "visionSave"],
+  "config.vision.clear": ["config", "visionClear"],
+  "ui.plugins": ["ui", "plugins"],
+  "humanizer.status": ["humanizer", "status"],
 };
 const ALL = Object.keys(HANDLER_OF);
 
@@ -54,6 +62,12 @@ const NO_PARAM = new Set([
   "schedule.list",
   "kb.list",
   "kb.reindex",
+  "data.usage",
+  "config.clearKey",
+  "config.vision.get",
+  "config.vision.clear",
+  "ui.plugins",
+  "humanizer.status",
 ]);
 
 /** 假域能力：记录调用参数，返回带域标记的哨兵值 */
@@ -83,11 +97,15 @@ function fakeDeps() {
       calendar: make("calendar", ["add", "list", "finish", "todoAdd", "todoList", "todoFinish", "scan"]),
       schedules: make("schedules", ["tick", "add", "list", "remove", "toggle"]),
       kb: make("kb", ["search", "list", "read", "reindex"]),
+      data: make("data", ["usage", "cleanup"]),
+      config: make("config", ["clearKey", "visionGet", "visionSave", "visionClear"]),
+      ui: make("ui", ["plugins"]),
+      humanizer: make("humanizer", ["status"]),
     },
   };
 }
 
-test("三批共 31 个方法都注册了，未迁移的方法不在注册表里", () => {
+test("五批共 39 个方法都注册了，未迁移的方法不在注册表里", () => {
   const { deps } = fakeDeps();
   const registry = buildKernelRegistry(deps);
   assert.deepEqual([...registry.methods()].sort(), [...ALL].sort());

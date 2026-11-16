@@ -95,11 +95,15 @@ import { createKbRpc, type KbRpc } from "./rpc/kb-rpc";
 import {
   buildKernelRegistry,
   type CalendarRpcDeps,
+  type ConfigRpcDeps,
+  type DataRpcDeps,
+  type HumanizerRpcDeps,
   type KbRpcDeps,
   type ModelRpcDeps,
   type RpcRegistry,
   type ScheduleRpcDeps,
   type ThreadRpcDeps,
+  type UiRpcDeps,
 } from "./rpc-registry";
 import { BUILTIN_SKILLS } from "./builtin-skills";
 import { ConnectorStore, CONNECTOR_CATALOG, probeConnector as probeConnectorLive } from "./connectors";
@@ -7623,6 +7627,89 @@ export class Kernel {
     };
   }
 
+  /** 数据维护域（第五批）：用量统计与清理；清理后的落卡属于内核反馈，留在下面的 cleanup 闭包里 */
+  private dataRpcDeps(): DataRpcDeps {
+    return {
+      usage: () => ({
+        usage: measureUsage(this.dataRoot),
+        retention: this.settings.getPrefs().retention,
+      }),
+      cleanup: (p) => {
+        const base = this.settings.getPrefs().retention;
+        const clamp = (v: unknown, fallback: number) => {
+          const n = Number(v);
+          return Number.isFinite(n) ? Math.min(365, Math.max(0, Math.floor(n))) : fallback;
+        };
+        const retention: Retention = {
+          scratchDays: clamp(p?.retention?.scratchDays, base.scratchDays),
+          checkpointDays: clamp(p?.retention?.checkpointDays, base.checkpointDays),
+          logDays: clamp(p?.retention?.logDays, base.logDays),
+        };
+        if (p?.retention) this.settings.savePrefs({ retention });
+        const r = runCleanup(this.dataRoot, retention);
+        this.log("data_cleanup", { freedBytes: r.freedBytes, removed: r.removed.length });
+        if (r.removed.length) {
+          this.card({
+            kind: "system",
+            text: `已清理 ${r.removed.length} 项过程文件，释放 ${Math.round(r.freedBytes / 1024)} KB（交付物与证据没动）。`,
+          });
+        }
+        return { ok: true, freedBytes: r.freedBytes, removed: r.removed.length };
+      },
+    };
+  }
+
+  /** 配置杂项域（第五批）：清 Key 与视觉模型；对话模型的保存/测试要过端点风险闸，仍在内核 */
+  private configRpcDeps(): ConfigRpcDeps {
+    return {
+      clearKey: () => ({ ok: this.settings.clearApiKey() }),
+      visionGet: () => {
+        const v = this.settings.getVisionModel();
+        return {
+          configured: Boolean(v),
+          provider: v?.provider,
+          baseUrl: v?.baseUrl,
+          model: v?.model,
+          updatedAt: v?.updatedAt,
+        };
+      },
+      visionSave: (p) => {
+        try {
+          this.settings.saveVisionModel({
+            provider: p.provider,
+            baseUrl: p.baseUrl,
+            model: p.model,
+            apiKey: p.apiKey,
+            plaintextOk: p.plaintextOk === true,
+            previous: this.settings.getVisionModel(),
+          });
+          return { ok: true };
+        } catch (err) {
+          return { ok: false, error: err instanceof Error ? err.message : String(err) };
+        }
+      },
+      visionClear: () => ({ ok: this.settings.clearVision() }),
+    };
+  }
+
+  /** 外观插件域（第五批）：扫描 .lynn/ui 插件，形状转换在这一层收口 */
+  private uiRpcDeps(): UiRpcDeps {
+    return {
+      plugins: () => {
+        const r = scanUiPlugins(this.dataRoot);
+        return {
+          plugins: r.plugins.map((p) => ({ ...p.manifest, html: p.html })),
+          errors: r.errors,
+        };
+      },
+    };
+  }
+
+  /** 写作规则状态（第五批）：只读入口；开关写入口在 config.prefs */
+  private humanizerRpcDeps(): HumanizerRpcDeps {
+    return { status: () => humanizerStatus() };
+  }
+
   /** RPC 方法注册表（按域迁移的落点，约定见 rpc-registry.ts 顶部注释） */
   private rpcRegistryCache: RpcRegistry | null = null;
   private get rpcRegistry(): RpcRegistry {
@@ -7633,6 +7720,10 @@ export class Kernel {
         calendar: this.calendarRpcDeps(),
         schedules: this.scheduleRpcDeps(),
         kb: this.kbRpcDeps(),
+        data: this.dataRpcDeps(),
+        config: this.configRpcDeps(),
+        ui: this.uiRpcDeps(),
+        humanizer: this.humanizerRpcDeps(),
       });
     }
     return this.rpcRegistryCache;
@@ -8659,14 +8750,6 @@ export class Kernel {
         }
       }
 
-      case "ui.plugins": {
-        const r = scanUiPlugins(this.dataRoot);
-        return {
-          plugins: r.plugins.map((p) => ({ ...p.manifest, html: p.html })),
-          errors: r.errors,
-        } as RpcContracts[M]["result"];
-      }
-
       case "config.get": {
         const cfg = this.activeModelConfig();
         return {
@@ -8747,9 +8830,6 @@ export class Kernel {
         return savedPrefs as RpcContracts[M]["result"];
       }
 
-      case "humanizer.status":
-        return humanizerStatus() as RpcContracts[M]["result"];
-
       // M3-08：界面语言字典——内置（zh 源语言 / en 渐进）⊕ 启用的语言包插件覆盖
       case "i18n.get": {
         const lang = this.settings.getPrefs().lang;
@@ -8767,43 +8847,7 @@ export class Kernel {
         return { lang, strings, sources } as RpcContracts[M]["result"];
       }
 
-      case "config.clearKey": {
-        return { ok: this.settings.clearApiKey() } as RpcContracts[M]["result"];
-      }
-
-      // 视觉/OCR 模型（M2-13）：与对话模型解耦，独立配置/探测/清除
-      case "config.vision.get": {
-        const v = this.settings.getVisionModel();
-        return {
-          configured: Boolean(v),
-          provider: v?.provider,
-          baseUrl: v?.baseUrl,
-          model: v?.model,
-          updatedAt: v?.updatedAt,
-        } as RpcContracts[M]["result"];
-      }
-
-      case "config.vision.save": {
-        const p = params as { provider: string; baseUrl: string; model: string; apiKey?: string; plaintextOk?: boolean };
-        try {
-          this.settings.saveVisionModel({
-            provider: p.provider,
-            baseUrl: p.baseUrl,
-            model: p.model,
-            apiKey: p.apiKey,
-            plaintextOk: p.plaintextOk === true,
-            previous: this.settings.getVisionModel(),
-          });
-          return { ok: true } as RpcContracts[M]["result"];
-        } catch (err) {
-          return { ok: false, error: err instanceof Error ? err.message : String(err) } as RpcContracts[M]["result"];
-        }
-      }
-
-      case "config.vision.clear": {
-        return { ok: this.settings.clearVision() } as RpcContracts[M]["result"];
-      }
-
+      // 清 Key / 视觉/OCR 模型（M2-13）已迁到 rpc-registry.ts 的 config 域
       // 消息平台（M2-16）：合规口径与状态在 handle；configure/send 是异步网络操作，在壳层（main.ts）
       case "msg.status": {
         const cfg = loadMessaging(this.dataRoot);
@@ -9028,38 +9072,7 @@ export class Kernel {
         } as RpcContracts[M]["result"];
       }
 
-      case "data.usage": {
-        const prefs = this.settings.getPrefs();
-        return {
-          usage: measureUsage(this.dataRoot),
-          retention: prefs.retention,
-        } as RpcContracts[M]["result"];
-      }
-
-      case "data.cleanup": {
-        const p = params as { retention?: { scratchDays?: number; checkpointDays?: number; logDays?: number } };
-        const base = this.settings.getPrefs().retention;
-        const clamp = (v: unknown, fallback: number) => {
-          const n = Number(v);
-          return Number.isFinite(n) ? Math.min(365, Math.max(0, Math.floor(n))) : fallback;
-        };
-        const retention: Retention = {
-          scratchDays: clamp(p?.retention?.scratchDays, base.scratchDays),
-          checkpointDays: clamp(p?.retention?.checkpointDays, base.checkpointDays),
-          logDays: clamp(p?.retention?.logDays, base.logDays),
-        };
-        if (p?.retention) this.settings.savePrefs({ retention });
-        const r = runCleanup(this.dataRoot, retention);
-        this.log("data_cleanup", { freedBytes: r.freedBytes, removed: r.removed.length });
-        if (r.removed.length) {
-          this.card({
-            kind: "system",
-            text: `已清理 ${r.removed.length} 项过程文件，释放 ${Math.round(r.freedBytes / 1024)} KB（交付物与证据没动）。`,
-          });
-        }
-        return { ok: true, freedBytes: r.freedBytes, removed: r.removed.length } as RpcContracts[M]["result"];
-      }
-
+      // 数据用量与清理（data.*）已迁到 rpc-registry.ts 的 data 域
       case "workspace.get": {
         return {
           ...(this.projectRoot ? { primary: this.projectRoot } : {}),

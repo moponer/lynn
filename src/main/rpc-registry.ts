@@ -9,6 +9,9 @@
  *      改一处漏一处只有点到才炸（历史事故：task.detail 被误删）。
  *
  * 第一批：model.list / model.save / model.remove / model.setDefault / model.setThread / model.test
+ * 第二批：thread.*（thread.halt 除外——跨域编排留在内核）
+ * 第三批：calendar.* / schedule.* / kb.*
+ * 第五批：data.* / config.clearKey / config.vision.* / ui.plugins / humanizer.status
  * 其余方法仍在 kernel.handle 的 switch 中，后续批次逐一迁移。
  */
 import type { RpcContracts, RpcMethod } from "../shared/contract";
@@ -72,6 +75,34 @@ export interface KbRpcDeps {
   reindex(): RpcContracts["kb.reindex"]["result"];
 }
 
+/** 数据维护域（第五批）：用量统计与过程文件清理；清理后的落卡留在内核 */
+export interface DataRpcDeps {
+  usage(): RpcContracts["data.usage"]["result"];
+  cleanup(params: RpcContracts["data.cleanup"]["params"]): RpcContracts["data.cleanup"]["result"];
+}
+
+/**
+ * 配置杂项域（第五批）：视觉模型与清 Key。
+ * 对话模型的 config.save / config.test 不在这里——它们要过端点风险闸并复用已存 Key，
+ * 把那段安全逻辑搬到域里只会多一层注入，收益不抵风险，留在内核。
+ */
+export interface ConfigRpcDeps {
+  clearKey(): RpcContracts["config.clearKey"]["result"];
+  visionGet(): RpcContracts["config.vision.get"]["result"];
+  visionSave(params: RpcContracts["config.vision.save"]["params"]): RpcContracts["config.vision.save"]["result"];
+  visionClear(): RpcContracts["config.vision.clear"]["result"];
+}
+
+/** 外观插件域（第五批） */
+export interface UiRpcDeps {
+  plugins(): RpcContracts["ui.plugins"]["result"];
+}
+
+/** 写作规则状态（第五批）：开关写入口在 config.prefs，这里只读 */
+export interface HumanizerRpcDeps {
+  status(): RpcContracts["humanizer.status"]["result"];
+}
+
 /** 注册表可注入的全部域能力；后续批次按域加字段，而不是把 Kernel 整个塞进来 */
 export interface RpcDeps {
   models: ModelRpcDeps;
@@ -79,6 +110,10 @@ export interface RpcDeps {
   calendar: CalendarRpcDeps;
   schedules: ScheduleRpcDeps;
   kb: KbRpcDeps;
+  data: DataRpcDeps;
+  config: ConfigRpcDeps;
+  ui: UiRpcDeps;
+  humanizer: HumanizerRpcDeps;
 }
 
 /** 一个 RPC handler：入参与返回值都由契约推导 */
@@ -168,6 +203,20 @@ export function buildKernelRegistry(deps: RpcDeps): RpcRegistry {
   registry.register("kb.list", () => deps.kb.list());
   registry.register("kb.read", (params) => deps.kb.read(params));
   registry.register("kb.reindex", () => deps.kb.reindex());
+
+  // ---------- 数据维护：用量统计 / 过程文件清理 ----------
+  registry.register("data.usage", () => deps.data.usage());
+  registry.register("data.cleanup", (params) => deps.data.cleanup(params));
+
+  // ---------- 配置杂项：清 Key / 视觉模型 ----------
+  registry.register("config.clearKey", () => deps.config.clearKey());
+  registry.register("config.vision.get", () => deps.config.visionGet());
+  registry.register("config.vision.save", (params) => deps.config.visionSave(params));
+  registry.register("config.vision.clear", () => deps.config.visionClear());
+
+  // ---------- 外观插件与写作规则状态 ----------
+  registry.register("ui.plugins", () => deps.ui.plugins());
+  registry.register("humanizer.status", () => deps.humanizer.status());
 
   return registry;
 }
