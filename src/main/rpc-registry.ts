@@ -27,9 +27,58 @@ export interface ModelRpcDeps {
   test(params: RpcContracts["model.test"]["params"]): RpcContracts["model.test"]["result"];
 }
 
+/**
+ * 对话面域能力（窄接口，第二批）。
+ * 入参/返回值同样取契约类型——ThreadRpc 内部是 unknown，收口在 Kernel.threadRpcDeps()。
+ * 注意 thread.halt 不在这一批：它要停成员、断回合、清待验收，属跨域编排，留在 kernel。
+ */
+export interface ThreadRpcDeps {
+  list(): RpcContracts["thread.list"]["result"];
+  create(params: RpcContracts["thread.new"]["params"]): RpcContracts["thread.new"]["result"];
+  switchTo(params: RpcContracts["thread.switch"]["params"]): RpcContracts["thread.switch"]["result"];
+  rename(params: RpcContracts["thread.rename"]["params"]): RpcContracts["thread.rename"]["result"];
+  pin(params: RpcContracts["thread.pin"]["params"]): RpcContracts["thread.pin"]["result"];
+  announce(params: RpcContracts["thread.announcement"]["params"]): RpcContracts["thread.announcement"]["result"];
+  draftNotice(params: RpcContracts["thread.draftNotice"]["params"]): RpcContracts["thread.draftNotice"]["result"];
+  remove(params: RpcContracts["thread.remove"]["params"]): RpcContracts["thread.remove"]["result"];
+  search(params: RpcContracts["thread.search"]["params"]): RpcContracts["thread.search"]["result"];
+}
+
+/** 日历域能力（窄接口，第三批）；scan 的"落卡 + 通知"留在内核，域里只有扫描入口 */
+export interface CalendarRpcDeps {
+  add(params: RpcContracts["calendar.add"]["params"]): RpcContracts["calendar.add"]["result"];
+  list(params: RpcContracts["calendar.list"]["params"]): RpcContracts["calendar.list"]["result"];
+  finish(params: RpcContracts["calendar.finish"]["params"]): RpcContracts["calendar.finish"]["result"];
+  todoAdd(params: RpcContracts["calendar.todo.add"]["params"]): RpcContracts["calendar.todo.add"]["result"];
+  todoList(): RpcContracts["calendar.todo.list"]["result"];
+  todoFinish(params: RpcContracts["calendar.todo.finish"]["params"]): RpcContracts["calendar.todo.finish"]["result"];
+  scan(): RpcContracts["calendar.scan"]["result"];
+}
+
+/** 定时任务域能力（窄接口，第三批）；tick 起对话由内核编排 */
+export interface ScheduleRpcDeps {
+  tick(): RpcContracts["schedule.tick"]["result"];
+  add(params: RpcContracts["schedule.add"]["params"]): RpcContracts["schedule.add"]["result"];
+  list(): RpcContracts["schedule.list"]["result"];
+  remove(params: RpcContracts["schedule.remove"]["params"]): RpcContracts["schedule.remove"]["result"];
+  toggle(params: RpcContracts["schedule.toggle"]["params"]): RpcContracts["schedule.toggle"]["result"];
+}
+
+/** 知识库域能力（窄接口，第三批） */
+export interface KbRpcDeps {
+  search(params: RpcContracts["kb.search"]["params"]): RpcContracts["kb.search"]["result"];
+  list(): RpcContracts["kb.list"]["result"];
+  read(params: RpcContracts["kb.read"]["params"]): RpcContracts["kb.read"]["result"];
+  reindex(): RpcContracts["kb.reindex"]["result"];
+}
+
 /** 注册表可注入的全部域能力；后续批次按域加字段，而不是把 Kernel 整个塞进来 */
 export interface RpcDeps {
   models: ModelRpcDeps;
+  threads: ThreadRpcDeps;
+  calendar: CalendarRpcDeps;
+  schedules: ScheduleRpcDeps;
+  kb: KbRpcDeps;
 }
 
 /** 一个 RPC handler：入参与返回值都由契约推导 */
@@ -86,6 +135,39 @@ export function buildKernelRegistry(deps: RpcDeps): RpcRegistry {
   registry.register("model.setDefault", (params) => deps.models.setDefault(params));
   registry.register("model.setThread", (params) => deps.models.setThread(params));
   registry.register("model.test", (params) => deps.models.test(params));
+
+  // ---------- 对话面：群列表 / 新建 / 切换 / 改名 / 置顶 / 公告 / 起草 / 删除 / 搜索 ----------
+  registry.register("thread.list", () => deps.threads.list());
+  registry.register("thread.new", (params) => deps.threads.create(params));
+  registry.register("thread.switch", (params) => deps.threads.switchTo(params));
+  registry.register("thread.rename", (params) => deps.threads.rename(params));
+  registry.register("thread.pin", (params) => deps.threads.pin(params));
+  registry.register("thread.announcement", (params) => deps.threads.announce(params));
+  registry.register("thread.draftNotice", (params) => deps.threads.draftNotice(params));
+  registry.register("thread.remove", (params) => deps.threads.remove(params));
+  registry.register("thread.search", (params) => deps.threads.search(params));
+
+  // ---------- 日历：事件 / 待办 / 到期扫描 ----------
+  registry.register("calendar.add", (params) => deps.calendar.add(params));
+  registry.register("calendar.list", (params) => deps.calendar.list(params));
+  registry.register("calendar.finish", (params) => deps.calendar.finish(params));
+  registry.register("calendar.todo.add", (params) => deps.calendar.todoAdd(params));
+  registry.register("calendar.todo.list", () => deps.calendar.todoList());
+  registry.register("calendar.todo.finish", (params) => deps.calendar.todoFinish(params));
+  registry.register("calendar.scan", () => deps.calendar.scan());
+
+  // ---------- 定时任务：到点起一轮 / 增删启停 ----------
+  registry.register("schedule.tick", () => deps.schedules.tick());
+  registry.register("schedule.add", (params) => deps.schedules.add(params));
+  registry.register("schedule.list", () => deps.schedules.list());
+  registry.register("schedule.remove", (params) => deps.schedules.remove(params));
+  registry.register("schedule.toggle", (params) => deps.schedules.toggle(params));
+
+  // ---------- 知识库：检索 / 清单 / 读 / 重建索引 ----------
+  registry.register("kb.search", (params) => deps.kb.search(params));
+  registry.register("kb.list", () => deps.kb.list());
+  registry.register("kb.read", (params) => deps.kb.read(params));
+  registry.register("kb.reindex", () => deps.kb.reindex());
 
   return registry;
 }

@@ -37,7 +37,7 @@ import { buildTurnAttachments, searchProjectFiles, type TurnAttachments } from "
 import { PersonaStore, composeSystemPrompt } from "./persona";
 import { MemoryStore, parseEntries, type MemoryKind } from "./memory";
 import { PRESETS, loadProviders, saveProviders, presetContextWindow, type ProviderEntry } from "./providers";
-import { CalendarStore, dueReminders, parseNaturalDate } from "./calendar";
+import { CalendarStore, dueReminders } from "./calendar";
 import { SchedulerStore, recover as recoverScheduler, type DueItem } from "./scheduler";
 import { KnowledgeStore, watchKnowledge } from "./knowledge";
 import { appendUsage, evaluateBudget, pickModel } from "./budget";
@@ -89,7 +89,18 @@ import {
 import { mergeStrings } from "../shared/i18n";
 import { createSettingsRpc, type SettingsRpc } from "./rpc/settings-rpc";
 import { createThreadRpc, type ThreadRpc } from "./rpc/thread-rpc";
-import { buildKernelRegistry, type ModelRpcDeps, type RpcRegistry } from "./rpc-registry";
+import { createCalendarRpc, type CalendarRpc } from "./rpc/calendar-rpc";
+import { createScheduleRpc, type ScheduleRpc } from "./rpc/schedule-rpc";
+import { createKbRpc, type KbRpc } from "./rpc/kb-rpc";
+import {
+  buildKernelRegistry,
+  type CalendarRpcDeps,
+  type KbRpcDeps,
+  type ModelRpcDeps,
+  type RpcRegistry,
+  type ScheduleRpcDeps,
+  type ThreadRpcDeps,
+} from "./rpc-registry";
 import { BUILTIN_SKILLS } from "./builtin-skills";
 import { ConnectorStore, CONNECTOR_CATALOG, probeConnector as probeConnectorLive } from "./connectors";
 import { allPresets, buildSkillMd, installPreset, presetInstalled, SCHEDULE_PRESETS } from "./capability-catalog";
@@ -7542,13 +7553,109 @@ export class Kernel {
     return this.threadRpcCache;
   }
 
+  /** 日历域（第三批）：store 自身不落卡不发通知，到期扫描回到内核 */
+  private calendarRpcCache: CalendarRpc | null = null;
+  private get calendarRpc(): CalendarRpc {
+    if (!this.calendarRpcCache) {
+      this.calendarRpcCache = createCalendarRpc({
+        calendar: this.calendar,
+        scanReminders: () => this.scanReminders(),
+      });
+    }
+    return this.calendarRpcCache;
+  }
+
+  /** 定时任务域（第三批）：到期起一轮对话仍在内核 */
+  private scheduleRpcCache: ScheduleRpc | null = null;
+  private get scheduleRpc(): ScheduleRpc {
+    if (!this.scheduleRpcCache) {
+      this.scheduleRpcCache = createScheduleRpc({
+        scheduler: this.scheduler,
+        tickSchedules: () => this.tickSchedules(),
+      });
+    }
+    return this.scheduleRpcCache;
+  }
+
+  /** 知识库域（第三批） */
+  private kbRpcCache: KbRpc | null = null;
+  private get kbRpc(): KbRpc {
+    if (!this.kbRpcCache) {
+      this.kbRpcCache = createKbRpc({ knowledge: this.knowledge });
+    }
+    return this.kbRpcCache;
+  }
+
+  /** 日历域的类型收口点（第三批）：域实现返回 unknown，出这里只看到契约类型 */
+  private calendarRpcDeps(): CalendarRpcDeps {
+    const c = this.calendarRpc;
+    return {
+      add: (p) => c.add(p) as RpcContracts["calendar.add"]["result"],
+      list: (p) => c.list(p) as RpcContracts["calendar.list"]["result"],
+      finish: (p) => c.finish(p) as RpcContracts["calendar.finish"]["result"],
+      todoAdd: (p) => c.todoAdd(p) as RpcContracts["calendar.todo.add"]["result"],
+      todoList: () => c.todoList() as RpcContracts["calendar.todo.list"]["result"],
+      todoFinish: (p) => c.todoFinish(p) as RpcContracts["calendar.todo.finish"]["result"],
+      scan: () => c.scan() as RpcContracts["calendar.scan"]["result"],
+    };
+  }
+
+  /** 定时任务域的类型收口点（第三批） */
+  private scheduleRpcDeps(): ScheduleRpcDeps {
+    const s = this.scheduleRpc;
+    return {
+      tick: () => s.tick() as RpcContracts["schedule.tick"]["result"],
+      add: (p) => s.add(p) as RpcContracts["schedule.add"]["result"],
+      list: () => s.list() as RpcContracts["schedule.list"]["result"],
+      remove: (p) => s.remove(p) as RpcContracts["schedule.remove"]["result"],
+      toggle: (p) => s.toggle(p) as RpcContracts["schedule.toggle"]["result"],
+    };
+  }
+
+  /** 知识库域的类型收口点（第三批） */
+  private kbRpcDeps(): KbRpcDeps {
+    const k = this.kbRpc;
+    return {
+      search: (p) => k.search(p) as RpcContracts["kb.search"]["result"],
+      list: () => k.list() as RpcContracts["kb.list"]["result"],
+      read: (p) => k.read(p) as RpcContracts["kb.read"]["result"],
+      reindex: () => k.reindex() as RpcContracts["kb.reindex"]["result"],
+    };
+  }
+
   /** RPC 方法注册表（按域迁移的落点，约定见 rpc-registry.ts 顶部注释） */
   private rpcRegistryCache: RpcRegistry | null = null;
   private get rpcRegistry(): RpcRegistry {
     if (!this.rpcRegistryCache) {
-      this.rpcRegistryCache = buildKernelRegistry({ models: this.modelRpcDeps() });
+      this.rpcRegistryCache = buildKernelRegistry({
+        models: this.modelRpcDeps(),
+        threads: this.threadRpcDeps(),
+        calendar: this.calendarRpcDeps(),
+        schedules: this.scheduleRpcDeps(),
+        kb: this.kbRpcDeps(),
+      });
     }
     return this.rpcRegistryCache;
+  }
+
+  /**
+   * 对话面域的能力注入（第二批）。ThreadRpc 的方法仍声明 unknown 入参/返回值（既有实现），
+   * 这里是唯一的类型收口点：出了这个方法，注册表侧只看到契约类型。
+   * thread.halt 不在其中——它要停成员、断回合、清待验收，属跨域编排，留在 handle 里。
+   */
+  private threadRpcDeps(): ThreadRpcDeps {
+    const t = this.threadRpc;
+    return {
+      list: () => t.list() as RpcContracts["thread.list"]["result"],
+      create: (p) => t.create(p) as RpcContracts["thread.new"]["result"],
+      switchTo: (p) => t.switchTo(p) as RpcContracts["thread.switch"]["result"],
+      rename: (p) => t.rename(p) as RpcContracts["thread.rename"]["result"],
+      pin: (p) => t.pin(p) as RpcContracts["thread.pin"]["result"],
+      announce: (p) => t.announce(p) as RpcContracts["thread.announcement"]["result"],
+      draftNotice: (p) => t.draftNotice(p) as RpcContracts["thread.draftNotice"]["result"],
+      remove: (p) => t.remove(p) as RpcContracts["thread.remove"]["result"],
+      search: (p) => t.search(p) as RpcContracts["thread.search"]["result"],
+    };
   }
 
   /**
@@ -7990,135 +8097,9 @@ export class Kernel {
         return { ok: true } as RpcContracts[M]["result"];
       }
 
-      case "calendar.add": {
-        const { text, remindLead } = params as { text: string; remindLead?: number };
-        const parsed = parseNaturalDate(text);
-        if (!parsed) {
-          return {
-            ok: false,
-            error: `没识别出时间。支持的写法如：明天下午三点、下周三 14:00、3月5号上午九点、两小时后。`,
-          } as RpcContracts[M]["result"];
-        }
-        const title = parsed.rest || text.trim();
-        const ev = this.calendar.addEvent(title, parsed.at, Math.max(0, Number(remindLead ?? 0)));
-        return {
-          ok: true,
-          event: { id: ev.id, title: ev.title, at: ev.at },
-          matched: parsed.matched,
-          defaultedTime: parsed.defaultedTime,
-        } as RpcContracts[M]["result"];
-      }
-
-      case "calendar.list": {
-        const { includePast } = params as { includePast?: boolean };
-        const events = this.calendar.listEvents({ includePast }).map((e) => ({
-          id: e.id,
-          title: e.title,
-          at: e.at,
-          status: e.status,
-        }));
-        return { events, backend: this.calendar.backend } as RpcContracts[M]["result"];
-      }
-
-      case "calendar.finish": {
-        const { id, status } = params as { id: number; status?: "done" | "canceled" };
-        this.calendar.finishEvent(Number(id), status === "canceled" ? "canceled" : "done");
-        return { ok: true } as RpcContracts[M]["result"];
-      }
-
-      case "calendar.todo.add": {
-        const { text } = params as { text: string };
-        const t = this.calendar.addTodo(String(text).trim());
-        return { ok: true, id: t.id } as RpcContracts[M]["result"];
-      }
-
-      case "calendar.todo.list": {
-        const todos = this.calendar.listTodos().map((t) => ({ id: t.id, text: t.text, due: t.due }));
-        return { todos } as RpcContracts[M]["result"];
-      }
-
-      case "calendar.todo.finish": {
-        const { id } = params as { id: number };
-        this.calendar.finishTodo(Number(id));
-        return { ok: true } as RpcContracts[M]["result"];
-      }
-
-      case "calendar.scan": {
-        this.scanReminders();
-        return { ok: true } as RpcContracts[M]["result"];
-      }
-
-      case "schedule.tick": {
-        this.tickSchedules();
-        return { ok: true } as RpcContracts[M]["result"];
-      }
-
-      case "schedule.add": {
-        const p = params as { name: string; prompt: string; kind: "once" | "daily" | "interval"; at?: string; time?: string; intervalMin?: number };
-        try {
-          const task = this.scheduler.add({
-            name: String(p.name).trim() || "未命名任务",
-            prompt: String(p.prompt),
-            kind: p.kind,
-            at: p.at,
-            time: p.time,
-            intervalMin: p.intervalMin,
-          });
-          return { ok: true, task: { id: task.id, name: task.name, nextRun: task.nextRun } } as RpcContracts[M]["result"];
-        } catch (err) {
-          return { ok: false, error: err instanceof Error ? err.message : String(err) } as RpcContracts[M]["result"];
-        }
-      }
-
-      case "schedule.list": {
-        return {
-          tasks: this.scheduler.list().map((t) => ({
-            id: t.id,
-            name: t.name,
-            kind: t.kind,
-            enabled: t.enabled,
-            nextRun: t.nextRun,
-            lastRun: t.lastRun,
-            lastStatus: t.lastStatus,
-          })),
-        } as RpcContracts[M]["result"];
-      }
-
-      case "schedule.remove": {
-        const { id } = params as { id: string };
-        return { ok: this.scheduler.remove(String(id)) } as RpcContracts[M]["result"];
-      }
-
-      case "schedule.toggle": {
-        const { id } = params as { id: string };
-        const t = this.scheduler.toggle(String(id));
-        if (!t) return { ok: false, error: `没有这个定时任务：${id}` } as RpcContracts[M]["result"];
-        return { ok: true, enabled: t.enabled } as RpcContracts[M]["result"];
-      }
-
-      case "kb.search": {
-        const { q, limit } = params as { q: string; limit?: number };
-        const { hits, error } = this.knowledge.search(String(q ?? ""), Math.min(50, Math.max(1, Number(limit ?? 8))));
-        return { hits, ...(error ? { error } : {}) } as RpcContracts[M]["result"];
-      }
-
-      case "kb.list": {
-        return { docs: this.knowledge.list(), backend: this.knowledge.backend } as RpcContracts[M]["result"];
-      }
-
-      case "kb.read": {
-        const { file } = params as { file: string };
-        const doc = this.knowledge.read(String(file));
-        if (!doc) return { ok: false, error: `文档不存在：${file}` } as RpcContracts[M]["result"];
-        return { ok: true, title: doc.title, body: doc.body } as RpcContracts[M]["result"];
-      }
-
-      case "kb.reindex": {
-        const { indexed, removed } = this.knowledge.reindex();
-        const st = this.knowledge.stats();
-        return { indexed, removed, docs: st.docs, dbBytes: st.dbBytes } as RpcContracts[M]["result"];
-      }
-
+      // ---------- 日历 / 定时任务 / 知识库 RPC ----------
+      // 已迁移到 rpc-registry.ts 的 calendar / schedules / kb 三个域（2026-11-16 第三批）。
+      // 到期扫描与到点起对话仍回内核编排；域文件只做存储与查询。
       case "office.health": {
         return { ...this.officeHealth, csv: true, xlsx: this.officeHealth.found } as RpcContracts[M]["result"];
       }
@@ -8874,35 +8855,9 @@ export class Kernel {
         return { ok: true, restored: r.restored.length, removed: r.removed.length } as RpcContracts[M]["result"];
       }
 
-      case "thread.list":
-        return this.threadRpc.list() as RpcContracts[M]["result"];
-
-      case "thread.new":
-        return this.threadRpc.create(params) as RpcContracts[M]["result"];
-
-      case "thread.switch":
-        return this.threadRpc.switchTo(params) as RpcContracts[M]["result"];
-
-      case "thread.rename":
-        return this.threadRpc.rename(params) as RpcContracts[M]["result"];
-
-      /** 置顶 / 取消置顶（群列表微信式） */
-      case "thread.pin":
-        return this.threadRpc.pin(params) as RpcContracts[M]["result"];
-
-      /**
-       * 群公告（全局段）：整体干什么 / 谁管哪段 / 接缝在哪 / 共享写入点归谁。
-       * 用户或风铃都能写；风铃每轮都看得见它（turnFacts 贴在当轮消息尾部，不进 system prompt）。
-       */
-      case "thread.announcement":
-        return this.threadRpc.announce(params) as RpcContracts[M]["result"];
-
-      /**
-       * 请风铃起草本群公告（2026-11-12）：
-       * 公告不该只能由用户写——风铃更清楚这个群在干什么、分工与接缝在哪。
-       */
-      case "thread.draftNotice":
-        return this.threadRpc.draftNotice(params) as RpcContracts[M]["result"];
+      // ---------- 对话面 RPC：list/new/switch/rename/pin/announcement/draftNotice/remove/search ----------
+      // 已迁移到 rpc-registry.ts 的 threads 域（2026-11-16 第二批）。
+      // thread.halt 留在下面：它要停成员、断回合、清待验收，属跨域编排，不是域内查询。
 
       /**
        * 终止本群（2026-11-15）：成员停机 + 当前回合中断 + 心跳/巡检/验收叫醒/定时任务
@@ -8917,12 +8872,6 @@ export class Kernel {
         }
         return this.haltThread(target) as RpcContracts[M]["result"];
       }
-
-      case "thread.remove":
-        return this.threadRpc.remove(params) as RpcContracts[M]["result"];
-
-      case "thread.search":
-        return this.threadRpc.search(params) as RpcContracts[M]["result"];
 
       case "task.feed":
         return this.rpcTaskFeed(params) as RpcContracts[M]["result"];
