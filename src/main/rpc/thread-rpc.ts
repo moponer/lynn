@@ -1,7 +1,7 @@
-// 对话面 RPC（2026-11-14）：thread.* 九件，从 kernel.handle 的巨型 switch 里抽出来。
+// 对话面 RPC（2026-11-14）：thread.* 八件，从 kernel.handle 的巨型 switch 里抽出来。
 //
-// 依赖是 9 个成员：对话存储、当前 id（读写）、忙闲、切群、持久化、空会话、清理工单、起一轮。
-// draftNotice 会起一轮 internal 对话（起草群公告），所以它同时要求"不忙"。
+// 依赖是 7 个成员：对话存储、当前 id（读写）、切群、持久化、空会话、清理工单。
+// （2026-11-16 删掉 draftNotice：群公告由风铃自己写，那个"让风铃起草"按钮是多余的入口）
 import type { ThreadStore } from "../threads";
 
 export interface ThreadRpcDeps {
@@ -9,14 +9,11 @@ export interface ThreadRpcDeps {
   currentThreadId(): string;
   /** 删群后要断开旧会话（否则落盘会把已删的群写成孤儿文件） */
   setCurrentThreadId(id: string): void;
-  /** 风铃正忙时不能再起一轮（起草公告会撞车） */
-  isBusy(): boolean;
   switchThread(id: string): void;
   persistThread(): void;
   enterEmptySession(): void;
   /** 删群时把名下工单一起清掉，不留"无主单" */
   purgeThreadTasks(threadId: string): { removed: number; kept: number };
-  submitTurn(text: string, attachments: undefined, opts: { internal?: boolean; ephemeral?: boolean }): void;
 }
 
 export interface ThreadRpc {
@@ -26,7 +23,6 @@ export interface ThreadRpc {
   rename(params: unknown): unknown;
   pin(params: unknown): unknown;
   announce(params: unknown): unknown;
-  draftNotice(params: unknown): unknown;
   remove(params: unknown): unknown;
   search(params: unknown): unknown;
 }
@@ -74,23 +70,6 @@ export function createThreadRpc(deps: ThreadRpcDeps): ThreadRpc {
       } catch {
         return { ok: false, text: "" };
       }
-    },
-    draftNotice(params: unknown): unknown {
-      const id = String((params as { id?: string }).id ?? deps.currentThreadId());
-      if (!id || id !== deps.currentThreadId()) {
-        return { ok: false, error: "只能给当前群起草" };
-      }
-      if (deps.isBusy()) {
-        return { ok: false, error: "风铃这会儿正忙，等它闲下来再起草" };
-      }
-      deps.submitTurn(
-        "【起草群公告】给这个群写一段公告，写完用 set_group_notice 落盘（群里每个人都会看见）。\n" +
-          "必须写清四件事：①整体要干什么 ②谁管哪段（按成员名字）③接缝在哪（谁的产出交给谁，别两边各做一半）④共享写入点归谁。\n" +
-          "几行就够，写人话；别写「认真一点」这种没法验的话。",
-        undefined,
-        { internal: true, ephemeral: true },
-      );
-      return { ok: true };
     },
     remove(params: unknown): unknown {
       const p = params as { id: string };

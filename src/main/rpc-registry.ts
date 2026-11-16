@@ -42,7 +42,6 @@ export interface ThreadRpcDeps {
   rename(params: RpcContracts["thread.rename"]["params"]): RpcContracts["thread.rename"]["result"];
   pin(params: RpcContracts["thread.pin"]["params"]): RpcContracts["thread.pin"]["result"];
   announce(params: RpcContracts["thread.announcement"]["params"]): RpcContracts["thread.announcement"]["result"];
-  draftNotice(params: RpcContracts["thread.draftNotice"]["params"]): RpcContracts["thread.draftNotice"]["result"];
   remove(params: RpcContracts["thread.remove"]["params"]): RpcContracts["thread.remove"]["result"];
   search(params: RpcContracts["thread.search"]["params"]): RpcContracts["thread.search"]["result"];
 }
@@ -178,7 +177,6 @@ export function buildKernelRegistry(deps: RpcDeps): RpcRegistry {
   registry.register("thread.rename", (params) => deps.threads.rename(params));
   registry.register("thread.pin", (params) => deps.threads.pin(params));
   registry.register("thread.announcement", (params) => deps.threads.announce(params));
-  registry.register("thread.draftNotice", (params) => deps.threads.draftNotice(params));
   registry.register("thread.remove", (params) => deps.threads.remove(params));
   registry.register("thread.search", (params) => deps.threads.search(params));
 

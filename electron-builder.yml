@@ -1,6 +1,4 @@
 # 风铃 Lynn · 打包配置（§4.6 / M0 测试包）
-# 说明：先关闭 asar —— RPC 子进程要用「真文件路径」加载 Pi 官方 rpc-entry.js
-# 与 agent/extensions/lynn-bridge.mjs；asar 内 ESM 解析不可靠。体积换稳定，后续再优化。
 appId: ai.lynn.desktop
 productName: Lynn
 copyright: Copyright © 2026 Lynn
@@ -9,7 +7,24 @@ directories:
   output: release
   buildResources: build
 
-asar: false
+# asar 打包（2026-11-16）：此前为 false —— RPC 子进程要用「真文件路径」加载 Pi 官方
+# rpc-entry.js 与 agent/extensions/lynn-bridge.mjs，asar 内那些路径对 node 子进程不存在。
+# 现在主进程统一过 unpackedPath()（src/main/unpack-path.ts）把 app.asar 改写成
+# app.asar.unpacked，配合下面的 asarUnpack 清单即可两全。
+# 下列目录**必须** unpack，漏一个就是装完才炸：
+#   agent/**                        Pi worker / L1 worker / lynn-bridge 扩展（--extension 传真路径）
+#   node_modules/@earendil-works/** Pi 官方 rpc-entry.js 与 SDK
+#   node_modules/typebox/**         lynn-bridge.mjs 与 Pi 运行时直接 import
+#   node_modules/jiti/**            L1 worker 现场编译插件 TS
+#   node_modules/node-screenshots*/**  原生 N-API 二进制（.node 不能从 asar 里 dlopen）
+asar: true
+asarUnpack:
+  - agent/**
+  - node_modules/@earendil-works/**
+  - node_modules/typebox/**
+  - node_modules/jiti/**
+  - node_modules/node-screenshots/**
+  - node_modules/node-screenshots-*/**
 
 files:
   - dist/**/*

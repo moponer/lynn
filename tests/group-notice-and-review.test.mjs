@@ -1,6 +1,6 @@
 // 2026-11-12 用户实测反馈后的两项修复：
 // ①成员交回报后必须**立刻**叫醒风铃验收（此前只能等心跳闸或用户主动问——闭环断了）
-// ②群公告不必由用户写：风铃能起草（set_group_notice / thread.draftNotice）
+// ②群公告不必由用户写：风铃自己写（set_group_notice；2026-11-16 删掉「让风铃起草」按钮与 RPC）
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
@@ -103,14 +103,17 @@ test("群公告由风铃起草：工具能写、能落盘、群里看得见", as
   }
 });
 
-test("「让风铃起草」这个动作会起一轮（不是让用户自己写）", async () => {
+// 2026-11-16 用户裁定：公告本来就是她写，「让风铃起草」按钮多余 → 连同 RPC 一起删掉。
+// 锁住这条：按钮删了但 RPC 留着，只会让人再把按钮加回来。
+test("没有「让风铃起草」这条 RPC：公告只由她自己写（set_group_notice）", async () => {
   const { kernel } = setup();
   try {
     await kernel.init();
-    const id = kernel.handle("session.snapshot").thread.id;
-    const r = kernel.handle("thread.draftNotice", { id });
-    assert.equal(r.ok, true);
-    assert.equal(kernel.busy, true, "要真起一轮，让风铃去写");
+    assert.throws(
+      () => kernel.handle("thread.draftNotice", {}),
+      /unknown rpc method/,
+      "起草公告的 RPC 不该再存在",
+    );
   } finally {
     await kernel.dispose();
   }

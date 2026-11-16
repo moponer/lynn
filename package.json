@@ -4,6 +4,7 @@
   "private": true,
   "version": "0.0.1",
   "description": "风铃 Lynn — 本地优先、插件化的桌面 AI 个人助理（指挥者形态）。薄壳 + Pi 运行时 + 三档插件 + MCP。",
+  "author": "Monlin <1318686166@qq.com>",
   "license": "MIT",
   "engines": {
     "node": ">=22.19.0"
@@ -27,6 +28,7 @@
     "dev": "npm run build && electron .",
     "shot": "electron scripts/preview-shot.cjs",
     "dist": "npm run build && electron-builder --win --config electron-builder.yml",
+    "dist:cn": "node scripts/dist-cn.mjs",
     "perf:standby": "electron scripts/perf-run.cjs 60",
     "lint:design": "node scripts/check-design.mjs",
     "lint": "oxlint src --deny-warnings",

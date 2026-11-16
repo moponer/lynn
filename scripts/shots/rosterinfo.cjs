@@ -9,6 +9,9 @@ module.exports = {
       others: [...document.querySelectorAll('.tgroup-others-h')].map(h => h.textContent.trim()),
       goto: [...document.querySelectorAll('.tg-goto')].map(h => h.textContent.trim()),
       gnotice: !!document.querySelector('.gnotice'),
+      // 群公告标题行只剩一个「我自己写/改」：不该再出现「让风铃起草」（2026-11-16）
+      noticeBtns: [...document.querySelectorAll('.gnotice-btns button')].map((b) => b.textContent.trim()),
+      noticeText: document.querySelector('.gnotice-t')?.textContent.trim() ?? null,
       hint: document.querySelector('.roster-note-quiet')?.textContent.trim() ?? null,
     }))()`);
     console.log("ROSTERINFO", JSON.stringify(info));

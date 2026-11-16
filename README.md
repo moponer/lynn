@@ -140,7 +140,43 @@ npm run build:renderer  # vite 产物
 npm run dist   # electron-builder --win → release/Lynn-0.0.1-setup.exe（NSIS）
 ```
 
-本机两个注意点：electron-builder 会先清空旧的 `win-unpacked`，文件数超过本机 safe-delete 阈值时要输出到**全新目录**；GitHub release 下载不稳定时可用 `electronDist: node_modules/electron/dist` 直接复制本地 Electron。安装包目前**未做代码签名**。
+本机（Windows + 国内网络 + IDE 集成终端）实测会撞三个坑，**都与业务代码无关**，2026-11-16 逐个定位：
+
+| 现象 | 原因 | 解法 |
+|---|---|---|
+| 停在 `packaging … appOutDir=release\win-unpacked` 不再前进，几分钟后进程静默退出 | electron-builder 要下 158 MB 的 `electron-v45.2.1-win32-x64.zip`，走代理时常在 98%（156006246 / 158187314 字节）断流 | 设 `ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/`，建议写进用户环境变量，否则每次干净打包都要重下 |
+| `⨯ [safe-delete] 操作失败 … trash operation … Some operations were aborted` | IDE 集成终端注入的 `NODE_OPTIONS=--require …node-language-shim.cjs` 把 `fs.rm` 改写成"扔回收站"，而 electron-builder 解压前正好要用它清 `win-unpacked.tmp`（`electronGet.ts:267`） | 打包前 `$env:NODE_OPTIONS=''`；或改用普通 PowerShell / cmd 窗口执行 |
+| `EBUSY: resource busy or locked, unlink '…\win-unpacked.tmp\resources\default_app.asar'`，该目录也删不掉、改不了名 | 上一次被垫片劫持的删除把文件句柄留在了 IDE 进程里（可用 Restart Manager 查持有者） | 重启 IDE 后删掉 `release/`；赶时间就换输出目录见下方命令 |
+
+**推荐入口：`npm run dist:cn`**（`scripts/dist-cn.mjs`，2026-11-16）——上表前两条它已经内置，IDE 集成终端里直接跑即可：
+
+```bash
+npm run dist:cn                                        # 默认输出到 config 里的 release/
+npm run dist:cn -- -c.directories.output=release-asar   # 换输出目录（release/ 被句柄占着时）
+```
+
+它做的两件事只作用于**子进程环境**：默认 `ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/`（已设则不覆盖），并对子进程清空 `NODE_OPTIONS`。手工等价写法：
+
+```powershell
+$env:NODE_OPTIONS=''
+$env:ELECTRON_MIRROR='https://npmmirror.com/mirrors/electron/'
+npm run dist
+```
+
+`release/` 被旧句柄占着（第三条）时只能换输出目录，或重启 IDE 后删掉 `release/` 再跑。
+
+完全不联网时可 `-c.electronDist=node_modules/electron/dist` 直接复制本地 Electron（版本须与 `electron` 依赖一致，当前 45.2.1）。
+
+现状：安装包**未做代码签名**（日志 `no code signing certificate configured, signing is skipped`，SmartScreen 会警告）；`asar` 已开启，安装包约 **142.5 MB**。
+
+asar 这次能开，靠的是两件配套（2026-11-16）：
+
+| 件 | 位置 | 作用 |
+|---|---|---|
+| `unpackedPath()` | `src/main/unpack-path.ts` | 把交给**子进程**的脚本路径从 `app.asar` 改写成 `app.asar.unpacked`（`ELECTRON_RUN_AS_NODE` 的子进程没有 asar 补丁，asar 里的路径对它不存在） |
+| `asarUnpack` 清单 | `electron-builder.yml` | `agent/**`、`@earendil-works/**`、`typebox/**`、`jiti/**`、`node-screenshots*/**` —— 漏一个就是装完才炸（子进程 Cannot find module / 原生 `.node` 无法 dlopen） |
+
+实测（打包版、真窗口、真模型）：首轮对话走的是 Pi 子进程（`agent.log` 里 `"source":"pi"`，`threads/<id>/pi/*.jsonl` 落盘），`node-screenshots` 原生模块可从 unpacked 加载。**改动这些依赖版本后，要重新核对 `asarUnpack` 清单**。
 
 ## 结构（2026-11-15）
 

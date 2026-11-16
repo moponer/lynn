@@ -27,7 +27,6 @@ export function Roster({
   /** @某人：把名字插进输入框（群聊模式） */
   onAt,
   onAnnounce,
-  onDraftNotice,
   open,
   onClose,
 }: {
@@ -56,8 +55,6 @@ export function Roster({
   onAt?: (name: string) => void;
   /** 写群公告（全局段）：保存后风铃下一轮就看得见 */
   onAnnounce?: (text: string) => void;
-  /** 请风铃起草群公告（用户不该只能自己写） */
-  onDraftNotice?: () => void | Promise<unknown>;
 }) {
   const t = useT();
   // 成员状态由成员卡自己表达（排序 + 状态色），标题栏不再报两套互相打架的总数
@@ -98,37 +95,6 @@ export function Roster({
   const [memberMenu, setMemberMenu] = useState<{ member: DeskMember; x: number; y: number } | null>(null);
   const [detail, setDetail] = useState<MemberDetailState | null>(null);
   const [rosterNote, setRosterNote] = useState<string | null>(null);
-  /** 群公告起草中（风铃写好了就停） */
-  const [draftingNotice, setDraftingNotice] = useState(false);
-  const noticeRequest = useRef(0);
-  const noticeText = desk.threads.find((x) => x.id === desk.thread.id)?.announcement;
-  useEffect(() => {
-    // 公告内容变了 = 起草完成
-    if (noticeText) setDraftingNotice(false);
-  }, [noticeText]);
-  useEffect(() => {
-    // 换群后旧请求的成功、失败与 finally 都不能再操作新群的起草状态。
-    noticeRequest.current += 1;
-    setDraftingNotice(false);
-    return () => {
-      noticeRequest.current += 1;
-    };
-  }, [desk.thread.id]);
-  const draftNotice = async () => {
-    if (!onDraftNotice) return;
-    const request = ++noticeRequest.current;
-    setDraftingNotice(true);
-    try {
-      // 同时兼容旧的 void 回调与新的 Promise 回调；同步抛错也由这个 try 捕获。
-      await Promise.resolve(onDraftNotice());
-    } catch (err) {
-      if (request === noticeRequest.current) {
-        setRosterNote(`起草没发起：${err instanceof Error ? err.message : String(err)}`);
-      }
-    } finally {
-      if (request === noticeRequest.current) setDraftingNotice(false);
-    }
-  };
   /** 编制全景：按群分家（2026-11-12）。
    *  队→群的绑定内核一直有（TeamRecord.threadId），此前没暴露给渲染层，
    *  十几支队只能平铺成一列——看不出哪支队是谁的，也跳不过去。 */
@@ -340,8 +306,6 @@ export function Roster({
           <GroupNotice
             text={desk.threads.find((x) => x.id === desk.thread.id)?.announcement}
             onSave={(text) => onAnnounce(text)}
-            onDraft={onDraftNotice ? () => void draftNotice() : undefined}
-            drafting={draftingNotice}
           />
         )}
         {/* 没有会话时不装懂：右栏如实说这是"可复用的编制"，不是一个群的人 */}
@@ -884,25 +848,23 @@ export function MemberDetail({ data, onClose }: { data: MemberDetailState; onClo
 /**
  * 群公告 = 这个群的全局段（整体干什么 / 谁管哪段 / 接缝在哪 / 共享写入点归谁）。
  * leader 那句「接缝没人接是头号事故」——所以接缝得是群级可见、能改的事实。
+ *
+ * 2026-11-16：删掉「让风铃起草」按钮——公告本来就是她自己写（set_group_notice），
+ * 再给用户一个"请她写"的入口等于承认她平时不写；用户仍可手写覆盖。
  */
 export function GroupNotice({
   text,
   onSave,
-  onDraft,
-  drafting,
 }: {
   text?: string;
   onSave: (t: string) => void;
-  /** 让风铃起草（用户不该只能自己写） */
-  onDraft?: () => void;
-  drafting?: boolean;
 }) {
   const [editing, setEditing] = useState(false);
   const [collapsed, setCollapsed] = useState(true);
   const [draft, setDraft] = useState(text ?? "");
   useEffect(() => {
     setDraft(text ?? "");
-    // 公告内容变了（风铃起草完成 / 别人改了）= 重新折叠，别让长公告一直顶着
+    // 公告内容变了（风铃写好了 / 别人改了）= 重新折叠，别让长公告一直顶着
     setCollapsed(true);
   }, [text]);
   return (
@@ -910,11 +872,6 @@ export function GroupNotice({
       <div className="gnotice-h">
         <span className="k">群公告</span>
         <span className="gnotice-btns">
-          {onDraft && (
-            <button type="button" className="gnotice-toggle" onClick={onDraft} disabled={drafting}>
-              {drafting ? "起草中…" : "让风铃起草"}
-            </button>
-          )}
           <button type="button" className="gnotice-toggle" onClick={() => setEditing((v) => !v)}>
             {editing ? "收起" : text ? "改" : "我自己写"}
           </button>
@@ -951,7 +908,7 @@ export function GroupNotice({
             <>
               <p className={`gnotice-t${collapsed && long ? " clamp" : ""}`}>
                 {text ||
-                  "还没写：这个群整体干什么、谁管哪段、接缝在哪——让风铃起草一版，或者你自己写一句（它每轮都看得见，会照着它分工）。"}
+                  "还没写：这个群整体干什么、谁管哪段、接缝在哪。风铃派活时会自己写；你也可以直接改（它每轮都看得见，成员照着它分工）。"}
               </p>
               {long && (
                 <button

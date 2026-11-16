@@ -1120,16 +1120,6 @@ export default function App() {
             .then(() => refresh())
             .catch((err) => setNotice(`群公告没存上：${err instanceof Error ? err.message : String(err)}`));
         }}
-        onDraftNotice={() => {
-          setNotice(null);
-          const id = desk.thread.id;
-          // 返回真实 RPC Promise：Roster 的「起草中」跟着它复位，而不是点了就一直转
-          return rpc("thread.draftNotice", { id })
-            .then((r) => {
-              if (!r.ok) setNotice(r.error ?? "风铃这会儿正忙，等它闲下来再起草");
-            })
-            .catch((err) => setNotice(`起草没发起：${err instanceof Error ? err.message : String(err)}`));
-        }}
         onThreadRemove={(id) => {
           setNotice(null);
           void rpc("thread.remove", { id })

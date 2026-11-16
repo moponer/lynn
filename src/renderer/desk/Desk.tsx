@@ -58,7 +58,6 @@ export function DeskView({
   onThreadRemove,
   onThreadPin,
   onAnnounce,
-  onDraftNotice,
   onHalt,
   onTaskFeed,
   onCreateTeam,
@@ -124,8 +123,6 @@ export function DeskView({
   onThreadPin?: (id: string, pinned: boolean) => void;
   /** 写群公告（全局段） */
   onAnnounce?: (text: string) => void;
-  /** 请风铃起草群公告：原样返回 RPC Promise，Roster 的「起草中」随真实结果复位 */
-  onDraftNotice?: () => void | Promise<void>;
   /** 终止本群所有进行中的工作（2026-11-15）：成员停机 + 心跳/巡检/验收叫醒全停 */
   onHalt?: () => void;
   /** 工单往来（跨会话追溯）：工单出发会话 ≠ 当前会话时按 threadId 回读 */
@@ -378,7 +375,6 @@ export function DeskView({
           onManageTeam={onManageTeam}
           onAt={(name) => setAtTarget({ name, nonce: Date.now() })}
           onAnnounce={(text) => onAnnounce?.(text)}
-          onDraftNotice={() => onDraftNotice?.()}
           onThread={(id) => {
             setRightOpen(false);
             onThread?.(id);

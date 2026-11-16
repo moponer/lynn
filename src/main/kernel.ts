@@ -147,6 +147,7 @@ import {
 import { L1Host } from "./plugin-l1";
 import { AgentHost, type AgentStats, type RpcToolSpec } from "./agent-host";
 import { PiRpcHost } from "./pi-rpc-host";
+import { unpackedPath } from "./unpack-path";
 import { execFile, execSync } from "node:child_process";
 
 /**
@@ -573,7 +574,7 @@ const TOOL_JSON: ToolSchema[] = [
     function: {
       name: "set_group_notice",
       description:
-        "写本群公告（全局段）：整体干什么、谁管哪段、接缝在哪、共享写入点归谁。用户点「让风铃起草」时用它落草稿；分工或接缝变了也用它更新。写完群里每个人看得见，你每轮也看得见（接缝没人接是并行协作的头号事故，所以它得是群级事实）。",
+        "写本群公告（全局段）：整体干什么、谁管哪段、接缝在哪、共享写入点归谁。公告是你自己的活，不用等用户让你写——第一次派活前先写一版；分工或接缝变了也用它更新。写完群里每个人看得见，你每轮也看得见（接缝没人接是并行协作的头号事故，所以它得是群级事实）。",
       parameters: {
         type: "object",
         required: ["text"],
@@ -1141,7 +1142,9 @@ export class Kernel {
       // 审计 #3：L1 插件一律隔离进程加载（agent/l1-worker.mjs）——崩溃不带内核、超时强杀。
       // LYNN_L1_INPROC=1 退回进程内直跑（排障逃生口；测试环境也用它保持旧行为）。
       workerEntry:
-        process.env.LYNN_L1_INPROC === "1" ? undefined : path.resolve(__dirname, "..", "..", "agent", "l1-worker.mjs"),
+        process.env.LYNN_L1_INPROC === "1"
+          ? undefined
+          : unpackedPath(path.resolve(__dirname, "..", "..", "agent", "l1-worker.mjs")),
     });
     this.pluginHost.attachL1(this.l1);
     this.tools = new ManagementTools(this.teamStore, dataRoot);
@@ -2323,20 +2326,25 @@ export class Kernel {
 
   // ---------- Pi RPC 初始化（M0-03：独立进程；不可用则降级直连） ----------
 
-  /** Pi 官方 RPC 入口（基座原样，不 patch / 不 fork）；风铃逻辑全在 --extension 插件里 */
+  /**
+   * Pi 官方 RPC 入口（基座原样，不 patch / 不 fork）；风铃逻辑全在 --extension 插件里。
+   * 三条路径都要过 unpackedPath：它们会交给没有 asar 补丁的子进程（见 unpack-path.ts）。
+   */
   private get rpcEntryPath(): string {
-    return path.join(
-      __dirname, "..", "..", "node_modules", "@earendil-works", "pi-coding-agent", "dist", "bundle", "rpc-entry.js",
+    return unpackedPath(
+      path.join(
+        __dirname, "..", "..", "node_modules", "@earendil-works", "pi-coding-agent", "dist", "bundle", "rpc-entry.js",
+      ),
     );
   }
 
   private get piExtensionPath(): string {
-    return path.join(__dirname, "..", "..", "agent", "extensions", "lynn-bridge.mjs");
+    return unpackedPath(path.join(__dirname, "..", "..", "agent", "extensions", "lynn-bridge.mjs"));
   }
 
   /** 旧自建协议：只作为一键回退（LYNN_USE_LEGACY_RPC=1），不再默认使用 */
   private get legacyEntryPath(): string {
-    return path.join(__dirname, "..", "..", "agent", "pi-rpc-entry.mjs");
+    return unpackedPath(path.join(__dirname, "..", "..", "agent", "pi-rpc-entry.mjs"));
   }
 
   private get useOfficialRpc(): boolean {
@@ -6909,6 +6917,19 @@ export class Kernel {
     return { round, timeline };
   }
 
+  /**
+   * 这支队伍绑在哪个群（读 team.json；读不到/没绑定都给 undefined）。
+   * 老工单没记 threadId 时用它兜出群归属——没有归属的单会被渲染层当成"本群"，
+   * 于是新建的群也会冒出别群的活（2026-11-16）。
+   */
+  private teamThreadOf(teamId: string): string | undefined {
+    try {
+      return this.teamStore.readTeam(teamId).threadId;
+    } catch {
+      return undefined;
+    }
+  }
+
   private buildTrack(): BoardData["track"] {
     const dir = path.join(this.dataRoot, "team");
     const track: BoardData["track"] = [];
@@ -6947,7 +6968,8 @@ export class Kernel {
             statusNote: task.statusNote ?? `${task.status} · ${task.member ?? "风铃"} · 证据 ${task.evidence.length}`,
             member: task.member ?? last.member,
             at: task.updatedAt,
-            threadId: task.threadId,
+            // 老工单可能没记派单时的群：按团队绑定的群兜（否则新群会把它当本群单）
+            threadId: task.threadId ?? this.teamThreadOf(task.teamId),
             readRoots: task.readRoots,
             workspaceRoot: task.workspaceRoot,
             evidenceCount: task.evidence.length,
@@ -6964,27 +6986,16 @@ export class Kernel {
           });
           continue;
         }
-        // 旧记录（无权威工单）：按最后一条记录派生，等任务卷宗迁移后消失
-        const status =
-          last.kind === "accept"
-            ? "done"
-            : last.kind === "escalate"
-              ? "blocked"
-              : last.kind === "report"
-                ? "in_review"
-                : "in_progress";
-        const evidenceCount = recs.reduce((n, r) => n + (r.evidence?.length ?? 0), 0);
-        const firstAssign = recs.find((r) => r.kind === "assign");
-        track.push({
-          id: taskId,
-          teamId: entry.name,
-          title: this.taskTitle(taskId, firstAssign?.text),
-          status,
-          statusNote: `${last.kind} · ${last.member ?? "风铃"} · ${last.text.slice(0, 30)}`,
-          member: last.member,
-          at: last.at,
-          evidenceCount,
-        });
+        /**
+         * 只剩派单账本、没有权威工单 = 这张单已经被删掉了（删单/删群/清数据根），
+         * 账本只是没来得及跟着清的死记录（2026-11-16）。
+         *
+         * 此前这里会按最后一条账本记录「派生」一张工单：状态是猜的、标题退回工单号、
+         * **没有群归属**——渲染层把"没有 threadId"当本群，于是任务与它的群都消失了，
+         * 它还能在每个群（包括刚新建的群）顶一张「等你拍板」，点验收必然失败。
+         * 台账的权威来源是任务卷宗（tasks.json），卷宗没了这张单就不存在：不派生。
+         */
+        continue;
       }
     }
     // 兜底：有权威工单却没有派单账本的（手工建单 / 迁移 / 账本被删）也要出现在台账上，
@@ -7000,7 +7011,7 @@ export class Kernel {
         statusNote: task.statusNote ?? `${task.status} · ${task.member ?? "风铃"} · 证据 ${task.evidence.length}`,
         member: task.member,
         at: task.updatedAt,
-        threadId: task.threadId,
+        threadId: task.threadId ?? this.teamThreadOf(task.teamId),
         readRoots: task.readRoots,
         workspaceRoot: task.workspaceRoot,
         evidenceCount: task.evidence.length,
@@ -7016,18 +7027,6 @@ export class Kernel {
     }
     // 只读派生：轮次与状态时间线供详情区展示；不改变任何工单状态，也不写卷宗。
     return track.reverse().map((t) => ({ ...t, ...this.trackTimeline(t.id) }));
-  }
-
-  /** 工单标题：优先用派单简报首行，退化到工单号（不编造） */
-  private taskTitle(taskId: string, briefJson?: string): string {
-    if (!briefJson) return taskId;
-    try {
-      const parsed = JSON.parse(briefJson) as { brief?: string };
-      const first = (parsed.brief ?? "").split("\n")[0]?.trim();
-      return first ? cleanTaskTitle(first, taskId) : taskId;
-    } catch {
-      return taskId;
-    }
   }
 
   private buildBoard(): BoardData {
@@ -7551,12 +7550,10 @@ export class Kernel {
         setCurrentThreadId: (id) => {
           this.currentThreadId = id;
         },
-        isBusy: () => this.busy,
         switchThread: (id) => this.switchThread(id),
         persistThread: () => this.persistThread(),
         enterEmptySession: () => this.enterEmptySession(),
         purgeThreadTasks: (id) => this.purgeThreadTasks(id),
-        submitTurn: (text, att, opts) => this.submitTurn(text, att, opts),
       });
     }
     return this.threadRpcCache;
@@ -7748,7 +7745,6 @@ export class Kernel {
       rename: (p) => t.rename(p) as RpcContracts["thread.rename"]["result"],
       pin: (p) => t.pin(p) as RpcContracts["thread.pin"]["result"],
       announce: (p) => t.announce(p) as RpcContracts["thread.announcement"]["result"],
-      draftNotice: (p) => t.draftNotice(p) as RpcContracts["thread.draftNotice"]["result"],
       remove: (p) => t.remove(p) as RpcContracts["thread.remove"]["result"],
       search: (p) => t.search(p) as RpcContracts["thread.search"]["result"],
     };
@@ -8904,7 +8900,7 @@ export class Kernel {
         return { ok: true, restored: r.restored.length, removed: r.removed.length } as RpcContracts[M]["result"];
       }
 
-      // ---------- 对话面 RPC：list/new/switch/rename/pin/announcement/draftNotice/remove/search ----------
+      // ---------- 对话面 RPC：list/new/switch/rename/pin/announcement/remove/search ----------
       // 已迁移到 rpc-registry.ts 的 threads 域（2026-11-16 第二批）。
       // thread.halt 留在下面：它要停成员、断回合、清待验收，属跨域编排，不是域内查询。
 

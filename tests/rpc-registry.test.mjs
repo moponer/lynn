@@ -22,7 +22,6 @@ const HANDLER_OF = {
   "thread.rename": ["threads", "rename"],
   "thread.pin": ["threads", "pin"],
   "thread.announcement": ["threads", "announce"],
-  "thread.draftNotice": ["threads", "draftNotice"],
   "thread.remove": ["threads", "remove"],
   "thread.search": ["threads", "search"],
   "calendar.add": ["calendar", "add"],
@@ -90,7 +89,6 @@ function fakeDeps() {
         "rename",
         "pin",
         "announce",
-        "draftNotice",
         "remove",
         "search",
       ]),
@@ -105,7 +103,8 @@ function fakeDeps() {
   };
 }
 
-test("五批共 39 个方法都注册了，未迁移的方法不在注册表里", () => {
+// 2026-11-16：thread.draftNotice 随「让风铃起草」按钮一起删除（38 个方法）
+test("五批共 38 个方法都注册了，未迁移的方法不在注册表里", () => {
   const { deps } = fakeDeps();
   const registry = buildKernelRegistry(deps);
   assert.deepEqual([...registry.methods()].sort(), [...ALL].sort());
