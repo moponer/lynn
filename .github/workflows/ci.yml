@@ -21,6 +21,20 @@ jobs:
           cache: npm
       - run: npm ci
       # typecheck（渲染层 + 主进程）→ oxlint → 设计规范 → 全量测试（含主进程构建）
-      - run: npm run verify
+      # 失败时把日志尾部的关键行打成 ::error:: 注解：GitHub 的 job log 需要登录才能下载，
+      # 注解可以匿名读取，排障不必登录。
+      - name: verify
+        shell: pwsh
+        run: |
+          npm run verify 2>&1 | Tee-Object -FilePath verify.log
+          if ($LASTEXITCODE -ne 0) {
+            $hits = Select-String -Path verify.log -Pattern '✖|^error TS|npm error|AssertionError|Error:' | Select-Object -Last 8
+            if (-not $hits) { $hits = Get-Content verify.log -Tail 8 }
+            foreach ($h in $hits) {
+              $line = if ($h.Line) { $h.Line } else { $h }
+              Write-Host "::error::$($line -replace '[%\r\n]', ' ')"
+            }
+            exit 1
+          }
       # 干净仓库再覆盖渲染层构建，防止素材或静态资源缺失回潮
       - run: npm run build:renderer
