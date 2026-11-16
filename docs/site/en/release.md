@@ -6,7 +6,8 @@
 npm run dist   # electron-builder → release/Lynn-<version>-setup.exe (NSIS, x64)
 ```
 
-- asar is disabled (the RPC subprocess needs real file paths to load Pi ESM packages — trading size for stability).
+- asar is enabled (2026-11-16): the main process rewrites script paths handed to child processes into `app.asar.unpacked` via `unpackedPath()`, and `agent/**`, `@earendil-works/**`, `typebox/**`, `jiti/**`, `node-screenshots*/**` are listed in `asarUnpack`. Installer 146.3 → 142.5 MB, unpacked file count 7588 → 2274.
+- On slow networks to GitHub, use `npm run dist:cn` (bundled electron mirror + cleaned `NODE_OPTIONS` for child processes). See the README "打包" section.
 - App data lives in `~/.lynn`, separate from the install dir; upgrades and uninstalls keep it.
 
 ## Signing (not yet — stated as-is)

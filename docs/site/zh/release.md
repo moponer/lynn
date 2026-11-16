@@ -6,7 +6,8 @@
 npm run dist   # electron-builder → release/Lynn-<version>-setup.exe（NSIS，x64）
 ```
 
-- asar 已关闭（RPC 子进程需要真文件路径加载 Pi ESM 包，体积换稳定）。
+- asar 已开启（2026-11-16）：主进程用 `unpackedPath()` 把交给子进程的脚本路径改写到 `app.asar.unpacked`，`agent/**`、`@earendil-works/**`、`typebox/**`、`jiti/**`、`node-screenshots*/**` 走 `asarUnpack`。安装包 146.3 → 142.5 MB，解包文件数 7588 → 2274。
+- 国内网络打包用 `npm run dist:cn`（内置 electron 镜像 + 对子进程清空 `NODE_OPTIONS`）；细节见仓库 README「打包」。
 - 应用数据目录 `~/.lynn` 独立于安装目录，升级 / 卸载不清数据。
 
 ## 签名（未做，如实注明）
