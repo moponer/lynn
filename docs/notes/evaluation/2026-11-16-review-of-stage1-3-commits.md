@@ -2,7 +2,7 @@
 
 **日期**：2026-11-16
 **范围**：远程本轮 5 个提交（2026-11-15 夜间推送）
-**结论**：功能整体可用，但有一个 P0 功能缺陷（Office 预览整条链路跑不通）与一个形式化重构（kernel 拆域只搬了 6 个透传方法）；共修 3 类问题、迁移 31 个 RPC 到注册表。
+**结论**：功能整体可用，但有一个 P0 功能缺陷（Office 预览整条链路跑不通）与一个形式化重构（kernel 拆域只搬了 6 个透传方法）；共修 5 类问题、迁移 39 个 RPC 到注册表，并补上读后写保护。
 
 ---
 
@@ -48,17 +48,22 @@ chrome, chrome-extension, chrome-untrusted, data, http, https.
 | 测试改动里新增的 `registry.register` 匹配是死代码（kernel.ts 里 0 次出现） | 删除；改为运行时断言注册表 `has/methods/handle` |
 | kernel.ts 缩进被改成 7 空格、留"墓碑注释" | 清理 |
 
-**后续两批**（本次补）：把纯域方法真正搬出 switch，kernel.ts 9268 → 9142 行：
+**后续三批**：把纯域方法真正搬出 switch，kernel.ts 9268 → 9154 行：
 
 - 第二批 `thread.*` 九件（`thread.halt` 留在 kernel：停成员、断回合、清待验收属跨域编排）
 - 第三批 `calendar.*` 七件 / `schedule.*` 五件 / `kb.*` 四件 → `rpc/calendar-rpc.ts`、`rpc/schedule-rpc.ts`、`rpc/kb-rpc.ts`
-- 注册表累计 31 个方法，`RpcDeps` 按域注入，任一域都不持有 Kernel 实例
+- 第五批（本次）`data.usage` / `data.cleanup` / `config.clearKey` / `config.vision.*` / `ui.plugins` / `humanizer.status` 八件
+- 注册表累计 39 个方法，`RpcDeps` 按域注入，任一域都不持有 Kernel 实例
+- `config.save` / `config.test` **有意留在 kernel**：它们要过端点风险闸、复用已存 Key 解密，搬进域只会多一层注入而不减风险，记在这里免得后人以为漏了
 
 ## 四、其它已修
 
 - `redactSecrets` 原先在 `endpoint.ts` 与 `memory.ts` 各写一份、覆盖的令牌形态不同（前者 Bearer/`xx key=`，后者 ghp_/xox/AKIA）。已合并到 `src/shared/redact.ts`，并修掉 `max_tokens`/`total_tokens` 这类计数键被误打码的问题。
 - 全局错误条复用 `.stale-bar` 的铜色图标（读作"提示"），改为 `err-bar` 用红线色；关闭按钮的 `aria-label` 走 i18n。
 - OfficePane 每次挂载都整块复制一份字节（8MB 级），改为整块复用、仅 subarray 才切。
+- 右下角两条提示（版本握手 / 全局错误）改为 `.toast-stack` 列容器堆叠：原先靠各自写死 `bottom: 64 / 16` 错开，错误文案一换行就压到上一条。
+- **读后写保护**（`Toolkit.assertFresh`）：`read_file` 记下 mtime/size，`write_file` / `edit_file` / patch 写前比对——读过之后文件被外部改过就拒绝盲写并提示重读；没读过的文件维持"整份覆盖"原行为，不打断正常创作。局限：保留 mtime 且同字节数的改写能绕过（不做全文哈希，那等于每次写多读一遍）。
+- 打包配置排除 `dist/_tmp/**`：本机验证脚本会把 preload 探针与截图写在那里，不该跟着安装包发出去。
 
 ## 五、交接文档的不实之处（以代码为准）
 
@@ -73,10 +78,27 @@ chrome, chrome-extension, chrome-untrusted, data, http, https.
 
 - `typecheck` 0（main + renderer）、`oxlint` 0、`lint:design` 通过
 - `build:main` + `build:renderer` 通过
-- 全量测试绿（含新增 `tests/redact.test.mjs` 4 条、`tests/rpc-registry.test.mjs` 覆盖 31 方法、`p1-shell-evidence-pet` 的 Office 通道防漂移断言）
+- 全量测试绿（含新增 `tests/redact.test.mjs` 4 条、`tests/toolkit-cas.test.mjs` 6 条、`tests/rpc-registry.test.mjs` 覆盖 39 方法、`p1-shell-evidence-pet` 的 Office 通道防漂移断言）
 
-## 七、仍开放（未做）
+## 七、8MB 字节过 IPC 的实测数据（2026-11-16）
 
-1. 写文件仍是"整份覆盖"，没有 ZCode 式 read-file-state + CAS（改前校验文件是否被别人改过）。
-2. 大文件经 IPC 传 TypedArray 的峰值内存未实测（8MB 上限内应在可接受范围，但没有压测数据）。
-3. `stale-bar` 与 `err-bar` 共用版式，两者同时出现时只靠 `bottom` 错开，未做堆叠布局。
+真实 Electron 窗口（`contextIsolation: true`，与生产一致），`ipcMain.handle` 返回 `Uint8Array`，
+经 `ipcRenderer.invoke` → `contextBridge` 回到页面：
+
+| 轮次 | 总耗时 | 单次 | 渲染进程 workingSet |
+|---|---|---|---|
+| 1 次 | 17 ms | 17 ms | 73 → 87 MB（+14） |
+| 5 次 | 93 ms | 18.6 ms | 73 → 115 MB（+42） |
+| 20 次 | 454 ms | 22.7 ms | 72 → 159 MB（+87，含未回收） |
+
+同一轮验证了 contextBridge 不会拍平 TypedArray：`Object.prototype.toString` 仍是 `[object Uint8Array]`，
+长度 8388608，首尾字节与源数据一致（80 / 75）。结论：8MB 上限下 Office 预览的字节通道可用，
+单次 17–23 ms；连续多次会累积未回收内存，正常使用（一次预览一份）不构成问题。
+
+## 八、仍开放
+
+1. CAS 有局限（保留 mtime + 同字节数改写绕得过）；要更强就得落全文哈希或 mtime 之外的文件 id。
+2. kernel.ts 仍有 63 个 case 在 switch 里：task(14) / team(9) / config(6) / session(6) / project(5) /
+   plugins(5) / workshop(5) / memory(5) / workspace(5) 等。这些域的依赖重、编排跨域，
+   适合按域一批一批搬，不适合为了行数硬拆。
+3. 安装包体积（`npm run dist`）本次未重新实测，`-27.6%` 仍是上一轮的估算口径。

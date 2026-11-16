@@ -2329,9 +2329,19 @@ button.ev:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 .thread-act:focus-visible { outline: 1.5px solid var(--blue); outline-offset: 1px; }
 .thread-rename { flex: 1; min-width: 0; }
 
-/* ---------- 版本握手提示（界面新、内核旧）：右下角提示卡，不压顶栏与图纸 ---------- */
+/* ---------- 右下角提示堆叠（2026-11-16）：版本握手与全局错误条共用一列，按内容各自长高 ----------
+   以前两条各自写死 bottom（64 / 16），错误文案一换行就压到上面那条；现在由列容器统一排。 */
+.toast-stack {
+  position: fixed; right: 16px; bottom: 16px; z-index: 80;
+  display: flex; flex-direction: column; align-items: flex-end; gap: 8px;
+  max-width: min(430px, calc(100vw - 32px));
+  pointer-events: none;
+}
+.toast-stack > * { pointer-events: auto; }
+
+/* ---------- 版本握手提示（界面新、内核旧）：不压顶栏与图纸 ---------- */
 .stale-bar {
-  position: fixed; right: 16px; bottom: 64px; z-index: 80; max-width: 430px;
+  position: static; max-width: 100%;
   display: flex; align-items: center; gap: 8px;
   padding: 8px 11px; border-radius: var(--r-m);
   background: var(--sheet); color: var(--ink-2);

@@ -347,6 +347,8 @@ export function findPathEscape(command: string, root: string, extraRoots: string
 export class Toolkit {
   private queues = new Map<string, Promise<unknown>>();
   private changeLog: FileChange[] = [];
+  /** 读过的文件状态（绝对路径 → mtime/size），写前比对用；见 assertFresh */
+  private observed = new Map<string, { mtimeMs: number; size: number }>();
   private readonly root: string;
   private readonly commandTimeoutMs: number;
   private readonly outputCap: number;
@@ -481,6 +483,39 @@ export class Toolkit {
   }
 
   /**
+   * 读后写保护（2026-11-16，ZCode 式 CAS 的轻量版）：只对「本实例读过」的文件生效。
+   * 读过之后被外部改动（mtime 或 size 变了）就拒绝盲写——人要先 read_file 看清现状。
+   * 没读过的文件保持原行为（整份覆盖），不打断"直接写一个新文件/整篇重写"的正常创作。
+   * 已知局限：保留 mtime 且同字节数的改写能绕过去；这里不做全文哈希，
+   * 因为那等于每次写都多读一遍（8MB 级文件不划算），而这类改写不是本产品的主要风险。
+   */
+  private assertFresh(full: string, rel: string): void {
+    const seen = this.observed.get(full);
+    if (!seen) return;
+    let st: fs.Stats;
+    try {
+      st = fs.statSync(full);
+    } catch {
+      return; // 文件被删：按新建处理，允许写
+    }
+    if (st.mtimeMs !== seen.mtimeMs || st.size !== seen.size) {
+      throw new Error(
+        `拒绝覆盖 ${rel}：你读过之后这个文件又被改过（可能是用户或另一个进程）。先 read_file 看清现状，再决定怎么写。`,
+      );
+    }
+  }
+
+  /** 读完/写完记下状态；写后必须更新，否则同一轮连续写两次会被自己的 CAS 挡住 */
+  private markObserved(full: string): void {
+    try {
+      const st = fs.statSync(full);
+      this.observed.set(full, { mtimeMs: st.mtimeMs, size: st.size });
+    } catch {
+      this.observed.delete(full);
+    }
+  }
+
+  /**
    * 工作区可读写，但**不写项目元数据**：`.git/`（版本库内部）与 `.lynn/`（风铃的项目配置/技能）
    * 不归成员改——改这两个等于改历史或改她自己的行为。
    */
@@ -552,6 +587,8 @@ export class Toolkit {
     const stat = fs.statSync(full);
     if (stat.isDirectory()) throw new Error(`${rel} 是目录，请用 list_dir`);
     const buf = fs.readFileSync(full);
+    // 记下"读到的是哪一版"：之后写入前会比对，别人中途改了要重读（assertFresh）
+    this.markObserved(full);
     // PDF（2026-11-14）：交给 pdfjs 提文本。扫描件提不出来就如实说——别把二进制当文本吐给模型
     if (buf.length > 5 && buf.subarray(0, 5).toString("latin1") === "%PDF-") {
       return this.readPdf(rel, buf);
@@ -607,11 +644,13 @@ export class Toolkit {
     const full = resolveWithin(this.root, rel);
     this.assertWritable(full);
     return this.serialize(full, () => {
+      this.assertFresh(full, rel);
       const existed = fs.existsSync(full);
       const before = existed ? fs.readFileSync(full, "utf-8") : "";
       this.onBeforeWrite?.(rel, full, existed);
       fs.mkdirSync(path.dirname(full), { recursive: true });
       fs.writeFileSync(full, content, "utf-8");
+      this.markObserved(full);
       const c = this.record(rel, before, content);
       return `已写入 ${rel}（${Buffer.byteLength(content, "utf-8")} 字节，+${c.added}/-${c.removed}）\n${c.diff}`;
     });
@@ -632,11 +671,13 @@ export class Toolkit {
     this.assertWritable(full);
     return this.serialize(full, () => {
       if (!fs.existsSync(full)) throw new Error(`文件不存在：${rel}`);
+      this.assertFresh(full, rel);
       const before = fs.readFileSync(full, "utf-8");
       if (!before.includes(oldStr)) throw new Error(`没找到要替换的原文（${oldStr.slice(0, 40)}…）。先 read_file 再改。`);
       this.onBeforeWrite?.(rel, full, true);
       const after = all ? before.split(oldStr).join(newStr) : before.replace(oldStr, newStr);
       fs.writeFileSync(full, after, "utf-8");
+      this.markObserved(full);
       const c = this.record(rel, before, after);
       return `已改 ${rel}（+${c.added}/-${c.removed}）\n${c.diff}`;
     });
@@ -648,6 +689,7 @@ export class Toolkit {
     this.assertWritable(full);
     return this.serialize(full, () => {
       if (!fs.existsSync(full)) throw new Error(`文件不存在：${rel}（新建请用 write_file）`);
+      this.assertFresh(full, rel);
       const before = fs.readFileSync(full, "utf-8");
       const after = applyPatch(before, patch, { fuzzFactor: 2 });
       if (after === false) {
@@ -658,6 +700,7 @@ export class Toolkit {
       if (after === before) return `补丁没有产生任何改动：${rel}（检查 @@ 行号与内容是否一致）`;
       this.onBeforeWrite?.(rel, full, true);
       fs.writeFileSync(full, after, "utf-8");
+      this.markObserved(full);
       const c = this.record(rel, before, after);
       return `已打补丁 ${rel}（+${c.added}/-${c.removed}）\n${c.diff}`;
     });

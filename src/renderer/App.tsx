@@ -950,40 +950,50 @@ export default function App() {
     <I18nProvider strings={i18nStrings}>
       {/* 确认卡片宿主：所有"做了就回不去"的动作都走这一张卡（2026-11-15） */}
       <AskHost />
-      {staleBackend && (
-        <div className="stale-bar" role="status">
-          <Icon name="warn" size="sm" />
-          <span>{i18nStrings["app.stale"] ?? "后台是旧版本（界面已更新，内核还没重启）：新加的操作可能不生效。"}</span>
-          <button
-            type="button"
-            className="ghost-btn"
-            onClick={() => {
-              void rpc("app.restart").catch(() => setStaleBackend(false));
-            }}
-          >
-            {i18nStrings["app.restart"] ?? "重启应用"}
-          </button>
-          <button type="button" className="icon-btn" onClick={() => setStaleBackend(false)} aria-label="close">
-            <Icon name="x" size="sm" />
-          </button>
-        </div>
-      )}
-      {/* 全局错误条（2026-11-15）：发送/裁决等失败必须值台、审查台、控制台都看得见——
-          此前只挂在值台输入框下面，审查台与控制台里失败等于静默。
-          版式复用 stale-bar，但 err-bar 把图标换成红线色：铜色读作"提示"，出事要一眼看出来。
-          固定在右下、与旧版本提示条错开高度；关闭按钮的说明走 i18n（不露英文 aria-label）。 */}
-      {notice && (
-        <div className="stale-bar err-bar" role="alert" style={{ bottom: 16 }}>
-          <Icon name="warn" size="sm" />
-          <span>{notice}</span>
-          <button
-            type="button"
-            className="icon-btn"
-            onClick={() => setNotice(null)}
-            aria-label={i18nStrings["common.close"] ?? "关闭"}
-          >
-            <Icon name="x" size="sm" />
-          </button>
+      {/* 右下角提示堆叠（2026-11-16）：版本提示与错误条同时出现时按列排、按内容各自长高，
+          不再靠两条各自写死 bottom 错开（错误文案换行变高就会压到上一条）。
+          两条都复用 stale-bar 骨相；err-bar 把图标换成红线色——铜色读作"提示"，出事要一眼看出来。 */}
+      {(staleBackend || notice) && (
+        <div className="toast-stack">
+          {staleBackend && (
+            <div className="stale-bar" role="status">
+              <Icon name="warn" size="sm" />
+              <span>{i18nStrings["app.stale"] ?? "后台是旧版本（界面已更新，内核还没重启）：新加的操作可能不生效。"}</span>
+              <button
+                type="button"
+                className="ghost-btn"
+                onClick={() => {
+                  void rpc("app.restart").catch(() => setStaleBackend(false));
+                }}
+              >
+                {i18nStrings["app.restart"] ?? "重启应用"}
+              </button>
+              <button
+                type="button"
+                className="icon-btn"
+                onClick={() => setStaleBackend(false)}
+                aria-label={i18nStrings["common.close"] ?? "关闭"}
+              >
+                <Icon name="x" size="sm" />
+              </button>
+            </div>
+          )}
+          {/* 全局错误条：发送/裁决等失败必须值台、审查台、控制台都看得见——
+              此前只挂在值台输入框下面，审查台与控制台里失败等于静默。 */}
+          {notice && (
+            <div className="stale-bar err-bar" role="alert">
+              <Icon name="warn" size="sm" />
+              <span>{notice}</span>
+              <button
+                type="button"
+                className="icon-btn"
+                onClick={() => setNotice(null)}
+                aria-label={i18nStrings["common.close"] ?? "关闭"}
+              >
+                <Icon name="x" size="sm" />
+              </button>
+            </div>
+          )}
         </div>
       )}
       {ConsoleHost ? (

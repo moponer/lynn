@@ -13,6 +13,9 @@ asar: false
 
 files:
   - dist/**/*
+  # 本地验证脚本会把 preload 探针与截图写进 dist/_tmp（scripts/preview-shot.cjs 等）：
+  # 那是本机调试产物，不能跟着安装包发出去（截图里可能带着用户的界面内容）。
+  - "!dist/_tmp/**"
   - agent/**/*
   - assets/**/*
   # 桌宠暂时停用（2026-11-15）：素材已移出仓库，即使本地归档被放回原位也不打进安装包
