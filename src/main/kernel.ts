@@ -89,7 +89,6 @@ import {
 } from "./skills";
 import { probeSoffice, readTable, writeTable, type EngineHealth } from "./office";
 import { BrowserController, sensitiveUrl } from "./browser";
-import { COMPLIANCE_NOTE, loadMessaging, type ChannelConfig } from "./messaging";
 import { TeamStore, effectiveToolsOf, generateTeamId, type MemberProfile } from "./team-store";
 import {
   MEMBER_WORK_STYLE_BODY,
@@ -10238,18 +10237,8 @@ export class Kernel {
       }
 
       // 清 Key / 视觉/OCR 模型（M2-13）已迁到 rpc-registry.ts 的 config 域
-      // 消息平台（M2-16）：合规口径与状态在 handle；configure/send 是异步网络操作，在壳层（main.ts）
-      case "msg.status": {
-        const cfg = loadMessaging(this.dataRoot);
-        const view = (c?: ChannelConfig) =>
-          c ? { appId: c.appId, enabled: c.enabled, updatedAt: c.updatedAt } : null;
-        return {
-          compliance: COMPLIANCE_NOTE,
-          feishu: view(cfg.feishu),
-          qq: view(cfg.qq),
-          receiveSupported: false,
-        } as RpcContracts[M]["result"];
-      }
+      // 消息平台（M2-16）已于 2026-11-18 移除：它只能发不能收（receiveSupported: false），
+      // 是半成品。IM 能力改由插件提供（见 docs/plan/30-dsh-im-port-plan.md）。
 
       case "trust.set": {
         const { trusted } = params as { trusted: boolean };

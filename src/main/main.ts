@@ -8,17 +8,6 @@ import { createCaptureHost } from "./capture-host";
 import { defaultDataRoot } from "./settings";
 import { resolveFeedUrl, feedUrlIssue, transition, type UpdateState } from "./updater";
 import { newRendererLogGate, RENDERER_LOG_LIMITS, rendererLogGate } from "./log-policy";
-import {
-  COMPLIANCE_NOTE,
-  configureChannel,
-  feishuSend,
-  loadMessaging,
-  qqSend,
-  resolveEnabledChannel,
-  saveMessaging,
-  type ChannelConfig,
-  type TokenCache,
-} from "./messaging";
 import { trayFallbackBuffer, trayIconPaths } from "./tray-icon";
 import { needsUserAttention } from "./notify-policy";
 import { VoiceService } from "./voice";
@@ -300,42 +289,8 @@ function bindUpdater(): void {
   autoUpdater.setFeedURL({ provider: "generic", url: feed });
 }
 
-// 消息平台（M2-16）：合规路径——官方 API + 用户自建应用；凭据加密落盘
-const msgTokenCache: Record<"feishu" | "qq", TokenCache> = { feishu: {}, qq: {} };
-
-function decryptSecret(secret: ChannelConfig["secret"]): string {
-  return secret.encrypted ? safeStorage.decryptString(Buffer.from(secret.data, "base64")) : secret.data;
-}
-
-async function handleMsgRpc(method: string, params: Record<string, unknown>): Promise<unknown> {
-  if (method === "msg.configure") {
-    const p = params as { channel: "feishu" | "qq"; appId: string; appSecret?: string; enable?: boolean };
-    const encrypt: (plain: string) => ChannelConfig["secret"] = (plain) =>
-      safeStorage.isEncryptionAvailable()
-        ? { encrypted: true, data: safeStorage.encryptString(plain).toString("base64") }
-        : { encrypted: false, data: plain };
-    const r = configureChannel(loadMessaging(kernel.dataRoot), p.channel, p, encrypt);
-    if (!r.ok) return { ok: false, error: r.error };
-    saveMessaging(kernel.dataRoot, r.next);
-    return { ok: true, compliance: COMPLIANCE_NOTE };
-  }
-
-  // msg.send
-  const p = params as { channel: "feishu" | "qq"; receiveId: string; text: string };
-  const guard = resolveEnabledChannel(loadMessaging(kernel.dataRoot), p.channel);
-  if (!guard.ok) return { ok: false, error: guard.error };
-  const secret = decryptSecret(guard.ch.secret);
-  try {
-    return p.channel === "feishu"
-      ? await feishuSend({ appId: guard.ch.appId, appSecret: secret }, String(p.receiveId), String(p.text), globalThisFetch, msgTokenCache.feishu)
-      : await qqSend({ appId: guard.ch.appId, appSecret: secret }, String(p.receiveId), String(p.text), globalThisFetch, msgTokenCache.qq);
-  } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
-  }
-}
-
-const globalThisFetch = ((url: string, init?: { method?: string; headers?: Record<string, string>; body?: string }) =>
-  fetch(url, init as RequestInit)) as never;
+// 消息平台（M2-16）已于 2026-11-18 移除：只能发不能收的半成品。
+// IM 能力改由插件提供，见 docs/plan/30-dsh-im-port-plan.md。
 
 async function handleUpdateRpc(method: string): Promise<unknown> {
   // update.check 可能在这里才补配 feed；幂等初始化必须先于任何 feed 校验。
@@ -562,7 +517,6 @@ app.whenReady().then(async () => {
     focusMain,
     captureHost,
     voice,
-    handleMsg: handleMsgRpc,
     handleUpdate: handleUpdateRpc,
   };
   ipcMain.handle("lynn:rpc", async (_event, method: string, params: unknown) => {

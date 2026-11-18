@@ -1196,24 +1196,13 @@ export interface RpcContracts {
       error?: string;
     };
   };
-  /** 消息平台（M2-16）：合规路径（官方 API + 用户自建应用）；收消息未实现如实标注 */
-  "msg.status": {
-    params: void;
-    result: {
-      compliance: string;
-      feishu: { appId: string; enabled: boolean; updatedAt: string } | null;
-      qq: { appId: string; enabled: boolean; updatedAt: string } | null;
-      receiveSupported: boolean;
-    };
-  };
-  "msg.configure": {
-    params: { channel: "feishu" | "qq"; appId: string; appSecret?: string; enable?: boolean };
-    result: { ok: boolean; compliance?: string; error?: string };
-  };
-  "msg.send": {
-    params: { channel: "feishu" | "qq"; receiveId: string; text: string };
-    result: { ok: boolean; error?: string };
-  };
+  /**
+   * msg.* 已于 2026-11-18 移除。
+   *
+   * 原实现只有 feishuSend / qqSend——**只能发不能收**（`msg.status` 自己就写着
+   * `receiveSupported: false`），是半成品。IM 能力改由插件提供，
+   * 见 docs/plan/30-dsh-im-port-plan.md。
+   */
   /** MCP 扩展服务器（L2）：配置里有什么 + 实际连上没连上，两个都如实报 */
   "mcp.status": {
     params: void;

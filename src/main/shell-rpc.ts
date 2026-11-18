@@ -39,7 +39,6 @@ export interface ShellRpcCtx {
     stop(): void;
     status(): unknown;
   };
-  handleMsg: (method: string, params: Record<string, unknown>) => Promise<unknown>;
   handleUpdate: (method: string) => Promise<unknown>;
 }
 
@@ -148,10 +147,8 @@ rpc("app.openExternal", async (params) => {
   }
 });
 
-// ---------- 消息平台（凭据加密在壳层 safeStorage） ----------
+// ---------- 消息平台已于 2026-11-18 移除（只能发不能收的半成品）----------
 
-rpc("msg.configure", (params, ctx) => ctx.handleMsg("msg.configure", params as Record<string, unknown>));
-rpc("msg.send", (params, ctx) => ctx.handleMsg("msg.send", params as Record<string, unknown>));
 
 // ---------- 插件试装（转发内核） ----------
 
