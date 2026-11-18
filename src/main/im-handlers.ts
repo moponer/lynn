@@ -34,8 +34,21 @@ export interface ImHostDeps {
   threadHistory(id: string): unknown[];
   /** 当前会话 id */
   currentThreadId(): string;
-  /** 发一轮消息；返回 promise，这一轮结束时 resolve（失败 reject） */
-  submitTurn(text: string, threadId?: string): Promise<void>;
+  /**
+   * 发一轮消息。
+   *
+   * **语义是"启动"**，不是"等完成"：Lynn 的 submitTurn 是 void + 流式，
+   * 它之后回答通过 `delta` 事件推给界面。
+   * 要等它结束，用 `waitTurn()`（见 turn-wait.ts）。
+   */
+  submitTurn(text: string, threadId?: string): void;
+  /**
+   * 等这一轮结束。
+   *
+   * 与 `submitTurn` 分开的原因：`submitTurn` 同步返回，之后才可能有 busy 事件；
+   * 合在一起会出现在"busy 还没置起来"时就误判完成的竞态。
+   */
+  waitTurn(): Promise<void>;
   /** 中断当前轮 */
   abortTurn(): void;
   /** 可用模型列表 */
@@ -52,8 +65,6 @@ export interface ImHostDeps {
   version(): string;
 }
 
-/** `session.prompt` 的默认超时：一轮对话可能跑很久（成员派单更久） */
-const PROMPT_TIMEOUT_MS = 10 * 60 * 1000;
 
 /** 明确的"不支持"：调用方要能区分"没实现"与"出错了" */
 function unsupported(method: string, why: string): never {
@@ -135,18 +146,18 @@ export function buildImHandlers(deps: ImHostDeps): Record<string, RpcHandler> {
       const text = String(p.text ?? "").trim();
       if (!text) throw new Error("text 不能为空");
       /**
-       * 超时保护：一轮对话可能因为模型慢而卡很久。
-       * 超时不是"失败"，是"还没完"——所以错误信息要说清这一点。
+       * 启动 + 等待要**分开两步**：
+       *
+       * 1. 先 `submitTurn` 把这一轮启动起来；
+       * 2. 再 `waitTurn` 等它结束。
+       *
+       * 不能反过来，也不能合并——`submitTurn` 同步返回，它之后的下一个事件
+       * 才可能是 `busy=true`。先等就会在 busy 还没置起来时误判"已完成"。
+       *
+       * 超时由 `waitTurn` 内部处理（它知道这一轮的真实时序）。
        */
-      await Promise.race([
-        deps.submitTurn(text, p.sessionId),
-        new Promise((_, reject) =>
-          setTimeout(
-            () => reject(new Error(`等这一轮超时（${PROMPT_TIMEOUT_MS / 60000} 分钟）——它可能还在跑，可以用 session.cancel 中断`)),
-            PROMPT_TIMEOUT_MS,
-          ),
-        ),
-      ]);
+      deps.submitTurn(text, p.sessionId);
+      await deps.waitTurn();
       return { ok: true };
     },
 

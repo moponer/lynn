@@ -39,8 +39,11 @@ function fakeDeps(over = {}) {
       return [{ role: "user", text: "你好" }];
     },
     currentThreadId: () => "t-1",
-    submitTurn: async (text, threadId) => {
+    submitTurn: (text, threadId) => {
       calls.push(["submitTurn", text, threadId]);
+    },
+    waitTurn: async () => {
+      calls.push(["waitTurn"]);
     },
     abortTurn: () => calls.push(["abortTurn"]),
     listModels: () => [
@@ -118,14 +121,26 @@ test("session.prompt：空 text 明确报错，不静默成功", async () => {
   await assert.rejects(() => h["session.prompt"]({ text: "   " }), /text 不能为空/);
 });
 
-test("session.prompt：内核抛错要透传出去（不吞）", async () => {
+test("session.prompt：waitTurn 抛错要透传出去（不吞）", async () => {
   const { deps } = fakeDeps({
-    submitTurn: async () => {
+    waitTurn: async () => {
       throw new Error("模型没配置");
     },
   });
   const h = buildImHandlers(deps);
   await assert.rejects(() => h["session.prompt"]({ text: "hi" }), /模型没配置/);
+});
+
+test("session.prompt：先启动再等待（顺序不能反）", async () => {
+  /**
+   * 顺序是这条链的关键：`submitTurn` 同步返回，它之后才可能有 busy 事件。
+   * 如果先 `waitTurn` 再 `submitTurn`，会在 busy 还没置起来时误判完成。
+   */
+  const { deps, calls } = fakeDeps();
+  const h = buildImHandlers(deps);
+  await h["session.prompt"]({ text: "hi" });
+  const order = calls.filter((c) => c[0] === "submitTurn" || c[0] === "waitTurn").map((c) => c[0]);
+  assert.deepEqual(order, ["submitTurn", "waitTurn"], `顺序错了：${order.join(" → ")}`);
 });
 
 test("session.cancel：调 abortTurn", () => {
