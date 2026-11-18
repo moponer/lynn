@@ -114,6 +114,7 @@ import { createThreadRpc, type ThreadRpc } from "./rpc/thread-rpc";
 import { createCalendarRpc, type CalendarRpc } from "./rpc/calendar-rpc";
 import { createScheduleRpc, type ScheduleRpc } from "./rpc/schedule-rpc";
 import { createKbRpc, type KbRpc } from "./rpc/kb-rpc";
+import { createTaskRpc, type TaskRpc, type TaskRpcDeps } from "./rpc/task-rpc";
 import {
   buildKernelRegistry,
   type CalendarRpcDeps,
@@ -123,6 +124,7 @@ import {
   type KbRpcDeps,
   type ModelRpcDeps,
   type RpcRegistry,
+  type TaskRpcDeps as TaskRpcContractDeps,
   type ScheduleRpcDeps,
   type ThreadRpcDeps,
   type UiRpcDeps,
@@ -8755,163 +8757,6 @@ export class Kernel {
     }
   }
 
-  /** task.cancel 的实现（2026-11-14 从 handle 的 switch 拆出） */
-  private rpcTaskCancel(params: unknown): unknown {
-    const { taskId } = params as { taskId: string };
-    return this.cancelMemberTask(String(taskId));
-  }
-
-  /** task.cancelAll 的实现（2026-11-14 从 handle 的 switch 拆出） */
-  private rpcTaskCancelAll(): unknown {
-    // C4：新会话提示卡上的一键止损；逐张停，失败的不假装成功（计数如实）
-    const ids = [...this.memberRuns.keys()];
-    let stopped = 0;
-    for (const id of ids) {
-      if (this.cancelMemberTask(id).ok) stopped += 1;
-    }
-    return { ok: true, stopped };
-  }
-
-  /** task.grantRead 的实现（2026-11-14 从 handle 的 switch 拆出） */
-  private rpcTaskGrantRead(params: unknown): unknown {
-    const { taskId, dir, dirs, allowDriveRoot } = params as {
-      taskId: string;
-      dir?: string;
-      dirs?: string[];
-      allowDriveRoot?: boolean;
-    };
-    const list = dirs?.length ? dirs : dir ? [dir] : [];
-    return this.grantReadRoots(String(taskId), list, { allowDriveRoot });
-  }
-
-  /** task.revokeRead 的实现（2026-11-14 从 handle 的 switch 拆出） */
-  private rpcTaskRevokeRead(params: unknown): unknown {
-    const { taskId, dir } = params as { taskId: string; dir?: string };
-    return this.revokeReadRoot(String(taskId), dir ? String(dir) : undefined);
-  }
-
-  /** task.dismiss 的实现（2026-11-14 从 handle 的 switch 拆出） */
-  private rpcTaskDismiss(params: unknown): unknown {
-    const { taskId } = params as { taskId: string };
-    return this.dismissTask(String(taskId));
-  }
-
-  /** task.snapshotProject 的实现（2026-11-14 从 handle 的 switch 拆出） */
-  private rpcTaskSnapshotProject(params: unknown): unknown {
-    const { taskId } = params as { taskId: string };
-    return this.snapshotProject(String(taskId));
-  }
-
-  /** task.export 的实现（2026-11-14 从 handle 的 switch 拆出） */
-  private rpcTaskExport(params: unknown): unknown {
-    const { taskId } = params as { taskId: string };
-    return this.exportTask(String(taskId));
-  }
-
-  /** task.remove 的实现（2026-11-14 从 handle 的 switch 拆出） */
-  private rpcTaskRemove(params: unknown): unknown {
-    const { taskId } = params as { taskId: string };
-    return this.removeTask(String(taskId));
-  }
-
-  /** task.purgeOrphans 的实现（2026-11-14 从 handle 的 switch 拆出） */
-  private rpcTaskPurgeOrphans(): unknown {
-    const r = this.purgeOrphanTasks();
-    return { ok: true, removed: r.removed, kept: r.kept };
-  }
-
-  /** task.removeDeliverable 的实现（2026-11-14 从 handle 的 switch 拆出） */
-  private rpcTaskRemoveDeliverable(params: unknown): unknown {
-    const { taskId, ref, deleteFile } = params as { taskId: string; ref: string; deleteFile?: boolean };
-    const rec = this.taskStore.get(String(taskId ?? ""));
-    if (!rec) return { ok: false, error: "没有这张单" };
-    const list = rec.deliverables ?? [];
-    const hit = list.find((d) => d.ref === ref || d.path === ref);
-    if (!hit) return { ok: false, error: "交付箱里没有这条交付物" };
-    let removedFile = false;
-    if (deleteFile) {
-      const wsRoot = rec.workspaceRoot ? path.resolve(rec.workspaceRoot) : "";
-      const abs = path.isAbsolute(hit.path) ? path.resolve(hit.path) : wsRoot ? path.resolve(wsRoot, hit.path) : "";
-      const artDir = path.join(this.dataRoot, "tasks", rec.id, "artifacts");
-      const inside = (root: string) => Boolean(root) && (abs === root || abs.startsWith(root + path.sep));
-      if (!abs || (!inside(wsRoot) && !inside(artDir))) {
-        return {
-          ok: false,
-          error: `为安全起见不删工作区外的文件：${abs || hit.path}`,
-        };
-      }
-      try {
-        if (fs.existsSync(abs) && fs.statSync(abs).isFile()) {
-          fs.unlinkSync(abs);
-          removedFile = true;
-        }
-      } catch (err) {
-        return {
-          ok: false,
-          error: `删文件失败：${err instanceof Error ? err.message : String(err)}`,
-        };
-      }
-    }
-    this.taskStore.setDeliverables(rec.id, list.filter((d) => d !== hit));
-    const name = hit.path.split(/[\\/]/).filter(Boolean).pop() ?? hit.path;
-    this.cardTo(rec.threadId ?? this.currentThreadId, {
-      kind: "system",
-      jobId: rec.id,
-      text: `已从交付箱移除「${name}」${removedFile ? "，磁盘文件已删除。" : "（磁盘文件保留）。"}`,
-    });
-    this.log("deliverable_removed", { taskId: rec.id, ref: hit.ref, deleteFile: Boolean(deleteFile), removedFile });
-    return { ok: true, removedFile };
-  }
-
-  /** task.detail 的实现（2026-11-14 从 handle 的 switch 拆出） */
-  private rpcTaskDetail(params: unknown): unknown {
-    const { taskId } = params as { taskId: string };
-    const id = String(taskId ?? "").trim();
-    const rec = this.taskStore.get(id);
-    if (!rec) return { ok: false, error: `没有这张单：${id}` };
-    const brief = rec.brief ?? "";
-    const acceptance = rec.acceptance ?? [];
-    let timeline: { at: string; kind: string; text: string }[] = [];
-    try {
-      timeline = this.taskCase.readTimeline(id).slice(-20).map((e) => ({ at: e.at, kind: e.kind, text: e.text }));
-    } catch {
-      timeline = [];
-    }
-    return {
-      ok: true,
-      detail: {
-        id: rec.id,
-        title: rec.title,
-        ...(rec.member ? { member: rec.member } : {}),
-        teamId: rec.teamId,
-        status: rec.status,
-        statusNote: rec.statusNote ?? "",
-        ...(brief ? { brief, goal: brief.split("\n")[0]?.replace(/^【目标】/, "").trim() ?? "" } : {}),
-        acceptance,
-        // 阶段账（2026-11-15）：详情区能看出走到哪一段、哪一段被打回、只重做哪几条
-        ...(rec.stagePlan
-          ? {
-              stages: rec.stagePlan.stages.map((s) => ({
-                id: s.id,
-                title: s.title,
-                status: s.status,
-                round: s.round,
-                evidence: s.evidence.slice(0, 3),
-                ...(s.note ? { note: s.note } : {}),
-              })),
-              stageLine: stageLine(rec.stagePlan),
-            }
-          : {}),
-        ...(rec.scale ? { scale: rec.scale } : {}),
-        ...(rec.reworkFocus?.items.length ? { reworkFocus: rec.reworkFocus.items } : {}),
-        ...(rec.workspaceRoot ? { workspaceRoot: rec.workspaceRoot } : {}),
-        ...(rec.projectName ? { projectName: rec.projectName } : {}),
-        deliverables: (rec.deliverables ?? []).map((d) => ({ label: d.path, ref: d.ref, bytes: d.bytes })),
-        timeline,
-      },
-    };
-  }
-
   /** task.nudge 的实现（2026-11-14 从 handle 的 switch 拆出） */
   private rpcTaskNudge(params: unknown): unknown {
     const { taskId, note } = params as { taskId: string; note?: string };
@@ -9081,6 +8926,61 @@ export class Kernel {
     return this.kbRpcCache;
   }
 
+  /**
+   * 工单域 RPC（2026-11-18 第六批）。
+   *
+   * 11 个 `task.*` 搬进 `rpc/task-rpc.ts`；`nudge` / `decide` / `feed` 仍留在 kernel——
+   * 它们改 turn 相位、推决策、读别的域，属跨域编排。
+   */
+  private taskRpcCache: TaskRpc | null = null;
+  private get taskRpc(): TaskRpc {
+    if (!this.taskRpcCache) {
+      this.taskRpcCache = createTaskRpc(this.taskRpcDeps());
+    }
+    return this.taskRpcCache;
+  }
+
+  /**
+   * 工单域的类型收口点：域实现返回 unknown，出这里只看到契约类型。
+   * 与 calendar/schedule/kb 同一套做法。
+   */
+  private taskRpcContractDeps(): TaskRpcContractDeps {
+    const t = this.taskRpc;
+    return {
+      cancel: (p) => t.cancel(p) as RpcContracts["task.cancel"]["result"],
+      cancelAll: () => t.cancelAll() as RpcContracts["task.cancelAll"]["result"],
+      grantRead: (p) => t.grantRead(p) as RpcContracts["task.grantRead"]["result"],
+      revokeRead: (p) => t.revokeRead(p) as RpcContracts["task.revokeRead"]["result"],
+      dismiss: (p) => t.dismiss(p) as RpcContracts["task.dismiss"]["result"],
+      snapshotProject: (p) => t.snapshotProject(p) as RpcContracts["task.snapshotProject"]["result"],
+      export: (p) => t.export(p) as RpcContracts["task.export"]["result"],
+      remove: (p) => t.remove(p) as RpcContracts["task.remove"]["result"],
+      purgeOrphans: () => t.purgeOrphans() as RpcContracts["task.purgeOrphans"]["result"],
+      removeDeliverable: (p) => t.removeDeliverable(p) as RpcContracts["task.removeDeliverable"]["result"],
+      detail: (p) => t.detail(p) as RpcContracts["task.detail"]["result"],
+    };
+  }
+
+  private taskRpcDeps(): TaskRpcDeps {
+    return {
+      taskStore: this.taskStore as unknown as TaskRpcDeps["taskStore"],
+      taskCase: this.taskCase as unknown as TaskRpcDeps["taskCase"],
+      dataRoot: this.dataRoot,
+      currentThreadId: () => this.currentThreadId,
+      cardTo: (threadId, card) => this.cardTo(threadId, card),
+      log: (event, detail) => this.log(event, detail),
+      cancelMemberTask: (taskId) => this.cancelMemberTask(taskId),
+      memberRunIds: () => [...this.memberRuns.keys()],
+      grantReadRoots: (taskId, dirs, opts) => this.grantReadRoots(taskId, dirs, opts),
+      revokeReadRoot: (taskId, dir) => this.revokeReadRoot(taskId, dir),
+      dismissTask: (taskId) => this.dismissTask(taskId),
+      snapshotProject: (taskId) => this.snapshotProject(taskId),
+      exportTask: (taskId) => this.exportTask(taskId),
+      removeTask: (taskId) => this.removeTask(taskId),
+      purgeOrphanTasks: () => this.purgeOrphanTasks(),
+    };
+  }
+
   /** 日历域的类型收口点（第三批）：域实现返回 unknown，出这里只看到契约类型 */
   private calendarRpcDeps(): CalendarRpcDeps {
     const c = this.calendarRpc;
@@ -9213,6 +9113,7 @@ export class Kernel {
         kb: this.kbRpcDeps(),
         data: this.dataRpcDeps(),
         config: this.configRpcDeps(),
+        tasks: this.taskRpcContractDeps(),
         ui: this.uiRpcDeps(),
         humanizer: this.humanizerRpcDeps(),
       });
@@ -9726,33 +9627,6 @@ export class Kernel {
         }
       }
 
-      case "task.cancel":
-        return this.rpcTaskCancel(params) as RpcContracts[M]["result"];
-
-      case "task.cancelAll":
-        return this.rpcTaskCancelAll() as RpcContracts[M]["result"];
-
-      case "task.grantRead":
-        return this.rpcTaskGrantRead(params) as RpcContracts[M]["result"];
-
-      case "task.revokeRead":
-        return this.rpcTaskRevokeRead(params) as RpcContracts[M]["result"];
-
-      case "task.dismiss":
-        return this.rpcTaskDismiss(params) as RpcContracts[M]["result"];
-
-      case "task.snapshotProject":
-        return this.rpcTaskSnapshotProject(params) as RpcContracts[M]["result"];
-
-      case "task.export":
-        return this.rpcTaskExport(params) as RpcContracts[M]["result"];
-
-      case "task.remove":
-        return this.rpcTaskRemove(params) as RpcContracts[M]["result"];
-
-      case "task.purgeOrphans":
-        return this.rpcTaskPurgeOrphans() as RpcContracts[M]["result"];
-
       // 建团队（§4.10.3 修正）：界面上给名字就够，ID 由系统生成
       case "team.create": {
         const { name } = params as { name?: string };
@@ -9824,21 +9698,6 @@ export class Kernel {
           ...(job ? { job: { id: job.id, title: job.title, status: job.status } } : {}),
         } as RpcContracts[M]["result"];
       }
-
-      /**
-       * 从交付箱移除一条交付物（2026-11-13 右键菜单）。
-       * 默认只删记录（文件留着）；deleteFile=true 才动磁盘，且只允许删两种：
-       *   ①本任务工作区里的原件；②本任务卷宗 artifacts 里的副本。
-       * 别的一律拒绝——右键菜单不该成为删任意文件的入口。
-       */
-      case "task.removeDeliverable":
-        return this.rpcTaskRemoveDeliverable(params) as RpcContracts[M]["result"];
-      /**
-       * 工单详情（群聊模式：右键成员看"他在做什么"）。
-       * 目标与完成标准从派单卷宗取——判卷口径派单时就冻结了，看的是当时那版。
-       */
-      case "task.detail":
-        return this.rpcTaskDetail(params) as RpcContracts[M]["result"];
 
       /**
        * 用户催办（群聊模式：右键成员"催一下"）。

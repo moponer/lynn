@@ -48,6 +48,18 @@ const HANDLER_OF = {
   "config.vision.clear": ["config", "visionClear"],
   "ui.plugins": ["ui", "plugins"],
   "humanizer.status": ["humanizer", "status"],
+  // 第六批（2026-11-18）：task.* 11 件；nudge / decide / feed 属跨域编排，留在 kernel
+  "task.cancel": ["tasks", "cancel"],
+  "task.cancelAll": ["tasks", "cancelAll"],
+  "task.grantRead": ["tasks", "grantRead"],
+  "task.revokeRead": ["tasks", "revokeRead"],
+  "task.dismiss": ["tasks", "dismiss"],
+  "task.snapshotProject": ["tasks", "snapshotProject"],
+  "task.export": ["tasks", "export"],
+  "task.remove": ["tasks", "remove"],
+  "task.purgeOrphans": ["tasks", "purgeOrphans"],
+  "task.removeDeliverable": ["tasks", "removeDeliverable"],
+  "task.detail": ["tasks", "detail"],
 };
 const ALL = Object.keys(HANDLER_OF);
 
@@ -62,6 +74,9 @@ const NO_PARAM = new Set([
   "kb.list",
   "kb.reindex",
   "data.usage",
+  // 工单域里两个无参的：整批止损、清孤儿
+  "task.cancelAll",
+  "task.purgeOrphans",
   "config.clearKey",
   "config.vision.get",
   "config.vision.clear",
@@ -99,12 +114,25 @@ function fakeDeps() {
       config: make("config", ["clearKey", "visionGet", "visionSave", "visionClear"]),
       ui: make("ui", ["plugins"]),
       humanizer: make("humanizer", ["status"]),
+      tasks: make("tasks", [
+        "cancel",
+        "cancelAll",
+        "grantRead",
+        "revokeRead",
+        "dismiss",
+        "snapshotProject",
+        "export",
+        "remove",
+        "purgeOrphans",
+        "removeDeliverable",
+        "detail",
+      ]),
     },
   };
 }
 
-// 2026-11-16：thread.draftNotice 随「让风铃起草」按钮一起删除（38 个方法）
-test("五批共 38 个方法都注册了，未迁移的方法不在注册表里", () => {
+// 2026-11-18：第六批加入 task.* 11 件（38 → 49）
+test("六批共 49 个方法都注册了，未迁移的方法不在注册表里", () => {
   const { deps } = fakeDeps();
   const registry = buildKernelRegistry(deps);
   assert.deepEqual([...registry.methods()].sort(), [...ALL].sort());

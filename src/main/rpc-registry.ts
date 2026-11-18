@@ -12,9 +12,13 @@
  * 第二批：thread.*（thread.halt 除外——跨域编排留在内核）
  * 第三批：calendar.* / schedule.* / kb.*
  * 第五批：data.* / config.clearKey / config.vision.* / ui.plugins / humanizer.status
+ * 第六批：task.*（cancel / cancelAll / grantRead / revokeRead / dismiss / snapshotProject /
+ *          export / remove / purgeOrphans / removeDeliverable / detail）
+ *          nudge / decide / feed 留在 kernel——它们改 turn 相位、推决策、读别的域，属跨域编排。
  * 其余方法仍在 kernel.handle 的 switch 中，后续批次逐一迁移。
  */
 import type { RpcContracts, RpcMethod } from "../shared/contract";
+
 
 /**
  * 模型库域能力（窄接口）。
@@ -113,6 +117,29 @@ export interface RpcDeps {
   config: ConfigRpcDeps;
   ui: UiRpcDeps;
   humanizer: HumanizerRpcDeps;
+  /** 工单域（第六批）：查询 / 决策 / 交付物 */
+  tasks: TaskRpcDeps;
+}
+
+/**
+ * 工单域能力（窄接口，第六批）。
+ *
+ * 只列**搬进 rpc/task-rpc.ts 的 11 个**：nudge / decide / feed 留在 kernel，
+ * 因为它们改 turn 相位、推决策、读别的域，属跨域编排——放进"工单域"会让接口
+ * 变成伪装成窄接口的 Kernel，那比留在原处更糟。
+ */
+export interface TaskRpcDeps {
+  cancel(params: RpcContracts["task.cancel"]["params"]): RpcContracts["task.cancel"]["result"];
+  cancelAll(): RpcContracts["task.cancelAll"]["result"];
+  grantRead(params: RpcContracts["task.grantRead"]["params"]): RpcContracts["task.grantRead"]["result"];
+  revokeRead(params: RpcContracts["task.revokeRead"]["params"]): RpcContracts["task.revokeRead"]["result"];
+  dismiss(params: RpcContracts["task.dismiss"]["params"]): RpcContracts["task.dismiss"]["result"];
+  snapshotProject(params: RpcContracts["task.snapshotProject"]["params"]): RpcContracts["task.snapshotProject"]["result"];
+  export(params: RpcContracts["task.export"]["params"]): RpcContracts["task.export"]["result"];
+  remove(params: RpcContracts["task.remove"]["params"]): RpcContracts["task.remove"]["result"];
+  purgeOrphans(): RpcContracts["task.purgeOrphans"]["result"];
+  removeDeliverable(params: RpcContracts["task.removeDeliverable"]["params"]): RpcContracts["task.removeDeliverable"]["result"];
+  detail(params: RpcContracts["task.detail"]["params"]): RpcContracts["task.detail"]["result"];
 }
 
 /** 一个 RPC handler：入参与返回值都由契约推导 */
@@ -211,6 +238,19 @@ export function buildKernelRegistry(deps: RpcDeps): RpcRegistry {
   registry.register("config.vision.get", () => deps.config.visionGet());
   registry.register("config.vision.save", (params) => deps.config.visionSave(params));
   registry.register("config.vision.clear", () => deps.config.visionClear());
+
+  // ---------- 工单域：查询 / 决策 / 交付物（2026-11-18 第五批）----------
+  registry.register("task.cancel", (params) => deps.tasks.cancel(params));
+  registry.register("task.cancelAll", () => deps.tasks.cancelAll());
+  registry.register("task.grantRead", (params) => deps.tasks.grantRead(params));
+  registry.register("task.revokeRead", (params) => deps.tasks.revokeRead(params));
+  registry.register("task.dismiss", (params) => deps.tasks.dismiss(params));
+  registry.register("task.snapshotProject", (params) => deps.tasks.snapshotProject(params));
+  registry.register("task.export", (params) => deps.tasks.export(params));
+  registry.register("task.remove", (params) => deps.tasks.remove(params));
+  registry.register("task.purgeOrphans", () => deps.tasks.purgeOrphans());
+  registry.register("task.removeDeliverable", (params) => deps.tasks.removeDeliverable(params));
+  registry.register("task.detail", (params) => deps.tasks.detail(params));
 
   // ---------- 外观插件与写作规则状态 ----------
   registry.register("ui.plugins", () => deps.ui.plugins());
