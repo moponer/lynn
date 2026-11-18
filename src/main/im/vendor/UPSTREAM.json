@@ -1,0 +1,17 @@
+{
+  "upstream": "https://github.com/xmanrui/dsh-im",
+  "branch": "main",
+  "fetchedAt": "2026-11-18T09:16:40.298Z",
+  "license": "MIT",
+  "copyright": "Copyright (c) 2026 xmanrui",
+  "note": "只取国内渠道 + shared；跳过测试与 ru/en 语言包。vendor 内容不改一行，升级时整体覆盖。",
+  "channels": [
+    "feishu",
+    "dingtalk",
+    "qq",
+    "wecom",
+    "wecom-app",
+    "weixin"
+  ],
+  "files": 218
+}
