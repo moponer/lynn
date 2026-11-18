@@ -1548,6 +1548,92 @@ export class Kernel {
     };
   }
 
+  /**
+   * 飞书自检的实现（P14-3）。返回 Promise，由 RPC case 直接返回。
+   *
+   * 只查**能自动查的**：凭据、机器人能力。权限清单、事件订阅、发布状态
+   * 这些飞书没有开放查询接口，只能列给用户人工核对。
+   */
+  private async checkFeishu(appId: string, appSecret: string): Promise<{
+    steps: { label: string; ok: boolean; detail: string }[];
+    botOpenId?: string;
+  }> {
+    const steps: { label: string; ok: boolean; detail: string }[] = [];
+    if (!appId || !appSecret) {
+      steps.push({ label: "凭据完整", ok: false, detail: "appId 或 appSecret 为空" });
+      return { steps };
+    }
+    const FEISHU = "https://open.feishu.cn/open-apis";
+    const call = async (
+      pathname: string,
+      init?: { method?: string; body?: unknown; token?: string },
+    ): Promise<{ code?: number; msg?: string; tenant_access_token?: string; expire?: number; bot?: { open_id?: string; app_name?: string } }> => {
+      const headers: Record<string, string> = { "content-type": "application/json; charset=utf-8" };
+      if (init?.token) headers.authorization = `Bearer ${init.token}`;
+      const res = await fetch(`${FEISHU}${pathname}`, {
+        method: init?.method ?? "GET",
+        headers,
+        ...(init?.body ? { body: JSON.stringify(init.body) } : {}),
+      });
+      const text = await res.text();
+      try {
+        return JSON.parse(text) as { code?: number; msg?: string };
+      } catch {
+        return { code: -1, msg: text.slice(0, 120) };
+      }
+    };
+
+    let token = "";
+    try {
+      const r = await call("/auth/v3/tenant_access_token/internal", {
+        method: "POST",
+        body: { app_id: appId, app_secret: appSecret },
+      });
+      if (r.code === 0 && r.tenant_access_token) {
+        token = r.tenant_access_token;
+        steps.push({ label: "appId + appSecret 有效", ok: true, detail: `token 有效期 ${r.expire ?? "?"} 秒` });
+      } else if (r.code === 10014) {
+        steps.push({
+          label: "appSecret 不对",
+          ok: false,
+          detail: "去 open.feishu.cn → 凭证与基础信息 → 重置 App Secret（旧的会立刻失效）",
+        });
+      } else if (r.code === 10003) {
+        steps.push({ label: "appId 不存在", ok: false, detail: "检查是否复制漏字符，或应用已被删除" });
+      } else {
+        steps.push({ label: "换 token 失败", ok: false, detail: `code=${r.code} msg=${r.msg ?? "?"}` });
+      }
+    } catch (e) {
+      steps.push({ label: "网络请求失败", ok: false, detail: e instanceof Error ? e.message : String(e) });
+    }
+
+    let botOpenId: string | undefined;
+    if (token) {
+      try {
+        const r = await call("/bot/v3/info", { token });
+        if (r.code === 0 && r.bot) {
+          botOpenId = r.bot.open_id;
+          steps.push({
+            label: "机器人已就绪",
+            ok: true,
+            detail: `名称「${r.bot.app_name ?? "?"}」（这个 open_id 是机器人自己的，白名单要填你自己的）`,
+          });
+        } else {
+          steps.push({
+            label: "读不到机器人信息",
+            ok: false,
+            detail: `code=${r.code}——大概率是「应用功能 → 机器人」没启用`,
+          });
+        }
+      } catch (e) {
+        steps.push({ label: "读机器人信息失败", ok: false, detail: e instanceof Error ? e.message : String(e) });
+      }
+    }
+
+    this.log("im_feishu_checked", { appId, passed: steps.filter((s) => s.ok).length, total: steps.length });
+    return { steps, ...(botOpenId ? { botOpenId } : {}) };
+  }
+
   /** 壳层用的公开日志入口（`log` 是 private，IM 渠道要记审计） */
   logFromShell(event: string, detail?: Record<string, unknown>): void {
     this.log(event, detail ?? {});
@@ -10118,11 +10204,30 @@ export class Kernel {
       }
 
       /**
-       * 存飞书配置（P14-2）。
+       * 飞书自检（P14-3）：真连一次，把能查的都查掉。
        *
-       * `appSecret` 为空 = 不修改已存的（用户只改白名单时不必重输）。
-       * 加密走 `this.encryptBlob`——与模型 API Key 同一条路径。
+       * 为什么放在内核而不是只做命令行脚本：用户不一定开终端。
+       * 界面里点一下就能看到逐步结果，比"连不上"三个字有用得多。
        */
+      /**
+       * 飞书自检（P14-3）：真连一次，把能查的都查掉。
+       *
+       * 为什么放在内核而不是只做命令行脚本：用户不一定开终端。
+       * 界面里点一下就能看到逐步结果，比"连不上"三个字有用得多。
+       *
+       * 注意写法：`handle()` 是**同步方法**（返回类型不是 Promise），
+       * 所以这里不能 `await`，而是把异步逻辑收进内部函数并**返回它的 Promise**。
+       * 这与 `modelTest` 的写法一致（`return probeEndpoint(...)`）。
+       */
+      case "im.checkFeishu": {
+        const p = params as { appId?: string; appSecret?: string };
+        const cur = this.imChannels().feishu;
+        const appId = String(p.appId ?? cur?.appId ?? "").trim();
+        // 传了就用传的（可能是刚填还没保存的），否则用已存的
+        const appSecret = String(p.appSecret ?? "").trim() || cur?.appSecret || "";
+        return this.checkFeishu(appId, appSecret) as RpcContracts[M]["result"];
+      }
+
       case "im.saveFeishu": {
         const p = params as {
           appId: string;

@@ -1797,6 +1797,19 @@ export interface RpcContracts {
       } | null;
     };
   };
+  /**
+   * 飞书自检（P14-3）：用当前配置真连一次，把能查的都查掉。
+   *
+   * 返回逐步结果，界面直接展示——用户不用开命令行就能知道哪里配错了。
+   */
+  "im.checkFeishu": {
+    params: { appId?: string; appSecret?: string };
+    result: {
+      steps: { label: string; ok: boolean; detail: string }[];
+      /** 机器人的 open_id（提醒用户白名单要填自己的，不是这个） */
+      botOpenId?: string;
+    };
+  };
   "im.saveFeishu": {
     params: {
       appId: string;

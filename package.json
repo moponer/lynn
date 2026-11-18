@@ -58,7 +58,8 @@
     "lint:i18n": "node scripts/lint-i18n.mjs",
     "check:plugin": "node scripts/check-plugin-package.mjs",
     "check:docs": "node scripts/check-docs-links.mjs",
-    "probe:im": "node scripts/probe-im-bridge.mjs"
+    "probe:im": "node scripts/probe-im-bridge.mjs",
+    "check:feishu": "node scripts/check-feishu.mjs"
   },
   "dependencies": {
     "@earendil-works/pi-agent-core": "1.4.0",

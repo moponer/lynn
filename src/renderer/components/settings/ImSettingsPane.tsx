@@ -94,6 +94,25 @@ export function ImSettingsPane() {
     }
   };
 
+  /** 自检结果（P14-3）：逐步展示，用户不用开终端就知道哪里错了 */
+  const [checks, setChecks] = useState<{ label: string; ok: boolean; detail: string }[]>([]);
+  const [checking, setChecking] = useState(false);
+  const runCheck = async () => {
+    setChecking(true);
+    setChecks([]);
+    try {
+      const r = await window.lynn.rpc("im.checkFeishu", {
+        ...(appId.trim() ? { appId: appId.trim() } : {}),
+        ...(appSecret.trim() ? { appSecret: appSecret.trim() } : {}),
+      });
+      setChecks(r.steps ?? []);
+    } catch (e) {
+      setChecks([{ label: t("im.checkFailed"), ok: false, detail: e instanceof Error ? e.message : String(e) }]);
+    } finally {
+      setChecking(false);
+    }
+  };
+
   const f = status?.feishu;
 
   return (
@@ -180,9 +199,26 @@ export function ImSettingsPane() {
           <button type="button" className="sf-btn primary" disabled={busy} onClick={() => void save()}>
             {busy ? t("im.saving") : t("im.save")}
           </button>
+          {/* 自检：不用开终端就能知道凭据/机器人对不对 */}
+          <button type="button" className="sf-btn" disabled={checking} onClick={() => void runCheck()}>
+            {checking ? t("im.checking") : t("im.check")}
+          </button>
         </div>
 
         {msg && <div className={`sf-result ${msg.ok ? "ok" : "bad"}`}>{msg.text}</div>}
+
+        {checks.length > 0 && (
+          <div className="sf-list">
+            {checks.map((c, i) => (
+              <div className="sf-row" key={i}>
+                <div className="sf-row-main">
+                  <b>{c.ok ? "✅" : "✖"} {c.label}</b>
+                  {c.detail && <small>{c.detail}</small>}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* 怎么拿到 open_id：不写这一步用户会卡住 */}
