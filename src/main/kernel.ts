@@ -156,6 +156,8 @@ import { scanUiPlugins } from "./ui-plugins";
 import { importPluginPackage } from "./plugin-package";
 import { scanPluginCommands } from "./plugin-commands";
 import { scanPluginMcp } from "./plugin-mcp";
+import { runTurnAndWait } from "./turn-wait";
+import type { ImHostDeps } from "./im-handlers";
 import { listVersions, rollbackToVersion, KEEP_VERSIONS } from "./plugin-versions";
 import { PluginHost } from "./plugin-host";
 import { PluginSetStore } from "./plugin-set";
@@ -1469,6 +1471,99 @@ export class Kernel {
   onEvent(cb: (ev: KernelEvent) => void): () => void {
     this.listeners.add(cb);
     return () => this.listeners.delete(cb);
+  }
+
+  /**
+   * 停掉当前这一轮（2026-11-18 P13-5：从 `session.abort` 的 case 里抽出）。
+   *
+   * 抽出来的原因：IM 网关也要能停（`session.cancel`），而那段逻辑有 20 行
+   * 且涉及 Pi 与直连两条路径。复制一份必然漂移，所以收成一个方法。
+   *
+   * 行为与原来的 case 逐字一致——包括"已停止本轮（已产出的内容保留）"这张卡。
+   */
+  private abortTurn(): { ok: boolean; aborted: boolean } {
+    this.abortRequested = true;
+    this.queue = [];
+    // 用户喊停：嘴也要立刻停，别把上一轮的结论继续念完
+    this.voice?.stop();
+    this.setTurn({ pending: 0 });
+    // 直连路径：立即断开 fetch/SSE；Pi 路径：让 worker 自己中止。
+    const directAborted = Boolean(this.chatAbort && !this.chatAbort.signal.aborted);
+    this.chatAbort?.abort();
+    const aborted = Boolean(this.host?.isRunning()) || directAborted;
+    if (this.host?.isRunning()) {
+      // 不等 RPC 回执：停止要立刻可见；失败由看门狗对账兜住
+      void this.host!.abort().catch(() => undefined);
+    }
+    if (this.liveCard) {
+      this.liveCard.streaming = false;
+      this.patchCard(this.liveCard, { streaming: false });
+      this.liveCard = null;
+    }
+    this.card({ kind: "system", text: aborted ? "已停止本轮（已产出的内容保留）。" : "已清空排队；当前没有可停的运行。" });
+    this.emit({ type: "done", tokens: this.usage.turnOut });
+    return { ok: true, aborted };
+  }
+
+  /**
+   * IM 网关接入点（2026-11-18 P13-5）。
+   *
+   * 外部 IM 网关（dsh-im 的 `baseUrl` 模式）需要"发一条消息、等它答完"，
+   * 而 kernel 的 `submitTurn` 是 private + void + 流式。这里给出一个窄接口，
+   * **不暴露 kernel 本体**：只有 IM 用得到的 14 个能力。
+   *
+   * 为什么不直接把 `submitTurn` 改 public：
+   *  - 它带 `internal` / `ephemeral` / `mentions` 三个参数，语义是给内核自己用的；
+   *  - IM 入口需要的是"用户发消息"这一种语义，不该让它能选 internal 轮。
+   * 窄接口既是封装，也是**权限收窄**——IM 进来的消息不能伪装成巡检轮。
+   */
+  imHost(): ImHostDeps {
+    return {
+      listThreads: () =>
+        this.threads.list().map((t) => ({ id: t.id, title: t.title, updatedAt: t.updatedAt })),
+      createThread: (title?: string) => this.threads.create(title).id,
+      switchThread: (id: string) => this.switchThread(id),
+      renameThread: (id: string, title: string) => {
+        this.threads.rename(id, title);
+      },
+      threadHistory: (id: string) => this.threads.loadState(id).feed,
+      currentThreadId: () => this.currentThreadId,
+      /**
+       * 发一轮：**只走"用户发言"语义**（不传 internal / ephemeral）。
+       *
+       * 如果指定了 threadId 且不是当前会话，先切过去——IM 的一条消息
+       * 对应一个会话，不能把它塞进用户正在看的另一个会话里。
+       */
+      submitTurn: (text: string, threadId?: string) => {
+        if (threadId && threadId !== this.currentThreadId) this.switchThread(threadId);
+        this.submitTurn(text);
+      },
+      waitTurn: () =>
+        runTurnAndWait({
+          subscribe: (cb) => this.onEvent((ev) => cb(ev as never)),
+          // 启动已经在 submitTurn 里做了，这里只等
+          start: () => {},
+          onTimeout: () => this.abortTurn(),
+        }),
+      abortTurn: () => this.abortTurn(),
+      listModels: () => this.settings.getModels().map((m) => ({ id: m.id, label: m.label })),
+      /** 会话单独指定过就优先，否则全局默认——与内核自己的取值口径一致 */
+      currentModelId: () => this.activeModelId() ?? this.settings.getDefaultModelId() ?? "",
+      /**
+       * 切模型：只改**全局默认**，不动会话级覆盖。
+       *
+       * 会话级覆盖是用户在界面上给某个会话单独指定的（`model.setThread`），
+       * IM 入口不该悄悄改掉它——那会让用户回到界面时发现模型被换过。
+       */
+      selectModel: (modelId: string) => {
+        this.settings.setDefaultModel(modelId);
+      },
+      listWorkspaces: () => (this.projectRoot ? [{ path: this.projectRoot }] : []),
+      createWorkspace: () => {
+        /* Lynn 的工作区由用户选目录，不支持从 IM 侧创建——保持空实现，由 host.describe 声明 */
+      },
+      version: () => "0.0.2",
+    };
   }
 
   /**
@@ -9840,27 +9935,7 @@ export class Kernel {
       }
 
       case "session.abort": {
-        this.abortRequested = true;
-        this.queue = [];
-        // 用户喊停：嘴也要立刻停，别把上一轮的结论继续念完
-        this.voice?.stop();
-        this.setTurn({ pending: 0 });
-        // 直连路径：立即断开 fetch/SSE；Pi 路径：让 worker 自己中止。
-        const directAborted = Boolean(this.chatAbort && !this.chatAbort.signal.aborted);
-        this.chatAbort?.abort();
-        const aborted = Boolean(this.host?.isRunning()) || directAborted;
-        if (this.host?.isRunning()) {
-          // 不等 RPC 回执：停止要立刻可见；失败由看门狗对账兜住
-          void this.host!.abort().catch(() => undefined);
-        }
-        if (this.liveCard) {
-          this.liveCard.streaming = false;
-          this.patchCard(this.liveCard, { streaming: false });
-          this.liveCard = null;
-        }
-        this.card({ kind: "system", text: aborted ? "已停止本轮（已产出的内容保留）。" : "已清空排队；当前没有可停的运行。" });
-        this.emit({ type: "done", tokens: this.usage.turnOut });
-        return { ok: true, aborted } as RpcContracts[M]["result"];
+        return this.abortTurn() as RpcContracts[M]["result"];
       }
 
       case "session.reload": {

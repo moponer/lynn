@@ -9,6 +9,8 @@ import { defaultDataRoot } from "./settings";
 import { resolveFeedUrl, feedUrlIssue, transition, type UpdateState } from "./updater";
 import { newRendererLogGate, RENDERER_LOG_LIMITS, rendererLogGate } from "./log-policy";
 import { trayFallbackBuffer, trayIconPaths } from "./tray-icon";
+import { startBridge } from "./im-bridge";
+import { buildImHandlers } from "./im-handlers";
 import { needsUserAttention } from "./notify-policy";
 import { VoiceService } from "./voice";
 import { handleShellRpc, handleKernelAsync, isKernelAsyncMethod, type ShellRpcCtx } from "./shell-rpc";
@@ -102,6 +104,8 @@ const logRenderer = (entry: Record<string, unknown>) => {
 };
 
 const kernel = new Kernel();
+/** IM 端点句柄（未启用时为 null；退出时要关掉，否则进程退不干净） */
+let imBridge: Awaited<ReturnType<typeof startBridge>> | null = null;
 // 用系统凭据库加密 API Key（§4.7：凭据只经内核注入，不下发渲染层）
 kernel.setEncryptors(
   (plain) => safeStorage.encryptString(plain),
@@ -555,6 +559,31 @@ app.whenReady().then(async () => {
       await kernel.init();
       const boot = kernel.noteKernelStart();
       console.log(`[plugins] fingerprint=${boot.fingerprint} safeMode=${boot.safeMode} starts=${boot.starts}`);
+      /**
+       * IM 端点（2026-11-18 P13-5）。
+       *
+       * **默认不启动**：它是联网能力（外部 IM 网关会连进来），
+       * 与"完全本地"的约束冲突，必须由用户显式开启。
+       *
+       * 开启方式：设置 `LYNN_IM_BRIDGE=1` 环境变量，或将来在设置页加开关。
+       * 未开启时**一个端口都不监听**——不给攻击面留口子。
+       */
+      if (process.env.LYNN_IM_BRIDGE === "1") {
+        try {
+          imBridge = await startBridge({ handlers: buildImHandlers(kernel.imHost()) });
+          console.log(`[im] 端点已启动：${imBridge.baseUrl}`);
+          /**
+           * token 打到日志里是有意的：这是**本机**的一次性凭据，
+           * 用户要从日志里复制它去配 IM 网关。不写日志用户就配不上。
+           * 它只在本进程生命周期内有效，重启即换。
+           */
+          console.log(`[im] token: ${imBridge.token}`);
+          console.log(`[im] 用法：POST ${imBridge.baseUrl}/api/host.describe`);
+        } catch (err) {
+          // 端点起不来不该影响应用启动——记日志，继续用本地功能
+          console.error("[im] 端点启动失败：", err);
+        }
+      }
     } catch (err) {
       console.error("[kernel] init failed:", err);
     }
@@ -574,7 +603,15 @@ app.on("before-quit", (event) => {
   event.preventDefault();
   quitting = true;
   // 收尾：Pi 子进程与 MCP server 都要停掉，不靠进程退出时被顺带回收
-  void kernel.dispose().finally(() => app.quit());
+  void (async () => {
+    // IM 端点先关：它监听端口，不关会让进程退不干净
+    try {
+      await imBridge?.close();
+    } catch (err) {
+      console.error("[im] 关闭端点失败：", err);
+    }
+    await kernel.dispose();
+  })().finally(() => app.quit());
 });
 
 app.on("window-all-closed", () => {
