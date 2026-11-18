@@ -1312,7 +1312,7 @@ export function SettingsModal({
                       <button type="button" className="sf-btn" disabled={autoBusy} onClick={() => void toggleSchedule(s.id)}>
                         {s.enabled ? t("auto.disable") : t("auto.enable")}
                       </button>
-                      <button type="button" className="sf-btn" disabled={autoBusy} onClick={() => void removeSchedule(s.id, s.name)}>
+                      <button type="button" className="sf-btn danger" disabled={autoBusy} onClick={() => void removeSchedule(s.id, s.name)}>
                         {t("auto.remove")}
                       </button>
                     </div>
@@ -1358,7 +1358,7 @@ export function SettingsModal({
                   value={autoEvery}
                   onChange={(e) => setAutoEvery(e.target.value)}
                   placeholder="60"
-                  style={{ width: 100 }}
+                  style={{ width: "var(--w-input-xs)" }}
                 />
               )}
               {autoKind === "once" && (
@@ -1403,7 +1403,7 @@ export function SettingsModal({
                 {tm.status === "active" && (
                   <button
                     type="button"
-                    className="sf-btn"
+                    className="sf-btn danger"
                     disabled={teamBusy}
                     onClick={() => {
                       const key = `dissolve:${tm.id}`;
@@ -1503,7 +1503,7 @@ export function SettingsModal({
                         </button>
                         <button
                           type="button"
-                          className="sf-btn"
+                          className="sf-btn danger"
                           disabled={teamBusy || tm.status !== "active"}
                           onClick={() => {
                             if (teamPending !== key) {
@@ -1562,11 +1562,9 @@ export function SettingsModal({
               <b>本地 / 免费模型</b>
               <small>只探测本机端口，不自动启动第三方进程；点「连接」自动填端点并拉模型列表</small>
             </div>
-            <label className="sf-field" style={{ flexDirection: "row", alignItems: "flex-start", gap: 8 }}>
-              <input type="checkbox" checked={gwRiskAck} onChange={(e) => setGwRiskAck(e.target.checked)} style={{ marginTop: 3 }} />
-              <span className="sf-hint">
-                我了解：本机/局域网网关可能复用第三方免费额度、prompt 可能被上游记录，且随时限流或下线；只会在非敏感数据上使用。
-              </span>
+            <label className="check-row">
+              <input type="checkbox" checked={gwRiskAck} onChange={(e) => setGwRiskAck(e.target.checked)} />
+              <span>{t("model.gwRisk")}</span>
             </label>
             <div className="sf-list">
               {gateways.length === 0 && (
@@ -1647,7 +1645,9 @@ export function SettingsModal({
                       <button type="button" className="sf-btn" onClick={() => void actOnModel("setThread", m.isThreadModel ? null : m.id)} disabled={busy !== ""}>
                         {m.isThreadModel ? "取消本对话专用" : "用于本对话"}
                       </button>
-                      <button type="button" className="sf-btn" onClick={() => void actOnModel("remove", m.id)} disabled={busy !== ""}>删除</button>
+                      <button type="button" className="sf-btn danger" onClick={() => void actOnModel("remove", m.id)} disabled={busy !== ""}>
+                        {t("common.delete")}
+                      </button>
                     </div>
                   </div>
                 ))}
@@ -1721,14 +1721,13 @@ export function SettingsModal({
                 <small className="sf-hint">{t("model.keyHint")}；换 Base URL 必须重填。</small>
               </label>
               {riskNeedsAck && (
-                <label className="sf-field" style={{ flexDirection: "row", alignItems: "flex-start", gap: 8 }}>
+                <label className="check-row">
                   <input
                     type="checkbox"
                     checked={riskAck}
                     onChange={(e) => setRiskAck(e.target.checked)}
-                    style={{ marginTop: 3 }}
                   />
-                  <span className="sf-hint">
+                  <span>
                     {risk === "local"
                       ? "我了解：这是本机/局域网网关，可能复用第三方免费额度，prompt 可能被上游记录，且随时限流或下线；只会在非敏感数据上使用。"
                       : "我了解：这个端点不是 HTTPS，API Key 与内容会明文传输；只会在可信网络里使用。"}
@@ -1737,14 +1736,13 @@ export function SettingsModal({
               )}
               {/* 审计 #9：safeStorage 不可用（系统密钥环缺失）时，明文落盘必须显式确认 */}
               {!modelMeta.canEncrypt && (
-                <label className="sf-field" style={{ flexDirection: "row", alignItems: "flex-start", gap: 8 }}>
+                <label className="check-row">
                   <input
                     type="checkbox"
                     checked={plaintextAck}
                     onChange={(e) => setPlaintextAck(e.target.checked)}
-                    style={{ marginTop: 3 }}
                   />
-                  <span className="sf-hint">
+                  <span>
                     明文存储，我知晓风险：本机不支持安全加密存储（系统密钥环不可用），API Key 将以**明文**写入 settings.json。
                   </span>
                 </label>
@@ -2218,7 +2216,7 @@ export function SettingsModal({
             <div className="sf-inline">
               <input
                 className="sf-input"
-                style={{ width: 150 }}
+                style={{ width: "var(--w-input-sm)" }}
                 value={captureHotkey}
                 aria-label={t("look.captureTitle")}
                 onChange={(e) => setCaptureHotkey(e.target.value)}
@@ -2258,7 +2256,7 @@ export function SettingsModal({
               </div>
               <select
                 className="sf-input"
-                style={{ width: 200 }}
+                style={{ width: "var(--w-input-md)" }}
                 aria-label={t("voice.timbre")}
                 value={voiceOptions.some((v) => v.id === voiceId) ? voiceId : "__custom__"}
                 onChange={(e) => {
@@ -2278,7 +2276,7 @@ export function SettingsModal({
                 <div className="sf-inline">
                   <input
                     className="sf-input"
-                    style={{ width: 200 }}
+                    style={{ width: "var(--w-input-md)" }}
                     aria-label={t("voice.custom")}
                     value={customVoiceId}
                     onChange={(e) => setCustomVoiceId(e.target.value)}
@@ -2305,7 +2303,7 @@ export function SettingsModal({
                 </select>
                 <input
                   className="sf-input"
-                  style={{ width: 80 }}
+                  style={{ width: "var(--w-input-xs)" }}
                   type="number"
                   min={30}
                   max={300}
@@ -2347,7 +2345,7 @@ export function SettingsModal({
               <div className="sf-inline">
                 <input
                   className="sf-input"
-                  style={{ width: 160 }}
+                  style={{ width: "var(--w-input-sm)" }}
                   aria-label={t("voice.proxy")}
                   placeholder="http://127.0.0.1:7890"
                   value={proxyDraft}
@@ -2521,7 +2519,7 @@ export function SettingsModal({
             <div className="sf-actions">
               <button
                 type="button"
-                className="sf-btn"
+                className="sf-btn danger"
                 onClick={() => {
                   setDataMsg("");
                   void window.lynn
@@ -2593,7 +2591,7 @@ export function SettingsModal({
             </button>
             <button
               type="button"
-              className="sf-btn"
+              className="sf-btn danger"
               onClick={() => {
                 void (async () => {
                   const ok = await askConfirm({
@@ -2787,7 +2785,7 @@ export function SettingsModal({
         <header className="sf-head">
           <div>
             <b>{t("settings.title")}</b>
-            <span className="sf-sub">{t("settings.subtitle")}</span>
+            <span className="sf-subtitle">{t("settings.subtitle")}</span>
           </div>
           <button type="button" className="sf-x" onClick={onClose} title={t("settings.close")}>
             ✕

@@ -93,16 +93,29 @@ export function Wizard({
 
       <div className="body" style={{ padding: 0 }}>
         <div className="wiz">
-          <div className="steps" style={{ marginTop: 0, padding: "0 26px" }}>
-            {STEP_NAMES.map((n, i) => (
-              <span key={n} style={{ display: "flex", alignItems: "center" }}>
-                <span className={`step${i < step ? " done" : i === step ? " now" : ""}`}>
-                  <span className="n">{i < step ? "✓" : i + 1}</span>
-                  <span className="l">{n}</span>
+          {/* 步骤条复用值台的 .steps 语言（同一个组件、同一套视觉）。
+              2026-11-18 之前这里发明了 .step .n / .step-line 两个类名，
+              但样式表里从未定义它们 —— 序号继承 body 的 16px，连接线是一个空 span。 */}
+          <div className="steps wiz-steps">
+            {STEP_NAMES.map((n, i) => {
+              const done = i < step;
+              const now = i === step;
+              return (
+                <span key={n} className={`step${done ? " done" : ""}${now ? " now" : ""}`}>
+                  <span className="step-mark" aria-hidden="true">
+                    {done ? (
+                      <Icon name="check" size="xs" />
+                    ) : (
+                      <span className={`step-dot${done ? " on" : ""}`} />
+                    )}
+                  </span>
+                  <span className="l">
+                    <span className="wiz-step-no">{i + 1}</span>
+                    {n}
+                  </span>
                 </span>
-                {i < STEP_NAMES.length - 1 && <span className={`step-line${i < step ? " done" : ""}`} />}
-              </span>
-            ))}
+              );
+            })}
           </div>
 
           <div className="wiz-body">

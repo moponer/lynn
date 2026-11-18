@@ -3,7 +3,20 @@
  * 取自制图室设计稿的 sprite，路径与设计稿逐条对应。
  */
 
-const PATHS: Record<string, string> = {
+/**
+ * 图标路径表。
+ *
+ * 2026-11-18：从 `Record<string, string>` 改成 `as const`。
+ *
+ * 为什么这一行很关键：`Record<string, string>` 让 `keyof typeof PATHS`
+ * 退化成 `string` —— 于是 `IconName` 等于没有任何约束，写 `name="home"`
+ * 而表里没有 home 时，TS 不会报错，运行时渲染出一个空 `<g>`。
+ * 实测设置页导航的「概览」「模型」两项就是这样丢了图标（空白占位）。
+ *
+ * 改法：去掉宽泛注解、末尾 `as const`，让 key 保留字面量类型。
+ * 现在拼错图标名是**编译期错误**，并且 lint:design 会再兜一层。
+ */
+const PATHS = {
   bell: '<path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/><path d="M12 2v2"/>',
   search: '<circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/>',
   folder: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
@@ -46,13 +59,67 @@ const PATHS: Record<string, string> = {
   stop: '<rect x="6" y="6" width="12" height="12" rx="2"/>',
   megaphone: '<path d="M3 11v2l11 4V7L3 11z"/><path d="M14 7v10"/><path d="M17 9a3 3 0 0 1 0 6"/>',
   gauge: '<path d="M3 13a9 9 0 0 1 18 0"/><path d="M12 13l4-4"/>',
-};
 
+  /* ---- 2026-11-18 补齐：此前 nav 引用了 home / cpu 但表里没有 ---- */
+  home: '<path d="M3 10.5 12 3l9 7.5"/><path d="M5.5 9.5V20h13V9.5"/><path d="M9.5 20v-5.5h5V20"/>',
+  cpu: '<rect x="6" y="6" width="12" height="12" rx="2"/><rect x="9.5" y="9.5" width="5" height="5" rx="1"/><path d="M9 3v3M15 3v3M9 18v3M15 18v3M3 9h3M3 15h3M18 9h3M18 15h3"/>',
+
+  /* ---- 语义补齐：把"用文字当图标"的地方收回来 ---- */
+  more: '<circle cx="5" cy="12" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="19" cy="12" r="1.4"/>',
+  "chev-right": '<path d="m9 6 6 6-6 6"/>',
+  "chev-left": '<path d="m15 6-6 6 6 6"/>',
+  "chev-up": '<path d="m6 15 6-6 6 6"/>',
+  edit: '<path d="M4 20h4L19.5 8.5a2.1 2.1 0 0 0-3-3L5 17v3z"/><path d="M14.5 6.5 17.5 9.5"/>',
+  external: '<path d="M14 4h6v6"/><path d="M20 4 11 13"/><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/>',
+  copy: '<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a1 1 0 0 1 1-1h10"/>',
+  refresh: '<path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 5v6h-6"/>',
+  filter: '<path d="M3 5h18l-7 8v6l-4 2v-8z"/>',
+  book: '<path d="M4 5a2 2 0 0 1 2-2h13v18H6a2 2 0 0 1-2-2z"/><path d="M8 3v18"/>',
+  plug: '<path d="M9 3v5M15 3v5"/><path d="M6 8h12v3a6 6 0 0 1-12 0z"/><path d="M12 17v4"/>',
+  power: '<path d="M12 3v9"/><path d="M6.5 6.5a8 8 0 1 0 11 0"/>',
+  star: '<path d="m12 3.5 2.6 5.4 5.9.8-4.3 4.2 1 5.9-5.2-2.8-5.2 2.8 1-5.9-4.3-4.2 5.9-.8z"/>',
+  key: '<circle cx="8" cy="12" r="4"/><path d="M12 12h9M18 12v3M15 12v2.5"/>',
+  link: '<path d="M10 13.5a4 4 0 0 0 5.7 0l2.8-2.8a4 4 0 0 0-5.7-5.7L11.5 6.3"/><path d="M14 10.5a4 4 0 0 0-5.7 0l-2.8 2.8a4 4 0 0 0 5.7 5.7l1.3-1.3"/>',
+  download: '<path d="M12 4v11M7.5 10.5 12 15l4.5-4.5"/><path d="M5 19h14"/>',
+  upload: '<path d="M12 20V9M7.5 13.5 12 9l4.5 4.5"/><path d="M5 5h14"/>',
+  sort: '<path d="M8 5v14M5 8l3-3 3 3"/><path d="M16 19V5M13 16l3 3 3-3"/>',
+} as const;
+
+/**
+ * 图标名：从 PATHS 的字面量键派生（不是 string）。
+ * 拼错名字 → 编译期报错，而不是渲染出一个空 <g>。
+ */
 export type IconName = keyof typeof PATHS;
 
-export function Icon({ name, size }: { name: IconName; size?: "sm" | "lg" }) {
+/**
+ * 尺寸档：五档，与 tokens.css 的 --ic-* 一一对应。
+ *
+ * 2026-11-18 之前只有 sm / lg 两档，另有 12/13/14 的局部 CSS 覆盖，
+ * 同一个 24 网格图标出现在 5 个互不相关的尺寸上。
+ */
+export type IconSize = "xs" | "sm" | "md" | "lg" | "xl";
+
+/**
+ * 内联 SVG 图标。
+ *
+ * 两条不可变的约束：
+ *  1) **内联**，不引图标库（离线可用是硬约束）；
+ *  2) `aria-hidden`：图标永远是装饰，语义由外层按钮/文字的 aria-label 承担。
+ *     纯图标按钮必须自带 aria-label（lint:design 会拦）。
+ */
+export function Icon({
+  name,
+  size,
+  className,
+}: {
+  name: IconName;
+  size?: IconSize;
+  /** 额外的类名（例如需要旋转的箭头） */
+  className?: string;
+}) {
+  const cls = ["ic", size && size !== "md" ? size : "", className ?? ""].filter(Boolean).join(" ");
   return (
-    <svg className={`ic${size ? ` ${size}` : ""}`} viewBox="0 0 24 24" aria-hidden="true">
+    <svg className={cls} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
       <g dangerouslySetInnerHTML={{ __html: PATHS[name] }} />
     </svg>
   );

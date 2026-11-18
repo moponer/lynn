@@ -271,7 +271,7 @@ export function AcceptSeal({
         </div>
       ) : (
         <div className="seal-actions">
-          <button type="button" className="btn btn-accept" onClick={onAccept}>
+          <button type="button" className="btn btn-accept" onClick={onAccept} title={t("seal.accept")}>
             <Icon name="check" size="sm" /> {t("seal.accept")}
           </button>
           <button type="button" className="btn btn-reject" onClick={() => setRejecting(true)}>
@@ -346,7 +346,9 @@ export function SealGlyph({ big }: { big?: boolean }) {
               x={x as number}
               y={y as number}
               textAnchor="middle"
-              fontFamily="Noto Sans SC, sans-serif"
+              /* 走与正文一致的字体栈（此前写死 "Noto Sans SC"，
+                 而那个字体从未随包 —— 印章上的四个字其实一直在回退）。 */
+              fontFamily="Microsoft YaHei, PingFang SC, sans-serif"
               fontSize="26"
               fontWeight="700"
               fill={c}

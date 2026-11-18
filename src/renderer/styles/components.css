@@ -1,0 +1,1042 @@
+/* ============================================================
+   风铃 · 组件原语（Component Primitives）
+   ============================================================
+
+   为什么要有这一层（2026-11-18 设计系统重建）：
+
+   在这之前，"一个按钮""一张卡片""一个输入框"在仓库里有 20+ 种各自为政的
+   实现——.btn / .sf-btn / .ghost-btn / .icon-btn / .ask-btn / .perm-btn /
+   .cs-act / .cs-tool / .cs-halt / .cs-send / .capture-trigger / .feed-action /
+   .blank-cta / .strip-link ……每个自带一套 padding + radius + shadow，
+   其中 .sf-btn 被用了 103 次却**没有任何 :hover**。
+
+   后果不是"不好看"，而是**用户无法建立映射**：同样是"保存"，在设置页是
+   灰块、在印章卡是蓝块、在控制台是描边块；同样是"删除"，在菜单里是朱砂、
+   在设置页和"保存"长得一模一样。
+
+   本层的三条纪律：
+
+   1) **一个语义一个类**。按钮只有四档（主/次/幽灵/危险），不再按页面起名。
+      旧类名保留为**别名**（.sf-btn → .btn 等），TSX 不用改，样式自动统一。
+   2) **四态齐全**。每个可点元素必须有 default / hover / active / focus-visible，
+      外加 disabled。缺 hover 是 bug，不是风格。
+   3) **危险动作必须可辨**。.btn-danger 用朱砂（--seal），且**永远不与其他
+      按钮同形**——危险色不是装饰，是"这一步回不去"的唯一信号。
+
+   依赖：只消费 tokens.css 的 var(--token)。本文件不定义任何颜色值。
+   ============================================================ */
+
+/* ============================================================
+   1. 按钮（Button）
+   ============================================================ */
+
+/**
+ * 底座：所有按钮共享的盒模型与四态。
+ * 不设 background/color——由变体决定，避免"忘了写变体就变成透明按钮"。
+ */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-3);
+  min-height: var(--h-ctl);
+  padding: 0 var(--sp-5);
+  border-radius: var(--r-m);
+  font-family: var(--f-cjk);
+  font-size: var(--fs-meta);
+  font-weight: var(--fw-medium);
+  line-height: var(--lh-tight);
+  white-space: nowrap;
+  cursor: pointer;
+  /* 零描边纪律：不用 border，用底色与阴影表达层次 */
+  border: 0;
+  background: var(--ctl-bg);
+  color: var(--ctl-fg);
+  box-shadow: var(--ctl-shadow);
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out),
+    filter var(--dur-fast) var(--ease-out);
+}
+
+.btn:hover {
+  background: var(--ctl-bg-hover);
+  color: var(--ctl-fg-strong);
+}
+
+.btn:active {
+  background: var(--ctl-bg-active);
+  transform: translateY(0.5px);
+}
+
+.btn:focus-visible {
+  outline: var(--ring-w) solid var(--blue);
+  outline-offset: var(--ring-off);
+}
+
+.btn:disabled,
+.btn[aria-disabled="true"] {
+  opacity: .45;
+  cursor: not-allowed;
+  /* 禁用态不吃 hover：否则用户以为还能点 */
+  pointer-events: none;
+}
+
+/* ---- 变体：主（primary）----
+   一个视图里只允许一个主按钮。它是"这一步该做的事"。 */
+.btn-primary {
+  background: var(--blue);
+  color: var(--on-accent);
+  font-weight: var(--fw-bold);
+  box-shadow: var(--sh-2);
+}
+.btn-primary:hover {
+  background: var(--blue-hover);
+  color: var(--on-accent);
+}
+.btn-primary:active {
+  background: var(--blue);
+  filter: brightness(.94);
+}
+
+/* ---- 变体：危险（danger）----
+   不可恢复的动作。用 --seal（不是 --red）：红笔是"打回"，朱砂是"你签字"。 */
+.btn-danger {
+  background: var(--seal);
+  color: var(--on-accent);
+  font-weight: var(--fw-bold);
+  box-shadow: var(--sh-2);
+}
+.btn-danger:hover {
+  background: var(--seal-hover);
+  color: var(--on-accent);
+}
+.btn-danger:active {
+  background: var(--seal);
+  filter: brightness(.94);
+}
+
+/* ---- 变体：幽灵（ghost）----
+   次要动作。透明底，hover 才浮出。用于"取消""稍后""更多"。 */
+.btn-ghost {
+  background: transparent;
+  color: var(--ink-3);
+  box-shadow: none;
+}
+.btn-ghost:hover {
+  background: var(--hover-bg);
+  color: var(--ink);
+}
+.btn-ghost:active {
+  background: var(--hover-bg-2);
+}
+
+/* ---- 变体：描边（outline）----
+   需要"看得见但不当主角"的动作（筛选、切换、控制台动作行）。
+   描边用 inset 阴影画（零描边纪律），不是 border。 */
+.btn-outline {
+  background: transparent;
+  color: var(--ink-2);
+  box-shadow: inset 0 0 0 1px var(--rule);
+}
+.btn-outline:hover {
+  color: var(--ink);
+  box-shadow: inset 0 0 0 1px var(--blue-line);
+}
+.btn-outline.on,
+.btn-outline[aria-pressed="true"] {
+  color: var(--blue-text);
+  background: var(--blue-wash);
+  box-shadow: inset 0 0 0 1px var(--blue-line);
+}
+
+/* ---- 尺寸 ---- */
+.btn-sm {
+  min-height: var(--h-row);
+  padding: 0 var(--sp-4);
+  font-size: var(--fs-label);
+  gap: var(--sp-2);
+}
+.btn-lg {
+  min-height: var(--h-ctl-lg);
+  padding: 0 var(--sp-6);
+  font-size: var(--fs-body);
+}
+.btn-block {
+  display: flex;
+  width: 100%;
+}
+
+/* ---- 纯图标按钮 ----
+   必须同时给 aria-label（见 lint:design 的 a11y 检查）。 */
+.btn-icon {
+  width: var(--h-ctl);
+  height: var(--h-ctl);
+  min-height: 0;
+  padding: 0;
+  border-radius: var(--r-m);
+  background: transparent;
+  color: var(--ink-3);
+  box-shadow: none;
+}
+.btn-icon:hover {
+  background: var(--hover-bg);
+  color: var(--ink);
+}
+.btn-icon.sm {
+  width: var(--h-row);
+  height: var(--h-row);
+}
+
+/* ---- 链接式按钮 ----
+   行内动作（"查看全部""展开"）：无底无边，只有字色与下划线。 */
+.btn-link {
+  display: inline;
+  min-height: 0;
+  padding: 0;
+  background: none;
+  box-shadow: none;
+  color: var(--blue-text);
+  font-size: inherit;
+  font-weight: var(--fw-body);
+  text-decoration: none;
+  cursor: pointer;
+}
+.btn-link:hover {
+  background: none;
+  color: var(--blue-hover);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+/* ============================================================
+   2. 旧类名别名（向后兼容）
+   ------------------------------------------------------------
+   TSX 里已经用了 300+ 次这些名字，不逐个改。它们在这里一次性
+   归一到上面的变体，语义完全一致：
+
+     .sf-btn            → .btn          （设置页/能力中心的按钮，103 处）
+     .sf-btn.primary    → .btn-primary
+     .ghost-btn         → .btn（幽灵档）
+     .icon-btn          → .btn-icon
+     .icon-btn-quiet    → .btn-icon（更小）
+     .ask-btn           → .btn（+ .ghost/.primary/.danger 三变体）
+     .perm-btn          → .btn
+     .capture-trigger   → .btn-ghost（小）
+   ============================================================ */
+
+.sf-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  min-height: var(--h-row);
+  padding: 0 var(--sp-4);
+  border: 0;
+  border-radius: var(--r-m);
+  background: var(--ctl-bg);
+  color: var(--ctl-fg);
+  font-family: var(--f-cjk);
+  font-size: var(--fs-label);
+  font-weight: var(--fw-medium);
+  line-height: var(--lh-tight);
+  white-space: nowrap;
+  cursor: pointer;
+  box-shadow: var(--ctl-shadow);
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
+}
+/* 这一条是本次修复的核心：此前 .sf-btn 完全没有 hover，
+   设置页 103 个按钮鼠标移上去毫无反馈。 */
+.sf-btn:hover {
+  background: var(--ctl-bg-hover);
+  color: var(--ctl-fg-strong);
+}
+.sf-btn:active {
+  background: var(--ctl-bg-active);
+  transform: translateY(0.5px);
+}
+.sf-btn:focus-visible {
+  outline: var(--ring-w) solid var(--blue);
+  outline-offset: var(--ring-off);
+}
+.sf-btn:disabled {
+  opacity: .45;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+.sf-btn.primary {
+  background: var(--blue);
+  color: var(--on-accent);
+  font-weight: var(--fw-bold);
+}
+.sf-btn.primary:hover {
+  background: var(--blue-hover);
+  color: var(--on-accent);
+}
+/* 设置页里的破坏性动作：删除 / 解散 / 移出 / 清理 / 清空。
+   此前它们和"保存"是同一个灰块——这是最危险的一处"按钮缺色"。 */
+.sf-btn.danger {
+  background: transparent;
+  color: var(--seal-text);
+  box-shadow: inset 0 0 0 1px var(--seal-wash);
+}
+.sf-btn.danger:hover {
+  background: var(--seal-wash);
+  color: var(--seal-text);
+  box-shadow: inset 0 0 0 1px var(--seal);
+}
+
+.ghost-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-3);
+  min-height: var(--h-ctl);
+  padding: 0 var(--sp-5);
+  border: 0;
+  border-radius: var(--r-m);
+  background: var(--ctl-bg);
+  color: var(--ctl-fg);
+  font-family: var(--f-cjk);
+  font-size: var(--fs-meta);
+  cursor: pointer;
+  box-shadow: var(--ctl-shadow);
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
+}
+.ghost-btn:hover {
+  background: var(--ctl-bg-hover);
+  color: var(--ctl-fg-strong);
+}
+.ghost-btn:active {
+  background: var(--ctl-bg-active);
+  transform: translateY(0.5px);
+}
+.ghost-btn:focus-visible {
+  outline: var(--ring-w) solid var(--blue);
+  outline-offset: var(--ring-off);
+}
+.ghost-btn:disabled {
+  opacity: .45;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.icon-btn {
+  display: grid;
+  place-items: center;
+  width: var(--h-ctl);
+  height: var(--h-ctl);
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-m);
+  background: var(--ctl-bg);
+  color: var(--ink-3);
+  cursor: pointer;
+  box-shadow: var(--ctl-shadow);
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+.icon-btn:hover {
+  background: var(--ctl-bg-hover);
+  color: var(--ink);
+}
+.icon-btn:focus-visible {
+  outline: var(--ring-w) solid var(--blue);
+  outline-offset: var(--ring-off);
+}
+.icon-btn:disabled {
+  opacity: .45;
+  cursor: not-allowed;
+}
+/* 面板标题右侧的安静图标按钮：无底，hover 才浮出 */
+.icon-btn-quiet {
+  width: var(--h-row);
+  height: var(--h-row);
+  background: transparent;
+  box-shadow: none;
+  color: var(--ink-4);
+}
+.icon-btn-quiet:hover {
+  background: var(--hover-bg);
+  color: var(--ink-2);
+}
+
+.ask-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-3);
+  min-height: var(--h-ctl);
+  padding: 0 var(--sp-5);
+  border: 0;
+  border-radius: var(--r-m);
+  font-family: var(--f-cjk);
+  font-size: var(--fs-meta);
+  font-weight: var(--fw-medium);
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out),
+    filter var(--dur-fast) var(--ease-out);
+}
+.ask-btn:focus-visible {
+  outline: var(--ring-w) solid var(--blue);
+  outline-offset: 2px;
+}
+.ask-btn.ghost {
+  background: var(--ctl-bg);
+  color: var(--ctl-fg);
+  box-shadow: var(--ctl-shadow);
+}
+.ask-btn.ghost:hover {
+  background: var(--ctl-bg-hover);
+  color: var(--ctl-fg-strong);
+}
+.ask-btn.primary {
+  background: var(--blue);
+  color: var(--on-accent);
+  font-weight: var(--fw-bold);
+}
+.ask-btn.primary:hover {
+  background: var(--blue-hover);
+  color: var(--on-accent);
+}
+.ask-btn.danger {
+  background: var(--seal);
+  color: var(--on-accent);
+  font-weight: var(--fw-bold);
+}
+.ask-btn.danger:hover {
+  background: var(--seal-hover);
+  color: var(--on-accent);
+}
+
+.perm-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: var(--h-ctl);
+  padding: 0 var(--sp-5);
+  border: 0;
+  border-radius: var(--r-m);
+  background: var(--ctl-bg);
+  color: var(--ctl-fg);
+  font-family: var(--f-cjk);
+  font-size: var(--fs-meta);
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+}
+.perm-btn:hover {
+  background: var(--ctl-bg-hover);
+  color: var(--ctl-fg-strong);
+}
+.perm-btn:focus-visible {
+  outline: var(--ring-w) solid var(--blue);
+  outline-offset: var(--ring-off);
+}
+.perm-btn.go {
+  background: var(--seal);
+  color: var(--on-accent);
+  font-weight: var(--fw-bold);
+}
+.perm-btn.go:hover {
+  background: var(--seal-hover);
+  color: var(--on-accent);
+}
+
+.capture-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: var(--h-row);
+  margin-left: auto;
+  padding: 0 var(--sp-4);
+  border: 0;
+  border-radius: var(--r-m);
+  background: transparent;
+  color: var(--ink-3);
+  font-family: var(--f-cjk);
+  font-size: var(--fs-label);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+}
+.capture-trigger:hover {
+  background: var(--hover-bg);
+  color: var(--blue-text);
+}
+.capture-trigger:focus-visible {
+  outline: var(--ring-w) solid var(--blue);
+  outline-offset: var(--ring-off);
+}
+.capture-trigger:disabled {
+  opacity: .5;
+  cursor: not-allowed;
+}
+
+/* ============================================================
+   3. 表单控件（Form Controls）
+   ------------------------------------------------------------
+   此前只有 .sf-input 一种，且：
+     · 没有 ::placeholder（UA 默认灰，比旁边字浅一档）
+     · <select> 零样式（系统白底下拉，贴在深色卡片里）
+     · <input type=checkbox> 零样式（Chromium 原生蓝勾）
+   ============================================================ */
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.field-label {
+  font-family: var(--f-mono);
+  font-size: var(--fs-label);
+  letter-spacing: 0;
+  color: var(--ink-3);
+  user-select: none;
+}
+
+.field-hint {
+  font-size: var(--fs-meta);
+  color: var(--ink-4);
+  line-height: var(--lh-snug);
+}
+
+/* 所有文本输入共用底座：input / textarea / select 一致 */
+.input,
+.sf-input,
+.sf-persona,
+.gnotice-in,
+.thread-q,
+.seal-input {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: var(--h-ctl-lg);
+  padding: 0 var(--sp-5);
+  border: 0;
+  border-radius: var(--r-m);
+  background: var(--desk);
+  color: var(--ink);
+  font-family: var(--f-cjk);
+  font-size: var(--fs-body);
+  line-height: var(--lh-normal);
+  outline: 0;
+  box-shadow: inset 0 0 0 1px var(--edge);
+  transition: box-shadow var(--dur-fast) var(--ease-out);
+}
+textarea.input,
+.sf-persona,
+.gnotice-in,
+.seal-input {
+  padding: var(--sp-4) var(--sp-5);
+  line-height: var(--lh-normal);
+  resize: vertical;
+}
+.input:hover,
+.sf-input:hover,
+.sf-persona:hover,
+.gnotice-in:hover,
+.thread-q:hover,
+.seal-input:hover {
+  box-shadow: inset 0 0 0 1px var(--ink-4);
+}
+.input:focus,
+.sf-input:focus,
+.sf-persona:focus,
+.gnotice-in:focus,
+.thread-q:focus,
+.seal-input:focus {
+  box-shadow: inset 0 0 0 1px var(--edge-focus), var(--ring);
+}
+.input:disabled,
+.sf-input:disabled {
+  opacity: .5;
+  cursor: not-allowed;
+}
+/* 占位符：与 field-hint 同档，不再用 UA 默认灰 */
+.input::placeholder,
+.sf-input::placeholder,
+.sf-persona::placeholder,
+.gnotice-in::placeholder,
+.thread-q::placeholder,
+.seal-input::placeholder {
+  color: var(--ink-4);
+  opacity: 1;
+}
+
+/* ---- 下拉（select）----
+   用 appearance:none + 自绘箭头，因为原生箭头在深色下是系统灰、
+   且在亮色主题里与底色撞在一起。箭头用 CSS 三角（不引图标）。 */
+select.input,
+select.sf-input {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: var(--sp-8);
+  cursor: pointer;
+  background-image:
+    linear-gradient(45deg, transparent 50%, currentColor 50%),
+    linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-position:
+    calc(100% - 15px) calc(50% - 2px),
+    calc(100% - 10px) calc(50% - 2px);
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+}
+select.input option,
+select.sf-input option {
+  background: var(--sheet);
+  color: var(--ink);
+}
+
+/* ---- 勾选（checkbox / radio）----
+   统一 accent-color，让原生控件跟随主题；不重造轮子（可访问性原生免费）。 */
+input[type="checkbox"],
+input[type="radio"] {
+  accent-color: var(--blue);
+  width: var(--ic-sm);
+  height: var(--ic-sm);
+  cursor: pointer;
+  flex: none;
+}
+input[type="checkbox"]:focus-visible,
+input[type="radio"]:focus-visible {
+  outline: var(--ring-w) solid var(--blue);
+  outline-offset: 2px;
+}
+input[type="checkbox"]:disabled,
+input[type="radio"]:disabled {
+  opacity: .45;
+  cursor: not-allowed;
+}
+
+/* ---- 勾选行（checkbox + 说明文字）----
+   此前是行内 style 拼的 flex，三处各写一遍。 */
+.check-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-4);
+  padding: var(--sp-2) 0;
+  cursor: pointer;
+}
+.check-row input[type="checkbox"] {
+  margin-top: var(--sp-2);
+}
+.check-row > span {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--fs-meta);
+  color: var(--ink-3);
+  line-height: var(--lh-snug);
+}
+
+/* ---- 开关（switch）----
+   轨道 + 圆钮。开启态必须有颜色（此前只有 12% 的青瓷淡底，
+   亮色主题下"关"的轨道在白底上直接看不见）。 */
+.switch {
+  position: relative;
+  flex: none;
+  width: 34px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-pill);
+  background: var(--sheet-3);
+  box-shadow: inset 0 0 0 1px var(--rule);
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out);
+}
+.switch i {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--ink-4);
+  transition: transform .16s var(--ease-out), background-color .16s var(--ease-out);
+}
+.switch:hover {
+  box-shadow: inset 0 0 0 1px var(--ink-4);
+}
+.switch.on {
+  background: var(--blue);
+  box-shadow: none;
+}
+.switch.on i {
+  transform: translateX(16px);
+  background: var(--on-accent);
+}
+.switch:focus-visible {
+  outline: var(--ring-w) solid var(--blue);
+  outline-offset: 2px;
+}
+.switch:disabled {
+  opacity: .45;
+  cursor: not-allowed;
+}
+
+/* ============================================================
+   4. 卡片（Card）
+   ------------------------------------------------------------
+   两种卡片，只两种：
+     .card        静态容器（成员卡、插件卡、设置组、市场卡）
+     .card-raised 可点容器（工单卡、会话行、产出卡）—— 有 hover 与 focus
+
+   层级只靠：底色差（desk → sheet → sheet-2）+ 阴影一档 + 留白。
+   不描边（零描边纪律）。
+   ============================================================ */
+
+.card {
+  background: var(--sheet);
+  border-radius: var(--r-m);
+  box-shadow: var(--sh-1);
+  padding: var(--sp-5);
+  min-width: 0;
+}
+.card-flat {
+  background: var(--sheet-2);
+  box-shadow: none;
+}
+.card-sunken {
+  background: var(--desk);
+  box-shadow: var(--sh-sunken);
+}
+.card-raised {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: var(--sheet);
+  border-radius: var(--r-m);
+  box-shadow: var(--sh-1);
+  padding: var(--sp-5);
+  border: 0;
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out), transform var(--dur-fast) var(--ease-out);
+}
+.card-raised:hover {
+  background: var(--sheet-2);
+  box-shadow: var(--sh-2);
+}
+.card-raised:active {
+  transform: translateY(0.5px);
+}
+.card-raised:focus-visible {
+  outline: var(--ring-w) solid var(--blue);
+  outline-offset: 1px;
+}
+.card-raised.on {
+  background: var(--sheet-2);
+  box-shadow: var(--sh-2), inset 0 0 0 1px var(--blue-line);
+}
+
+/* 卡片头：标题 + 计数/动作。所有卡片共用同一把尺子。 */
+.card-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-4);
+  min-width: 0;
+}
+.card-title {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--fs-section);
+  font-weight: var(--fw-medium);
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.card-count {
+  flex: none;
+  font-family: var(--f-mono);
+  font-size: var(--fs-label);
+  color: var(--ink-4);
+  font-variant-numeric: tabular-nums;
+}
+.card-acts {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  flex: none;
+}
+
+/* ============================================================
+   5. 徽章 / 芯片（Badge / Chip）
+   ------------------------------------------------------------
+   三种，语义不同，不许混用：
+     .badge  状态（在跑/待审/卡住/完成）—— 有底色
+     .chip   标记（工具名/分类/技能）—— 中性淡底
+     .tag    计数与标识（12 / WO-2418 / PLAN）—— 等宽无底
+   ============================================================ */
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  flex: none;
+  padding: 1px var(--sp-2);
+  border-radius: var(--r-xs);
+  font-family: var(--f-cjk);
+  font-size: var(--fs-label);
+  font-weight: var(--fw-medium);
+  line-height: var(--lh-tight);
+  white-space: nowrap;
+}
+.badge-run,
+.badge-live,
+.badge-hold {
+  background: var(--blue-wash);
+  color: var(--blue-text);
+}
+.badge-wait,
+.badge-blocked {
+  background: var(--seal-wash);
+  color: var(--seal-text);
+}
+.badge-done,
+.badge-idle {
+  background: var(--rule-soft);
+  color: var(--ink-3);
+}
+.badge-warn {
+  background: var(--brass-wash);
+  color: var(--brass-text);
+}
+.badge-error {
+  background: var(--red-wash);
+  color: var(--red-text);
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex: none;
+  padding: var(--sp-1) var(--sp-3);
+  border-radius: var(--r-xs);
+  background: var(--rule-soft);
+  color: var(--ink-3);
+  font-family: var(--f-mono);
+  font-size: var(--fs-label);
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+.chip.b {
+  background: var(--blue-wash);
+  color: var(--blue-text);
+}
+.chip.s {
+  background: var(--seal-wash);
+  color: var(--seal-text);
+}
+.chip.r {
+  background: var(--red-wash);
+  color: var(--red-text);
+}
+.chip.b2 {
+  background: var(--brass-wash);
+  color: var(--brass-text);
+}
+
+.tag {
+  flex: none;
+  font-family: var(--f-mono);
+  font-size: var(--fs-label);
+  color: var(--ink-4);
+  letter-spacing: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ============================================================
+   6. 空态（Empty State）
+   ------------------------------------------------------------
+   此前有 8 种写法，其中 2 种（.sheet-empty / .sealcard-empty）
+   是零引用的死样式。现在只有两种：
+     .empty      区块内空态（左对齐，一行说明 + 可选动作）
+     .empty-hero 整屏空态（居中，标题 + 说明 + 主按钮）
+   ============================================================ */
+
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--sp-4);
+  padding: var(--sp-6) var(--sp-5);
+  min-width: 0;
+}
+.empty > p {
+  margin: 0;
+  font-size: var(--fs-meta);
+  color: var(--ink-3);
+  line-height: var(--lh-snug);
+}
+.empty > small {
+  font-size: var(--fs-label);
+  color: var(--ink-4);
+  line-height: var(--lh-snug);
+}
+
+.empty-hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-5);
+  margin: auto;
+  padding: var(--sp-10) var(--sp-7);
+  max-width: 460px;
+  text-align: center;
+}
+.empty-hero .empty-title {
+  margin: 0;
+  font-family: var(--f-display);
+  font-size: var(--fs-head);
+  font-weight: var(--fw-bold);
+  color: var(--ink);
+  line-height: var(--lh-tight);
+}
+.empty-hero > p {
+  margin: 0;
+  font-size: var(--fs-body);
+  color: var(--ink-3);
+  line-height: var(--lh-relaxed);
+}
+.empty-hero > small {
+  font-family: var(--f-mono);
+  font-size: var(--fs-label);
+  color: var(--ink-4);
+}
+
+/* ============================================================
+   7. 排版助手（Typography Helpers）
+   ------------------------------------------------------------
+   只保留真正跨页面复用的四个。别的一律写在组件自己的样式里。
+   ============================================================ */
+
+.mono {
+  font-family: var(--f-mono);
+  font-variant-numeric: tabular-nums;
+}
+/* 数值统一口径：数值亮、单位弱化、等宽对齐——"1.1 MB"不再糊成一团 */
+.num {
+  font-family: var(--f-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+.num .u,
+.num > .u {
+  font-style: normal;
+  color: var(--ink-4);
+  font-size: var(--fs-label);
+  margin-left: var(--sp-2);
+}
+.num.seg-label {
+  color: var(--ink-4);
+  font-size: var(--fs-label);
+}
+.sf-nums {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--sp-5);
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+/* 分节标题：设置页与卡片组共用。
+   此前页面标题 20px → 组标题 12px，中间没有档位，这是"没有重点"的根因。 */
+.section-title {
+  margin: 0;
+  font-size: var(--fs-section);
+  font-weight: var(--fw-bold);
+  color: var(--ink);
+  line-height: var(--lh-tight);
+  letter-spacing: 0;
+}
+.section-sub {
+  margin: 0;
+  font-size: var(--fs-meta);
+  color: var(--ink-4);
+  line-height: var(--lh-snug);
+}
+
+/* 等宽小节帽：设置组名、面板标题、菜单分组名。
+   中文不加字距（加了发虚），这是全局约定。 */
+.cap-mono {
+  font-family: var(--f-mono);
+  font-size: var(--fs-label);
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--ink-3);
+}
+
+/* ============================================================
+   8. 滚动条（全局一套）
+   ============================================================ */
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--scroll-thumb);
+  border-radius: var(--r-pill);
+}
+::-webkit-scrollbar-thumb:hover,
+::-webkit-scrollbar-thumb:active {
+  background: var(--scroll-thumb-hover);
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* 卡片内的滚动区要更明显（内容被截断时必须看得见能滚） */
+.scroll-thick::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.scroll-thick::-webkit-scrollbar-thumb {
+  background: var(--scroll-thumb-hover);
+}
+
+/* ============================================================
+   9. 可访问性（Accessibility）
+   ============================================================ */
+
+/* 视觉隐藏但屏幕阅读器可读 */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* 减少动效：全局兜底。组件自己的 @media 仍可更细地关。 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: .001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .001ms !important;
+    scroll-behavior: auto !important;
+  }
+}

@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { checkManifest, type PluginManifest } from "./plugin-manifest";
 import { probeMcpServer } from "./plugin-probe";
 import { PluginSetStore } from "./plugin-set";
-import { SKIN_TOKEN_KEYS } from "../shared/skin";
+import { checkThemeTokens } from "../shared/skin";
 import { checkLangPack, type LangPack } from "../shared/i18n";
 import type { L1Host } from "./plugin-l1";
 
@@ -41,7 +41,6 @@ export interface PluginView {
   description?: string;
 }
 
-const COLOR_RE = /^(#[0-9a-fA-F]{3,8}|rgba?\([^)]*\))$/;
 /** 形态层上限：整屏 CSS 远小于此，超了说明放的不是样式 */
 const STYLE_MAX = 256 * 1024;
 
@@ -61,6 +60,16 @@ export function checkPluginCss(raw: string): { ok: boolean; issues: string[] } {
   return { ok: issues.length === 0, issues };
 }
 
+/**
+ * 主题文件（contributes.theme → theme.json）的准入检查。
+ *
+ * 2026-11-18：改用 checkThemeTokens —— 主题可以覆盖颜色**和几何**
+ * （间距/圆角/字号/行高/层级），但仍然不能新增或改名。
+ *
+ * 为什么放开几何：设计系统重建后，tokens.css 里有 60+ 个令牌。
+ * 如果主题插件只能改颜色，"紧凑主题""大字主题"这类真实需求就做不出来，
+ * 而它们恰恰是主题相对于皮肤的价值所在（皮肤只改色）。
+ */
 export function checkThemeFile(raw: unknown): { ok: boolean; issues: string[]; theme?: ThemeFile } {
   const issues: string[] = [];
   if (typeof raw !== "object" || raw === null) return { ok: false, issues: ["theme.json 必须是对象"] };
@@ -75,19 +84,9 @@ export function checkThemeFile(raw: unknown): { ok: boolean; issues: string[]; t
       issues.push(`${mode} 必须是对象`);
       continue;
     }
-    const out: Record<string, string> = {};
-    for (const [k, v] of Object.entries(block as Record<string, unknown>)) {
-      if (!(SKIN_TOKEN_KEYS as readonly string[]).includes(k)) {
-        issues.push(`${mode}.${k} 不是允许覆盖的语义 Token（不能新增/改名）`);
-        continue;
-      }
-      if (typeof v !== "string" || !COLOR_RE.test(v.trim())) {
-        issues.push(`${mode}.${k} 必须是颜色值`);
-        continue;
-      }
-      out[k] = v.trim();
-    }
-    theme[mode] = out;
+    const { issues: modeIssues, values } = checkThemeTokens(block as Record<string, unknown>, mode);
+    issues.push(...modeIssues);
+    theme[mode] = values;
   }
 
   if (!theme.dark && !theme.light) issues.push("至少要有 dark 或 light 一组 Token");
