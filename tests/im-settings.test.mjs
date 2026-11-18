@@ -74,7 +74,7 @@ test("im.saveFeishu：白名单为空 → 拒绝保存（并说清为什么）",
 test("im.saveFeishu：appId 为空 → 拒绝", async () => {
   const { k } = await makeKernel();
   try {
-    const r = await k.handle("im.saveFeishu", { appId: "", appSecret: "s", allowOpenIds: ["ou_1"] });
+    const r = await k.handle("im.saveFeishu", { appId: "", appSecret: "s", allowOpenIds: ["ou_0123456789abcdef0123456789abcdef"] });
     assert.equal(r.ok, false);
     assert.match(r.error, /appId/);
   } finally {
@@ -85,7 +85,7 @@ test("im.saveFeishu：appId 为空 → 拒绝", async () => {
 test("im.saveFeishu：没填 secret 且之前也没存 → 拒绝", async () => {
   const { k } = await makeKernel();
   try {
-    const r = await k.handle("im.saveFeishu", { appId: "cli_test", allowOpenIds: ["ou_1"] });
+    const r = await k.handle("im.saveFeishu", { appId: "cli_test", allowOpenIds: ["ou_0123456789abcdef0123456789abcdef"] });
     assert.equal(r.ok, false);
     assert.match(r.error, /appSecret/);
   } finally {
@@ -99,7 +99,7 @@ test("im.status：**绝不回传 secret 明文**（这是本组的核心）", as
     const saved = await k.handle("im.saveFeishu", {
       appId: "cli_test",
       appSecret: "my-very-secret",
-      allowOpenIds: ["ou_1"],
+      allowOpenIds: ["ou_0123456789abcdef0123456789abcdef"],
       enabled: true,
     });
     assert.equal(saved.ok, true);
@@ -123,13 +123,13 @@ test("im.status：**绝不回传 secret 明文**（这是本组的核心）", as
 test("im.saveFeishu：留空 secret 时保留已存的那个", async () => {
   const { k } = await makeKernel();
   try {
-    await k.handle("im.saveFeishu", { appId: "cli_a", appSecret: "s1", allowOpenIds: ["ou_1"], enabled: true });
+    await k.handle("im.saveFeishu", { appId: "cli_a", appSecret: "s1", allowOpenIds: ["ou_0123456789abcdef0123456789abcdef"], enabled: true });
     // 只改白名单，不重输 secret
-    const r = await k.handle("im.saveFeishu", { appId: "cli_a", allowOpenIds: ["ou_1", "ou_2"], enabled: true });
+    const r = await k.handle("im.saveFeishu", { appId: "cli_a", allowOpenIds: ["ou_0123456789abcdef0123456789abcdef", "ou_fedcba9876543210fedcba9876543210"], enabled: true });
     assert.equal(r.ok, true);
     const status = await k.handle("im.status", undefined);
     assert.equal(status.feishu.secretSet, true, "secret 应保留");
-    assert.deepEqual(status.feishu.allowOpenIds, ["ou_1", "ou_2"]);
+    assert.deepEqual(status.feishu.allowOpenIds, ["ou_0123456789abcdef0123456789abcdef", "ou_fedcba9876543210fedcba9876543210"]);
   } finally {
     await k.dispose();
   }
@@ -141,12 +141,12 @@ test("im.saveFeishu：白名单里的空白项被过滤掉", async () => {
     const r = await k.handle("im.saveFeishu", {
       appId: "cli_a",
       appSecret: "s",
-      allowOpenIds: ["ou_1", "  ", "", "ou_2"],
+      allowOpenIds: ["ou_0123456789abcdef0123456789abcdef", "  ", "", "ou_fedcba9876543210fedcba9876543210"],
       enabled: true,
     });
     assert.equal(r.ok, true);
     const status = await k.handle("im.status", undefined);
-    assert.deepEqual(status.feishu.allowOpenIds, ["ou_1", "ou_2"], "空项不该进白名单");
+    assert.deepEqual(status.feishu.allowOpenIds, ["ou_0123456789abcdef0123456789abcdef", "ou_fedcba9876543210fedcba9876543210"], "空项不该进白名单");
   } finally {
     await k.dispose();
   }
@@ -155,7 +155,7 @@ test("im.saveFeishu：白名单里的空白项被过滤掉", async () => {
 test("imChannels：解密后的形态只给内核内部用（壳层启动渠道时才调）", async () => {
   const { k } = await makeKernel();
   try {
-    await k.handle("im.saveFeishu", { appId: "cli_a", appSecret: "real-secret", allowOpenIds: ["ou_1"], enabled: true });
+    await k.handle("im.saveFeishu", { appId: "cli_a", appSecret: "real-secret", allowOpenIds: ["ou_0123456789abcdef0123456789abcdef"], enabled: true });
     const ch = k.imChannels();
     assert.equal(ch.feishu.appSecret, "real-secret", "内核内部要拿到明文才能连飞书");
     assert.equal(ch.feishu.enabled, true);
@@ -163,4 +163,32 @@ test("imChannels：解密后的形态只给内核内部用（壳层启动渠道�
   } finally {
     await k.dispose();
   }
+});
+
+/**
+ * 只有一个开关（2026-11-18 P14-4）。
+ *
+ * 真实事故：第一版只认环境变量，用户在设置页勾了「启用」却没反应；
+ * 第二版改成"环境变量 **或** 设置页"，用户问得好——"两个不一样信谁的？"
+ *
+ * 答案是不该有两个。这条测试守的是**结构上只有一个**：
+ * 主进程里不许再出现 LYNN_IM_BRIDGE 的**判断**（注释里的历史记录不算）。
+ */
+test("启动判断只看设置页的 enabled，不看环境变量", async () => {
+  const fs = await import("node:fs");
+  const path = await import("node:path");
+  const { fileURLToPath } = await import("node:url");
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const src = fs.readFileSync(path.join(here, "..", "src/main/main.ts"), "utf8");
+
+  // 去掉注释后不该有 process.env.LYNN_IM_BRIDGE
+  const noComments = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+  assert.doesNotMatch(
+    noComments,
+    /process\.env\.LYNN_IM_BRIDGE/,
+    "主进程里还有环境变量判断——会出现「两个开关信谁」的问题",
+  );
+  // 必须看设置
+  assert.match(noComments, /imChannels\(\)/, "启动判断应当读 kernel.imChannels()");
+  assert.match(noComments, /feishu\?\.enabled === true/, "应当只看 feishu.enabled");
 });

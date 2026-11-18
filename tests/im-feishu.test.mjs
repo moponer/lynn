@@ -16,7 +16,7 @@ import assert from "node:assert/strict";
 import { createJiti } from "jiti";
 
 const jiti = createJiti(import.meta.url);
-const { parseIncoming, shouldHandle } = await jiti.import("../src/main/im-feishu.ts", { default: true });
+const { parseIncoming, shouldHandle, isValidOpenId } = await jiti.import("../src/main/im-feishu.ts", { default: true });
 
 /** 造一条飞书事件 */
 function ev({
@@ -129,4 +129,36 @@ test("安全：白名单是精确匹配，不做前缀/子串匹配", () => {
   const m = parseIncoming(ev({ senderId: "ou_owner_evil" }));
   const v = shouldHandle(m, { appId: "a", appSecret: "s", allowOpenIds: ["ou_owner"] });
   assert.equal(v.ok, false, "ou_owner_evil 不该因为以 ou_owner 开头就放行");
+});
+
+/**
+ * open_id 格式校验（真实事故）。
+ *
+ * 用户从飞书后台复制 open_id 时多选了末尾 3 个字符，保存成功、渠道起来了，
+ * 但每条消息都被白名单挡掉——表现为"发消息没反应"。
+ * 这类错误必须当场发现，不能等用户去翻日志。
+ */
+test("isValidOpenId：标准格式通过（ou_ + 32 位十六进制）", () => {
+  assert.equal(isValidOpenId("ou_7d8a6e6df7621556ce0d21922b676706"), true);
+  assert.equal(isValidOpenId("ou_0123456789abcdef0123456789abcdef"), true);
+});
+
+test("isValidOpenId：多复制了字符 → 拒绝（真实事故的形态）", () => {
+  assert.equal(isValidOpenId("ou_7d8a6e6df7621556ce0d21922b676706ccs"), false, "末尾多 3 个字符应被拒");
+  assert.equal(isValidOpenId("ou_7d8a6e6df7621556ce0d21922b676706c"), false, "末尾多 1 个字符应被拒");
+});
+
+test("isValidOpenId：少字符 → 拒绝", () => {
+  assert.equal(isValidOpenId("ou_7d8a6e6df7621556ce0d21922b67670"), false);
+});
+
+test("isValidOpenId：前缀不对 / 空值 / 非十六进制 → 拒绝", () => {
+  assert.equal(isValidOpenId(""), false);
+  assert.equal(isValidOpenId("7d8a6e6df7621556ce0d21922b676706"), false, "缺 ou_ 前缀");
+  assert.equal(isValidOpenId("oc_7d8a6e6df7621556ce0d21922b676706"), false, "oc_ 是 chat_id 不是 open_id");
+  assert.equal(isValidOpenId("ou_7d8a6e6df7621556ce0d21922b67670z"), false, "含非十六进制字符");
+});
+
+test("isValidOpenId：前后空白被容忍（用户粘贴时常带空格）", () => {
+  assert.equal(isValidOpenId("  ou_7d8a6e6df7621556ce0d21922b676706  "), true);
 });

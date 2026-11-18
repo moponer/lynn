@@ -154,6 +154,19 @@ export function parseIncoming(raw: unknown): IncomingMessage | null {
   };
 }
 
+/**
+ * open_id 格式校验（2026-11-18）。
+ *
+ * 真实事故：用户从飞书后台复制 open_id 时多选了末尾 3 个字符
+ * （`ou_xxx...ccs`），保存成功、渠道起来了，但每条消息都被白名单挡掉，
+ * 表现为"发消息没反应"——很难自己看出是 id 写错了。
+ *
+ * 所以保存时校验格式：`ou_` + 32 位十六进制。
+ */
+export function isValidOpenId(id: string): boolean {
+  return /^ou_[0-9a-f]{32}$/i.test(id.trim());
+}
+
 /** 判断这条消息该不该处理 */
 export function shouldHandle(
   msg: IncomingMessage,

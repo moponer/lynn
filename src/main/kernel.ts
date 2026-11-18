@@ -157,6 +157,7 @@ import { importPluginPackage } from "./plugin-package";
 import { scanPluginCommands } from "./plugin-commands";
 import { scanPluginMcp } from "./plugin-mcp";
 import { runTurnAndWait } from "./turn-wait";
+import { isValidOpenId } from "./im-feishu";
 import type { ImHostDeps } from "./im-handlers";
 import { listVersions, rollbackToVersion, KEEP_VERSIONS } from "./plugin-versions";
 import { PluginHost } from "./plugin-host";
@@ -10239,6 +10240,18 @@ export class Kernel {
         const appId = String(p.appId ?? "").trim();
         if (!appId) return { ok: false, error: "appId 不能为空" } as RpcContracts[M]["result"];
         const ids = (p.allowOpenIds ?? []).map((s) => String(s).trim()).filter(Boolean);
+        /**
+         * 格式校验：真实事故是复制 open_id 时多选了末尾几个字符，
+         * 保存成功但消息全被挡掉，表现为"发消息没反应"。
+         * 当场拒绝比事后排查便宜得多。
+         */
+        const badIds = ids.filter((id) => !isValidOpenId(id));
+        if (badIds.length) {
+          return {
+            ok: false,
+            error: `open_id 格式不对：${badIds.join("、")}。正确格式是 ou_ 加 32 位十六进制（共 35 字符），检查是否多复制了字符。`,
+          } as RpcContracts[M]["result"];
+        }
         if (!ids.length) {
           /**
            * 白名单为空**不允许保存**：渠道会拒绝启动（见 im-feishu.ts），

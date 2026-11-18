@@ -563,15 +563,26 @@ app.whenReady().then(async () => {
       const boot = kernel.noteKernelStart();
       console.log(`[plugins] fingerprint=${boot.fingerprint} safeMode=${boot.safeMode} starts=${boot.starts}`);
       /**
-       * IM 端点（2026-11-18 P13-5）。
+       * IM 渠道（2026-11-18 P13-5 / P14-4）。
        *
-       * **默认不启动**：它是联网能力（外部 IM 网关会连进来），
-       * 与"完全本地"的约束冲突，必须由用户显式开启。
+       * **唯一开关：设置页的「启用飞书渠道」**（`settings.im.feishu.enabled`）。
        *
-       * 开启方式：设置 `LYNN_IM_BRIDGE=1` 环境变量，或将来在设置页加开关。
-       * 未开启时**一个端口都不监听**——不给攻击面留口子。
+       * 2026-11-18 两次修正，记下来：
+       *  1. 第一版只认环境变量 `LYNN_IM_BRIDGE=1`——用户在设置页勾了「启用」
+       *     却发现没反应，因为界面开关只写配置、启动判断不看它。
+       *  2. 第二版改成"环境变量 **或** 设置页"——两个入口，用户问得好：
+       *     "两个不一样信谁的？"
+       *
+       * 答案是不该有两个。**环境变量已彻底移除**：
+       *  - 用户已经有一个开关了，多一个只会制造"到底哪个生效"的困惑；
+       *  - 环境变量在图形界面应用里本来就不可见——用户看不到它，也就管不了它；
+       *  - 排障时"配置文件里是什么"比"启动时环境变量是什么"更好查。
+       *
+       * 默认仍然不启动（联网能力必须显式开启），但开关只有一个。
        */
-      if (process.env.LYNN_IM_BRIDGE === "1") {
+      const imCfg = kernel.imChannels();
+      const imEnabled = imCfg.feishu?.enabled === true;
+      if (imEnabled) {
         try {
           imBridge = await startBridge({ handlers: buildImHandlers(kernel.imHost()) });
           console.log(`[im] 端点已启动：${imBridge.baseUrl}`);
