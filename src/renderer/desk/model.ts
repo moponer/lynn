@@ -250,19 +250,33 @@ export function fmtTime(iso?: string): string {
   return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
-function reportOf(feed: FeedCard[], taskId: string): DeskJob["report"] {
+/**
+ * 每张单的最新回报，**一遍扫完**（2026-11-17 P6-1 / 18 章 F1）。
+ *
+ * 原来是 `reportOf(feed, id)` 在 `toJob` 里逐单倒扫整个 feed：O(单数 × feed)。
+ * 流式回复时一次 60s 能产生 750 次快照派生，20 张单 × 800 条 feed ≈ 1.2 万次循环/次派生，
+ * 这就是主线程 Long Task 的来源（18 章 §2 P1）。
+ *
+ * 这里改成一次从尾向前扫：每个 taskId **第一次**遇到 report 卡就记下（倒序 = 最新），
+ * 之后的重复直接跳过。总代价 O(feed)，查表 O(1)。
+ */
+export function feedReportIndex(feed: readonly FeedCard[]): Map<string, NonNullable<DeskJob["report"]>> {
+  const out = new Map<string, NonNullable<DeskJob["report"]>>();
   for (let i = feed.length - 1; i >= 0; i -= 1) {
     const c = feed[i];
-    if (c.jobId === taskId && c.report) return c.report;
+    if (!c.jobId || !c.report) continue;
+    if (out.has(c.jobId)) continue; // 倒序时先遇到的就是最新的
+    out.set(c.jobId, c.report);
   }
-  return undefined;
+  return out;
 }
 
 function toJob(
   job: TaskTrackItem,
   teamName?: string,
   member?: Member,
-  feed: FeedCard[] = [],
+  /** 这张单的最新回报（由 feedReportIndex 一次查好，不再逐单倒扫 feed） */
+  report?: DeskJob["report"],
   turn?: TurnState,
   halted = false,
 ): DeskJob {
@@ -294,7 +308,7 @@ function toJob(
     budget: member ? { used: member.budgetUsed, total: member.budgetTotal } : undefined,
     budgetKind: "tokens",
     rejectDraft: job.rejectDraft,
-    report: reportOf(feed, job.id),
+    report,
     threadId: job.threadId,
     readRoots: job.readRoots,
     workspaceRoot: job.workspaceRoot,
@@ -321,14 +335,19 @@ function toDecision(d: Decision): DeskDecision {
 export function deskFromSnapshot(snap: SessionSnapshot): Desk {
   const board = snap.board;
   const teamNames = new Map(board.teams.map((t) => [t.id, t.name]));
-  const memberOf = (name?: string): Member | undefined => {
-    if (!name) return undefined;
-    for (const t of board.teams) {
-      const m = t.members.find((x) => x.name === name);
-      if (m) return m;
+  /**
+   * 成员表一次建好（P6-1，与 reportIndex 同一个病因）。
+   * 原来是 `memberOf` 每张单都遍历「所有团队 × 所有成员」：O(单数 × 成员)。
+   * 团队成员通常不多，但这是**纯线性可消除**的开销——顺手做掉，不占预算。
+   */
+  const memberByName = new Map<string, Member>();
+  for (const t of board.teams) {
+    for (const m of t.members) {
+      // 同名成员跨团队时保留先遇到的（与原 memberOf 的遍历顺序一致：teams 顺序靠前者优先）
+      if (!memberByName.has(m.name)) memberByName.set(m.name, m);
     }
-    return undefined;
-  };
+  }
+  const memberOf = (name?: string): Member | undefined => (name ? memberByName.get(name) : undefined);
 
   /**
    * 已终止的群（2026-11-15）：用户按「终止任务」之后，本群一切"等你拍板"都该闭嘴——
@@ -341,16 +360,34 @@ export function deskFromSnapshot(snap: SessionSnapshot): Desk {
   }
   const isHalted = (tid?: string) => (tid ? haltedThreads.has(tid) : haltedThreads.has(snap.thread?.id ?? ""));
 
+  /**
+   * 回报索引一次建好（P6-1）：把「每单扫一遍 feed」换成「扫一遍 feed」。
+   * 必须建在 jobs 之前——jobs 里每张单都要查它。
+   */
+  const reportIndex = feedReportIndex(snap.feed);
   const jobs = board.track.map((t) =>
-    toJob(t, teamNames.get(t.teamId), memberOf(t.member), snap.feed, snap.turn, isHalted(t.threadId)),
+    toJob(t, teamNames.get(t.teamId), memberOf(t.member), reportIndex.get(t.id), snap.turn, isHalted(t.threadId)),
   );
+
+  /**
+   * 「每个成员有哪几张在办单」一次分好（P6-1）：原来是成员卡里 `jobs.filter(...)`，
+   * O(成员 × 单数)。分组只花 O(单数)，而且**保持 jobs 的原始顺序**——
+   * 下面按 `action !== none → running → 第一张` 的优先级挑选依赖这个顺序。
+   */
+  const jobsByMember = new Map<string, DeskJob[]>();
+  for (const j of jobs) {
+    if (j.group === "archived" || !j.member) continue;
+    const list = jobsByMember.get(j.member);
+    if (list) list.push(j);
+    else jobsByMember.set(j.member, [j]);
+  }
 
   const members: DeskMember[] = board.teams
     .filter((t) => t.status !== "dissolved")
     .flatMap((t) =>
       t.members.map((m) => {
         // 一张成员卡优先挂"需要你的/在跑的"那张单，其次才是最近归档前的那张
-        const mine = jobs.filter((j) => j.member === m.name && j.group !== "archived");
+        const mine = jobsByMember.get(m.name) ?? [];
         const job = mine.find((j) => j.action !== "none") ?? mine.find((j) => j.group === "running") ?? mine[0];
         return {
           name: m.name,
@@ -431,8 +468,14 @@ export function deskFromSnapshot(snap: SessionSnapshot): Desk {
     usage: snap.usage,
     queue: snap.queue,
     autoStart: snap.prefs.autoStart,
-    // 老快照/预览数据可能没有 thread 字段：兜底成空线程，不让整页崩在白屏
-    thread: snap.thread ?? { id: "", title: "新群" },
+    /**
+     * 老快照/预览数据可能没有 thread 字段：兜底成**空标题**，不让整页崩在白屏。
+     *
+     * 这里不写 "新群" 这样的中文兜底：`model.ts` 是纯数据层（没有 React context，调不了 t()），
+     * 写了就等于把文案硬编码在数据里。渲染处本来就有 `|| t("...")` 兜底，空串会正确落到那里。
+     * 2026-11-17 P6-8 改：原来是 "新群"，被 i18n lint 抓出来的正是这种"数据层写文案"。
+     */
+    thread: snap.thread ?? { id: "", title: "" },
     threads: snap.threads ?? [],
   };
 }

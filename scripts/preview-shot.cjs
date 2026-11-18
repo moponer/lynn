@@ -14,6 +14,8 @@ const out = process.argv[2] || path.join(__dirname, "..", "shots", "desk.png");
 if (process.argv[3] === "trustask") process.env.LYNN_PREVIEW_PICKDIR = "F:/spiker/hermix-desktop";
 // 表格回报走查：夹具同样要在 preload 起来之前挂上
 if (process.argv[3] === "reporttable") process.env.LYNN_PREVIEW_TABLEREPORT = "1";
+// 群内协作走查（2026-11-16）：成员的进展/结论/疑问与风铃的回答（夹具同 preload，必须提前设）
+if (process.argv[3] === "dialogue") process.env.LYNN_PREVIEW_DIALOGUE = "1";
 const W = Number(process.env.LYNN_PREVIEW_WIDTH) || 1600;
 const H = Number(process.env.LYNN_PREVIEW_HEIGHT) || 1000;
 

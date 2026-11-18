@@ -1,0 +1,11 @@
+{
+  "servers": [
+    {
+      "id": "demo",
+      "command": "node",
+      "args": ["server.mjs"],
+      "enabled": true,
+      "timeoutMs": 15000
+    }
+  ]
+}

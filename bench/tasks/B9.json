@@ -1,0 +1,24 @@
+{
+  "id": "B9",
+  "title": "两群同时派单",
+  "domain": "ops",
+  "role": "implementer",
+  "mode": "execute",
+  "brief": "在群 A 派一张读 docx 的 office 单，同时在群 B 派一张改代码的 coding 单，验证：任务归属不串群、成员不互相踩、回报写到各自的群。",
+  "acceptance": [
+    "A 群的回报只出现在 A 群",
+    "B 群的产物只落在 B 的工作区",
+    "两张单并行时总时延 < 两单串行之和",
+    "没有文件被另一群覆盖"
+  ],
+  "expected": {
+    "deliverables": [],
+    "checks": [
+      { "type": "thread", "assertIsolation": true },
+      { "type": "diff", "assertNoCrossWrite": true },
+      { "type": "timing", "assertParallel": true }
+    ]
+  },
+  "judge": { "auto": true, "script": "checks/B9.mjs" },
+  "limits": { "maxTurns": 8, "budgetTokens": 120000, "minutes": 12 }
+}

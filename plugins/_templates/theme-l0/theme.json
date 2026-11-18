@@ -1,0 +1,17 @@
+{
+  "name": "示例主题",
+  "dark": {
+    "desk": "#0a0d0f",
+    "sheet": "#0e1215",
+    "blue": "#6fa892",
+    "seal": "#c8443a",
+    "brass": "#c9a227"
+  },
+  "light": {
+    "desk": "#f7f7f5",
+    "sheet": "#ffffff",
+    "blue": "#3e6f5b",
+    "seal": "#b0402f",
+    "brass": "#8a6f1e"
+  }
+}

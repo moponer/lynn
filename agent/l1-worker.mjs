@@ -36,6 +36,31 @@ const send = (msg) => {
 async function activate(msg) {
   currentId = msg.id;
   tools = new Map();
+  /**
+   * 网络守卫（P10-2）：**必须在加载插件之前**装好。
+   *
+   * 为什么在这里而不是在 host 侧：守卫要 patch 的是**本进程**的 net/dgram/dns。
+   * 插件在 `activate` 里就能发请求，所以装晚一步就等于没装。
+   *
+   * host 通过 `msg.netGuard` 传一段自包含源码过来（见 src/main/l1-net-guard.ts）。
+   * 传源码而不是 import 模块：worker 是随应用分发的独立文件，import dist/main 会随打包路径漂移。
+   */
+  if (typeof msg.netGuard === "string" && msg.netGuard.trim()) {
+    /**
+     * 用 AsyncFunction 求值，并**显式把 require 传进去**。
+     *
+     * 为什么必须传：`new AsyncFunction(body)` 运行在全局作用域，那里没有 `require`。
+     * 而守卫要 patch 的是**本进程的 net/dgram/dns 模块实例**——必须用 worker 自己的
+     * `createRequire(import.meta.url)` 解析，才能拿到与插件同一份模块。
+     * （实测：用 `await import("node:net")` 在 ESM 里拿到的表面引用与 `require` 不同，
+     *   模块表面的 patch 挡不住插件；原型层 patch 才有效。）
+     */
+    const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
+    const nodeModule = await import("node:module");
+    const guardRequire = nodeModule.createRequire(import.meta.url);
+    const fn = new AsyncFunction("require", "module", "exports", msg.netGuard);
+    await fn(guardRequire, nodeModule, {});
+  }
   const jitiMod = await import("jiti");
   const jiti = jitiMod.createJiti(import.meta.url, { moduleCache: false, fsCache: false, interopDefault: true });
   const mod = (await jiti.import(msg.entryPath)) ?? {};

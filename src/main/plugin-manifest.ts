@@ -59,7 +59,15 @@ export interface PluginManifest {
   contributes?: {
     theme?: string;
     skills?: string[];
-    commands?: { name: string; description: string }[];
+    /**
+     * 斜杠命令（P11-1）。两种写法：
+     *  - 内联对象：`{ name, description, prompt }`——prompt 是选中后填进输入台的文本
+     *  - 文件路径：`"commands/weekly.md"`——长提示词更好维护，命令名取文件名
+     *
+     * 加载器在 `plugin-commands.ts`。命令**不执行代码**，只填一段文本，
+     * 所以它没有权限问题（与 L1 工具不同）。
+     */
+    commands?: (string | { name: string; description?: string; prompt: string })[];
     tools?: string[];
     slots?: UiSlot[];
     /** M3-08：语言包文件（相对路径，JSON 结构见 shared/i18n.ts）——L0 声明式，无代码 */

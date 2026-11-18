@@ -1,0 +1,7 @@
+{
+  "lang": "zh",
+  "strings": {
+    "combo.echoTitle": "回显（来自组合插件）",
+    "combo.echoHint": "这条文案由插件提供"
+  }
+}

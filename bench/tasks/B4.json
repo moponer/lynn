@@ -1,0 +1,22 @@
+{
+  "id": "B4",
+  "title": "抓网页抽 5 个字段",
+  "domain": "research",
+  "role": "researcher",
+  "mode": "execute",
+  "brief": "打开 fixtures/web/list.html（本地文件，file:// 协议），抽出表格里前 5 行的「名称 / 价格 / 库存」写成 fields.json。字段值必须与页面一致。",
+  "acceptance": [
+    "fields.json 是合法 JSON，含 5 条记录",
+    "每条含 name/price/stock 三个字段",
+    "值与页面表格一致（不许多、不许猜）"
+  ],
+  "expected": {
+    "deliverables": ["fields.json"],
+    "checks": [
+      { "type": "json", "path": "fields.json", "minItems": 5, "fields": ["name", "price", "stock"] },
+      { "type": "match", "from": "fixtures/web/list.html", "in": "fields.json" }
+    ]
+  },
+  "judge": { "auto": true, "script": "checks/B4.mjs" },
+  "limits": { "maxTurns": 10, "budgetTokens": 150000, "minutes": 12 }
+}

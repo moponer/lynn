@@ -67,8 +67,15 @@ test("M0-03 真链路：Pi 在子进程里跑，工具回壳执行，流式文�
   const toolCalls = [];
   const host = new AgentHost({
     entryPath: entry,
-    // 高载机器上 Pi SDK 冷启动可能超过 20s 默认窗口（实机 2026-11-09 必现），放宽到 60s
-    readyTimeoutMs: 60_000,
+    /**
+     * Pi SDK 冷启动窗口。
+     *
+     * 20s 默认值在高载机器上必现超时（2026-11-09 实机）；60s 在 6 核机器上跑**全量 195 个测试文件**
+     * 时仍会被饿死——`node --test` 按 CPU 核数并发起子进程，Pi 子进程的 Node 启动被排在后面。
+     * 2026-11-17 全量跑实测 60s 超时、单跑 32s 通过，就是这种资源争抢。
+     * 放宽到 180s 是**给测试环境留余量**，不是掩盖产品问题：真实启动耗时由性能指标单独管。
+     */
+    readyTimeoutMs: 180_000,
     model: { baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: "test-key", model: "mock-chat" },
     tools: [
       {

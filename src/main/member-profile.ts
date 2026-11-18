@@ -9,12 +9,17 @@
 // 交什么名字的产物、何时截止，一律进 assign_task 的四段简报。
 import type { MemberProfile } from "./team-store";
 
-/** 给模型、给用户、给退回说明共用的同一份原则（不要各处复述出不同版本）。 */
-export const MEMBER_PROFILE_RULES = `成员档案 = 岗位说明书，不是工单；写完要能原样用到下一件完全不同的任务上。
-只写五类内容：① 能力域（擅长哪类活）② 做事风格/方法论（怎么取证、怎么自检）③ 稳定边界（永远不做什么）④ 通用产出形态（报告/清单/表格的类型，不写文件名）⑤ 升级条件（能力或权限层面）。
-严禁写：具体路径/文件名/URL、项目或仓库名、任务/工单/会话 ID、阶段号与轮次、具体数字目标与计数、截止时间、本次验收标准。
-名字用通用岗位名（如「代码审查员」「资料盘点员」），不要带任务对象、阶段、编号或 A/B/C 后缀——名字是战绩主键，带任务词就等于每次换人。
-具体任务信息一律放进 assign_task 的四段简报【目标】【完成标准】【材料与位置】【限制】。`;
+/**
+ * 给模型、给用户、给退回说明共用的同一份原则（不要各处复述出不同版本）。
+ *
+ * 2026-11-17 精简（P2-1b）：这段会原样拼进 create_member 的工具描述，**每次调用都付**。
+ * 原文 5 行 330 字，压成 4 行 240 字——五类内容合并成一句列举，禁写项去重
+ *（"路径/文件名/URL" 与 "项目名" 同类），规则一条不丢，只删重复的修饰语。
+ */
+export const MEMBER_PROFILE_RULES = `成员档案 = 岗位说明书，不是工单：要能原样用到下一件完全不同的任务上。
+只写五类：能力域、做事风格（怎么取证/自检）、稳定边界、通用产出形态（不写文件名）、升级条件。
+禁写：具体路径/文件名/URL、项目名、任务或工单 ID、阶段号与轮次、数字目标、截止时间、本次验收标准。
+名字用通用岗位名（如「代码审查员」），不带任务对象、阶段、编号或 A/B 后缀——名字是战绩主键。本次任务信息一律进 assign_task 四段简报。`;
 
 /** 内核生成的档案正文：只讲做事风格，不复写本次目标。 */
 export const MEMBER_WORK_STYLE_BODY =
@@ -192,6 +197,20 @@ export function validateMemberProfile(p: MemberProfile, opts?: { skipName?: bool
 }
 
 /** 退回说明：点名违规字段 + 给可照抄的合规示例，让风铃一轮就能改对。 */
+/**
+ * 这个成员是否需要「去 AI 味」写作规则（2026-11-17 / 05 章第 4 节）。
+ *
+ * 实测：成员侧此前每轮都注入 1,200 字写作规则（约 750 tokens），连写代码的成员也背。
+ * coding/ops 的交付物是代码、补丁、命令输出——这条规则是纯噪音，还会稀释弱模型注意力。
+ * 只有「交付物是文档」的角色才给（有 office_* 工具或岗位名带文档属性）。
+ */
+const PROSE_ROLE = /文档|写作|文案|编辑|报告|排版|翻译|设计/;
+
+export function writesProseDocs(role: string, tools: readonly string[] = []): boolean {
+  if (tools.some((t) => t.startsWith("office_"))) return true;
+  return PROSE_ROLE.test(String(role ?? ""));
+}
+
 export function memberProfileRejection(issues: readonly MemberProfileIssue[]): string {
   const ex = EXAMPLE_MEMBER_PROFILES[0];
   const lines = issues

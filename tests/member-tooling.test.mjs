@@ -51,13 +51,15 @@ const tc = (id, name, args) => ({ id, name, arguments: JSON.stringify(args) });
 test("提示词点名的工具，必须真在成员执行面里（说得到 = 拿得到）", () => {
   const sys = memberSystemPrompt(inputOf());
   const named = new Set(
-    sys.match(/\b(?:read_file|write_file|list_dir|glob|grep|run_command|office_\w+|browser_\w+|app_api|ssh_run|kb_add|submit_report)\b/g) ?? [],
+    sys.match(/\b(?:read_file|write_file|list_dir|glob|grep|run_command|office_\w+|browser_\w+|app_api|ssh_run|kb_add|submit_report|post_message)\b/g) ?? [],
   );
   // 这条断言本身也要有意义：确认提示词确实在教 glob/grep
   assert.ok(named.has("glob") && named.has("grep"), "找文件的指引里必须有 glob / grep");
+  // 回报通道与群内发言通道不属于执行面，但必须永远发得下来
+  const channels = new Set(["submit_report", "post_message"]);
   for (const n of named) {
     assert.ok(
-      n === "submit_report" || MEMBER_EXEC_TOOLS.includes(n),
+      channels.has(n) || MEMBER_EXEC_TOOLS.includes(n),
       `提示词点名了 ${n}，但它不在成员执行面里——成员会被工具层以「未知工具」拒掉`,
     );
   }
@@ -68,7 +70,11 @@ test("glob / grep：可授权、能发下来、在工作区里真能跑", async 
     assert.ok(MEMBER_EXEC_TOOLS.includes(t), `${t} 必须在 MEMBER_EXEC_TOOLS 里（否则风铃填了也会被过滤）`);
   }
   const names = memberToolSchemas(["glob", "grep"]).map((s) => s.function.name);
-  assert.deepEqual(names.sort(), ["glob", "grep", "submit_report"], "白名单授权即发放，回报通道不可剥");
+  assert.deepEqual(
+    names.sort(),
+    ["glob", "grep", "post_message", "submit_report"],
+    "白名单授权即发放；回报与群内发言通道不可剥",
+  );
 
   const root = tmp();
   fs.mkdirSync(path.join(root, "src", "deep"), { recursive: true });

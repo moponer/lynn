@@ -35,7 +35,15 @@ export interface StreamChatInput {
   temperature?: number;
   signal?: AbortSignal;
   onDelta: (text: string) => void;
+  /** 多久没有任何 chunk 就断开（默认 90s）；慢端点排队/长上下文可调大 */
+  idleTimeoutMs?: number;
+  /** 单次调用的总上限（默认 300s）；必须 ≥ idleTimeoutMs */
+  totalTimeoutMs?: number;
 }
+
+/** 默认超时：idle 抓"卡死"，total 只做兜底 */
+const DEFAULT_IDLE_TIMEOUT_MS = 90_000;
+const DEFAULT_TOTAL_TIMEOUT_MS = 300_000;
 
 export interface ToolCall {
   id: string;
@@ -100,15 +108,73 @@ export class LlmError extends Error {
   }
 }
 
+export type StreamTimeoutKind = "idle" | "total";
+
+/**
+ * 流式调用超时（2026-11-16 日志复盘）。
+ *
+ * 原来只有一个 120s 的**整轮硬超时**：成员读了几十个文件、上下文长到十几万 token 后，
+ * 单次模型调用很容易超过 120s，被砍断 → 整单作废 → 风铃重派 → 从零再读一遍。
+ * 实测同一张单跑了 6 次，43% 的成员 token 花在这种重复执行上。
+ * 现在拆成两种：
+ *  - idle：一段时间没有任何 chunk（端点排队 / 卡死）——这才是真该断的；
+ *  - total：兜底上限，默认放宽到 5 分钟，让"慢但一直在产出"的一轮跑完。
+ */
+export class StreamTimeoutError extends Error {
+  constructor(
+    readonly kind: StreamTimeoutKind,
+    readonly timeoutMs: number,
+  ) {
+    super(
+      kind === "idle"
+        ? `模型 ${Math.round(timeoutMs / 1000)}s 没有任何输出（idle 超时），已断开；这通常是端点排队或上下文过大`
+        : `模型 ${Math.round(timeoutMs / 1000)}s 未跑完（总超时），已断开`,
+    );
+    this.name = "StreamTimeoutError";
+  }
+}
+
+/**
+ * 额度类 429（用尽 / 欠费 / 套餐上限）是**终态**：退避重试没有意义，只会把请求配额也烧掉。
+ * 与"瞬时限流"（同一句话再等一会儿就能过）必须分开——前者要熔断，后者要退避。
+ */
+const QUOTA_HINTS =
+  /用量上限|额度不足|额度已用|配额已用|余额不足|购买积分|请充值|请升级|token plan|insufficient_quota|exceeded your current quota|quota exceeded/i;
+
+/** 文案判定（供只有字符串、没有 err 对象的路径用：Pi 事件里的 errorMessage、成员回报等） */
+export function isQuotaMessage(text: string): boolean {
+  return QUOTA_HINTS.test(String(text ?? ""));
+}
+
+export function isQuotaError(err: unknown): boolean {
+  const status = err instanceof LlmError ? err.status : undefined;
+  const msg = err instanceof Error ? err.message : String(err ?? "");
+  if (status === 402) return true;
+  return status === 429 && isQuotaMessage(msg);
+}
+
 /**
  * 流式对话一轮：返回最终 content 与 toolCalls。
  * `input.signal`（用户停止）与 120s 超时合成同一个 AbortSignal：
  * 任一方触发都会立刻断开 fetch 与 SSE body，不再等整段流跑完。
  */
 export async function streamChat(input: StreamChatInput): Promise<StreamChatResult> {
+  const idleTimeoutMs = Math.max(500, input.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS);
+  const totalTimeoutMs = Math.max(idleTimeoutMs, input.totalTimeoutMs ?? DEFAULT_TOTAL_TIMEOUT_MS);
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 120_000);
-  (timer as NodeJS.Timeout & { unref?: () => void }).unref?.();
+  /** 记下超时种类：AbortError 本身分不清"用户停"与"超时"，判定必须靠这里 */
+  let timeoutKind: StreamTimeoutKind | null = null;
+  const totalTimer = setTimeout(() => {
+    timeoutKind = "total";
+    controller.abort();
+  }, totalTimeoutMs);
+  (totalTimer as NodeJS.Timeout & { unref?: () => void }).unref?.();
+  // idle 定时器在每个 chunk 到达时 refresh：有产出就不算卡死
+  const idleTimer = setTimeout(() => {
+    timeoutKind = "idle";
+    controller.abort();
+  }, idleTimeoutMs);
+  (idleTimer as NodeJS.Timeout & { unref?: () => void }).unref?.();
   const onExternalAbort = () => controller.abort();
   if (input.signal?.aborted) onExternalAbort();
   else input.signal?.addEventListener("abort", onExternalAbort, { once: true });
@@ -192,6 +258,7 @@ export async function streamChat(input: StreamChatInput): Promise<StreamChatResu
 
     // SSE 按「空行分隔的块」解析，块内取 data: 行
     for await (const bytes of res.body) {
+      idleTimer.refresh();
       buffer += decoder.decode(bytes as Uint8Array, { stream: true });
       const blocks = buffer.split(/\r?\n\r?\n/);
       buffer = blocks.pop() ?? "";
@@ -220,8 +287,15 @@ export async function streamChat(input: StreamChatInput): Promise<StreamChatResu
       cacheMiss,
       cacheFieldsReported,
     };
+  } catch (err) {
+    // 超时与用户停止必须分开：前者可续跑/可重试，后者要立刻安静收口
+    if (timeoutKind && !input.signal?.aborted) {
+      throw new StreamTimeoutError(timeoutKind, timeoutKind === "idle" ? idleTimeoutMs : totalTimeoutMs);
+    }
+    throw err;
   } finally {
-    clearTimeout(timer);
+    clearTimeout(totalTimer);
+    clearTimeout(idleTimer);
     input.signal?.removeEventListener("abort", onExternalAbort);
   }
 }
@@ -275,7 +349,10 @@ export async function streamChatWithRetry(
       const status = err instanceof LlmError ? err.status : undefined;
       const msg = err instanceof Error ? err.message : String(err);
       const network = !status && /fetch failed|network|ECONNREFUSED|ETIMEDOUT|socket hang up|EAI_AGAIN|ENOTFOUND/i.test(msg);
-      const retryable = !streamed && (status === 429 || (typeof status === "number" && status >= 500) || network);
+      // 额度用尽（429 + 套餐/余额语义）是终态：重试只会把请求配额一起烧掉，必须交给上层熔断
+      const timeout = err instanceof StreamTimeoutError;
+      const retryable =
+        !streamed && !isQuotaError(err) && (status === 429 || (typeof status === "number" && status >= 500) || network || timeout);
       if (!retryable || attempt >= max) throw err;
       const delayMs = retryDelay(err, attempt);
       opts.onRetry?.({ attempt, status, delayMs });

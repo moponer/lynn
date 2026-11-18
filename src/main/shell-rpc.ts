@@ -402,8 +402,26 @@ rpc("app.pickDir", async (params, ctx) => {
   });
   return r.canceled || !r.filePaths[0] ? { canceled: true } : { path: r.filePaths[0] };
 });
-rpc("app.openPath", async (params, ctx) => {
-  // 只允许打开数据根内的文件（导出包 / 工件），不当前端可调的任意文件执行器。
+rpc("app.pickPluginPackage", async (params, ctx) => {
+  /**
+   * 选一个插件包（P9-4）：`.zip` 文件或插件目录。
+   *
+   * 两个按钮走同一个 RPC、用 mode 区分：原生对话框一次只能开一种模式。
+   * 选完只返回**路径**，真正的校验在 `plugins.import` 里做——
+   * 这里不做任何判断，避免"选的时候说行、装的时候说不行"两套口径。
+   */
+  const p = params as { mode?: "file" | "dir"; title?: string } | undefined;
+  const win = ctx.getWin();
+  if (!win || win.isDestroyed()) return { canceled: true };
+  const mode = p?.mode === "dir" ? "dir" : "file";
+  const r = await dialog.showOpenDialog(win, {
+    title: p?.title ?? (mode === "dir" ? "选择插件目录（含 plugin.json）" : "选择插件包（.zip）"),
+    properties: mode === "dir" ? ["openDirectory"] : ["openFile"],
+    ...(mode === "file" ? { filters: [{ name: "插件包", extensions: ["zip"] }] } : {}),
+  });
+  return r.canceled || !r.filePaths[0] ? { canceled: true } : { path: r.filePaths[0] };
+});
+rpc("app.openPath", async (params, ctx) => {  // 只允许打开数据根内的文件（导出包 / 工件），不当前端可调的任意文件执行器。
   // 审计 #1：数据根内有成员可写的目录（tasks/<id>/workspace），只挡目录不够——
   // .bat/.ps1 写进工作区再被打开就等于任意程序执行；扩展名走白名单（审计三轮 P0）。
   const p = params as { path: string };

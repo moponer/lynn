@@ -63,11 +63,19 @@ test("项目隔离：两个项目互不可见；没有项目时如实拒写", as
     kernel.handle("project.setRoot", { root: b });
     assert.ok(!kernel.systemPrompt().includes("pnpm"), "换项目后看不到 A 的事实");
     kernel.runTool("save_memory", { entry: "B 项目用 npm", scope: "project" });
-    assert.match(kernel.systemPrompt(), /B 项目用 npm/);
+    /**
+     * 2026-11-17 缓存修复 B3 后的契约：写入**不再热更新 system**（会打断前缀），
+     * 而是当轮尾部提示；快照在切会话/换项目时重建。
+     */
+    assert.match(kernel.pendingMemoryNote, /B 项目用 npm/, "当轮要能看到刚记的事实");
+    assert.ok(!kernel.systemPrompt().includes("B 项目用 npm"), "当前会话的 system 不能因此抖动");
 
     kernel.handle("project.setRoot", { root: a });
     assert.match(kernel.systemPrompt(), /pnpm/, "切回 A 又能看到");
-    assert.ok(!kernel.systemPrompt().includes("B 项目用 npm"));
+    assert.ok(!kernel.systemPrompt().includes("B 项目用 npm"), "A 的快照里不该有 B 的事实");
+
+    kernel.handle("project.setRoot", { root: b });
+    assert.match(kernel.systemPrompt(), /B 项目用 npm/, "回到 B 时重建快照，应带上它自己的记忆");
   } finally {
     await kernel.dispose();
   }

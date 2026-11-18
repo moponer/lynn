@@ -9,6 +9,8 @@ import * as path from "node:path";
 import { L1Host, L1_WORKER_CALL_TIMEOUT_MS } from "../dist/main/plugin-l1.js";
 
 const WORKER_ENTRY = path.resolve(import.meta.dirname, "..", "agent", "l1-worker.mjs");
+/** 项目根：P10-1 权限模型需要读 node_modules 才能加载 jiti */
+const PROJECT_ROOT = path.resolve(import.meta.dirname, "..");
 
 function tmpRoot(p = "lynn-l1w-") {
   return fs.mkdtempSync(path.join(os.tmpdir(), p));
@@ -50,6 +52,12 @@ function makeWorkerHost(root, opts = {}) {
     },
     kernelVersion: "0.0.1",
     workerEntry: WORKER_ENTRY,
+    /**
+     * P10-1：权限强制执行后，worker 需要读 node_modules 才能加载 jiti 转译器。
+     * 不传这一项，所有插件都会失败在 "Access to this API has been restricted"——
+     * 那不是回归，是权限生效了但没给它"启动所必需"的读权限。
+     */
+    kernelModules: path.join(PROJECT_ROOT, "node_modules"),
     workerCallTimeoutMs: opts.callTimeoutMs ?? L1_WORKER_CALL_TIMEOUT_MS,
   });
 }

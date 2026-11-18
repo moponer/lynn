@@ -137,6 +137,8 @@ const voice = new VoiceService({
     if (win && !win.isDestroyed()) win.webContents.send("lynn:voice", ev);
   },
   isVisible: () => Boolean(win && !win.isDestroyed() && win.isVisible()),
+  // 合成失败/限流只写日志：界面不弹窗、不刷卡片，用户看到的只是"这次没播"
+  onSynthesizeError: (message, reason) => kernel.noteVoiceFailure(message, reason),
 });
 kernel.setVoice(voice);
 

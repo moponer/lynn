@@ -50,15 +50,17 @@ test("notice 只拼命中项，且写明只这一轮有效", () => {
   assert.equal(MAGIC_WORDS.length >= 3, true);
 });
 
-test("内核接线：命中写进当轮注入，下一轮自动消失", async () => {
+test("内核接线：命中写进当轮注入，且拼进历史后立刻清空", async () => {
   const root = tmp();
   const kernel = new Kernel(root);
   try {
     await kernel.init();
     kernel.submitTurn("ultrathink 这个重构怎么做");
-    assert.match(kernel.pendingSkillText, /本轮要求·想清楚/);
-    kernel.submitTurn("普通的一句话");
-    assert.ok(!kernel.pendingSkillText.includes("本轮要求"), "魔法词只影响当轮");
+    // 2026-11-17 缓存修复 B1：技能/魔法词现在**拼进 history 再发送**（发送=存储），
+    // 不再挂在 pendingSkillText 上留给 runChat 二次拼接。
+    const lastUser = [...kernel.history].reverse().find((m) => m.role === "user");
+    assert.match(lastUser.content, /本轮要求·想清楚/);
+    assert.equal(kernel.pendingSkillText, "", "拼进历史后必须清空，防止二次拼接破坏前缀");
   } finally {
     await kernel.dispose();
   }

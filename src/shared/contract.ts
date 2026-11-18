@@ -364,6 +364,15 @@ export type ToolCardBadge =
   | "提醒"
   /** 成员执行中的跟踪进度（按时间追加到对话流底部，20 秒内折成一张卡） */
   | "进度"
+  /**
+   * 成员在群里的一次中途发言（2026-11-16，post_message）：
+   * 进展 / 结论 只落群不打断人；疑问 / 风险 会叫醒风铃。与「进度」区分：
+   * 进度是内核自动摘的工具流水，这些是成员自己说的话。
+   */
+  | "进展"
+  | "结论"
+  | "疑问"
+  | "风险"
   /** 成员被用户停掉 */
   | "已停止"
   /** 成员跑完但没有交出回报 */
@@ -1093,6 +1102,17 @@ export interface RpcContracts {
     result: { paths?: string[]; canceled?: boolean };
   };
   /**
+   * 选一个插件包（P9-4）：`.zip` 文件**或**插件目录。
+   *
+   * 为什么单独一个 RPC 而不是复用 `app.pickDir`：导入需要同时支持两种来源，
+   * 而原生对话框一次只能开一种模式（文件 or 目录）。所以开两个按钮、
+   * 走同一个 RPC、用 `mode` 区分——界面上是"选 zip"和"选目录"两个入口。
+   */
+  "app.pickPluginPackage": {
+    params: { mode: "file" | "dir"; title?: string };
+    result: { path?: string; canceled?: boolean };
+  };
+  /**
    * 审查快照：把这张单的工作区（只读看过/要跑测试的项目）复制进任务沙箱，
    * 之后成员在副本里跑构建测试，原项目不动。
    */
@@ -1770,9 +1790,47 @@ export interface RpcContracts {
       errors: string[];
     };
   };
+  /**
+   * 插件版本（P12-1）：列出历史版本 / 回滚到某一版。
+   * 更新走 `plugins.import` 带 `override: true`（会先归档旧版）。
+   */
+  "plugins.versions": {
+    params: { id: string };
+    result: {
+      versions: { dir: string; version: string; at: string; bytes: number }[];
+      keep: number;
+    };
+  };
+  /** 回滚到某个历史版本（注意：与插件集快照的 `plugins.rollback` 是两件事） */
+  "plugins.rollbackVersion": {
+    params: { id: string; versionDir: string };
+    result: { ok: boolean; version?: string; issues: { stage: string; message: string }[] };
+  };
+  /**
+   * 插件斜杠命令（P11-1）：指令台里选中后把 prompt 填进输入台。
+   * 命令不执行代码，只提供一段预置文本。
+   */
+  "plugins.commands": {
+    params: void;
+    result: {
+      commands: { id: string; name: string; description: string; prompt: string; pluginId: string; pluginName: string }[];
+      errors: string[];
+    };
+  };
+  /**
+   * 导入插件包（P9-2）：`.zip` 文件或插件目录。
+   * 失败时 issues 里给**具体到字段**的原因（不是笼统的"导入失败"）。
+   */
+  "plugins.import": {
+    params: { path: string; override?: boolean };
+    result: {
+      ok: boolean;
+      id?: string;
+      issues: { stage: string; message: string }[];
+    };
+  };
   "plugins.toggle": {
-    params: { id: string; enabled: boolean };
-    result: { ok: true };
+    params: { id: string; enabled: boolean };    result: { ok: true };
   };
   /** 隔离试装：一次性进程里跑起来、调用一次、再杀干净（L2 走真实 MCP 握手） */
   "plugins.probe": {

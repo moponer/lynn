@@ -17,8 +17,9 @@ module.exports = {
     await wait(900);
 
     const labelOf = { plugins: "插件", mcp: "MCP", skills: "技能", auto: "自动化", apps: "外部应用" }[stage];
+    // 按钮文本现在带计数（「技能2」），所以用包含而不是全等匹配（2026-11-16）
     const clicked = await win.webContents.executeJavaScript(
-      `(() => { const b=[...document.querySelectorAll('.cap-seg-btn')].find(x=>(x.textContent||'').trim()===${JSON.stringify(labelOf)}); if (b) b.click(); return !!b; })()`,
+      `(() => { const b=[...document.querySelectorAll('.cap-seg-btn')].find(x=>(x.textContent||'').includes(${JSON.stringify(labelOf)})); if (b) b.click(); return !!b; })()`,
     );
     await wait(800);
 
@@ -38,8 +39,18 @@ module.exports = {
 
     const info = await win.webContents.executeJavaScript(`(() => ({
       title: document.querySelector('.sf-pane h3')?.textContent.trim() ?? null,
-      stat: document.querySelector('.cap-stat')?.textContent.replace(/\\s+/g, ' ').trim() ?? null,
+      stat: document.querySelector('.cap-seg')?.textContent.replace(/\\s+/g, ' ').trim() ?? null,
       segs: [...document.querySelectorAll('.cap-seg-btn')].map((b) => ({ t: b.textContent.trim(), on: b.classList.contains('on') })),
+      // 技能行：描述与工具面是否收成一行、工具清单是否已折叠成件数
+      skillRows: [...document.querySelectorAll('.sk-meta')].map((m) => {
+        const d = m.querySelector('.sk-desc');
+        return {
+          desc: d ? d.textContent.trim().slice(0, 24) : null,
+          descClipped: d ? d.scrollWidth > d.clientWidth + 1 : null,
+          tools: m.querySelector('.sk-tools')?.textContent.trim() ?? null,
+          h: Math.round(m.getBoundingClientRect().height),
+        };
+      }),
       groups: [...document.querySelectorAll('.sf-group-head b')].map((b) => b.textContent.trim()),
       rows: document.querySelectorAll('.sf-row').length,
       switches: [...document.querySelectorAll('.cap-sw')].map((s) => ({ on: s.classList.contains('on'), w: Math.round(s.getBoundingClientRect().width) })),
@@ -74,13 +85,21 @@ module.exports = {
     // 2 倍裁剪「已装/可预装」那一段：全图里小字读不清，细节要靠放大图确认
     const rect = await win.webContents.executeJavaScript(`(() => {
       const heads = [...document.querySelectorAll('.sf-group')];
-      const g = heads.find((x) => (x.querySelector('.sf-group-head b')?.textContent || '').includes('可预装'))
+      // 技能段优先截「已发现的技能」（2026-11-16：技能行改版要单独看清楚）
+      const g = heads.find((x) => (x.querySelector('.sf-group-head b')?.textContent || '').includes('已发现'))
+        || heads.find((x) => (x.querySelector('.sf-group-head b')?.textContent || '').includes('可预装'))
         || heads.find((x) => (x.querySelector('.sf-group-head b')?.textContent || '').includes('已装'));
       if (!g) return null;
       const r = g.getBoundingClientRect();
       return { x: Math.round(r.x), y: Math.round(r.y), width: Math.round(r.width), height: Math.min(Math.round(r.height), 460) };
     })()`);
     if (rect && rect.width > 40) {
+      // 隐藏窗口里 capturePage(rect) 会拿到上一帧（实测截到的是插件段，不是当前段）：
+      // 先显形并强制重绘一次，同 usageboard 的做法
+      win.showInactive();
+      await wait(300);
+      win.webContents.invalidate();
+      await wait(250);
       const img = await win.webContents.capturePage(rect);
       fs.writeFileSync(String(out).replace(/\.png$/, "-crop.png"), img.resize({ width: rect.width * 2 }).toPNG());
     }

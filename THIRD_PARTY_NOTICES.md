@@ -30,6 +30,23 @@
 - **内置预览**：`preview.read` 只在 `~/.lynn/tasks/<taskId>/` 内读字节，md / html / csv / 代码 / 图片全在渲染层本地排版，不调用 `shell.openPath`；外部程序打开只作为用户显式点击的备选出口。HTML 预览放进 `sandbox=""` 的 iframe，不执行脚本。
 - 消息平台（QQ / 飞书）只走官方开放平台 API + 用户自建应用凭据，不接非官方协议。
 
+## 提示词资产（一次性引入，非运行时依赖）
+
+`prompts/vendor/` 下的提示词正文于 **2026-11-17** 从本机已有副本一次性拷入（06 章：不联网、不检查更新、不跟上游同步）。
+拷入后冻结：每个文件的 sha256、来源路径与引入时间记在各自的 `UPSTREAM.json`，
+`npm run lint:prompts` 校验它们未被人手改动。**这些内容不参与 npm 依赖树，也不在运行时下载。**
+
+| 上游 | 许可 | 引入内容 | 上游原件 |
+|---|---|---|---|
+| Codex | Apache-2.0 | 编排角色、协作模板、压缩协议共 3 份正文 | `prompts/vendor/codex/LICENSE` |
+| superpowers（Jesse Vincent） | MIT | 6 份角色模板 + 14 个技能正文 | `prompts/vendor/superpowers/LICENSE` |
+| ZCode 插件 agents | Apache-2.0 | 办公域视觉评审员 1 份（上游四份副本 sha256 一致，已合并） | `prompts/vendor/zcode/LICENSE` |
+
+一律保留上游 LICENSE 原件，未使用上游产品名作为人设或角色名。
+我们在 `prompts/adapters/` 做了工具名映射（`Read→read_file`、`Bash→run_command` 等）、回报契约改写与领域裁剪，
+每个 adapter 文件头注明 `from`（派生自哪个 vendor 文件）与其 sha256 前 8 位，满足修改标注要求。
+未引入的内容（Codex 整段系统提示词、技能的 references/scripts）及原因见 `prompts/README.md`。
+
 ## 依赖清单（自动生成）
 
 <!-- AUTO-DEPS START（由 scripts/gen-notices.mjs 生成，勿手改） -->

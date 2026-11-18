@@ -9,6 +9,7 @@ import {
   runMemberTask,
   MEMBER_EXEC_TOOLS,
   memberSystemPrompt,
+  memberTaskIntro,
 } from "../dist/main/member-runner.js";
 import { MANAGEMENT_ONLY_TOOLS } from "../dist/main/management-tools.js";
 
@@ -81,13 +82,13 @@ test("memberToolSchemas：白名单过滤 + submit_report 不可剥 + 管理型�
     assert.ok(!MEMBER_EXEC_TOOLS.includes(m));
   }
   assert.deepEqual(names.filter((n) => n === "submit_report"), ["submit_report"]);
-  // 空白名单也能回报
-  assert.deepEqual(memberToolSchemas([]).map((s) => s.function.name), ["submit_report"]);
+  // 空白名单也能回报 + 在群里说话（2026-11-16：发言不是执行工具，不该被白名单剥掉）
+  assert.deepEqual(memberToolSchemas([]).map((s) => s.function.name), ["submit_report", "post_message"]);
 });
 
-// ---------- 系统提示词：档案全字段编译进提示词 ----------
+// ---------- 系统提示词：岗位内容进 system，任务内容进首条 user ----------
 
-test("memberSystemPrompt：goal/边界/工具/产出契约/截止时间全部编译进提示词", () => {
+test("memberSystemPrompt：岗位字段进 system，任务内容不进（P3-1b 05 章关键改动）", () => {
   const wd = tmpWorkdir();
   const input = {
     profile: profile(),
@@ -102,11 +103,12 @@ test("memberSystemPrompt：goal/边界/工具/产出契约/截止时间全部编
   assert.ok(sys.includes("数据整理员"));
   assert.ok(sys.includes("把数据整理干净"));
   assert.ok(sys.includes("只动工作区"));
-  assert.ok(sys.includes("周五 18:00"));
-  assert.ok(sys.includes("整理 Q3 流水并出月报"));
   assert.ok(sys.includes("report.md"));
   assert.ok(sys.includes("read_file、write_file"));
   assert.ok(sys.includes("submit_report"));
+  // 群内中途发言（2026-11-16）：成员要能被教会在群里说话，而不是只交终局回报
+  assert.ok(sys.includes("post_message"));
+  assert.match(sys, /【群内发言/);
   assert.ok(!sys.includes("run_command")); // 未分配的工具不出现在提示词里
   // 死字段修复回归：escalateWhen / body 必须编译进成员提示词（2026-11-09 实锤此前从未注入）
   assert.match(sys, /何时必须停手升级.*卡住/);
@@ -115,7 +117,37 @@ test("memberSystemPrompt：goal/边界/工具/产出契约/截止时间全部编
     ...input,
     profile: profile({ body: "先列目录再逐个核对；产出前用眼睛检查一遍数字。" }),
   });
-  assert.match(withBody, /岗位工作方式（档案正文）】\n先列目录再逐个核对/);
+  assert.match(withBody, /岗位工作方式】\n先列目录再逐个核对/);
+
+  /**
+   * P3-1b / 05 章「关键：简报从 system 移到首条 user」：
+   * 截止时间与简报**必须离开 system**——它们每单都不一样，留在 system 里等于
+   * 同一岗位的第二个任务要把整段提示词按全价重发一遍。
+   */
+  assert.ok(!sys.includes("整理 Q3 流水并出月报"), "简报不许留在 system prompt");
+  assert.ok(!sys.includes("周五 18:00"), "截止时间不许留在 system prompt");
+  const intro = memberTaskIntro(input);
+  assert.ok(intro.includes("整理 Q3 流水并出月报"), "简报要出现在首条 user 的任务段里");
+  assert.ok(intro.includes("周五 18:00"), "截止时间要出现在任务段里");
+});
+
+test("同 role×domain 的两次不同任务：system 逐字节相同（跨任务前缀可共享）", () => {
+  const wd = tmpWorkdir();
+  const base = {
+    profile: profile(),
+    tools: ["read_file", "write_file"],
+    workdir: wd,
+    model: { baseUrl: "http://x", apiKey: "k", model: "m" },
+  };
+  const a = memberSystemPrompt({ ...base, brief: "整理 Q3 流水并出月报", deadline: "周五", forbidden: ["不许改原始数据"] });
+  const b = memberSystemPrompt({ ...base, brief: "把去年台账并进来做对账", deadline: "下周一", priority: "算得对>做得全" });
+  assert.equal(a, b, "换了任务简报，system 居然变了——那跨任务缓存就无从谈起");
+
+  // 而任务级内容确实进了各自的 user 段
+  assert.notEqual(
+    memberTaskIntro({ ...base, brief: "A 任务", deadline: "周五" }),
+    memberTaskIntro({ ...base, brief: "B 任务", deadline: "下周一" }),
+  );
 });
 
 // ---------- 执行循环 ----------

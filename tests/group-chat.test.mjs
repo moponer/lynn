@@ -177,7 +177,7 @@ test("群聊：成员交回报 → 群里以他本人名义发言（带头像）
   }
 });
 
-test("群聊：定向说明只进当轮，不进历史（保住前缀缓存）", async () => {
+test("群聊：定向说明随原话一起进历史（发送=存储，否则下一轮前缀变短）", async () => {
   const { kernel } = setup();
   try {
     await kernel.init();
@@ -188,9 +188,14 @@ test("群聊：定向说明只进当轮，不进历史（保住前缀缓存）",
     assert.match(dir, /林工/, "定向说明要点名");
     assert.match(dir, /nudge_member/, "定向说明要指明落地动作");
 
+    /**
+     * 2026-11-17 缓存修复 B1 后的契约：**发送什么就存什么**。
+     * 旧行为是"定向只进当轮、不进历史"，下一轮重建时这条 user 变短，
+     * 从它开始的前缀缓存全部失效——那才是真正的缓存杀手。
+     */
     assert.ok(
-      !kernel.history.some((h) => h.content.includes("【群内定向】")),
-      "定向说明不进历史（历史前缀原样，缓存命中不受 @ 抖动影响）",
+      kernel.history.some((h) => h.content.includes("【群内定向】")),
+      "定向说明必须进历史，保证下一轮发送的前缀与上一轮一致",
     );
     assert.ok(
       kernel.history.some((h) => h.content.includes("@林工")),

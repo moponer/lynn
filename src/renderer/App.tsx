@@ -15,6 +15,7 @@ import { useUiPlugins } from "./desk/ui-host";
 import { pluginsForSlot } from "../shared/ui-plugin";
 import { consoleViewOf } from "./console/registry";
 import { deskFromSnapshot, type Desk } from "./desk/model";
+import { startPerfMonitor } from "./desk/perf-monitor";
 import { applyPluginStyle, applyPluginTokens, applyTheme, loadTheme, normalizeThemeId, type ThemeId, type ThemeMode } from "./desk/theme";
 import type { LynnPack } from "./desk/lynnpack";
 import { Wizard, type WizardResult } from "./desk/Wizard";
@@ -75,9 +76,34 @@ function rpcResultError(res: { error?: string } | undefined, fallback: string): 
 /** 增量事件合并：同 id 的卡就地替换，不整表重拉 */
 function upsertCard(feed: FeedCard[], card: FeedCard): FeedCard[] {
   const i = feed.findIndex((c) => c.id === card.id);
-  if (i < 0) return [...feed, card];
+  if (i < 0) {
+    /**
+     * 与内核同一条排序纪律（2026-11-16）：她的实时输出卡永远留在末尾，
+     * 新到的动作卡 / 成员回报插在它**前面**。此前双方都是 append，
+     * 长任务里她的话被后来的回报一路顶到上面，读起来就是"早期消息穿插在下面"。
+     */
+    const live = feed.findIndex((c) => c.kind === "lynn" && c.streaming);
+    if (live >= 0 && live !== feed.length) {
+      const next = feed.slice();
+      next.splice(live, 0, card);
+      return next;
+    }
+    return [...feed, card];
+  }
   const next = feed.slice();
   next[i] = card;
+  /**
+   * 就地更新的卡要跟着时间走（2026-11-16）：进度卡是同一张卡反复更新，
+   * 如果只替换内容不挪位置，最新一步会永远停在它第一次出现的地方（长任务里就在很上面）。
+   * 规则与内核 floatAboveLive 一致：插到她的实时输出卡之前。
+   */
+  const live = next.findIndex((c) => c.kind === "lynn" && c.streaming && c.id !== card.id);
+  if (live >= 0 && i > live) {
+    next.splice(i, 1);
+    const l = next.findIndex((c) => c.kind === "lynn" && c.streaming && c.id !== card.id);
+    if (l >= 0) next.splice(l, 0, card);
+    else next.push(card);
+  }
   return next;
 }
 
@@ -142,6 +168,14 @@ export default function App() {
   useEffect(() => {
     captureShotRef.current = captureShot;
   }, [captureShot]);
+  /**
+   * 性能采集启动一次（P6-7 / 18 章 F6）。
+   * `startPerfMonitor` 是幂等的；React 严格模式双跑 effect 不会重复挂观察者。
+   * 没有 PerformanceObserver 的环境里它自己静默返回，不影响任何功能。
+   */
+  useEffect(() => {
+    startPerfMonitor();
+  }, []);
   /** 截图到达时的当前会话：事件回调里读快照外的最新 thread.id */
   const threadIdRef = useRef("");
   const seenShots = useRef(new Set<string>());
@@ -267,6 +301,21 @@ export default function App() {
     }
   }, []);
 
+  /**
+   * 合并式刷新（2026-11-16 实机「Lynn 未响应」）：
+   * 每个工具事件/后台会话动静都拉一次全量快照，而快照要同步读全量工单与卷宗。
+   * 卡片本身已经由 card 事件增量送达，这类刷新只是为了对齐台账与编排状态——
+   * 合并到一个窗口里做一次就够，不必一事件一拉。
+   */
+  const refreshSoonTimer = useRef<number | null>(null);
+  const refreshSoon = useCallback(() => {
+    if (refreshSoonTimer.current !== null) return;
+    refreshSoonTimer.current = window.setTimeout(() => {
+      refreshSoonTimer.current = null;
+      void refresh();
+    }, 400);
+  }, [refresh]);
+
   /** 造铃完成：主题立即生效；改了端点/模型也要写盘（不能只在填了 Key 时才保存） */
   const finishWizard = useCallback(
     async (r: WizardResult) => {
@@ -311,18 +360,21 @@ export default function App() {
     }
   }, [snap?.model.configured, wizardOpen]);
 
-  // 流式补字合帧（对齐蓝本 tether-ai 的 rAF 合并）：一帧最多一次 setState，
-  // 否则每个 delta 都重建整棵 feed，长回复会一顿一顿
+  // 流式补字合帧（2026-11-16 从 rAF 改为定间隔）：
+  // 每个 delta 都要 setState → 整棵 feed 与右栏重算。长回复时模型每秒吐几十个 delta，
+  // 每帧一次在长任务（几十张卡）上会把渲染进程压到"未响应"。40ms 合并人眼无感，
+  // 重渲染次数降到 1/3 左右。
   const pendingDelta = useRef<{ id: string; text?: string; thinking?: string } | null>(null);
-  const deltaFrame = useRef<number | null>(null);
+  const deltaTimer = useRef<number | null>(null);
+  const DELTA_MIN_GAP_MS = 80;
 
   useEffect(() => {
-    // 终态（card / done / error）到达时，先丢弃还没跑的 rAF delta：
+    // 终态（card / done / error）到达时，先丢弃还没跑的合并帧：
     // 否则旧的半截补字会在终态卡之后回写，把「恢复成功」又覆盖成半句话。
     const clearPendingDelta = () => {
-      if (deltaFrame.current !== null) {
-        window.cancelAnimationFrame(deltaFrame.current);
-        deltaFrame.current = null;
+      if (deltaTimer.current !== null) {
+        window.clearTimeout(deltaTimer.current);
+        deltaTimer.current = null;
       }
       pendingDelta.current = null;
     };
@@ -335,9 +387,9 @@ export default function App() {
       }
       if (ev.type === "delta" && ev.cardId) {
         pendingDelta.current = { id: ev.cardId, text: ev.text, thinking: ev.thinking };
-        if (deltaFrame.current === null) {
-          deltaFrame.current = window.requestAnimationFrame(() => {
-            deltaFrame.current = null;
+        if (deltaTimer.current === null) {
+          deltaTimer.current = window.setTimeout(() => {
+            deltaTimer.current = null;
             const d = pendingDelta.current;
             pendingDelta.current = null;
             if (!d) return;
@@ -358,7 +410,7 @@ export default function App() {
                   }
                 : s,
             );
-          });
+          }, DELTA_MIN_GAP_MS);
         }
         return;
       }
@@ -368,6 +420,17 @@ export default function App() {
       }
       // 窗口事件只关系到自绘标题栏的按钮态，不触发快照重拉
       if (ev.type === "window") return;
+      // 工具事件：卡已经随 card 事件增量落地（emit 先落卡再广播），
+      // 这里只为对齐台账/编排状态，走合并刷新——一事件一拉全量快照会把主进程拖死。
+      if (ev.type === "tool") {
+        refreshSoon();
+        return;
+      }
+      // 别的会话有动静：同理，合并刷新即可
+      if (ev.type === "thread") {
+        refreshSoon();
+        return;
+      }
       // 截图只进随附条，不拉快照（拉了会重渲染整张指挥台，输入框草稿会抖）
       if (ev.type === "capture") {
         acceptShot(ev.shot);
@@ -379,16 +442,20 @@ export default function App() {
         void refresh();
         return;
       }
-      void refresh();
+      refreshSoon();
     });
     return () => {
       off();
-      if (deltaFrame.current !== null) {
-        window.cancelAnimationFrame(deltaFrame.current);
-        deltaFrame.current = null;
+      if (refreshSoonTimer.current !== null) {
+        window.clearTimeout(refreshSoonTimer.current);
+        refreshSoonTimer.current = null;
+      }
+      if (deltaTimer.current !== null) {
+        window.clearTimeout(deltaTimer.current);
+        deltaTimer.current = null;
       }
     };
-  }, [refresh, acceptShot]);
+  }, [refresh, refreshSoon, acceptShot]);
 
   // 兜底：窗口刚起来 / 重新获得焦点时取回没接到的截图；与事件按 id 去重
   useEffect(() => {

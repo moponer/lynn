@@ -14,6 +14,9 @@ import type { CommandFamily } from "../shared/contract";
 import { normalizeTargetPath } from "./member-path";
 import { buildDocx, type DocxBlock } from "./docx";
 import { insideBase } from "./path-guard";
+import { langOf, scanSymbols, matchSymbols, isScannable, receipt, type CodeSymbol } from "./symbols";
+import { ToolRegistry, type ToolImpl } from "./tool-registry";
+import type { ToolSchema } from "./llm";
 
 export interface FileChange {
   path: string;
@@ -164,6 +167,40 @@ export function destructiveTargets(command: string): string[] | null {
   if (out.some((t) => /[*?%$`]/.test(t))) return null;
   return out;
 }
+
+/**
+ * 扫描保护（2026-11-16 实机「窗口未响应」的根因之一）：
+ * glob / grep 是**同步递归**扫盘，在 Rust+Tauri 这种带 `target/`（几十万文件）的项目里
+ * 单次实测 1 秒，两个成员并行调用就把主进程按死，Windows 直接把窗口标成「未响应」。
+ *  - 一律跳过只会产生噪音的重目录；
+ *  - 再给时间与条目双重上限，超了就返回已找到的部分并如实说明截断。
+ */
+const HEAVY_DIRS = new Set([
+  "node_modules",
+  ".git",
+  ".hg",
+  ".svn",
+  "target",
+  "target-dir",
+  "dist",
+  "dist-electron",
+  ".next",
+  ".nuxt",
+  ".svelte-kit",
+  ".turbo",
+  ".cache",
+  "__pycache__",
+  ".venv",
+  "venv",
+  "vendor",
+  "coverage",
+  "win-unpacked",
+  ".gradle",
+  "Pods",
+]);
+
+const SCAN_BUDGET_MS = 1_500;
+const SCAN_MAX_ENTRIES = 12_000;
 
 /** 通配 → 正则（只支持 * / ** / ?；逐字符拼，链式 replace 会把插入的 `.*` 再吃掉） */
 export function globToRegExp(pattern: string): RegExp {
@@ -349,6 +386,25 @@ export class Toolkit {
   private changeLog: FileChange[] = [];
   /** 读过的文件状态（绝对路径 → mtime/size），写前比对用；见 assertFresh */
   private observed = new Map<string, { mtimeMs: number; size: number }>();
+  /**
+   * 重复读抑制（2026-11-16 日志复盘）。
+   *
+   * 一个 Toolkit 实例 = 一次成员执行，上下文里已经留着他读过的正文；但成员经常
+   * 隔几轮再读同一个文件（实机同一张单把 commands.rs 读了 23 次，全量统计里
+   * 20% 的 read_file 是同参数重复）。每次工具调用本身又是一次完整上下文重放，
+   * 所以"再读一遍"的代价远大于返回的那几千字。
+   * 文件没改、读的是同一段 → 只回一句"内容未变"，不重复粘贴。
+   */
+  private readMemo = new Map<string, { mtimeMs: number; size: number; sig: string; n: number; lines: number }>();
+  private readCount = 0;
+
+  /**
+   * 清空「已读」记忆（2026-11-16）：更早的工具结果被折叠后，模型再读同一文件
+   * 必须能拿到全文——否则它只收到"内容未变"，而正文已经不在上下文里了。
+   */
+  forgetReads(): void {
+    this.readMemo.clear();
+  }
   private readonly root: string;
   private readonly commandTimeoutMs: number;
   private readonly outputCap: number;
@@ -388,6 +444,65 @@ export class Toolkit {
     this.runStartedAt = opts.runStartedAt ?? Date.now();
     this.autoDeleteInWorkspace = opts.autoDeleteInWorkspace;
     this.signalSource = opts.signal;
+    // 内置工具一次性装进注册表：与原来 switch 的分发**逐项对应**，行为不变
+    this.installBuiltinTools();
+  }
+
+  /**
+   * 把 23 个内置工具注册进注册表。
+   *
+   * 每个实现都**委托给原来的私有方法**（`this.readFile` 等），不重写逻辑——
+   * 这样这次改造的风险被限制在"分发方式"上，业务行为一个字没动。
+   *
+   * `resident` 标热路径（P4-2 的常驻集）：长尾工具（office/browser/符号）默认不常驻，
+   * 但**是否常驻由调用方按场景决定**，注册表只记事实，不做策略。
+   */
+  private installBuiltinTools(): void {
+    const schemaOf = (name: string): ToolSchema => {
+      const s = TOOLKIT_SCHEMAS.find((x) => x.function.name === name);
+      if (!s) throw new Error(`内置工具 ${name} 缺少 schema——注册表与 TOOLKIT_SCHEMAS 已漂移`);
+      return s;
+    };
+    const HOT = new Set([
+      "read_file",
+      "write_file",
+      "edit_file",
+      "list_dir",
+      "glob",
+      "grep",
+      "run_command",
+      "repo_map",
+      "find_symbol",
+      "read_symbol",
+      "find_references",
+    ]);
+    const reg = (name: string, execute: ToolImpl["execute"]): void => {
+      this.registry.register({ name, schema: schemaOf(name), execute, origin: "builtin", resident: HOT.has(name) });
+    };
+
+    reg("read_file", (a) => this.readFile(a));
+    reg("write_file", (a) => this.writeFile(a));
+    reg("edit_file", (a) => this.editFile(a));
+    reg("list_dir", (a) => this.listDir(a));
+    reg("glob", (a) => this.glob(a));
+    reg("grep", (a) => this.grep(a));
+    reg("run_command", (a) => this.runCommand(a));
+    reg("office_read_table", (a) => this.officeTool("office_read_table", a));
+    reg("office_write_table", (a) => this.officeTool("office_write_table", a));
+    reg("office_write_docx", (a) => this.officeDocx(a));
+    reg("browser_navigate", (a) => this.browserTool("browser_navigate", a));
+    reg("browser_snapshot", (a) => this.browserTool("browser_snapshot", a));
+    reg("browser_click", (a) => this.browserTool("browser_click", a));
+    reg("browser_fill", (a) => this.browserTool("browser_fill", a));
+    reg("browser_extract", (a) => this.browserTool("browser_extract", a));
+    reg("browser_close", (a) => this.browserTool("browser_close", a));
+    reg("kb_add", (a) => this.kbAdd(a));
+    reg("app_api", (a) => this.appApi(a));
+    reg("ssh_run", (a) => this.sshRun(a));
+    reg("repo_map", (a) => this.repoMap(a));
+    reg("find_symbol", (a) => this.findSymbol(a));
+    reg("read_symbol", (a) => this.readSymbolText(a));
+    reg("find_references", (a) => this.findReferences(a));
   }
 
   /**
@@ -604,12 +719,25 @@ export class Toolkit {
     // 往往只是其中一段（对表头、查一行、看日志尾部）。默认 400 行，显式传 offset/limit 精读。
     const lines = text.split("\n");
     const explicit = args.offset !== undefined || args.limit !== undefined;
-    // 小文件且没点名分页：保持原样返回（不动既有调用方的输出）
-    if (!explicit && lines.length <= READ_LINES && text.length <= READ_CAP) return text;
-
     const start = Math.max(1, Math.trunc(Number(args.offset ?? 1)) || 1);
     const wantLimit = Math.trunc(Number(args.limit ?? READ_LINES)) || READ_LINES;
     const limit = Math.max(1, Math.min(MAX_READ_LINES, wantLimit));
+    // 小文件且没点名分页：保持原样返回（不动既有调用方的输出）
+    const small = !explicit && lines.length <= READ_LINES && text.length <= READ_CAP;
+    const sig = small ? "full" : `${start}+${limit}`;
+    // 同一实例里重复读同一段、文件也没改：正文已经在上文，只回一句（省一次整段上下文重放）
+    const memo = this.readMemo.get(full);
+    if (memo && memo.mtimeMs === stat.mtimeMs && memo.size === stat.size && memo.sig === sig) {
+      return (
+        `[内容未变] ${rel} 与你在第 ${memo.n} 次读到的完全一致（共 ${memo.lines} 行，文件未修改），` +
+        "这里不再重复粘贴——正文就在上文。要看别的段落再用 offset/limit 分段读。"
+      );
+    }
+    this.readCount += 1;
+    if (small) {
+      this.readMemo.set(full, { mtimeMs: stat.mtimeMs, size: stat.size, sig, n: this.readCount, lines: lines.length });
+      return text;
+    }
     if (start > lines.length) {
       return `${rel} 只有 ${lines.length} 行，offset=${start} 超出范围（要从 1 开始）。`;
     }
@@ -622,6 +750,7 @@ export class Toolkit {
     if (out.length > READ_CAP) {
       out = `${out.slice(0, READ_CAP)}\n…（已截断：这一行本身就超过 ${READ_CAP} 字符，用 offset 换一段或让上游拆行）`;
     }
+    this.readMemo.set(full, { mtimeMs: stat.mtimeMs, size: stat.size, sig, n: this.readCount, lines: lines.length });
     return out;
   }
 
@@ -656,6 +785,8 @@ export class Toolkit {
       fs.mkdirSync(path.dirname(full), { recursive: true });
       fs.writeFileSync(full, content, "utf-8");
       this.markObserved(full);
+      // 自己改过就必须重新读：残留的"内容未变"记忆会让它以为磁盘还是旧版
+      this.readMemo.delete(full);
       const c = this.record(rel, before, content);
       return `已写入 ${rel}（${Buffer.byteLength(content, "utf-8")} 字节，+${c.added}/-${c.removed}）\n${c.diff}`;
     });
@@ -683,6 +814,7 @@ export class Toolkit {
       const after = all ? before.split(oldStr).join(newStr) : before.replace(oldStr, newStr);
       fs.writeFileSync(full, after, "utf-8");
       this.markObserved(full);
+      this.readMemo.delete(full);
       const c = this.record(rel, before, after);
       return `已改 ${rel}（+${c.added}/-${c.removed}）\n${c.diff}`;
     });
@@ -706,6 +838,7 @@ export class Toolkit {
       this.onBeforeWrite?.(rel, full, true);
       fs.writeFileSync(full, after, "utf-8");
       this.markObserved(full);
+      this.readMemo.delete(full);
       const c = this.record(rel, before, after);
       return `已打补丁 ${rel}（+${c.added}/-${c.removed}）\n${c.diff}`;
     });
@@ -738,10 +871,26 @@ export class Toolkit {
     if (!pattern) throw new Error("pattern 不能为空");
     const re = globToRegExp(pattern);
     const out: string[] = [];
+    // 时间/条目双重上限（2026-11-16 实机「窗口未响应」）：这几个工具是**同步递归**扫盘，
+    // 实测一次 glob 996~1004ms，主进程被占住，Windows 直接把窗口标成「未响应」。
+    const deadline = Date.now() + SCAN_BUDGET_MS;
+    let visited = 0;
+    let truncated = false;
     const walk = (dir: string, depth: number) => {
-      if (depth > 8 || out.length >= 400) return;
-      for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
-        if (e.name === "node_modules" || e.name === ".git") continue;
+      if (truncated || depth > 8 || out.length >= 400) return;
+      if (Date.now() > deadline || visited > SCAN_MAX_ENTRIES) {
+        truncated = true;
+        return;
+      }
+      let entries: fs.Dirent[];
+      try {
+        entries = fs.readdirSync(dir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const e of entries) {
+        visited += 1;
+        if (e.isDirectory() && HEAVY_DIRS.has(e.name)) continue;
         const full = path.join(dir, e.name);
         const rel = path.relative(this.root, full).replace(/\\/g, "/");
         if (e.isDirectory()) walk(full, depth + 1);
@@ -749,7 +898,8 @@ export class Toolkit {
       }
     };
     walk(this.root, 0);
-    return out.length ? out.slice(0, 200).join("\n") : "没有匹配的文件。";
+    const tail = truncated ? "\n（扫描达到时间/条目上限，结果可能不全：缩小到具体子目录，或用更精确的 pattern）" : "";
+    return out.length ? out.slice(0, 200).join("\n") + tail : "没有匹配的文件。" + tail;
   }
 
   grep(args: Record<string, unknown>): string {
@@ -785,11 +935,26 @@ export class Toolkit {
         /* 跳过读不了的文件 */
       }
     };
+    let truncated = false;
     if (fs.existsSync(base) && fs.statSync(base).isDirectory()) {
+      // 与 glob 同一套保护：跳过重目录 + 时间/条目上限（同步扫盘会把主进程卡死）
+      const deadline = Date.now() + SCAN_BUDGET_MS;
+      let visited = 0;
       const walk = (dir: string, depth: number) => {
-        if (depth > 8 || hits.length >= LIMIT) return;
-        for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
-          if (e.name === "node_modules" || e.name === ".git") continue;
+        if (truncated || depth > 8 || hits.length >= LIMIT) return;
+        if (Date.now() > deadline || visited > SCAN_MAX_ENTRIES) {
+          truncated = true;
+          return;
+        }
+        let entries: fs.Dirent[];
+        try {
+          entries = fs.readdirSync(dir, { withFileTypes: true });
+        } catch {
+          return;
+        }
+        for (const e of entries) {
+          visited += 1;
+          if (e.isDirectory() && HEAVY_DIRS.has(e.name)) continue;
           const full = path.join(dir, e.name);
           if (e.isDirectory()) walk(full, depth + 1);
           else if (!incRe || incRe.test(path.relative(this.root, full).replace(/\\/g, "/"))) scan(full);
@@ -799,9 +964,10 @@ export class Toolkit {
     } else {
       scan(base);
     }
-    if (!hits.length) return "没有匹配行。";
+    const cutNote = truncated ? "\n…（扫描达到时间/条目上限，结果可能不全：缩小 path 或加 include 再搜）" : "";
+    if (!hits.length) return "没有匹配行。" + cutNote;
     const more = hits.length >= LIMIT ? `\n…（已到 ${LIMIT} 行上限，可能还有更多；加 include 或缩小 path 再搜）` : "";
-    return `${hits.join("\n")}${more}`;
+    return `${hits.join("\n")}${more}${cutNote}`;
   }
 
   async runCommand(args: Record<string, unknown>): Promise<string> {
@@ -853,14 +1019,26 @@ export class Toolkit {
         }
       }
     }
-    // 4) 出站闸（审计 #2）：OUTBOUND 命中先问权限档——计划/询问档不自动放行
-    //    （成员工作区里的数据可以被 curl 带出本机，这是真实的外泄通道）；
-    //    自动/全权档保持"只审计不拦"。拒了给指路：ESCALATE 让用户决定。
+    /**
+     * 4) 出站闸（审计 #2，2026-11-17 P5-1 改为**按单**授权）
+     *
+     * 默认不给网：成员工作区里的数据可以被一条 curl 带出本机，这是真实的外泄通道。
+     * 拒绝时要把**两条可行出路**说清楚，不然成员只会换个写法硬试（实测过这种空转）：
+     *  - 取网页数据：用 browser_* 工具（宿主进程，不需要给成员开网）；
+     *  - 确实要脚本联网：在回报里写 ESCALATE，让风铃在派单时给这张单 network 授权。
+     */
     const outbound = OUTBOUND.test(command);
     if (outbound && this.outboundAllowed && !this.outboundAllowed()) {
-      this.onAudit?.({ kind: "cmd_blocked", command, why: "出站/联网命令在当前权限档不自动放行", cwd });
-      return `已拒绝执行：出站/联网命令（curl/wget/ssh/上传类）在当前权限档不自动放行。` +
-        `改用无需联网的做法；确实需要联网时在回报里写 ESCALATE 说明原因，由用户切「自动」档或单独放行。`;
+      this.onAudit?.({ kind: "cmd_blocked", command, why: "本单没有联网授权（出站命令被拒）", cwd });
+      return (
+        "已拒绝执行：联网/出站命令，但这张单**没有联网授权**（出站闸默认关闭）。\n" +
+        "两条出路，按顺序考虑：\n" +
+        "1. **取网页数据用 browser_* 工具**（browser_navigate / browser_snapshot / browser_extract）：" +
+        "它们走宿主进程，不需要给成员开网，也不会把工作区数据带出去；\n" +
+        "2. 确实必须由脚本联网（装依赖 / 克隆仓库 / 调接口）：在回报里写 `ESCALATE: 需要联网，理由…`，" +
+        "由风铃重派时给这张单开 network 授权。\n" +
+        "不要换写法绕过闸门（改命令名、拼字符串、写进脚本再跑都不行），那只会烧轮次。"
+      );
     }
     if (outbound) this.onAudit?.({ kind: "cmd_net", command, cwd });
     this.onAudit?.({ kind: "cmd_run", command, cwd });
@@ -913,43 +1091,323 @@ export class Toolkit {
   }
 
   /** 统一入口：名字与 schema 一一对应 */
+  /**
+   * 工具注册表（2026-11-17 P8-1）。
+   *
+   * 原来 `execute()` 是一个 switch、`TOOLKIT_SCHEMAS` 是常量数组。换成注册表之后：
+   *  - 内置工具与插件工具**走同一条路**，插件才可能"替换"而不只是"新增"；
+   *  - 工具面顺序由注册表统一保证（按名字排序，不受加载先后影响）；
+   *  - 注册返回 disposer，插件卸载时自动回收。
+   *
+   * 内置工具在构造时一次性装进来（`installBuiltinTools`），行为与原来逐字一致。
+   */
+  private readonly registry = new ToolRegistry();
+
+  /**
+   * 内置工具名（用于审计"哪些被插件覆盖了"）。
+   *
+   * 用 getter 而不是静态常量：`TOOLKIT_SCHEMAS` 在文件末尾才定义，
+   * 静态字段初始化会在模块加载期求值——那时它还是 undefined。
+   */
+  static get BUILTIN_TOOL_NAMES(): readonly string[] {
+    return TOOLKIT_SCHEMAS.map((s) => s.function.name);
+  }
+
+  /** 暴露注册表给需要"统一执行入口"的调用方（成员运行时、插件宿主） */
+  get tools(): ToolRegistry {
+    return this.registry;
+  }
+
+  /**
+   * 统一执行入口。
+   *
+   * 保留这个方法名与签名（`execute(name, args)`）：调用方（member-runner / 测试）不用改。
+   * 内部从 switch 改成查注册表——**错误文案保持不变**（"工作区里没有这个工具：x"），
+   * 因为测试与模型都依赖它。
+   */
   async execute(name: string, args: Record<string, unknown>): Promise<string> {
-    switch (name) {
-      case "read_file":
-        return this.readFile(args);
-      case "write_file":
-        return this.writeFile(args);
-      case "edit_file":
-        return this.editFile(args);
-      case "list_dir":
-        return this.listDir(args);
-      case "glob":
-        return this.glob(args);
-      case "grep":
-        return this.grep(args);
-      case "run_command":
-        return this.runCommand(args);
-      case "office_read_table":
-      case "office_write_table":
-        return this.officeTool(name, args);
-      case "office_write_docx":
-        return this.officeDocx(args);
-      case "browser_navigate":
-      case "browser_snapshot":
-      case "browser_click":
-      case "browser_fill":
-      case "browser_extract":
-      case "browser_close":
-        return this.browserTool(name, args);
-      case "kb_add":
-        return this.kbAdd(args);
-      case "app_api":
-        return this.appApi(args);
-      case "ssh_run":
-        return this.sshRun(args);
-      default:
-        throw new Error(`工作区里没有这个工具：${name}`);
+    const impl = this.registry.get(name);
+    if (!impl) throw new Error(`工作区里没有这个工具：${name}`);
+    return impl.execute(args);
+  }
+
+  /**
+   * 扫文件（符号四件套共用）。边界与 grep/glob 同一套：只走工作区 + 已批准只读根，
+   * 跳过重目录，有总预算与条目上限——同步扫盘会把主进程卡死。
+   */
+  private scanCodeFiles(
+    baseDir: string,
+    onFile: (full: string, rel: string, text: string) => boolean | void,
+    budget: { maxEntries?: number; maxMs?: number } = {},
+  ): { visited: number; truncated: boolean } {
+    const maxEntries = budget.maxEntries ?? 4000;
+    const maxMs = budget.maxMs ?? SCAN_BUDGET_MS;
+    const deadline = Date.now() + maxMs;
+    let visited = 0;
+    let truncated = false;
+    const walk = (dir: string, depth: number): void => {
+      if (truncated || depth > 8) return;
+      if (Date.now() > deadline || visited > maxEntries) {
+        truncated = true;
+        return;
+      }
+      let entries: fs.Dirent[];
+      try {
+        entries = fs.readdirSync(dir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const e of entries) {
+        if (truncated) return;
+        if (e.isDirectory()) {
+          if (HEAVY_DIRS.has(e.name) || e.name.startsWith(".")) continue;
+          walk(path.join(dir, e.name), depth + 1);
+          continue;
+        }
+        if (!e.isFile()) continue;
+        const full = path.join(dir, e.name);
+        let size = 0;
+        try {
+          size = fs.statSync(full).size;
+        } catch {
+          continue;
+        }
+        if (!isScannable(full, size)) continue;
+        visited += 1;
+        let text = "";
+        try {
+          text = fs.readFileSync(full, "utf8");
+        } catch {
+          continue;
+        }
+        const rel = path.relative(this.root, full).replace(/\\/g, "/");
+        if (onFile(full, rel, text) === false) {
+          truncated = true;
+          return;
+        }
+      }
+    };
+    walk(baseDir, 0);
+    return { visited, truncated };
+  }
+
+  private scanRoots(scope: string): string[] {
+    const roots = [resolveWithin(this.root, scope)];
+    for (const r of this.getReadRoots()) if (fs.existsSync(r)) roots.push(r);
+    return [...new Set(roots)];
+  }
+
+  /** repo_map：目录 → 文件 → 顶层符号 + 行号（10 章 §3） */
+  repoMap(args: Record<string, unknown>): string {
+    const scope = args.path === undefined || args.path === "" ? "." : String(args.path);
+    const rawDepth = Number(args.depth);
+    const depth = Number.isFinite(rawDepth) && rawDepth > 0 ? Math.min(4, Math.floor(rawDepth)) : 2;
+    const BUDGET = 2000;
+    const lines: string[] = [];
+    let used = 0;
+    let filesSeen = 0;
+    let cut = false;
+    for (const root of this.scanRoots(scope)) {
+      const res = this.scanCodeFiles(
+        root,
+        (_full, rel, text) => {
+          const relDepth = rel.split("/").length - 1;
+          if (relDepth > depth) return; // 文件本身在更深的层，不列
+          filesSeen += 1;
+          const syms = scanSymbols(text, langOf(rel));
+          const head = `${rel} (${text.split(/\r?\n/).length} 行, ${syms.length} 个顶层符号)`;
+          const items = syms.slice(0, 12).map((s) => `  ${s.line}: ${s.kind} ${s.name}${s.exported ? "" : " (私有)"}`);
+          const block = [head, ...items].join("\n");
+          if (used + block.length + 1 > BUDGET) {
+            cut = true;
+            return false;
+          }
+          lines.push(block);
+          used += block.length + 1;
+          return undefined;
+        },
+        { maxEntries: 2000 },
+      );
+      if (res.truncated) cut = true;
+      if (cut) break;
     }
+    if (!filesSeen) {
+      return receipt({
+        ok: false,
+        kind: "repo_map",
+        target: scope,
+        summary: "这个目录里没有可扫描的代码文件（只认 ts/js/py/rs/go）",
+        next: "用 list_dir 看有什么；非代码文件直接 read_file",
+      });
+    }
+    return receipt({
+      ok: true,
+      kind: "repo_map",
+      target: scope,
+      summary: `列了 ${lines.length} 个文件${cut ? "（到 2K 上限，还有没列的）" : ""}；共扫到 ${filesSeen} 个代码文件`,
+      next: cut ? "要看更多：给更窄的 path，或直接 read_symbol / read_file" : "看中哪个符号就 read_symbol 只读它，别整篇读",
+      extra: { map: lines.join("\n") },
+    });
+  }
+
+  /** find_symbol：按名字找工作区里的符号 */
+  findSymbol(args: Record<string, unknown>): string {
+    const query = String(args.query ?? "").trim();
+    if (!query) throw new Error("query 不能为空");
+    const scope = args.path === undefined || args.path === "" ? "." : String(args.path);
+    const rawLimit = Number(args.limit);
+    const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(100, Math.floor(rawLimit)) : 30;
+    const hits: string[] = [];
+    let scanned = 0;
+    let cut = false;
+    for (const root of this.scanRoots(scope)) {
+      this.scanCodeFiles(
+        root,
+        (_full, rel, text) => {
+          scanned += 1;
+          const syms = scanSymbols(text, langOf(rel), true);
+          for (const s of matchSymbols(syms, query)) {
+            if (hits.length >= limit) {
+              cut = true;
+              return false;
+            }
+            hits.push(`${rel}:${s.line}  ${s.kind} ${s.name}${s.exported ? "" : " (私有)"}  ${s.signature}`);
+          }
+          return undefined;
+        },
+        { maxEntries: 2000 },
+      );
+      if (cut) break;
+    }
+    if (!hits.length) {
+      return receipt({
+        ok: false,
+        kind: "find_symbol",
+        target: query,
+        summary: `扫了 ${scanned} 个代码文件，没找到符号「${query}」`,
+        next: "词法扫描认不出宏生成/异形写法：改用 grep 搜名字，或 repo_map 看那个目录有什么",
+      });
+    }
+    return receipt({
+      ok: true,
+      kind: "find_symbol",
+      target: query,
+      summary: `找到 ${hits.length} 处（扫了 ${scanned} 个文件）${cut ? "，到上限还有更多" : ""}`,
+      next: "确定是哪个之后用 read_symbol 只读那一个；改名/改签名前先 find_references",
+      extra: { hits },
+    });
+  }
+
+  /** read_symbol：只读一个符号的正文 */
+  readSymbolText(args: Record<string, unknown>): string {
+    const file = String(args.file ?? "").trim();
+    const symbol = String(args.symbol ?? "").trim();
+    if (!file) throw new Error("file 不能为空");
+    if (!symbol) throw new Error("symbol 不能为空");
+    const full = resolveReadable(this.root, this.getReadRoots(), file).full;
+    if (!fs.existsSync(full)) {
+      return receipt({
+        ok: false,
+        kind: "read_symbol",
+        target: file,
+        summary: `文件不存在：${file}`,
+        next: "用 list_dir 看父目录，或 repo_map / find_symbol 确认路径",
+      });
+    }
+    const text = fs.readFileSync(full, "utf8");
+    const lines = text.split(/\r?\n/);
+    const syms = scanSymbols(text, langOf(full), true);
+    const before = syms.length;
+    const hit = matchSymbols(syms, symbol)[0];
+    if (!hit) {
+      return receipt({
+        ok: false,
+        kind: "read_symbol",
+        target: `${file}#${symbol}`,
+        summary: `${file} 里扫到 ${before} 个符号，但没有「${symbol}」`,
+        next: `词法扫描可能漏（宏/异形写法）。用 grep 在 ${file} 里搜 "${symbol}"，或 read_file 分段读`,
+      });
+    }
+    const rawMax = Number(args.maxLines);
+    const maxLines = Number.isFinite(rawMax) && rawMax > 0 ? Math.min(1000, Math.floor(rawMax)) : 200;
+    const span = hit.endLine - hit.line + 1;
+    const end = Math.min(hit.endLine, hit.line + maxLines - 1);
+    const body = lines
+      .slice(hit.line - 1, end)
+      .map((l, i) => `${hit.line + i}: ${l}`)
+      .join("\n");
+    return receipt({
+      ok: true,
+      kind: "read_symbol",
+      target: `${file}#${hit.name}`,
+      summary: `${hit.kind} ${hit.name} 在 ${hit.line}-${hit.endLine} 行（共 ${span} 行）${span > maxLines ? `，只给了前 ${maxLines} 行` : ""}`,
+      next:
+        span > maxLines
+          ? `要看剩下：read_file(file="${file}", offset=${end + 1}, limit=${span - maxLines})`
+          : "改它用 edit_file（不要整篇 write_file 覆盖）",
+      extra: { body },
+    });
+  }
+
+  /** find_references：找引用（改签名/改名前必查） */
+  findReferences(args: Record<string, unknown>): string {
+    const symbol = String(args.symbol ?? "").trim();
+    if (!symbol) throw new Error("symbol 不能为空");
+    const scope = args.path === undefined || args.path === "" ? "." : String(args.path);
+    const rawLimit = Number(args.limit);
+    const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(200, Math.floor(rawLimit)) : 40;
+    // 按词边界匹配：`getUser` 不该命中 `getUserById`，那会让"改名的风险面"被夸大
+    const re = new RegExp(`\\b${symbol.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`);
+    const hits: string[] = [];
+    let defs = 0;
+    let scanned = 0;
+    let cut = false;
+    for (const root of this.scanRoots(scope)) {
+      this.scanCodeFiles(
+        root,
+        (_full, rel, text) => {
+          scanned += 1;
+          const lines = text.split(/\r?\n/);
+          const syms = scanSymbols(text, langOf(rel), true);
+          const defLines = new Set(syms.filter((s) => s.name === symbol).map((s: CodeSymbol) => s.line));
+          lines.forEach((line, i) => {
+            if (cut) return;
+            if (!re.test(line)) return;
+            const isDef = defLines.has(i + 1);
+            if (isDef) defs += 1;
+            if (hits.length >= limit) {
+              cut = true;
+              return;
+            }
+            hits.push(`${rel}:${i + 1}${isDef ? "  [定义]" : ""}  ${line.trim().slice(0, 160)}`);
+          });
+          return cut ? false : undefined;
+        },
+        { maxEntries: 2000 },
+      );
+      if (cut) break;
+    }
+    if (!hits.length) {
+      return receipt({
+        ok: false,
+        kind: "find_references",
+        target: symbol,
+        summary: `扫了 ${scanned} 个代码文件，没找到「${symbol}」的任何出现`,
+        next: "确认名字拼写；名字只在非代码文件里出现的话用 grep",
+      });
+    }
+    return receipt({
+      ok: true,
+      kind: "find_references",
+      target: symbol,
+      summary: `${hits.length} 处（其中 ${defs} 处是定义）${cut ? "，到上限还有更多" : ""}；扫了 ${scanned} 个文件`,
+      next: cut
+        ? "到上限了：给更窄的 path 再跑一次，别以为就这些"
+        : defs > 1
+          ? "有不止一处定义（重名或重载）：改之前先确认改哪一处"
+          : "改动落点清楚了：用 read_symbol 读那一段，再 edit_file",
+      extra: { hits },
+    });
   }
 
   /** 知识库写入（M2-08）：抓取结果存为 markdown；未注入如实说 */
@@ -1303,6 +1761,80 @@ export const TOOLKIT_SCHEMAS = [
       name: "glob",
       description: "按通配符找工作区内的文件（支持 *、**、?）。",
       parameters: { type: "object", properties: { pattern: { type: "string" } }, required: ["pattern"] },
+    },
+  },
+  /**
+   * 符号四件套（2026-11-17 P4-1 / 10 章 §3）。定位代码先看结构、再看片段，
+   * 不要再"整篇读一遍 + grep 猜"。底层是词法扫描（无原生依赖），结果里会如实标注精确度。
+   */
+  {
+    type: "function" as const,
+    function: {
+      name: "repo_map",
+      description:
+        "看目录里有哪些文件、每个文件有哪些顶层符号（函数/类/接口…）+ 行号。**定位代码第一步用这个**，别整篇读。" +
+        "输出压到 2K 字符内；要更细就给它更窄的 path 或更大的 depth。词法扫描，不是语法树。",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "相对工作区的目录（缺省 = 工作区根）" },
+          depth: { type: "number", description: "目录层级（默认 2，最多 4）" },
+        },
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "find_symbol",
+      description:
+        "按名字找工作区里的符号（函数/类/接口…），返回 file:line + 种类 + 签名。要比对全仓同名定义时用它。" +
+        "找不到就降级用 grep（可能是宏生成或异形写法）。",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "符号名（支持部分匹配，大小写不敏感）" },
+          path: { type: "string", description: "限定目录（缺省 = 整个工作区）" },
+          limit: { type: "number", description: "最多几条（默认 30）" },
+        },
+        required: ["query"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "read_symbol",
+      description:
+        "只读一个符号的正文（它的声明到结束），不用整篇读文件。要改某个函数时先读它，再 edit_file。" +
+        "找不到符号时会告诉你用 grep 兜底——别当成「这个文件里没有」。",
+      parameters: {
+        type: "object",
+        properties: {
+          file: { type: "string", description: "相对工作区的文件路径" },
+          symbol: { type: "string", description: "符号名" },
+          maxLines: { type: "number", description: "最多读多少行（默认 200）" },
+        },
+        required: ["file", "symbol"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "find_references",
+      description:
+        "找某个符号在工作区里被引用/调用的地方（file:line + 那行原文）。**改签名、改名、删函数之前必须先跑这个**，" +
+        "否则会漏掉调用方。定义处会标「定义」。",
+      parameters: {
+        type: "object",
+        properties: {
+          symbol: { type: "string", description: "符号名（按词边界匹配，不做子串乱配）" },
+          path: { type: "string", description: "限定目录（缺省 = 整个工作区）" },
+          limit: { type: "number", description: "最多几条（默认 40）" },
+        },
+        required: ["symbol"],
+      },
     },
   },
   {

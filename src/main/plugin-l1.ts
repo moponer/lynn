@@ -1,6 +1,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { planSandbox } from "./l1-sandbox";
+import { netPolicyOf, netGuardSource } from "./l1-net-guard";
 import type { ToolSchema } from "./llm";
 import type { PluginManifest } from "./plugin-manifest";
 import { drainUtf8Lines, RpcLineBufferOverflowError } from "./rpc-lines";
@@ -69,6 +71,11 @@ export interface L1Deps {
   toolTimeoutMs?: number;
   /** worker 入口（agent/l1-worker.mjs）：配置后 L1 一律隔离进程加载（审计 #3）；不传 = 进程内（测试/逃生口） */
   workerEntry?: string;
+  /**
+   * 内核 node_modules 目录（P10-1）。worker 要在里面找 jiti 转译器；
+   * 不给这个读权限，插件加载会失败在 "Access to this API has been restricted"。
+   */
+  kernelModules?: string;
   /** 隔离进程单次调用超时（默认 30s）：超时直接杀进程树——进程可强杀，文案如实说明 */
   workerCallTimeoutMs?: number;
   /** 隔离进程激活超时（默认 20s；测试可调小） */
@@ -104,6 +111,8 @@ class L1Worker {
   constructor(
     private readonly entry: string,
     private readonly spawnImpl: typeof spawn,
+    /** 权限参数（P10-1）：由 planSandbox 生成，放在入口之前 */
+    private readonly nodeArgs: readonly string[] = [],
   ) {}
 
   callId(): number {
@@ -113,7 +122,7 @@ class L1Worker {
   private start(): ChildProcessWithoutNullStreams {
     if (this.child) return this.child;
     // Electron 主进程里 process.execPath 是 Electron 二进制；ELECTRON_RUN_AS_NODE=1 让它以纯 Node 跑 worker
-    const child = this.spawnImpl(process.execPath, [this.entry], {
+    const child = this.spawnImpl(process.execPath, [...this.nodeArgs, this.entry], {
       env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
@@ -389,7 +398,35 @@ export class L1Host {
       if (!fs.existsSync(this.deps.workerEntry)) {
         return { ok: false, detail: `L1 worker 入口不存在：${this.deps.workerEntry}` };
       }
-      const worker = new L1Worker(this.deps.workerEntry, this.deps.spawnImpl ?? spawn);
+      /**
+       * 权限强制执行（P10-1）：把 manifest 的 `permissions` 翻译成 Node 权限模型的启动参数。
+       *
+       * 之前这里是"裸跑"——插件进程与内核同权限，`permissions` 只是文档里的一句话。
+       * 现在 fs / 写 / 子进程由 Node 真拦（实测有效），网络仍挡不住（如实标注）。
+       *
+       * dataDir 必须先建好：Node 的 `--allow-fs-write` 要求目标路径**预先存在**，
+       * 否则写权限静默失效——那种"看起来配了其实没生效"最危险。
+       */
+      const dataDir = path.join(dir, "state");
+      fs.mkdirSync(dataDir, { recursive: true });
+      const plan = planSandbox(manifest.permissions, {
+        workerEntry: this.deps.workerEntry,
+        pluginDir: dir,
+        dataDir,
+        /**
+         * 内核依赖目录：jiti 从这里加载 TypeScript 转译器。
+         * 不给它，插件**连加载都做不到**——报错是
+         * "Access to this API has been restricted. Use --allow-fs-read to manage permissions."
+         */
+        kernelModules: this.deps.kernelModules,
+      });
+      /**
+       * 网络守卫（P10-2）：Node 权限模型不拦网络，这是 L1 自启用最后一道没关上的门。
+       * 守卫源码随 activate 消息下发，worker 在加载插件**之前**装好它。
+       */
+      const netPolicy = netPolicyOf(manifest.permissions?.net);
+      const netGuard = netGuardSource(netPolicy);
+      const worker = new L1Worker(this.deps.workerEntry, this.deps.spawnImpl ?? spawn, plan.args);
       let registered = false;
       try {
         const res = await worker.request(
@@ -398,7 +435,9 @@ export class L1Host {
             id,
             entryPath,
             declared: manifest.contributes?.tools ?? [],
-            dataDir: path.join(dir, "state"),
+            dataDir,
+            // P10-2：网络守卫源码，worker 在加载插件前求值
+            netGuard,
           },
           this.deps.workerActivateTimeoutMs ?? L1_ACTIVATE_TIMEOUT_MS,
           () => worker.kill(),

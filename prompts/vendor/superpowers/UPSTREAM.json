@@ -1,0 +1,30 @@
+{
+  "upstream": "superpowers",
+  "sourcePath": "f:\\spiker\\zcode-ref\\apps\\zcode-cli\\packages\\superpowers-plugin",
+  "license": "MIT",
+  "vendoredAt": "2026-11-17T07:44:29Z",
+  "note": "角色提示词（执行者 / 三种评审者）与 14 个技能正文。技能只取 SKILL.md：上游的 references/ 与 scripts/ 服务它自己的运行环境（Codex CLI / Copilot），我们没有对应实现，收进来是死文件。",
+  "files": {
+    "roles/implementer.md": "sha256:b6965edc0caa74ea541aa91548369d822bf320ca12ba97d610da1f12dcf6bcbc",
+    "roles/reviewer-spec.md": "sha256:1519af8d7120ce6769929fc5df9487e8ffc6514a79f96b62399e250928d69de8",
+    "roles/reviewer-quality.md": "sha256:c1d73cac66b03b917f56925f3d4d36e5fe15ff6dc18dff52d7bfca9d27307149",
+    "roles/code-reviewer.md": "sha256:442ced6266fa01e2429c7e48af3dcc63bd56ff89e5d0dd5f1461d8769ba4a93a",
+    "roles/reviewer-plan.md": "sha256:f934889f4f40f85782e703042edb28217169853df3eaf285586a5ab4e5ea5403",
+    "roles/reviewer-spec-doc.md": "sha256:845c53bf548472622150cb03708a6abbcc3c11cf86b7d7131e41e6789c334574",
+    "skills/brainstorming/SKILL.md": "sha256:4625fbfaafb229d41364b77a3591f9559e0d9d73ab0ed3589bb8e3c63f0cb734",
+    "skills/dispatching-parallel-agents/SKILL.md": "sha256:ee429867974830f3fa1dc2a3b0cf5c98c742a1c33ec0fb156ac3727a255d24b5",
+    "skills/executing-plans/SKILL.md": "sha256:f24e0fdbcdb973b34f81ab481d10be0e494b5809d9e11f00fcf646a3e268c7a2",
+    "skills/finishing-a-development-branch/SKILL.md": "sha256:604aedd210874565f91207829226305819f3b6cadc323e3de813a2d9d20aeafe",
+    "skills/receiving-code-review/SKILL.md": "sha256:bda6f19ebd6d4ec043e448c8d233de8308f76b72230de2297b306bc49b8a6e93",
+    "skills/requesting-code-review/SKILL.md": "sha256:59f0c7d3180a47946734c03afa975b417428c49edaf7526d8e589ef40bb3aa7e",
+    "skills/subagent-driven-development/SKILL.md": "sha256:6bd8b947bad82cd59bd440b64a6f2a2e92e7c89282cf26187e6ea3ba44f1b199",
+    "skills/systematic-debugging/SKILL.md": "sha256:530855dfa2b10d5b9f92ac170fe41c5f8fbc4918957a564855b50a896ca625a2",
+    "skills/test-driven-development/SKILL.md": "sha256:4f090e919b7310192864f1d046910c53fa7ca353f5cc2b8d07717c7a897f0183",
+    "skills/using-git-worktrees/SKILL.md": "sha256:498ba68274da48e3b96473be8cbddcdc35399e0969d6933d6e7b8fe2d8e89c07",
+    "skills/using-superpowers/SKILL.md": "sha256:8052a1248970aee7ddd272bf27e9873aec08177d5065b75ba8c53d9b68d89d5f",
+    "skills/verification-before-completion/SKILL.md": "sha256:c35ac975d145f74d9f3668c1b035a3754d3c0f4edb491cc80a6a0265cfdf7749",
+    "skills/writing-plans/SKILL.md": "sha256:cd8550405fc7fd224489f0b993fce822f69626fc0c612b3c9829d991cb4314c6",
+    "skills/writing-skills/SKILL.md": "sha256:4d99cd4e235947d27d58241335dfd5ca89b4e873af5051b19ae32a3ac92851ea",
+    "LICENSE": "sha256:0da33ed814ee87e72db078f489c4447af72f13d9f25d9e17476f32efd77705fc"
+  }
+}

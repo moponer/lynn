@@ -1,0 +1,24 @@
+{
+  "id": "B1",
+  "title": "CSV 整理成 Word 报告",
+  "domain": "office",
+  "role": "writer",
+  "mode": "execute",
+  "brief": "把 input/sales.csv 做成一份 Word 报告（report.docx）：顶部一句结论，下面按区域汇总的表格，最后一段写异常点。数字必须与 CSV 一致。",
+  "acceptance": [
+    "report.docx 存在且能被 office_read_table/docx 预览打开",
+    "含 1 个表格，表头至少「区域 / 销售额 / 订单数」三列",
+    "报告里的合计与 CSV 合计一致（允许四舍五入到整数）",
+    "结论段不少于 2 句实质内容，不是标题党"
+  ],
+  "expected": {
+    "deliverables": ["report.docx"],
+    "checks": [
+      { "type": "file", "path": "report.docx", "minBytes": 5000 },
+      { "type": "docx", "hasTable": true, "minParagraphs": 3 },
+      { "type": "number", "from": "input/sales.csv", "in": "report.docx", "field": "total" }
+    ]
+  },
+  "judge": { "auto": true, "script": "checks/B1.mjs" },
+  "limits": { "maxTurns": 12, "budgetTokens": 300000, "minutes": 20 }
+}

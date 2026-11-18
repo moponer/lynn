@@ -1,0 +1,4 @@
+/* 形态层（组合插件示例）：只许属性选择器 + Token，禁 @import。 */
+[data-plugin="lynn.template.combo"] .sf-row-main b {
+  letter-spacing: 0.01em;
+}

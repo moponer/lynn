@@ -181,6 +181,24 @@ export function DeskView({
     },
     [desk.thread.id],
   );
+  /**
+   * 插件命令把文本填进输入台（P11-1）。
+   *
+   * 为什么需要一个 state 而不是直接改 ref：`draftByThread` 是 ref（不触发渲染），
+   * 而 `ComposerZone` 靠 `key` 重建来接收 `initialDraft`。要让新草稿立刻出现在
+   * 输入台里，必须改 key 让它重建一次——`draftSeq` 就是这个"请重建"的信号。
+   *
+   * 为什么是"填进去"而不是"直接发送"：命令是省打字，不是代替用户决定。
+   * 用户还能改几个字再发。
+   */
+  const [draftSeq, setDraftSeq] = useState(0);
+  const runPluginPrompt = useCallback(
+    (text: string) => {
+      draftByThread.current.set(desk.thread.id, text);
+      setDraftSeq((n) => n + 1);
+    },
+    [desk.thread.id],
+  );
   // 默认永远是「会话频道」：用户与风铃的完整对话不会被任何工单抢走。
   // 需要拍板的单走右栏/频道提示，用户点开才切工单详情（2026-11-11 修）。
   const [activeId, setActiveId] = useState<string | undefined>(undefined);
@@ -341,7 +359,7 @@ export function DeskView({
             // 会话 key 重建输入台（产品行为）：切会话时 @ 文件与图片附件随旧实例卸载清空，
             // 不会把 A 会话选的附件误发进 B 会话；文字草稿则按会话隔离——
             // 每个会话在草稿匣里各存一份，切回来接着写，不是一刀切清空。
-            key={desk.thread.id || "none"}
+            key={`${desk.thread.id || "none"}#${draftSeq}`}
             initialDraft={draftByThread.current.get(desk.thread.id) ?? ""}
             onDraftChange={saveDraft}
             configured={configured}
@@ -400,6 +418,7 @@ export function DeskView({
           onPickProject={onPickProject}
           onClearWorkspace={onClearWorkspace}
           onAddReadRoots={onAddReadRoots}
+          onRunPrompt={runPluginPrompt}
         />
       )}
       {keymapOpen && <KeymapOverlay onClose={() => setKeymapOpen(false)} />}

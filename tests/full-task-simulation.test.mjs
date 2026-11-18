@@ -157,11 +157,12 @@ test("模拟任务全链路：派单 → 骨架稿被拒 → checks 回报 → �
     assert.equal(advisorCalls, 1);
     assert.equal(tasks.get("WO-SIM").status, "in_review", "顾问不改工单状态");
 
-    // 6) 项目记忆：只写进当前项目，且 systemPrompt 里带得上
+    // 6) 项目记忆：只写进当前项目；写入走当轮提示，不热改 system（缓存修复 B3）
     const saved = kernel.runTool("save_memory", { scope: "project", entry: "本项目月报口径：GMV 不含税" });
     assert.match(String(saved), /项目/);
     assert.match(String(kernel.runTool("read_memory", { scope: "project" })), /不含税/);
-    assert.match(kernel.systemPrompt(), /本项目月报口径/);
+    assert.match(kernel.pendingMemoryNote, /本项目月报口径/, "当轮要能看到刚记的事实");
+    assert.ok(!kernel.systemPrompt().includes("本项目月报口径"), "当前会话的 system 不能因记忆写入而抖动");
 
     // 7) 删除审批：第一次弹卡，点「这类以后都允许」后同族不再打扰
     //    （自动档不弹卡是 2026-11-15 的口径；这一段要走"询问档"才测得到族放行）

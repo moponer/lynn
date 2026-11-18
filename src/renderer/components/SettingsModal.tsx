@@ -12,6 +12,9 @@ import type { AvatarState } from "../../shared/avatar";
 import { AMBIENT_MODE_LABEL, type AmbientMode } from "../../shared/ambient";
 import { AVATARS, avatarById, avatarFor } from "../../shared/avatars";
 import { MemberAvatar } from "../desk/MemberAvatar";
+import { PerfPanel } from "./PerfPanel";
+import { AboutPane } from "./settings/AboutPane";
+import { PersonaPane } from "./settings/PersonaPane";
 import { askConfirm } from "./ConfirmCard";
 import { CapabilityCenter } from "./CapabilityCenter";
 import { useT } from "../i18n";
@@ -401,6 +404,44 @@ export function SettingsModal({
     </>
   );
   const Dot = () => <span className="num seg-label">·</span>;
+  /** 版本历史（2026-11-16）：一行一版，人设与记忆共用。
+      同日只报时刻（日期只在换天时出现，否则七行里同一个日期抄七遍）；
+      字符差是这张表真正的信息——只报总数，等于让用户自己心算减法。 */
+  const VersionRows = ({
+    rows,
+    onRollback,
+  }: {
+    rows: { id: string; savedAt: string; chars: number }[];
+    onRollback: (id: string) => void;
+  }) => {
+    const clock = (iso: string) => {
+      const d = new Date(iso);
+      if (Number.isNaN(d.getTime())) return "—";
+      const p = (n: number) => String(n).padStart(2, "0");
+      return `${p(d.getHours())}:${p(d.getMinutes())}`;
+    };
+    const sameDay = (a: string, b: string) => new Date(a).toDateString() === new Date(b).toDateString();
+    return (
+      <div className="sf-list">
+        {rows.map((v, i) => {
+          const before = rows[i + 1];
+          const delta = before ? v.chars - before.chars : 0;
+          const dayShift = i === 0 || !sameDay(v.savedAt, rows[i - 1].savedAt);
+          return (
+            <div className="sf-row ver-row" key={v.id}>
+              <span className="ver-when mono">{dayShift ? fmtTime(v.savedAt) : clock(v.savedAt)}</span>
+              <span className="ver-delta">{delta > 0 ? `+${delta}` : delta < 0 ? `${delta}` : "±0"}</span>
+              <span className="ver-chars">{t("persona.chars", { n: v.chars })}</span>
+              {i === 0 && <span className="ver-tag">{t("persona.verLatest")}</span>}
+              <button type="button" className="sf-btn ver-act" onClick={() => onRollback(v.id)}>
+                {t("persona.rollback")}
+              </button>
+            </div>
+          );
+        })}
+      </div>
+    );
+  };
   useEffect(() => {
     if (tab !== "data") return;
     let dead = false;
@@ -1799,85 +1840,19 @@ export function SettingsModal({
     }
 
     if (tab === "persona") {
+      // P6-9：整页搬进 settings/PersonaPane.tsx（F4 第二步）。state 仍留在父组件，
+      // 用 props 传下去——这样 diff 只反映位置变化，不掺状态迁移。
       return (
-        <div className="sf-pane">
-          <h3>{t("persona.title")}</h3>
-          <p className="sf-lede">{t("persona.lede")}</p>
-          {personaText === null ? (
-            <p className="sf-empty">{personaMsg || t("persona.loading")}</p>
-          ) : (
-            <>
-              <div className="sf-group">
-                <div className="sf-group-head">
-                  <b>{t("persona.editTitle")}</b>
-                  <small>{t("persona.hint")}</small>
-                </div>
-                <textarea
-                  className="sf-persona"
-                  rows={14}
-                  value={personaText}
-                  onChange={(e) => setPersonaText(e.target.value)}
-                  spellCheck={false}
-                />
-                <div className="sf-actions">
-                  <button
-                    type="button"
-                    className="sf-btn primary"
-                    onClick={() => {
-                      void window.lynn.rpc("persona.save", { text: personaText }).then((r) => {
-                        setPersonaMsg(r.hot ? t("persona.savedHot") : t("persona.savedNext"));
-                        void window.lynn.rpc("persona.versions").then((v) => setPersonaVersions(v.versions));
-                      });
-                    }}
-                  >
-                    {t("persona.save")}
-                  </button>
-                  <button
-                    type="button"
-                    className="sf-btn"
-                    onClick={() => {
-                      void refreshPersona();
-                      setPersonaMsg("");
-                    }}
-                  >
-                    {t("persona.discard")}
-                  </button>
-                </div>
-                {personaMsg && <div className="sf-hint">{personaMsg}</div>}
-              </div>
-              {personaVersions.length > 0 && (
-                <div className="sf-group">
-                  <div className="sf-group-head">
-                    <b>{t("persona.versions")}</b>
-                    <small>{t("persona.verHint")}</small>
-                  </div>
-                  <div className="sf-list">
-                    {personaVersions.map((v) => (
-                      <div className="sf-row" key={v.id}>
-                        <div className="sf-row-main">
-                          <span className="mono">{new Date(v.savedAt).toLocaleString()}</span>
-                          <span className="sf-row-sub">{t("persona.chars", { n: v.chars })}</span>
-                        </div>
-                        <button
-                          type="button"
-                          className="sf-btn"
-                          onClick={() => {
-                            void window.lynn.rpc("persona.rollback", { id: v.id }).then((r) => {
-                              setPersonaText(r.text);
-                              setPersonaMsg(r.hot ? t("persona.rollbackHot") : t("persona.rollbackNext"));
-                            });
-                          }}
-                        >
-                          {t("persona.rollback")}
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </>
-          )}
-        </div>
+        <PersonaPane
+          text={personaText}
+          msg={personaMsg}
+          versions={personaVersions}
+          onChange={setPersonaText}
+          onMsg={setPersonaMsg}
+          onVersions={setPersonaVersions}
+          onReload={refreshPersona}
+          renderVersions={(rows, onRollback) => <VersionRows rows={rows} onRollback={onRollback} />}
+        />
       );
     }
 
@@ -1934,23 +1909,7 @@ export function SettingsModal({
                     <b>{t("persona.versions")}</b>
                     <small>{t("memory.verHint")}</small>
                   </div>
-                  <div className="sf-list">
-                    {memVersions.map((v) => (
-                      <div className="sf-row" key={v.id}>
-                        <div className="sf-row-main">
-                          <span className="mono">{new Date(v.savedAt).toLocaleString()}</span>
-                          <span className="sf-row-sub">{t("persona.chars", { n: v.chars })}</span>
-                        </div>
-                        <button
-                          type="button"
-                          className="sf-btn"
-                          onClick={() => void rollbackMemory(v.id)}
-                        >
-                          {t("persona.rollback")}
-                        </button>
-                      </div>
-                    ))}
-                  </div>
+                  <VersionRows rows={memVersions} onRollback={(id) => void rollbackMemory(id)} />
                 </div>
               )}
             </>
@@ -2408,104 +2367,9 @@ export function SettingsModal({
     }
 
     if (tab === "about") {
-      // 写法照 tether-ai 的 README：一句定义 + 事实清单 + 主动免责，版本号从壳层读，不写死。
-      // 版式是"左侧小标 + 右侧正文"的账目式两列：不给每一项配一句解释，也不做卡片墙。
-      const way: { k: I18nKey; v: I18nKey }[] = [
-        { k: "about.wayDispatchK", v: "about.wayDispatchV" },
-        { k: "about.wayReportK", v: "about.wayReportV" },
-        { k: "about.wayApproveK", v: "about.wayApproveV" },
-        { k: "about.wayPipeK", v: "about.wayPipeV" },
-      ];
-      const caps: { k: I18nKey; v: I18nKey }[] = [
-        { k: "about.capTeamK", v: "about.capTeamV" },
-        { k: "about.capSkillK", v: "about.capSkillV" },
-        { k: "about.capPluginK", v: "about.capPluginV" },
-        { k: "about.capMemoryK", v: "about.capMemoryV" },
-        { k: "about.capPreviewK", v: "about.capPreviewV" },
-        { k: "about.capAutoK", v: "about.capAutoV" },
-      ];
-      const privacy: { k: I18nKey; v: I18nKey }[] = [
-        { k: "about.privRootK", v: "about.privRootV" },
-        { k: "about.privKeyK", v: "about.privKeyV" },
-        { k: "about.privUninstallK", v: "about.privUninstallV" },
-        { k: "about.privSignK", v: "about.privSignV" },
-      ];
-      const limits: I18nKey[] = ["about.limit1", "about.limit2", "about.limit3", "about.limit4"];
-      const credits: I18nKey[] = ["about.creditLicense", "about.creditThird", "about.creditFont"];
-      return (
-        <div className="sf-pane">
-          <div className="sf-about-head">
-            <h3>{t("about.title")}</h3>
-            <p className="sf-about-lead">{t("about.lead")}</p>
-            <div className="sf-about-meta">
-              {updateInfo?.version ? `v${updateInfo.version} · ` : ""}
-              {t("about.meta")}
-            </div>
-          </div>
-
-          <div className="sf-group">
-            <div className="sf-group-head">
-              <b>{t("about.wayTitle")}</b>
-            </div>
-            {way.map((r) => (
-              <div className="sf-row" key={r.k}>
-                <span className="sf-about-k">{t(r.k)}</span>
-                <span className="sf-about-v">{t(r.v)}</span>
-              </div>
-            ))}
-          </div>
-
-          <div className="sf-group">
-            <div className="sf-group-head">
-              <b>{t("about.capTitle")}</b>
-            </div>
-            {caps.map((r) => (
-              <div className="sf-row" key={r.k}>
-                <span className="sf-about-k">{t(r.k)}</span>
-                <span className="sf-about-v">{t(r.v)}</span>
-              </div>
-            ))}
-          </div>
-
-          <div className="sf-group">
-            <div className="sf-group-head">
-              <b>{t("about.privacyTitle")}</b>
-            </div>
-            {privacy.map((r) => (
-              <div className="sf-row" key={r.k}>
-                <span className="sf-about-k">{t(r.k)}</span>
-                <span className="sf-about-v">{t(r.v)}</span>
-              </div>
-            ))}
-          </div>
-
-          <div className="sf-group">
-            <div className="sf-group-head">
-              <b>{t("about.limitTitle")}</b>
-            </div>
-            <div className="sf-about-lines">
-              {limits.map((k) => (
-                <p className="sf-about-line" key={k}>
-                  {t(k)}
-                </p>
-              ))}
-            </div>
-          </div>
-
-          <div className="sf-group">
-            <div className="sf-group-head">
-              <b>{t("about.creditTitle")}</b>
-            </div>
-            <div className="sf-about-lines">
-              {credits.map((k) => (
-                <p className="sf-about-line" key={k}>
-                  {t(k)}
-                </p>
-              ))}
-            </div>
-          </div>
-        </div>
-      );
+      // P6-9：整页搬进 settings/AboutPane.tsx（F4 拆分第一步）。
+      // 只搬 JSX，文案与类名一字未改——diff 只反映位置变化。
+      return <AboutPane version={updateInfo?.version} />;
     }
 
     if (tab === "data") {
@@ -2846,6 +2710,9 @@ export function SettingsModal({
             </div>
           </div>
         </div>
+        {/* 界面流畅度（P6-7 / 18 章 F6）：18 章要求"Long Task 在设置页可见"。
+            单独组件而不是塞进这 2956 行——边界干净，也不给 F4 拆分添乱。 */}
+        <PerfPanel />
       </div>
     );
   }, [

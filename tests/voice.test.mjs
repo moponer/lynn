@@ -132,6 +132,55 @@ test("需要你拍板：问句照播；只有工单 ID 的契约卡改成人话�
   assert.ok(plan.text.includes("等你拍板"));
 });
 
+test("播报要说清交回了什么（不再只念成员名）", () => {
+  // 落卡时的 speak 优先：带任务名 + 结论要点
+  const hinted = pickCardSpeech(
+    {
+      kind: "tool",
+      badge: "回报",
+      title: "阿明 回报 · task-mf3k9x2a-1",
+      body: "【完成】对账完成，差异两条已定位到 9 月 12 日",
+      speak: "阿明交回「Q3 对账」：对账完成，差异两条已定位到 9 月 12 日，等风铃验收。",
+    },
+    prefs(),
+  );
+  assert.ok(hinted);
+  assert.match(hinted.text, /Q3 对账/, "要念出是哪件事");
+  assert.match(hinted.text, /差异两条/, "要念出结论要点");
+
+  // 老卡没有 speak：退回到正文里找结论性句子，但绝不念过程叙述
+  const bare = pickCardSpeech(
+    { kind: "tool", badge: "回报", title: "阿明 回报 · task-mf3k9x2a-1", body: "【完成】审计完成：两条隐患已定位\n其余过程略" },
+    prefs(),
+  );
+  assert.ok(bare);
+  assert.match(bare.text, /两条隐患已定位/);
+
+  const processOnly = pickCardSpeech(
+    { kind: "tool", badge: "回报", title: "阿明 回报 · task-mf3k9x2a-1", body: "第一步读了材料，第二步复算了金额，第三步写了表格" },
+    prefs(),
+  );
+  assert.ok(processOnly);
+  assert.equal(processOnly.text, "阿明交回了结果，等我验收。", "只有过程叙述时不许念过程");
+});
+
+test("没交出来的播报要说清为什么、写出了什么", () => {
+  const c = pickCardSpeech(
+    {
+      kind: "tool",
+      badge: "未完成",
+      title: "阿明 没交出回报 · task-mf3k9x2a-1",
+      body:
+        "**为什么没有回报**：轮次用尽（12/12 轮）\n" +
+        "**已经写出的文件（2 个，都在工作区）**：\n- docs/a.md\n- docs/b.md",
+    },
+    prefs(),
+  );
+  assert.ok(c);
+  assert.match(c.text, /轮次用尽/);
+  assert.match(c.text, /已写出 2 个文件/);
+});
+
 test("成员回报与进度里程碑改写成短句，不念回报正文和步骤明细", () => {
   const delivery = pickCardSpeech({
     kind: "tool", badge: "回报", title: "阿明 回报 · WO-2418",
@@ -154,7 +203,7 @@ test("简洁档也播任务进度：派单开工、里程碑、卡住与无交�
     brief,
   );
   assert.ok(dispatch);
-  assert.equal(dispatch.text, "我已把任务派给阿明，开始处理。");
+  assert.equal(dispatch.text, "我已派单，开始处理。");
   assert.notEqual(dispatch.priority, "high", "开工不打断汇报");
 
   const milestone = pickCardSpeech(
@@ -206,10 +255,14 @@ test("简洁档：提醒照播；过程明细、系统内务、用户卡、内�
   }
 });
 
-test("两档切换：简洁只念结论；详细加念她的分析，internal 巡检轮永远不念", () => {
+test("两档切换：简洁念第一句结论；详细加念她的分析；internal 巡检轮永远不念", () => {
   const text = "三张订单都已核对完成，金额一致，可以归档了。";
-  assert.equal(pickReplySpeech(text, prefs(), false), null, "简洁档不念正文");
+  // 2026-11-16 修：简洁档此前完全不念她的结论，用户投诉"分析完成时没有播报"
+  const briefReply = pickReplySpeech(text, prefs(), false);
+  assert.ok(briefReply, "简洁档也要播她的结论");
+  assert.equal(briefReply.text, text, "简洁档念第一句");
   assert.equal(pickReplySpeech(text, prefs({ voiceScope: "detail" }), true), null, "巡检轮不念");
+  assert.equal(pickReplySpeech("好的。", prefs(), false), null, "纯开场白不念");
   const got = pickReplySpeech(text, prefs({ voiceScope: "detail" }), false);
   assert.ok(got);
   assert.equal(got.reason, "reply");
@@ -224,7 +277,8 @@ test("详细档：过程卡改写成中文短句，命令 / 路径 / 工单号 /
   const detailed = prefs({ voiceScope: "detail" });
   const cases = [
     [{ kind: "tool", badge: "组队", title: "招募 阿明 · 数据整理", body: "目标：核对 Q3\n边界：只读" }, "我已组建小组，阿明负责数据整理。"],
-    [{ kind: "tool", badge: "派单", title: "阿明 开工 · WO-2418", body: "工作区：C:\\work\\tasks\\WO-2418\n只读授权：D:\\data" }, "我已把任务派给阿明，开始处理。"],
+    // 2026-11-16：派单兜底不再只报成员名（落卡时的 speak 会念"任务名 + 谁做"）
+    [{ kind: "tool", badge: "派单", title: "阿明 开工 · WO-2418", body: "工作区：C:\\work\\tasks\\WO-2418\n只读授权：D:\\data" }, "我已派单，开始处理。"],
     [{ kind: "tool", badge: "工具", title: "技能激活 · 订单核对" }, "技能激活，订单核对。"],
     [{ kind: "tool", badge: "出站", title: "阿明 · WO-2418", body: "出站命令已审计：curl https://x" }, "有一次外部请求已审计。"],
     [{ kind: "tool", badge: "放行", title: "阿明 · WO-2418", body: "删除类命令自动放行：rm -rf /tmp/x" }, "低风险操作已自动放行。"],
@@ -329,7 +383,7 @@ test("落卡时写的 speak 优先：开工说清做什么，完成说清哪件�
     { kind: "tool", badge: "派单", title: "阿计 开工 · task-mf3k9x2a-1", speak: "阿计。" },
     brief,
   );
-  assert.equal(bad.text, "我已把任务派给阿计，开始处理。");
+  assert.equal(bad.text, "我已派单，开始处理。");
   const done = pickCardSpeech(
     { kind: "tool", badge: "汇报", title: "系统汇总 · Q3 订单核对", speak: "「Q3 订单核对」做完了，阿计交的活我已经验收归档。" },
     brief,

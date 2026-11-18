@@ -171,6 +171,55 @@ const feed = [
   },
 ];
 
+// 走查：群内协作（2026-11-16）——成员像同事一样发进展/结论/疑问，风铃当场回答。
+// 这三条不是"进度流水"：进展/结论不打断人，疑问要风铃接；回答是 she 在群里说的话。
+if (process.env.LYNN_PREVIEW_DIALOGUE) {
+  feed.push(
+    {
+      id: "c-dlg1",
+      kind: "tool",
+      badge: "进展",
+      title: "顾明 · WO-2418",
+      meta: "第 4 步 · 22s",
+      jobId: "WO-2418",
+      author: { kind: "member", name: "顾明", memberId: "顾明", role: "数据分析", avatarId: "a02", teamId: "t1" },
+      body: "去重口径先按 number 走完了，1284 条唯一、没有缺口。下一步把季度聚合落到第 3 节。",
+      createdAt: "14:36",
+    },
+    {
+      id: "c-dlg2",
+      kind: "tool",
+      badge: "结论",
+      title: "顾明 · WO-2418",
+      meta: "第 5 步 · 35s",
+      jobId: "WO-2418",
+      author: { kind: "member", name: "顾明", memberId: "顾明", role: "数据分析", avatarId: "a02", teamId: "t1" },
+      body: "按季度聚合比按周少 3 条，差的是只有月份没有日期的三条记录（2026-09）——它们会被丢掉，不是重复。",
+      createdAt: "14:37",
+    },
+    {
+      id: "c-dlg3",
+      kind: "tool",
+      badge: "疑问",
+      title: "顾明 · WO-2418",
+      meta: "等你答复",
+      jobId: "WO-2418",
+      author: { kind: "member", name: "顾明", memberId: "顾明", role: "数据分析", avatarId: "a02", teamId: "t1" },
+      body: "这三条只有月份的记录要算进季度合计吗？按含税还是不含税？简报里没写，我先按不含税做，你确认下。",
+      createdAt: "14:38",
+    },
+    {
+      id: "c-dlg4",
+      kind: "lynn",
+      createdAt: "14:39",
+      jobId: "WO-2418",
+      author: { kind: "lynn", name: "风铃" },
+      text: "@顾明 算进合计，按不含税；那三条另开一行备注「日期缺失」，别丢。",
+      mentions: [{ kind: "member", name: "顾明", memberId: "顾明" }],
+    },
+  );
+}
+
 // 走查：超长思考让对话流真的可滚，验证「贴底跟随」与细滚动条（不进产品数据）
 if (process.env.LYNN_PREVIEW_LONGTHINK) {
   feed.push({
@@ -341,6 +390,27 @@ const snapshot = {
             avatarId: avatarPicks["阿计"] ?? "a03",
             model: "deepseek-chat",
             turnLimit: 40,
+          },
+          // 验收员（2026-11-16）：走查消耗看板里「验收」身份标会不会把名字列挤爆
+          {
+            name: "验收员",
+            role: "验收",
+            goal: "只验收不执行：按完成标准逐条核对成员回报",
+            status: "review",
+            statusNote: "正在验收",
+            progress: 60,
+            budgetUsed: 180,
+            budgetTotal: 300,
+            cacheUsed: 112.5,
+            hitRate: 62.5,
+            rejections: 0,
+            rejectionLimit: 3,
+            toolWhitelist: ["read_file", "list_dir", "submit_report"],
+            color: "#b07d3a",
+            avatarId: "a11",
+            model: "deepseek-chat",
+            turnLimit: 8,
+            acceptor: true,
           },
           {
             name: "阿元",
@@ -1373,7 +1443,19 @@ contextBridge.exposeInMainWorld("lynn", {
       return { fingerprint: "3f9c1a2b4d5e6f70", count: 3, safeMode: false, snapshots: [] };
     }
     if (method === "persona.get") return { text: "## 语气与人设\n\n- 称呼用户为「你」；提到自己用「我」或「风铃」。\n- 简洁。汇报用短段落；不确定就问，不编造。\n" };
-    if (method === "persona.versions") return { versions: [{ id: "p-abc", savedAt: new Date().toISOString(), chars: 128 }] };
+    // 版本历史（2026-11-16）：照实机的一组（同日多版、字符数上下跳），
+    // 否则走查看不到「字符差 / 最近标」这两个新东西
+    if (method === "persona.versions") {
+      const base = Date.parse("2026-11-13T20:20:23");
+      const chars = [1722, 938, 938, 1621, 1621, 819, 819];
+      return {
+        versions: chars.map((c, i) => ({
+          id: `p-${i}`,
+          savedAt: new Date(base - i * 9 * 60 * 1000).toISOString(),
+          chars: c,
+        })),
+      };
+    }
   // 去 AI 味（2026-11-15）：预览里插件是真装着的（仓库就在旁边），所以如实报 loaded
   if (method === "humanizer.status") return { enabled: true, loaded: true, dir: "~/.lynn/plugins/humanizer-stream", version: "0.1.0" };
     if (method === "workshop.list") {

@@ -1,0 +1,12 @@
+{
+  "id": "lynn.template.ui",
+  "name": "示例界面（模板）",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "tier": "U",
+  "engines": { "kernel": ">=0.0.1" },
+  "entry": "ui.html",
+  "contributes": {
+    "slots": ["status.bar"]
+  }
+}

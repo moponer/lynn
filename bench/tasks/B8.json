@@ -1,0 +1,24 @@
+{
+  "id": "B8",
+  "title": "杀进程后重启继续",
+  "domain": "ops",
+  "role": "implementer",
+  "mode": "execute",
+  "brief": "跑一张 8 轮的只读勘察单，第 4 轮时强制 kill 主进程，重启后确认：会话、工单状态、已读清单不丢，最多丢 1 轮。",
+  "acceptance": [
+    "重启后会话可打开，历史消息完整",
+    "工单状态不回到 backlog",
+    "已读清单保留（或至少能从卷宗恢复）",
+    "丢弃轮次 ≤1"
+  ],
+  "expected": {
+    "deliverables": [],
+    "checks": [
+      { "type": "restart", "killAtTurn": 4 },
+      { "type": "state", "threadIntact": true, "taskStatusKept": true },
+      { "type": "log", "assertNoCorruption": true }
+    ]
+  },
+  "judge": { "auto": true, "script": "checks/B8.mjs" },
+  "limits": { "maxTurns": 10, "budgetTokens": 150000, "minutes": 15 }
+}

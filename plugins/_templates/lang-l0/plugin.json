@@ -1,0 +1,11 @@
+{
+  "id": "lynn.template.lang",
+  "name": "示例语言包（模板）",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "tier": "L0",
+  "engines": { "kernel": ">=0.0.1" },
+  "contributes": {
+    "langs": ["lang-zh.json", "lang-en.json"]
+  }
+}

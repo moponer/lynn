@@ -1,0 +1,23 @@
+{
+  "id": "B3",
+  "title": "三个开源方案对比一页",
+  "domain": "research",
+  "role": "researcher",
+  "mode": "explore",
+  "brief": "对比 SWE-agent、OpenHands、mini-swe-agent 三个项目在「工具接口 / 上下文管理 / 可扩展性」三方面的差异，出一页结论文档。要给出依据（文件或文档位置），不确定的地方明确标注。",
+  "acceptance": [
+    "三个项目都有结论，不能只写两个",
+    "每条结论有来源（仓库文件/文档/论文），没有来源的标注「未核实」",
+    "结论段 ≤800 字，能直接贴给用户看",
+    "明确写出「不适合我们的点」至少一条"
+  ],
+  "expected": {
+    "deliverables": ["compare.md"],
+    "checks": [
+      { "type": "file", "path": "compare.md", "minBytes": 1200 },
+      { "type": "text", "in": "compare.md", "mustInclude": ["SWE-agent", "OpenHands", "mini-swe-agent", "未核实"] }
+    ]
+  },
+  "judge": { "auto": true, "script": "checks/B3.mjs" },
+  "limits": { "maxTurns": 14, "budgetTokens": 250000, "minutes": 20 }
+}

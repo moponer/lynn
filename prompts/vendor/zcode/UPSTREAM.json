@@ -1,0 +1,11 @@
+{
+  "upstream": "zcode",
+  "sourcePath": "f:\\spiker\\zcode-ref",
+  "license": "Apache-2.0",
+  "vendoredAt": "2026-11-17T07:44:29Z",
+  "note": "办公域视觉评审员的角色提示词。上游把同一份文件复制在 documents / pdf / presentations / spreadsheets 四个插件里（sha256 一致），这里合并为一份。",
+  "files": {
+    "roles/visual-judge.md": "sha256:472147273ac6e4ee3db4b3f10121ae74224d6da6df18816f0813d5a599b27221",
+    "LICENSE": "sha256:fa36dc312bc4946b1c22dba3c726ad8d3052b353f81424e7b997dbb3d9b40a49"
+  }
+}

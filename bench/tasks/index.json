@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "updatedAt": "2026-11-17",
+  "smoke": ["B2", "B10"],
+  "full": ["B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B9", "B10"],
+  "tasks": {
+    "B1": { "file": "B1.json", "domains": ["office"], "auto": true },
+    "B2": { "file": "B2.json", "domains": ["coding"], "auto": true },
+    "B3": { "file": "B3.json", "domains": ["research"], "auto": true },
+    "B4": { "file": "B4.json", "domains": ["research"], "auto": true },
+    "B5": { "file": "B5.json", "domains": ["ops"], "auto": true },
+    "B6": { "file": "B6.json", "domains": ["coding"], "auto": true },
+    "B7": { "file": "B7.json", "domains": ["ops"], "auto": true },
+    "B8": { "file": "B8.json", "domains": ["ops"], "auto": true },
+    "B9": { "file": "B9.json", "domains": ["ops"], "auto": true },
+    "B10": { "file": "B10.json", "domains": ["security"], "auto": true }
+  }
+}

@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8">
+  <title>示例界面插件</title>
+  <style>
+    /* 用宿主下发的主题令牌，不要写死颜色——换主题时它要跟着变 */
+    :root { --ink: #e6ebee; --ink-3: #8c979d; }
+    html, body { margin: 0; padding: 0; background: transparent; }
+    body { font: 12px/1.4 system-ui, sans-serif; color: var(--ink); }
+    .pill { display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; border-radius: 999px; background: rgba(127,127,127,.14); }
+    .dot { width: 6px; height: 6px; border-radius: 50%; background: #6fa892; }
+  </style>
+</head>
+<body>
+  <span class="pill" id="pill"><i class="dot"></i><span id="label">示例</span></span>
+  <script>
+    /**
+     * U 档插件的通信契约（只有两条）：
+     *   收：{ lynn:true, type:"init", plugin, theme:{ desk, sheet, ink } }
+     *   发：{ lynn:true, type:"action", label }  /  { lynn:true, type:"resize", height }
+     *
+     * 三条禁令：
+     *   - 不要访问 parent / top（iframe sandbox 没有 allow-same-origin）；
+     *   - 不要加载外部脚本（CSP 会拦）；
+     *   - 不要试图改宿主 DOM（你碰不到）。
+     */
+    addEventListener("message", (e) => {
+      const d = e.data;
+      if (!d || d.lynn !== true) return;
+      if (d.type === "init") {
+        const label = document.getElementById("label");
+        if (label && d.plugin) label.textContent = "示例 · " + d.plugin;
+        if (d.theme && d.theme.ink) document.body.style.color = d.theme.ink;
+      }
+    });
+
+    // 演示"发 action"：点一下把一句话回传给宿主
+    document.getElementById("pill").addEventListener("click", () => {
+      parent.postMessage({ lynn: true, type: "action", label: "来自示例插件的点击" }, "*");
+    });
+  </script>
+</body>
+</html>

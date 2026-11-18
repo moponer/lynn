@@ -44,3 +44,10 @@ Local State
 *.pfx
 
 # /shots/ 中历史已跟踪的 PNG 不受忽略规则影响；本次不做 git rm，后续另行清理。
+
+# bench 生成物（由 bench/fixtures/make.mjs 重建，不入库）
+/bench/input/
+/bench/fixtures/rename/
+
+# Rust 构建产物（npm run build:native 生成；二进制随 dist/ 走）
+/native/*/target/

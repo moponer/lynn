@@ -1,0 +1,9 @@
+/* 形态层（模板）：只许属性选择器 + Token，禁 @import。
+ * 这份文件的作用是演示"能在不写代码的前提下改界面形态"。
+ * 具体规则见 docs/plan/25-plugin-package-spec.md 与 checkPluginCss。 */
+[data-theme="demo"] .feed-history {
+  opacity: 0.9;
+}
+[data-theme="demo"] .sf-group-head small {
+  letter-spacing: 0.02em;
+}

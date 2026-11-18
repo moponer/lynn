@@ -373,23 +373,35 @@ export function pickCardSpeech(card: SpeechCard, prefs: VoicePrefs): SpeechCandi
       if (/交付待补充/.test(String(card.title ?? ""))) {
         return candidate(`${member}交的东西还差核验记录，${SELF}让他补上。`, "normal", "delivery");
       }
+      /**
+       * 结论要点（2026-11-16 用户：「播报还是只报成员名称」）：
+       * 落卡时没写 speak 的老卡也要念出它交回了什么。但**只取结论性句子**——
+       * 回报正文第一行经常是"第一步读了材料、第二步复算…"这种过程叙述，念了是噪音。
+       */
+      const firstLine = String(card.body ?? "").replace(/^\s*【[^】]*】\s*/u, "").split(/\n/)[0];
+      const gist = /完成|结论|结果|交付|已核|共|发现|问题|建议|产出|依据/.test(firstLine)
+        ? cleanSpeechText(firstLine, Math.max(20, Math.min(limit, 70)))
+        : "";
+      const withGist = hasSubstance(gist) ? `：${gist}` : "";
+      // 验收对象**不在这里写死**（2026-11-16）：有常驻验收员时是验收员先看，不是风铃。
+      // 精确的接收方由内核落卡时的 speak 说明；这里只说"等验收"，不误导。
       switch (reportTone(card.body)) {
         case "reserved":
-          return candidate(`${member}交回了结果，说有几处没做到，等${SELF}验收。`, "normal", "delivery");
+          return candidate(`${member}交回了结果${withGist}，说有几处没做到，等${SELF}验收。`, "normal", "delivery");
         case "blocked":
-          return candidate(`${member}做不下去，报了受阻，${SELF}去看卡在哪。`, "normal", "problem");
+          return candidate(`${member}做不下去，报了受阻${withGist}，${SELF}去看卡在哪。`, "normal", "problem");
         case "missing":
-          return candidate(`${member}说材料不够，没往下做，${SELF}去补齐。`, "normal", "problem");
+          return candidate(`${member}说材料不够，没往下做${withGist}，${SELF}去补齐。`, "normal", "problem");
         case "done":
-          return candidate(`${member}交回了结果，说已经做完，等${SELF}验收。`, "normal", "delivery");
+          return candidate(`${member}交回了结果${withGist}，说已经做完，等${SELF}验收。`, "normal", "delivery");
         default:
-          return candidate(`${member}交回了结果，等${SELF}验收。`, "normal", "delivery");
+          return candidate(`${member}交回了结果${withGist}，等${SELF}验收。`, "normal", "delivery");
       }
     }
     case "派单":
-      // 开工本身就是第一个进度节点：默认档就要听见"派给谁、做什么"，
-      // 否则耳朵里的第一条进度永远是"交回了结果"，中间发生了什么一无所知。
-      return candidate(who ? `${SELF}已把任务派给${who}，开始处理。` : `${SELF}已派单，开始处理。`, "normal", "dispatch");
+      // 开工是第一个进度节点，但**别只报名字**（2026-11-16 用户投诉）：
+      // 落卡时的 speak 会带「任务名 + 谁做」；这里只做兜底，说"开工了"就够了。
+      return candidate(`${SELF}已派单，开始处理。`, "normal", "dispatch");
     case "进度": {
       const raw = cleanSpeechText(card.title || card.text || "", Math.min(limit, 80));
       // 里程碑卡：`阿计 第 3 步 · task-x` → `阿计已推进到第 3 步。`
@@ -419,6 +431,22 @@ export function pickCardSpeech(card: SpeechCard, prefs: VoicePrefs): SpeechCandi
     }
     case "未完成":
     case "崩溃": {
+      /**
+       * 没交出来也要说清"为什么、写出了什么"（2026-11-16）：
+       * 卡片正文里已经有成因与已写文件清单，别退回只念「阿计 没交出回报」。
+       */
+      // 卡片正文是 Markdown（`**为什么没有回报**：`），取字段前先去加粗标记
+      const bodyText = String(card.body ?? card.text ?? "").replace(/\*\*/g, "");
+      const why = bodyText.match(/为什么没有回报[：:]\s*([^\n]{1,60})/)?.[1] ?? "";
+      const produced = bodyText.match(/已经写出的文件（(\d+)\s*个/);
+      const member = who || "成员";
+      if (hasSubstance(why)) {
+        return candidate(
+          `${member}这单没交出来：${cleanSpeechText(why, 40)}${produced ? `，已写出 ${produced[1]} 个文件` : "，一个文件都没写出"}。`,
+          "high",
+          "problem",
+        );
+      }
       const raw = cleanSpeechText([card.title, card.text].filter(Boolean).join("，"), Math.min(limit, 60));
       return candidate(raw, "high", "problem");
     }
@@ -436,14 +464,23 @@ function dropPreamble(text: string): string {
 }
 
 /**
- * 收轮时的助手正文（她写在卡片上的分析/结论）：只有详细档、且是用户回合才播。
+ * 收轮时的助手正文（她写在卡片上的分析/结论）。
+ *
+ * 2026-11-16 修（用户：「接任务后分析完成时无语音播报」）：
+ * 此前只有 detail 档才播她的结论，默认 brief 档下一句话都不念——
+ * 用户听到的全是成员的动静，她"想明白了什么"永远是静音。
+ * 现在两档都播，区别只在长度：brief 只念**第一句**（结论），detail 念前 100 字。
  * 取 `FeedCard.text`，**不取 `thinking`**（内部推理、默认折叠、可能极长且复读）。
  */
 export function pickReplySpeech(text: string, prefs: VoicePrefs, internal: boolean): SpeechCandidate | null {
-  if (!prefs.voiceEnabled || internal || prefs.voiceScope !== "detail") return null;
-  const cleaned = cleanSpeechText(dropPreamble(text), Math.min(prefs.voiceMaxChars, 100));
+  if (!prefs.voiceEnabled || internal) return null;
+  const detail = prefs.voiceScope === "detail";
+  const cleaned = cleanSpeechText(dropPreamble(text), detail ? Math.min(prefs.voiceMaxChars, 100) : 60);
   if (!isMeaningfulSpeech(cleaned)) return null;
-  return { text: cleaned, priority: "normal", reason: "reply" };
+  // 只念第一句：完整结论仍留在卡片上给眼睛看
+  const oneLine = detail ? cleaned : firstSentence(cleaned);
+  if (!isMeaningfulSpeech(oneLine)) return null;
+  return { text: oneLine, priority: "normal", reason: "reply" };
 }
 
 export interface VoiceGateState {

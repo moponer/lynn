@@ -4,6 +4,8 @@ import { generateTeamId, type TeamStore, type MemberProfile } from "./team-store
 import { avatarFor, isAvatarId } from "../shared/avatars";
 import { MEMBER_EXEC_TOOLS } from "./member-runner";
 import { validateMemberProfile, memberProfileRejection } from "./member-profile";
+import { resolveRole, mixedRoleRejection, roleSpec } from "./role-registry";
+import { MemberPool } from "./member-pool";
 
 /**
  * 风铃的管理型工具 8 件套（§3.1 / §4.10.3）。
@@ -78,7 +80,16 @@ export const MANAGEMENT_ONLY_TOOLS = [
   "ship_plugin",
   // 指挥者的两只手：催办在跑的成员、停掉明显做不到的单
   "nudge_member",
+  // 2026-11-16 群内协作：成员会中途提问/报风险，回答与纠正归她（成员没有问用户/问领导的通道）
+  "reply_member",
   "stop_task",
+  // 插件自举三件套（P8-2）：看清单 / 开关已装的 / 删掉装错的。只做用户也能做的事
+  "list_plugins",
+  "set_plugin_enabled",
+  "uninstall_plugin",
+  "install_plugin",
+  "list_plugin_versions",
+  "rollback_plugin",
   // 主动工作闭环：沉淀记忆（M2-05 记忆进系统提示词）、自开插件草稿（M3-07 工坊）
   "save_memory",
   // 2026-11-13：记忆要能"删一条"（此前只能追加与整版回滚，作废事实只能越滚越绕）
@@ -141,6 +152,13 @@ export class ManagementTools {
     // 覆盖所有入口，包括模板导入与用户手改之外的直调路径。
     const issues = validateMemberProfile(profile);
     if (issues.length) throw new Error(memberProfileRejection(issues));
+    /**
+     * G1 准入的**硬兜底**（2026-11-17 P3-1 / 07 章 §4）。
+     * 风铃那条路径已经在建队之前拦过一次；这里再拦一次是因为 create_member 不止一个入口——
+     * 模板导入、用户手改、脚本直调都走同一个写盘口。闸只放在"看起来会走"的地方等于没放。
+     */
+    const roleGate = resolveRole({ roleId: profile.roleId, role: profile.role });
+    if (roleGate.mixed) throw new Error(mixedRoleRejection(profile.role, roleGate.suggestion ?? null));
     this.assertTeamActive(teamId);
     const existing = this.store.listMembers(teamId).length;
     // 2026-11-11：小任务起手就招 3~8 人是实机最大浪费（一次长任务曾招 16 人、重派 24 次）。
@@ -178,14 +196,35 @@ export class ManagementTools {
       .listMembers(teamId)
       .map((m) => m.avatarId)
       .filter((x): x is string => typeof x === "string");
-    const picked: MemberProfile = { ...profile, avatarId: profile.avatarId ?? avatarFor(profile.name, used).id };
-    const file = this.store.writeMember(teamId, picked);
+    const picked: MemberProfile = {
+      ...profile,
+      roleId: roleGate.roleId,
+      avatarId: profile.avatarId ?? avatarFor(profile.name, used).id,
+    };
+    /**
+     * 入池（2026-11-17 P3-2 / 08 章 §2）：团队是雇佣关系，人是池子里的那个人。
+     * 先入池再写团队档案，这样档案里带得上 memberId——战绩与经验都挂在它上面。
+     * `hire` 幂等：同一个 roleId+名字+团队重复招募会拿回同一个人，不会凭空多一个分身。
+     */
+    const pool = new MemberPool(this.dataRoot);
+    const domain = roleSpec(roleGate.roleId)?.domains[0] ?? "general";
+    const hired = pool.hire({ profile: picked, roleId: roleGate.roleId, domain, hiredFrom: teamId });
+    const withPoolId: MemberProfile = { ...picked, memberId: hired.memberId };
+    const file = this.store.writeMember(teamId, withPoolId);
     this.audit("create_member", {
       teamId,
-      member: picked.name,
-      avatarId: picked.avatarId,
-      tools: picked.tools.length,
+      member: withPoolId.name,
+      avatarId: withPoolId.avatarId,
+      tools: withPoolId.tools.length,
       justified: existing >= MEMBER_CAP,
+      // G1/G4（07 章）：角色归属要进审计，否则「按 roleId 统计成功率」没有数据源
+      roleId: roleGate.roleId,
+      roleSource: roleGate.source,
+      roleConfidence: roleGate.confidence,
+      promptFallback: roleGate.source === "fallback",
+      // P3-2：池内身份；hired=false 表示这个人本来就在池子里（复用，不是新人）
+      memberId: hired.memberId,
+      memberReused: !hired.created,
     });
     return file;
   }
@@ -307,14 +346,23 @@ export class ManagementTools {
     teamId: string,
     taskId: string,
     verdict: "accept" | "reject",
-    opts: { member: string; rejectReason?: RejectReason; evidence?: string[] },
+    opts: {
+      member: string;
+      rejectReason?: RejectReason;
+      evidence?: string[];
+      /**
+       * 打回轮次（含本次）。交给调用方从**权威工单**传进来（2026-11-16）：
+       * 这里自己读派单账本会与工单的 rejectRounds 漂移，导致"刚打回一次就说到上限"。
+       */
+      priorRejects?: number;
+    },
   ): { escalated: boolean } {
     if (verdict === "reject") {
       const r = opts.rejectReason;
       if (!r || !r.what || !r.expect || !r.deadline) {
         throw new Error("打回必须可执行：写清哪里不合格(what)、期望是什么(expect)、多久内重交(deadline)——不带理由的打回视为风铃失职（§4.10.5）");
       }
-      const rejects = this.store.rejectCount(teamId, taskId);
+      const rejects = opts.priorRejects ?? this.store.rejectCount(teamId, taskId);
       if (rejects >= REJECT_LIMIT) {
         // 不再循环，也不再问用户：单停在 blocked，交给风铃换法（这一层是她的活）
         this.store.appendAssignment(teamId, {

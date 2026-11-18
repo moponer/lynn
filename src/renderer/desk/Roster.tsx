@@ -455,17 +455,16 @@ export function Roster({
           );
         })()}
 
-        {/* 消耗看板（2026-11-15 重做）：一张紧凑表，一人一行。
-            旧版按「Token 消耗 / 缓存命中」分成两块，同一个名字出现两遍、条形重复两套，
-            右栏窄宽下要滚两屏才看得到底。现在只留「谁 · 占多少 · 花了多少 · 命中多少」：
-            条形长度=相对最大消耗（同一个量尺），缓存命中是同一行右侧的数字。
-            上下文占比不在这里重复——顶栏仪表已经在报它。没人跑过活就整块不画。 */}
+        {/* 消耗看板（2026-11-16 收紧）：一张表，一人一行。
+            列＝成员 / 占比条 / 消耗 / 命中率，前三列定宽、名字列吃剩余空间，
+            所以各行的条形起点是齐的；身份标（指挥/验收）跟在名字后面，不再把名字列挤爆。
+            命中率取整：一位小数在 34px 的窄列里读不出差别，只是噪音。 */}
         {(() => {
           const u = desk.usage;
           const rawHit = cacheHitRate(u);
           // cacheHitRate 返回的就是百分数（0–100）。旧版在这里又乘了 100，
           // 实测右栏显示成「9194.4%」——走查脚本量到的，不是猜的。
-          const lynnHit = rawHit === undefined ? undefined : Math.max(0, Math.min(100, Math.round(rawHit * 10) / 10));
+          const lynnHit = rawHit === undefined ? undefined : Math.round(Math.max(0, Math.min(100, rawHit)));
           const lynnTokensK = (u.sessionIn + u.sessionOut) / 1000;
           const members = rosterMembers
             .filter((m) => (m.budgetUsed ?? 0) > 0 || m.hitRate !== undefined)
@@ -478,8 +477,9 @@ export function Roster({
           if (lynnTokensK <= 0 && lynnHit === undefined && members.length === 0) return null;
           const fmtK = (k: number) => `${Math.round(k * 10) / 10}`;
           const tokenMax = Math.max(lynnTokensK, ...members.map((m) => m.budgetUsed ?? 0), 0.001);
-          const barW = (k: number) => `${Math.max(2, Math.round((k / tokenMax) * 100))}%`;
-          /** 一行：名字 | 占比条 | token | 命中率。缺读数就留空位，不写「—」占视觉。 */
+          // 最小 3%：风铃常只有成员的几十分之一，2% 的条在 4px 高里就是一个点
+          const barW = (k: number) => `${Math.max(3, Math.round((k / tokenMax) * 100))}%`;
+          /** 一行：名字（可省一号）| 占比条 | token | 命中率。缺读数就留空位，不写「—」占视觉。 */
           const row = (opts: {
             key: string;
             name: string;
@@ -495,10 +495,15 @@ export function Roster({
               title={opts.title}
             >
               <span className="ub-name">
-                {opts.name}
+                {/* 名字自己负责省略号：身份标是 flex:none，跟名字抢同一列时会被压到名字上 */}
+                <span className="ub-nm">{opts.name}</span>
                 {/* 指挥这一层要写在字面上：只靠行底色，扫一眼分不清谁在指挥（2026-11-15 用户追问） */}
                 {opts.lead && <span className="ub-lead-tag">{t("board.lead")}</span>}
-                {opts.accept && <span className="ub-tag accept">{t("roster.acceptor")}</span>}
+                {opts.accept && (
+                  <span className="ub-tag" title={t("roster.acceptor")}>
+                    {t("board.acceptShort")}
+                  </span>
+                )}
               </span>
               <span className="ub-bar">
                 <i style={{ width: barW(opts.tokens) }} />
@@ -541,7 +546,7 @@ export function Roster({
                   key: `${m.teamId}::${m.name}`,
                   name: m.name,
                   tokens: m.budgetUsed ?? 0,
-                  hit: m.hitRate,
+                  hit: m.hitRate === undefined ? undefined : Math.round(m.hitRate),
                   accept: m.acceptor,
                   title: `${m.role} · ${t("board.memberTip")}`,
                 }),

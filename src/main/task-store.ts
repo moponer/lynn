@@ -149,6 +149,24 @@ export interface TaskRecord {
   /** 任务型态：execute=要有产物；explore=要结论与依据（调研/选型） */
   mode?: "execute" | "explore";
   /**
+   * 本单的联网授权（2026-11-17 P5-1）。
+   *
+   * 默认**没有**这个字段 = 不给网。要联网（npm/pip/git clone、脚本抓数据）必须**按单**放行，
+   * 且必须写明谁批的——这不是「权限档」那种全局开关，因为一张单要联网不代表下一张也要。
+   *
+   * 为什么要落盘而不是只看命令：出站闸原先是对命令字符串做正则（curl/wget/https://），
+   * 脚本内联的 `node -e fetch(...)` 完全绕得过去。按单记录 + 进程级拦截才堵得住，
+   * 而进程级拦截（AppContainer）需要知道「这一单该不该给网」——就是这里。
+   */
+  network?: {
+    granted: boolean;
+    /** 谁批的：user（用户在契约上点）/ lynn（风铃按自己的判断档位）*/
+    by: "user" | "lynn";
+    at: string;
+    /** 放的什么网（写进审计，回查时知道当初为什么给） */
+    reason?: string;
+  };
+  /**
    * 任务规模（派单时按简报与判据数判定，2026-11-15 落盘）。
    * 用途：小任务的验收不再另起验收员（不值一次完整执行），由风铃看核对清单拍板。
    * 存单上是因为"规模"是判卷时的事实，不能等验收时再按当前上下文重算。
@@ -219,6 +237,31 @@ export class TaskStore {
    */
   constructor(readonly dataRoot: string, private readonly hooks?: { onChange?: () => void }) {}
 
+  /**
+   * 列表缓存（2026-11-16 实机「Lynn 未响应」）：
+   * 一次 session.snapshot 里 buildBoard 要读全量工单好几遍（团队×成员、台账、兜底），
+   * 每个工具事件又都会触发一次快照——几十张单 × 每份 task.json 全量 JSON.parse，
+   * 主进程被同步 IO 占住，窗口就没响应了。
+   *
+   * 只缓存很短的时间窗口（同一次渲染/同一批事件复用），任何写操作立刻失效：
+   * 写 → 清缓存 → 下一次读一定是新的，不会出现"刚改完界面还是旧的"。
+   */
+  private listCache: { at: number; stamp: number; recs: TaskRecord[] } | null = null;
+  private static readonly LIST_TTL_MS = 250;
+  /**
+   * 按数据根记的**写入代数**（单调递增）：TaskStore 可能有不止一个实例
+   * （内核一个，壳层/测试各一个），写操作必须让所有实例的缓存一起失效——
+   * 否则 A 实例删了一张单，B 实例还在拿旧列表说"有未收的单"。
+   * 用代数而不是时间：同一毫秒里"写-读"也不会撞上旧缓存。
+   */
+  private static readonly WRITE_STAMP = new Map<string, number>();
+
+  /** 写盘 / 删单 / 归档之后必须调用：缓存不失效比没有缓存更糟 */
+  private invalidateList(): void {
+    this.listCache = null;
+    TaskStore.WRITE_STAMP.set(this.dataRoot, (TaskStore.WRITE_STAMP.get(this.dataRoot) ?? 0) + 1);
+  }
+
   private dir(id: string): string {
     return path.join(this.dataRoot, "tasks", id);
   }
@@ -234,6 +277,7 @@ export class TaskStore {
     fs.writeFileSync(tmp, JSON.stringify(rec, null, 2), "utf-8");
     fs.renameSync(tmp, this.file(rec.id));
     // 落盘后通知（Kernel 用来做秒级事件心跳；测试不传则完全无副作用）
+    this.invalidateList();
     this.hooks?.onChange?.();
   }
 
@@ -244,14 +288,21 @@ export class TaskStore {
   }
 
   list(): TaskRecord[] {
+    const now = Date.now();
+    const stamp = TaskStore.WRITE_STAMP.get(this.dataRoot) ?? 0;
+    if (this.listCache && this.listCache.stamp === stamp && now - this.listCache.at < TaskStore.LIST_TTL_MS) {
+      return this.listCache.recs;
+    }
     const dir = path.join(this.dataRoot, "tasks");
     if (!fs.existsSync(dir)) return [];
-    return fs
+    const recs = fs
       .readdirSync(dir, { withFileTypes: true })
       .filter((d) => d.isDirectory() && !d.name.startsWith("_"))
       .map((d) => this.get(d.name))
       .filter((r): r is TaskRecord => r !== null)
       .sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
+    this.listCache = { at: now, stamp, recs };
+    return recs;
   }
 
   /**
@@ -274,6 +325,7 @@ export class TaskStore {
       fs.renameSync(path.join(tasksDir, entry.name), path.join(archiveDir, entry.name));
       moved.push(entry.name);
     }
+    if (moved.length) this.invalidateList();
     return moved;
   }
 
@@ -297,6 +349,7 @@ export class TaskStore {
           : `删除失败：${err instanceof Error ? err.message : String(err)}`,
       );
     }
+    this.invalidateList();
   }
 
   /** 归档带里的工单（界面「归档带」用；只读） */
@@ -324,6 +377,8 @@ export class TaskStore {
     workspaceRoot?: string;
     workspace?: TaskWorkspaceRecord;
     evidencePolicy?: EvidencePolicy;
+    /** 本单的联网授权（P5-1）：缺省不写 = 不给网 */
+    network?: TaskRecord["network"];
     /** 派单简报原文（判卷口径冻结在单上，2026-11-12） */
     brief?: string;
     /** 派单时的完成标准（冻结版） */
@@ -365,6 +420,7 @@ export class TaskStore {
       workspaceRoot: input.workspaceRoot ?? input.workspace?.root,
       ...(input.workspace ? { workspace: input.workspace } : {}),
       ...(input.evidencePolicy ? { evidencePolicy: input.evidencePolicy } : {}),
+      ...(input.network ? { network: input.network } : {}),
       ...(input.brief ? { brief: input.brief } : {}),
       ...(input.acceptance?.length ? { acceptance: input.acceptance } : {}),
       ...(input.forbidden?.length ? { forbidden: input.forbidden } : {}),

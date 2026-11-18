@@ -1,0 +1,17 @@
+{
+  "_comment": "上游资产的**本机来源**。只有 sync 需要这些路径；check（lint:prompts）只用 vendor/ 下的文件与哈希，换了机器也能跑。路径按 06 章 §2 核对过的位置填。",
+  "sources": {
+    "codex": {
+      "root": "F:\\tmp\\ref-codex\\codex-rs",
+      "licenseFile": "F:\\tmp\\ref-codex\\LICENSE"
+    },
+    "superpowers": {
+      "root": "f:\\spiker\\zcode-ref\\apps\\zcode-cli\\packages\\superpowers-plugin",
+      "licenseFile": "f:\\spiker\\zcode-ref\\apps\\zcode-cli\\packages\\superpowers-plugin\\LICENSE"
+    },
+    "zcode": {
+      "root": "f:\\spiker\\zcode-ref",
+      "licenseFile": "f:\\spiker\\zcode-ref\\LICENSE"
+    }
+  }
+}

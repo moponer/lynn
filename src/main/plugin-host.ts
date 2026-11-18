@@ -299,11 +299,24 @@ export class PluginHost {
     return out;
   }
 
-  /** 找到插件目录（试装 / 卸载时用） */
-  private dirOf(id: string): string | null {
+  /**
+   * 找到插件目录（试装 / 卸载时用）。
+   *
+   * 2026-11-17 P8-2：从 private 改为公开——`uninstall_plugin` 需要它把目录移进回收站。
+   * 公开而不是在 kernel 里重写一遍：这里有几条容易漏的纪律（跳过 `_` 前缀、
+   * 坏 manifest 不算匹配），复制一份迟早会漂移。
+   */
+  dirOf(id: string): string | null {
     if (!fs.existsSync(this.pluginsDir)) return null;
     for (const entry of fs.readdirSync(this.pluginsDir, { withFileTypes: true })) {
-      if (!entry.isDirectory() || entry.name.startsWith("_")) continue;
+      /**
+       * 跳过 `_` 前缀（`_state.json`、`_drafts`、`_updating-*` 这类内部目录）
+       * 与 `.` 前缀（`.versions` 历史版本归档）。
+       *
+       * 2026-11-18 P12-1 修：原来只跳 `_`。加入版本归档后，`.versions/<id>/<ts>/`
+       * 里也有 `plugin.json`，`dirOf` 会把它当成候选——卸载时可能删到归档而不是生效中的那份。
+       */
+      if (!entry.isDirectory() || entry.name.startsWith("_") || entry.name.startsWith(".")) continue;
       const file = path.join(this.pluginsDir, entry.name, "plugin.json");
       if (!fs.existsSync(file)) continue;
       try {

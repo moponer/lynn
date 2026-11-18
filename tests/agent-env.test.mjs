@@ -61,8 +61,12 @@ test("forget_memory：真删一条（文件与提示词里都不留），且留�
   const kernel = new Kernel(root);
   try {
     await kernel.init();
+    // 先建一次快照（模拟会话已开始），否则首次读取会包含刚写入的内容
+    const before = String(kernel.systemPrompt());
     kernel.runTool("save_memory", { entry: "hermix-desktop 分析任务（校验码 HERMIX-4471）已取消" });
-    assert.ok(String(kernel.systemPrompt()).includes("HERMIX-4471"), "写完就在提示词里");
+    // 缓存修复 B3：写入不再热改 system（会打断前缀），当轮提示可见
+    assert.match(kernel.pendingMemoryNote, /HERMIX-4471/, "当轮要能看到刚写的这条");
+    assert.equal(String(kernel.systemPrompt()), before, "写入不得改变当前会话的 system 前缀");
 
     const out = String(kernel.runTool("forget_memory", { keyword: "HERMIX-4471" }));
     assert.match(out, /已从.*删掉/, "要如实说删掉了");

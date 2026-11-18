@@ -21,7 +21,18 @@ import type {
 } from "../shared/contract";
 import type { VoicePort } from "./voice-policy";
 import { ManagementTools, MANAGEMENT_ONLY_TOOLS } from "./management-tools";
-import { LlmError, probeEndpoint, streamChat, streamChatWithRetry, type ChatMessage, type ToolSchema } from "./llm";
+import {
+  LlmError,
+  isQuotaMessage,
+  probeEndpoint,
+  streamChat,
+  streamChatWithRetry,
+  type ChatMessage,
+  type ToolSchema,
+} from "./llm";
+import { compactKeepRecent, compactToolHistory } from "./history-compact";
+import { composeTurnText } from "./turn-text";
+import { prefixFingerprint } from "./prefix-hash";
 import { discoverModels, endpointRiskError, normalizeBaseUrl, redactSecrets } from "./endpoint";
 import { probeGateways } from "./gateways";
 import { SettingsStore, loadApiKey, defaultDataRoot, type Prefs, type StoredModelConfig } from "./settings";
@@ -59,6 +70,11 @@ import {
   tryCompleteStage,
 } from "./stage-plan";
 import { findDuplicateAssignment } from "./assignment-guard";
+import { compileLynnPrompt } from "./prompt-compiler";
+import { resolveRole, mixedRoleRejection, roleGateNote, roleSpec, MEMBER_ROLE_IDS } from "./role-registry";
+import { MemberPool, lessonsFromOutcome, type Lesson } from "./member-pool";
+import { gateMemberCompile } from "./member-compile";
+import { errorCopy, shouldMergeError, ERROR_MERGE_WINDOW_MS, type ErrorAction } from "./error-copy";
 import { readDocxText } from "./docx-read";
 // 写作规则（2026-11-15 重做）：可选外部插件 humanizer-stream，只往系统提示词里加一段约束，
 // 不改任何模型输出（0.1 的展示层改写已删除）
@@ -75,7 +91,13 @@ import { probeSoffice, readTable, writeTable, type EngineHealth } from "./office
 import { BrowserController, sensitiveUrl } from "./browser";
 import { COMPLIANCE_NOTE, loadMessaging, type ChannelConfig } from "./messaging";
 import { TeamStore, effectiveToolsOf, generateTeamId, type MemberProfile } from "./team-store";
-import { MEMBER_WORK_STYLE_BODY, MEMBER_PROFILE_RULES, validateMemberProfile, memberProfileRejection } from "./member-profile";
+import {
+  MEMBER_WORK_STYLE_BODY,
+  MEMBER_PROFILE_RULES,
+  validateMemberProfile,
+  memberProfileRejection,
+  writesProseDocs,
+} from "./member-profile";
 import { isAskingUserForOutputDetails, claimsDone, NO_DELIVERABLE_HINT, REPLY_GUARD_HINT } from "./reply-guard";
 import {
   createDraft,
@@ -130,9 +152,19 @@ import type { DeliverableRef, TaskRecord, TaskWorkspaceRecord } from "./task-sto
 import { TaskCase, type TimelineEvent } from "./task-case";
 import { ContextStore } from "./context-store";
 import { scanUiPlugins } from "./ui-plugins";
+import { importPluginPackage } from "./plugin-package";
+import { scanPluginCommands } from "./plugin-commands";
+import { scanPluginMcp } from "./plugin-mcp";
+import { listVersions, rollbackToVersion, KEEP_VERSIONS } from "./plugin-versions";
 import { PluginHost } from "./plugin-host";
 import { PluginSetStore } from "./plugin-set";
-import { runMemberTask, validateBrief, MEMBER_EXEC_TOOLS, type MemberRunResult } from "./member-runner";
+import {
+  runMemberTask,
+  validateBrief,
+  MEMBER_EXEC_TOOLS,
+  type MemberRunResult,
+  type MemberPost,
+} from "./member-runner";
 import {
   collectHeartbeatFacts,
   heartbeatSignature,
@@ -304,6 +336,21 @@ const AGGREGATED_BADGES = new Set(["已拦截", "出站"]);
  */
 const MIN_TURNS = 8;
 
+/**
+ * 同一张单最多把风铃叫醒几次来回答成员提问（2026-11-16）。
+ * 超过就只落群卡 + 进心跳事实，不再单独唤醒——问答不能变成新的无限循环
+ * （AutoGen 的教训：群聊必须至少有两个独立终止条件，否则会一直说到预算烧完）。
+ */
+const MEMBER_QUESTION_WAKES = 3;
+
+/** 成员中途发言的徽标（2026-11-16）：进展/结论只落群，疑问/风险才需要人接 */
+const POST_BADGE: Record<string, NonNullable<FeedCard["badge"]>> = {
+  update: "进展",
+  finding: "结论",
+  question: "疑问",
+  risk: "风险",
+};
+
 const TOOL_JSON: ToolSchema[] = [
   {
     type: "function",
@@ -324,7 +371,8 @@ const TOOL_JSON: ToolSchema[] = [
     function: {
       name: "create_member",
       description:
-        `招募团队成员（书面岗位）。${MEMBER_PROFILE_RULES}\n**团队最小 1 人**：一张单一个人做得完就只招 1 人，不要为凑角色多招（每个人都在烧预算/时限）。**一条任务线一支团队**：不要把人招进上一条任务的团队；沿用旧班底要显式传 teamId。超过 6 人编制需要 justification。团队不存在会自动新建。`,
+        // 2026-11-17 精简（P2-1b）：工具描述每轮都要发送，三句重复的"别多招"合并成一句，约束一条不减。
+        `招募团队成员（书面岗位）。${MEMBER_PROFILE_RULES}\n一个人做得完就只招 1 人（每人都在烧预算与时限）；一条任务线一支团队——不把人招进上一条任务的团队，沿用旧班底要显式传 teamId；超 6 人需 justification。团队不存在会自动新建。`,
       parameters: {
         type: "object",
         required: ["name", "role", "goal", "tools"],
@@ -332,7 +380,16 @@ const TOOL_JSON: ToolSchema[] = [
           teamId: { type: "string", description: TEAM_HINT },
           teamName: { type: "string", description: "需要自动建队时用的团队名（可选）" },
           name: { type: "string", description: "通用岗位名（如「代码审查员」）；禁带任务对象、阶段、编号或 A/B/C 后缀——名字是战绩主键" },
-          role: { type: "string", description: "能力域：擅长哪类活、以什么身份做事；不写具体任务对象" },
+          // 2026-11-17 P3-1：roleId 进枚举。role 仍是人类可读的岗位名，但**主角色由这里定**。
+          roleId: {
+            type: "string",
+            enum: [...MEMBER_ROLE_IDS],
+            description:
+              "主角色（注册表 id）：implementer 开发 / reviewer-quality 质量评审 / reviewer-spec 规格评审 / " +
+              "debugger 排查 / tester 测试 / researcher 调研 / writer 文档 / analyst 表格 / presenter 演示 / " +
+              "visual-judge 视觉验收 / ops 运维。只选一个；不确定就 implementer 或 researcher。不要写「全栈兼文档」这类混合岗位",
+          },
+          role: { type: "string", description: "岗位名（人类可读，如「代码审查员」）；一个成员一个主角色，别写复合岗位" },
           goal: { type: "string", description: "这个岗位长期对哪类结果负责（不写本次要看哪个目录/文件、要算哪个数字）" },
           boundaries: { type: "array", items: { type: "string" }, description: "稳定边界：永远不做什么；本次任务的临时限制写进简报" },
           tools: {
@@ -341,7 +398,8 @@ const TOOL_JSON: ToolSchema[] = [
             description:
               // 2026-11-16：这份清单以前是手写的，与 MEMBER_EXEC_TOOLS 漂移——glob/grep 实际可用却没写进来，
               // 她因此从不分配，成员只能扫盘。改成从同一处生成，名字不会再对不上。
-              `执行类工具白名单，只能填这些真实工具名：${MEMBER_EXEC_TOOLS.join(" / ")}`,
+              // 2026-11-17 P2-1b：前缀压到最短（名字一个不能少——写错名字成员就带着空工具集开工）。
+              `只能填这些真实名字：${MEMBER_EXEC_TOOLS.join(" / ")}`,
           },
           deliverable: { type: "string" },
           acceptance: { type: "array", items: { type: "string" } },
@@ -361,7 +419,7 @@ const TOOL_JSON: ToolSchema[] = [
     function: {
       name: "assign_task",
       description:
-        "向成员派单。成员只拿到简报包，看不到你们的对话，所以简报必须自足：按四段写【目标】【完成标准】【材料与位置】【限制】，缺了会被代码层退回重写。委托目标或材料位置不明确时先用 ask_user 问清用户，不要猜着派单。**一条任务线一支团队**：不传 teamId 时，新会话会新建团队（不会塞进上一条任务的班底）；要沿用旧班底必须显式传 teamId 并说明理由。多个任务并行时一任务一团队可以，但要先把任务清单（各派给谁、多久）告诉用户。**群里点名**：用户 @某人 是对他的定向诉求，别当全队广播；派完在群里 @他 说清在做什么。",
+        "向成员派单。成员只看到简报包、看不到对话，所以简报必须自足：四段【目标】【完成标准】【材料与位置】【限制】，缺了会被代码层退回。目标或材料位置不明确先用 ask_user，别猜着派。不传 teamId = 新建团队（不会塞进上一条任务的班底）；沿用旧班底要显式传 teamId 并说明理由。多单并行先告诉用户分工。用户 @某人 是对他的定向诉求，不是全队广播；派完在群里 @他 说清做什么。",
       parameters: {
         type: "object",
         required: ["member", "brief", "deadline"],
@@ -371,58 +429,60 @@ const TOOL_JSON: ToolSchema[] = [
           taskId: { type: "string", description: "系统生成，模型不要填；旧调用可省略" },
           reworkTaskId: {
             type: "string",
-            description:
-              "重做 / 打回 / 卡住重来时填**原工单 ID**：沿用同一张单的状态与卷宗，不新建工单。新任务不要填。",
+            description: "重做/打回/卡住重来填**原工单 ID**（沿用状态与卷宗，不新建单）；新任务不填",
           },
           evidencePolicy: {
             type: "string",
             enum: ["required", "optional"],
-            description:
-              "证据策略：关键任务（审计/对账/安全/可复跑）填 required；其余省略（自动判 optional，证据不强制）。",
+            description: "required=关键任务（审计/对账/安全/可复跑）；其余省略，默认 optional",
           },
-          title: { type: "string", description: "任务名（可选，给一句人话；不给则从简报首行清洗后取）" },
+          title: { type: "string", description: "任务名（可选；不给则从简报首行取）" },
           taskTitle: { type: "string", description: "title 的旧别名（可选）" },
           member: { type: "string" },
           brief: {
             type: "string",
             description:
-              "简报包（四段，缺会被退回）：【目标】产出什么；【完成标准】可验证的验收点；【材料与位置】输入材料的完整路径（关键内容能贴进简报就贴，别让成员去猜）；【限制】不许做什么、范围与口径",
+              "四段简报（缺会被退回）：【目标】产出什么；【完成标准】可验证的验收点；【材料与位置】完整路径，关键内容直接贴进来；【限制】不许做什么、范围与口径",
           },
-          deadline: { type: "string", description: "具体时间（如「2026-11-10 18:00」「2小时后」），不要写「尽快」" },
-          tools: { type: "array", items: { type: "string" }, description: "本次分配工具集，必须 ⊆ 岗位白名单" },
-          acceptance: { type: "array", items: { type: "string" }, description: "验收标准（可验证；写进任务契约，用户点开始后生效）" },
+          deadline: { type: "string", description: "具体时间（如「2026-11-10 18:00」「2小时后」），不写「尽快」" },
+          tools: { type: "array", items: { type: "string" }, description: "本次工具集，必须 ⊆ 岗位白名单" },
+          acceptance: { type: "array", items: { type: "string" }, description: "验收标准（可验证；写进契约，用户点开始后生效）" },
           forbidden: {
             type: "array",
             items: { type: "string" },
             description:
-              "本次禁区（法：违反即不合格，不是建议）：点名不许做的事，并写清具体姿势。例如「不许把测试 skip 掉」「不许 mock 被测对象」「不许改断言或放宽阈值」。别写「认真一点」这种没法验的话。",
+              "本次禁区（违反即不合格）：点名不许做的事与具体姿势，如「不许 skip 测试」「不许 mock 被测对象」「不许放宽阈值」；不写「认真一点」这类没法验的话",
           },
           priority: {
             type: "string",
-            description: "取舍口径：冲突时保什么。例如「算得对 > 做得全 > 做得快」。不给成员就自己猜。",
+            description: "取舍口径：冲突时保什么，如「算得对 > 做得全 > 做得快」；不给则成员自己猜",
           },
           mode: {
             type: "string",
             enum: ["execute", "explore"],
-            description:
-              "任务型态：execute=要有可交付产物（缺省）；explore=调研/选型/找方案，要的是结论+依据+不确定性，别硬凑产物。",
+            description: "execute=要有产物（缺省）；explore=要结论+依据+不确定性，别硬凑产物",
           },
           workspace: {
             type: "string",
-            description:
-              "成员的读写工作目录（可选，须是已存在的目录）。缺省 = 当前会话的项目目录。用户会在契约卡上看到并批准",
+            description: "读写工作目录（须已存在）；缺省 = 会话项目目录。用户在契约卡上批准",
           },
           readRoots: {
             type: "array",
             items: { type: "string" },
-            description:
-              "成员需要**只读**访问的目录清单（可选，须是已存在的目录）。材料在工作区外时填这个申请授权——用户在契约卡上批准后才生效，你不能自己扩权",
+            description: "需**只读**访问的目录（须已存在）：材料在工作区外时填，用户批准后生效，你不能自行扩权",
           },
-          maxTurns: { type: "number", description: "轮次上限覆盖（可选，1–40；缺省用岗位档案上限）。任务量大就给足，别让成员中途被掐断" },
+          maxTurns: { type: "number", description: "轮次上限（1–40）；缺省用岗位档案上限。量大就给足" },
           template: {
             type: "string",
-            description: "复用哪套编制模板（省略则按任务标题自动匹配；没有再自动新建一支空队，不会失败）",
+            description: "复用哪套编制模板（省略则按任务标题匹配；没有再新建空队，不会失败）",
           },
+          network: {
+            type: "boolean",
+            description:
+              "本单是否放行联网（缺省 false，不给网）。只在**确实要抓数据/装依赖/克隆仓库**时置 true；" +
+              "**取网页数据优先用 browser_* 工具**，那不用开网。开了就要为这张单的出站负责",
+          },
+          networkReason: { type: "string", description: "为什么需要联网（进审计；一句话说清要访问什么）" },
         },
       },
     },
@@ -451,6 +511,22 @@ const TOOL_JSON: ToolSchema[] = [
         properties: {
           taskId: { type: "string" },
           note: { type: "string", description: "一句话说清：改什么 / 先交什么 / 别再做什么" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "reply_member",
+      description:
+        "回答或纠正**正在跑**的成员（下一轮生效，不用重派、不丢已写文件）。成员用 post_message 提问/报风险时用它：能一句话答就答；他说错了就当场指明错在哪、该按什么做；他在为猜着做找借口就要求按简报执行。回答会落到群里并 @ 他。成员已经跑完就别用这个（改不动了）——要它继续就用 assign_task 带 reworkTaskId。",
+      parameters: {
+        type: "object",
+        required: ["taskId", "text"],
+        properties: {
+          taskId: { type: "string" },
+          text: { type: "string", description: "直接给结论/纠正/新做法，一句话说清；不要复述他的问题" },
         },
       },
     },
@@ -698,6 +774,93 @@ const TOOL_JSON: ToolSchema[] = [
       },
     },
   },
+  /**
+   * 插件自举三件套（2026-11-17 P8-2 / 24 章第 6 节）。
+   * 只做"用户也能做"的事：看清单、开关已装的、删掉装错的。
+   * **不提供改已装插件代码的能力**——那条走草稿 + 新 id，见 24 章第 6 节的缺口说明。
+   */
+  {
+    type: "function",
+    function: {
+      name: "list_plugins",
+      description: "列出已安装的插件（id / 档位 / 是否启用 / 提供了哪些工具）。装了什么、哪些没开、有没有加载错误，一次看全。",
+      parameters: { type: "object", properties: {} },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "set_plugin_enabled",
+      description:
+        "启用或停用**已安装**的插件。停用永远允许（只会减少能力）；启用 L1 会让它的代码重新加载，要确认这个插件是可信的。",
+      parameters: {
+        type: "object",
+        required: ["id", "enabled"],
+        properties: {
+          id: { type: "string", description: "插件 id（list_plugins 可查）" },
+          enabled: { type: "boolean", description: "true=启用，false=停用" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "uninstall_plugin",
+      description:
+        "卸载已安装的插件。文件会被移到 plugins-trash/（不是永久删除），需要时可以手工恢复。装错了就用这个收拾，别留在那里。",
+      parameters: {
+        type: "object",
+        required: ["id"],
+        properties: { id: { type: "string", description: "插件 id（list_plugins 可查）" } },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "list_plugin_versions",
+      description: "列出某个插件的历史版本（新的在前）。改插件前先看这个：可能已经有旧版可以直接回滚，不用重写。",
+      parameters: {
+        type: "object",
+        required: ["id"],
+        properties: { id: { type: "string", description: "插件 id（list_plugins 可查）" } },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "rollback_plugin",
+      description:
+        "把插件回滚到某个历史版本。当前版本会先归档，所以回滚本身也能再回滚——点错了不会变成单行道。",
+      parameters: {
+        type: "object",
+        required: ["id", "versionDir"],
+        properties: {
+          id: { type: "string", description: "插件 id" },
+          versionDir: { type: "string", description: "历史版本目录名（list_plugin_versions 可查）" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "install_plugin",
+      description:
+        "从插件包安装插件（.zip 文件或插件目录）。校验失败会返回**具体到字段**的原因，照它改就行。" +
+        "你自己开发完插件（工坊草稿产物就是标准包结构）也走这个装。装不上时先看 issues，别反复试同一个包。",
+      parameters: {
+        type: "object",
+        required: ["path"],
+        properties: {
+          path: { type: "string", description: "插件包路径：.zip 文件，或含 plugin.json 的目录（绝对路径）" },
+          override: { type: "boolean", description: "覆盖同名插件（默认 false；覆盖会丢掉回滚能力，谨慎）" },
+        },
+      },
+    },
+  },
 ];
 
 /**
@@ -719,20 +882,44 @@ const COMPACT_TOOL_DESC: Record<string, string> = {
   assign_task: "派单。简报四段自足；按规模自动配轮次/预算；证据默认可选，关键任务才强制。",
   check_progress: "查工单/团队进度与状态。",
   nudge_member: "给在跑的成员补一句指示。",
+  reply_member: "回答/纠正成员在群里的提问或错误（下一轮生效）。",
   stop_task: "停单后由你决定：同单重做（dismiss=false）或自行关单（dismiss=true），别问用户。",
   check_roster: "查编制与成员状态。",
   read_artifact: "读产物正文（docx/md/txt）：验收前看内容，别只看文件在不在。",
   review_result: "登记成员回报（证据可空；关键任务缺证据会被拦在审查外）。",
-  accept_or_reject: "处理待审契约（approve 开工 / reject 取消）。",
+  // 2026-11-17 P2-1b：这条原先写成「处理待审契约（approve 开工 / reject 取消）」——
+  // 把契约审批和验收打回混成了两个动作，模型会拿它去处理"待拍板契约"。事实是：
+  // 验收/打回走这里，契约审批走 accept_or_reject 之外的表单卡（用户点，模型不调）。
+  accept_or_reject: "验收/打回成员交付；打回必须写 what/expect/deadline，连续 3 次打回强制升级问用户。",
   report_to_user: "向用户汇报结论、证据、未完成项与待拍板项。",
   ask_user: "目标/标准/材料/工作区有缺口时问用户；不猜。",
   dissolve_team: "解散团队（编制与历史仍在，成员不再可用）。",
   save_memory: "把长期事实写进记忆。",
+  // 下面三条 2026-11-17 补齐（P2-1b）：此前这三个工具没有紧凑描述，原版长文案
+  // 每轮都要发（set_group_notice 153 / forget_memory 145 / read_memory 125 tokens），
+  // 加起来比 assign_task 还贵。规则一条没删，只把"为什么"挪回 system prompt。
+  set_group_notice: "写本群公告：整体目标 / 谁管哪段 / 接缝 / 共享写入点归谁。派活前先写一版。",
+  read_memory: "列出记忆条目（序号+时间+摘要）：删之前先读，确认要删哪一条。",
+  forget_memory: "按关键词删一条记忆（多条会拒绝并给候选）。记忆归你管，别派成员去删文件。",
   create_plugin_draft: "把稳定流程写成插件草稿（不会自动启用）。",
   ship_plugin: "仅启用通过准入的 L0 技能草稿；L1/L2 必须由用户启用。",
 };
 
-const KEEP_PARAM_DESC = new Set(["brief", "tools"]);
+const KEEP_PARAM_DESC = new Set(["brief", "tools", "network", "networkReason"]);
+
+/**
+ * 紧凑工具面里显式剔除的参数（2026-11-17 P2-1b 收尾）。
+ *
+ * 判据只有一条：**模型不该填、或填了也没用**。这类参数留在 schema 里，
+ * 每轮调用都要付一次 JSON 结构费，还会增加模型填错的概率。
+ * 完整定义仍保留在 TOOL_JSON（文档/测试/兼容旧调用），这里只是不发出去。
+ *
+ *  - assign_task.taskId：系统生成，描述原文就写着"模型不要填"
+ *  - assign_task.taskTitle：`title` 的旧别名，保留 title 即可
+ */
+const COMPACT_TOOL_DROP: Record<string, string[]> = {
+  assign_task: ["taskId", "taskTitle"],
+};
 
 function compactParam(value: unknown, propName?: string): unknown {
   if (Array.isArray(value)) return value.map((v) => compactParam(v, propName));
@@ -751,14 +938,30 @@ function compactParam(value: unknown, propName?: string): unknown {
   return out;
 }
 
-const COMPACT_TOOL_JSON: ToolSchema[] = TOOL_JSON.map((t) => ({
-  type: "function",
-  function: {
-    name: t.function.name,
-    description: COMPACT_TOOL_DESC[t.function.name] ?? t.function.description,
-    parameters: compactParam(t.function.parameters) as Record<string, unknown>,
-  },
-}));
+const COMPACT_TOOL_JSON: ToolSchema[] = TOOL_JSON.map((t) => {
+  const dropped = COMPACT_TOOL_DROP[t.function.name];
+  const params = compactParam(t.function.parameters) as Record<string, unknown>;
+  if (dropped?.length && params && typeof params === "object") {
+    const props = params.properties;
+    const required = params.required;
+    if (props && typeof props === "object") {
+      const keptProps: Record<string, unknown> = { ...(props as Record<string, unknown>) };
+      for (const name of dropped) delete keptProps[name];
+      params.properties = keptProps;
+    }
+    if (Array.isArray(required)) {
+      params.required = required.filter((r) => !dropped.includes(String(r)));
+    }
+  }
+  return {
+    type: "function",
+    function: {
+      name: t.function.name,
+      description: COMPACT_TOOL_DESC[t.function.name] ?? t.function.description,
+      parameters: params,
+    },
+  };
+});
 
 type DecisionEntry = Decision;
 
@@ -791,6 +994,8 @@ interface PendingPlan {
   mode?: "execute" | "explore";
   /** M3-07：插件工坊草稿 id——成员工作区即草稿区（产物只能写进草稿） */
   draftId?: string;
+  /** 本单的联网授权（P5-1）：批准后建单时原样写进 TaskRecord */
+  network?: TaskRecord["network"];
 }
 
 /** 排队中的输入 */
@@ -799,6 +1004,18 @@ interface QueuedInput extends QueueItem {
   attachments?: TurnAttachments;
   /** 群内 @（排队的这条消息点了谁） */
   mentions?: FeedMention[];
+}
+
+/**
+ * 成员在群里抛出的疑问 / 风险（2026-11-16）：按任务合并，等风铃答复。
+ * 合并是有意的——同一张单连发三条疑问只该叫醒她一次，否则就是新的刷屏源。
+ */
+interface PendingMemberQuestion {
+  taskId: string;
+  teamId: string;
+  member: string;
+  threadId: string;
+  items: { id: string; kind: string; text: string; needAnswer?: boolean }[];
 }
 
 /** 计划档位下也允许的只读工具 */
@@ -872,6 +1089,11 @@ export class Kernel {
   readonly dataRoot: string;
   private settings: SettingsStore;
   private teamStore: TeamStore;
+  /** 成员池（P3-2）：跨团队的那个人，L1 岗位说明 + L2 经验 + 战绩。懒建，用到才建目录。 */
+  private memberPoolInstance: MemberPool | null = null;
+  private get memberPool(): MemberPool {
+    return (this.memberPoolInstance ??= new MemberPool(this.dataRoot));
+  }
   private taskStore: TaskStore;
   private taskCase: TaskCase;
   private contextStore: ContextStore;
@@ -909,20 +1131,44 @@ export class Kernel {
   private memberBlockedCmds = new Map<string, Set<string>>();
   /** 卡住老化：每张单上次被"催一次风铃"的时间，避免同一张单反复注入 */
   private blockedAgedNoted = new Map<string, number>();
-  /** 跟踪卡折叠窗口：20 秒内的连续步骤折进同一张卡，避免一次工具调用刷一张 */
-  private progressAt = new Map<string, number>();
+
   /** 指挥者巡检：定时器与节流（不催也管） */
   private supervisorTimer: NodeJS.Timeout | null = null;
   private lastSupervisorAt = 0;
   private supervisorNoted = new Map<string, number>();
   /** 本轮技能注入文本（当轮消息尾部拼接；不进 system prompt —— 保前缀缓存稳定） */
   private pendingSkillText = "";
+  /**
+   * 本轮记忆变更提示（2026-11-17 缓存修复 B3）：与技能同通道拼进当轮 finalText，
+   * 保证「刚记的事实当轮就知道」，同时不动 system 前缀。
+   */
+  private pendingMemoryNote = "";
+  /** 会话级记忆快照（见 memorySectionCached）：null = 需要重建 */
+  private memorySnapshot: string | null = null;
+  private memorySnapshotKey = "";
+  /** 上一次请求的前缀指纹（见 prefix-hash.ts）：变了就记一条原因，便于归因命中率 */
+  private lastPrefixFp = "";
+  /** 最近一次 system prompt 的分段长度（见 prompt-compiler.ts）：诊断/日志用，不参与业务判断 */
+  private lastPromptSegments: { name: string; chars: number }[] = [];
   /** 顾问（2026-11-14）：可注入的假模型（测试用）；null = 直接用 streamChat */
   advisorChatFn: AdvisorChatFn | null = null;
   /** 每单只审一次：重派之后再审同一份交付没有新信息，只会多烧一次 token */
   private advisorReviewed = new Set<string>();
   /** 句子级去重（跨任务）：同一句"数字对不上"不在每张单里重复刷；存 severity 以便允许升级重提 */
   private advisorSeen = new Map<string, AdvisorSeverity>();
+  /**
+   * 额度熔断（2026-11-16 日志复盘）。
+   *
+   * 实机：09:54 起端点回 "Token Plan 用量上限"（429），此后心跳仍每 5 分钟叫醒一次、
+   * 每次 2 连重试，一路空转到 11:35；同一秒内还有 4 个排队回合各自撞 429。
+   * 额度用尽是**终态**，不是"再试一次就过"：必须整体停手一段，等额度恢复。
+   * 熔断期：心跳/巡检/叫醒/派单/顾问一律不发请求；用户主动说话仍然放行（他可能在充值后重试）。
+   */
+  private quotaBlockedUntil = 0;
+  private quotaStrikes = 0;
+  private quotaCardAt = 0;
+  /** 最近一张错误卡（F7 合并用）：同 code+action 在窗口内只留一张，计数 */
+  private lastErrorCard: { code: string; action: ErrorAction; at: number; cardId: string; count: number } | null = null;
   /**
    * 巡检轮（心跳/验收叫醒）走直连路径的累计用量（2026-11-13 P1）。
    * Pi 的 session stats 只包含主会话，巡检轮的消耗单独累计，展示时合并进 usage——
@@ -939,6 +1185,19 @@ export class Kernel {
   private heartbeatPending: string | null = null;
   /** 成员交回报后待风铃验收的队列（2026-11-12）：忙时先挂着，收尾再叫 */
   private reviewPending: { taskId: string; member: string; text: string }[] = [];
+  /**
+   * 成员在群里问的话（2026-11-16）：只有 question / risk 会进这里。
+   * 按 taskId 合并，同一单在一轮里说三件事只叫醒她一次。
+   */
+  private questionPending = new Map<string, PendingMemberQuestion>();
+  /** 每单已经为"回答提问"唤醒过几次（上限 MEMBER_QUESTION_WAKES） */
+  private questionWakes = new Map<string, number>();
+  /**
+   * 超过唤醒上限的单：问题仍留在队列里（每轮事实段会继续提醒她），但不再单独打断。
+   * 这个标记只是"别再叫醒"，不是"把问题丢掉"——成员的问题不能静默消失。
+   */
+  private questionMuted = new Set<string>();
+  private questionSeq = 0;
   /**
    * 被用户「终止任务」的群（2026-11-15）：这些群里的一切后台动作停手——
    * 成员执行、心跳/巡检、验收叫醒、定时任务注入、排队输入，直到用户在这个群发出新消息。
@@ -1145,6 +1404,12 @@ export class Kernel {
         process.env.LYNN_L1_INPROC === "1"
           ? undefined
           : unpackedPath(path.resolve(__dirname, "..", "..", "agent", "l1-worker.mjs")),
+      /**
+       * 内核依赖目录（P10-1）：worker 要在里面找 jiti 转译器。
+       * 生产环境 `__dirname` 是 `dist/main`，`node_modules` 在项目根。
+       * 打包后（asar）依赖在 unpacked 里，所以走 unpackedPath。
+       */
+      kernelModules: unpackedPath(path.resolve(__dirname, "..", "..", "node_modules")),
     });
     this.pluginHost.attachL1(this.l1);
     this.tools = new ManagementTools(this.teamStore, dataRoot);
@@ -1322,8 +1587,11 @@ export class Kernel {
      */
     // 同一张单反复出同一种事件（权限拦截 / 外呼审计）：聚合成一张卡计数，不再一屏刷 N 条
     if (AGGREGATED_BADGES.has(c.badge ?? "") && this.feed.length > 0) {
-      const last = this.feed[this.feed.length - 1];
-      if (last.badge === c.badge && last.jobId === c.jobId) {
+      // 聚合看的是"她那张 live 卡之前"的最后一条：live 卡永远在末尾（见下），
+      // 直接取 feed 尾部会把聚合判给她的话，同一张单的拦截记录就重新一张张刷屏。
+      const tailIdx = this.feed.length - 1;
+      const last = this.liveCard && this.feed[tailIdx] === this.liveCard ? this.feed[tailIdx - 1] : this.feed[tailIdx];
+      if (last && last.badge === c.badge && last.jobId === c.jobId) {
         return this.bumpBlocked(last, c);
       }
     }
@@ -1332,7 +1600,16 @@ export class Kernel {
       id: `c-${++this.cardSeq}`,
       createdAt: new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }),
     };
-    this.feed.push(full);
+    /**
+     * 顺序纪律（2026-11-16 实机「长任务里仍穿插早期消息」）：
+     * 她的实时输出卡（liveCard）一旦建在回合开头，之后所有动作卡与成员回报都排在它后面，
+     * 十几分钟后她的话就被埋在中间。这里让 live 卡**永远保持在末尾**：
+     * 新卡插到它前面，而不是 push 到它后面。收轮时 live 卡已在末尾，moveCardToEnd 自然幂等。
+     */
+    const live = this.liveCard;
+    const at = live && live !== full && live.streaming ? this.feed.lastIndexOf(live) : -1;
+    if (at >= 0) this.feed.splice(at, 0, full);
+    else this.feed.push(full);
     this.notify({ type: "card", card: full });
     // 单点播报判定：所有卡片（含 emit 转出来的 tool 卡）都从这里过白名单
     this.voice?.sayCard(full);
@@ -1571,11 +1848,27 @@ export class Kernel {
     this.notify({ type: "thread", threadId });
   }
 
+  /** 进度卡（每单一张）：taskId+会话 → 卡 id，用来就地更新而不是一刷一张 */
+  private progressCards = new Map<string, string>();
   /**
-   * 跟踪进度按对话流走（2026-11-11 修）：
-   * 旧做法是开工时建一张卡、之后就地堆到 1500 字，最新进展永远压在会话顶部；
-   * 现在每次新进展都追加到会话末尾，贴底跟随让用户看到的就是最新一步。
-   * 20 秒内 / 少于 6 行的连续步骤折进末尾那张卡，不刷屏。
+   * 上一轮成员做过的最后几步（2026-11-16）：重派时交给继任者/同一成员，
+   * 否则它会从零把那棵目录树再列一遍。实机：同一张单被重派 6 次，每次都从 list_dir 开始。
+   */
+  private memberTrail = new Map<string, string[]>();
+  /** 上一轮真正写出去的文件（2026-11-16）：重派时告诉成员"这些已经写过了"，别重复写/覆盖丢内容 */
+  private memberProduced = new Map<string, string[]>();
+
+  /**
+   * 跟踪进度（2026-11-16 重做：**一张单只有一张进度卡**）。
+   *
+   * 实机证据：单张单的进度卡刷到 31 张，整个会话 200 条里 148 条是进度
+   * （`list_dir：.` / `正在执行（还没返回）： list_dir：.` 各一条，同一动作两行）。
+   * 结果是用户眼里"一直在重写、永远看不到结论"。
+   *
+   * 现在的规则：
+   *  - 同一张单复用同一张卡，追加步骤（最多留最近 8 行，滚动窗口）；
+   *  - 卡永远浮在她实时输出的前面（贴底跟随，最新一步在最下）；
+   *  - `mode="meta"` 只更新"执行中 · Xs"，不往正文里加行——工具开始/结束不再各刷一条。
    */
   private appendProgress(
     threadId: string,
@@ -1584,38 +1877,46 @@ export class Kernel {
     text: string,
     meta: string,
     badge: NonNullable<FeedCard["badge"]> = "进度",
+    mode: "append" | "meta" = "append",
   ): void {
     const local = !threadId || threadId === this.currentThreadId || !this.threadExists(threadId);
+    const key = `${local ? (this.currentThreadId ?? "local") : threadId}::${taskId}::${badge}`;
     const list = local ? this.feed : this.threads.loadState(threadId).feed;
-    const last = list[list.length - 1];
-    const now = Date.now();
-    const lines = (last?.body ?? "").split("\n").filter((l) => l.trim()).length;
-    const fold =
-      badge === "进度" &&
-      !!last &&
-      last.kind === "tool" &&
-      last.badge === "进度" &&
-      last.jobId === taskId &&
-      now - (this.progressAt.get(taskId) ?? 0) < 20_000 &&
-      lines < 6;
-    this.progressAt.set(taskId, now);
+    const prevId = this.progressCards.get(key);
+    const hit = prevId ? list.find((c) => c.id === prevId) : undefined;
     const at = new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
-    if (fold && last) {
-      this.patchCardTo(threadId, last, {
-        body: `${last.body ?? ""}\n${text}`.trim(),
-        meta,
-        createdAt: at,
-      });
+    if (hit) {
+      // 本地先把它浮到最后一张非 live 卡的位置，再改内容（顺序对了只发一次通知）
+      if (local && mode === "append") this.floatAboveLive(hit);
+      const lines = (hit.body ?? "").split("\n").filter((l) => l.trim());
+      const nextBody = mode === "meta" ? (hit.body ?? "") : [...lines, text].slice(-8).join("\n");
+      this.patchCardTo(threadId, hit, { body: nextBody, meta, createdAt: at });
       return;
     }
-    this.cardTo(threadId, {
+    const created = this.cardTo(threadId, {
       kind: "tool",
       badge,
       jobId: taskId,
       title: `${member} · ${taskId}`,
       meta,
-      body: text,
+      body: mode === "append" ? text : "",
     });
+    if (created) this.progressCards.set(key, created.id);
+  }
+
+  /** 把一张卡挪到"她的实时输出卡"之前（流式期间最新进展永远贴底） */
+  private floatAboveLive(card: FeedCard): void {
+    const live = this.liveCard;
+    if (!live) return;
+    const i = this.feed.indexOf(card);
+    const l = this.feed.lastIndexOf(live);
+    if (i < 0 || l < 0) return;
+    if (i > l) return; // 已经在 live 后面（异常）：不动
+    if (i === l - 1) return; // 已经在紧邻位置
+    this.feed.splice(i, 1);
+    const l2 = this.feed.lastIndexOf(live);
+    if (l2 >= 0) this.feed.splice(l2, 0, card);
+    else this.feed.push(card);
   }
 
   /** 回合状态迁移：所有 UI 的"谁在干什么"都只读这一个字段 */
@@ -1638,16 +1939,45 @@ export class Kernel {
    * 「人设 + 记忆 + 全部历史」的前缀缓存整体作废，长对话的命中率就是这么掉下去的。
    */
   private systemPrompt(): string {
-    return (
-      composeSystemPrompt(this.persona.load()) +
-      this.memory.systemPromptSection() +
-      this.memory.projectSection(this.currentProject()?.id) +
-      this.projectContext() +
-      this.environmentFacts() +
+    /**
+     * 组装交给 prompt-compiler（2026-11-17 P2-1c）：纯函数、顺序固定、可量每段。
+     * 这里只负责"取料"，不再关心拼接顺序——顺序变了会被 golden 快照测试抓住。
+     */
+    const compiled = compileLynnPrompt({
+      persona: composeSystemPrompt(this.persona.load()),
+      memory: this.memorySectionCached(),
+      project: this.projectContext(),
+      environment: this.environmentFacts(),
       // 写作规则（2026-11-15 重做）：插件提供的固定约束段，会话内不变。
       // 放在 system prompt 末尾：换插件版本才变化，前缀缓存不受日常对话影响。
-      this.rulesSection("chat")
-    );
+      rules: this.rulesSection("chat"),
+    });
+    this.lastPromptSegments = compiled.segments;
+    return compiled.text;
+  }
+
+  /**
+   * 会话级记忆快照（2026-11-17 缓存修复 B3）。
+   *
+   * 此前 `save_memory` 会热同步 system prompt；记忆段在 system 里，一改就等于把
+   * 「人设 + 记忆 + 全部历史」的前缀整体作废（实测每天 13 次记忆变更，每次都断）。
+   * 现在：会话内冻结，新记忆走当轮尾部提示（当轮可见），下个会话/切换项目时重建。
+   */
+  private memorySectionCached(): string {
+    const key = `${this.currentThreadId ?? ""}|${this.currentProject()?.id ?? ""}`;
+    if (this.memorySnapshot === null || this.memorySnapshotKey !== key) {
+      this.memorySnapshot =
+        this.memory.systemPromptSection() + this.memory.projectSection(this.currentProject()?.id);
+      this.memorySnapshotKey = key;
+      this.log("memory_snapshot", { chars: this.memorySnapshot.length, threadId: this.currentThreadId ?? "" });
+    }
+    return this.memorySnapshot;
+  }
+
+  /** 切会话/换项目后调用：下一次 systemPrompt 重建记忆段（本会话前缀因此重建一次） */
+  private resetMemorySnapshot(): void {
+    this.memorySnapshot = null;
+    this.memorySnapshotKey = "";
   }
 
   /**
@@ -1709,6 +2039,24 @@ export class Kernel {
         `【本群成员（${members.length} 人）】\n` +
           members.map((m) => `- ${m.name}${m.role ? `（${m.role}）` : ""}`).join("\n") +
           "\n（@ 只对群里的人有意义；要对某个人说话就 @ 他；派单按公告里的分工与接缝来。）",
+      );
+    }
+    /**
+     * 成员在等答复（2026-11-16）：这些是"别人干不了、只有她能定的"问题。
+     * 放进每轮事实而不是只靠唤醒——她正忙时可能错过一次叫醒，问题不能就这么烂着。
+     */
+    const questions = [...this.questionPending.values()];
+    if (questions.length) {
+      parts.push(
+        `【成员在等你答复（${questions.length} 单）】\n` +
+          questions
+            .map(
+              (q) =>
+                `- ${q.member}（${q.taskId}）：${q.items[q.items.length - 1]?.text.slice(0, 100) ?? ""}` +
+                (this.questionMuted.has(q.taskId) ? "（已叫过 3 次，不再单独打断你，但问题还挂着）" : ""),
+            )
+            .join("\n") +
+          "\n用 reply_member 回答或纠正（下一轮生效，不用重派）；答不了就让他按简报最合理的做法继续，并在回报里标注。",
       );
     }
     return parts.length ? `【本群当前情况】\n${parts.join("\n\n")}` : "";
@@ -1847,21 +2195,74 @@ export class Kernel {
   private reloadSkills(): void {
     const hasProject = Boolean(this.projectRoot);
     const trusted = hasProject && (this.trust?.isTrusted(this.projectRoot) ?? false);
-    const allRoots: { dir: string; level: SkillEntry["level"] }[] = [
+    /**
+     * 技能来源三档（P12-2 调整）。
+     *
+     * `skills/`（用户级）与 `.lynn/skills/`（项目级）保持"放进去就生效"——
+     * 那是用户自己管的地方，加个 `contributes.skills` 反而多一道手续。
+     *
+     * **插件目录改成按 manifest 声明**：插件是"别人写的、可能带多个产物"的包，
+     * 不按声明过滤会出现"声明写错了技能照样加载"——那 `contributes.skills` 就是空字段。
+     * 具体到每个插件目录单独成一个 root（而不是整个 `plugins/` 当一个 root），
+     * 这样才能把各自的 `declared` 传下去。
+     */
+    const allRoots: { dir: string; level: SkillEntry["level"]; declared?: readonly string[] }[] = [
       { dir: path.join(this.dataRoot, "skills"), level: "user" },
       ...(hasProject ? [{ dir: path.join(this.projectRoot, ".lynn", "skills"), level: "project" as const }] : []),
-      { dir: path.join(this.dataRoot, "plugins"), level: "plugin" },
+      ...this.pluginSkillRoots(),
     ];
     const roots = allRoots.filter((r) => r.level !== "project" || trusted);
     const { entries, errors } = discoverSkills(roots);
     // 停用清单（用户在设置里关的技能）：不参与激活与 allowed-tools 强制
     const disabled = this.settings.getPrefs().disabledSkills ?? [];
     this.skillEntries = entries.filter((e) => !disabled.includes(e.name));
-    for (const e of errors.slice(0, 5)) this.log("skill_error", { error: e });
+    for (const e of errors.slice(0, 8)) this.log("skill_error", { error: e });
     for (const e of entries) {
       for (const w of e.warnings.slice(0, 3)) this.log("skill_warning", { skill: e.name, warning: w });
     }
     this.log("skills_ready", { count: entries.length, projectTrusted: trusted });
+  }
+
+  /**
+   * 把每个插件目录变成一个技能 root，并带上它自己的 `contributes.skills` 声明。
+   *
+   * 为什么不是一个 root 扫 `plugins/`：
+   * `declared` 是**每个插件各自**的清单，混在一个 root 里就传不下去了。
+   *
+   * 没有声明 `skills` 的插件**不产出 root**——它的目录里就算有 `SKILL.md` 也不加载。
+   * 这是"声明即生效"的另一面：不声明就不生效，行为可预期。
+   */
+  private pluginSkillRoots(): { dir: string; level: SkillEntry["level"]; declared: readonly string[] }[] {
+    const pluginsRoot = path.join(this.dataRoot, "plugins");
+    if (!fs.existsSync(pluginsRoot)) return [];
+    const out: { dir: string; level: SkillEntry["level"]; declared: readonly string[] }[] = [];
+    /**
+     * 启用状态用 `pluginHost.scan()`——那是主进程的单一真相（`_state.json` + 安全模式）。
+     * 自己再读一遍 `_state.json` 会漏掉安全模式这个条件：安全模式下所有非官方插件都算停用。
+     */
+    const disabled = new Set(this.pluginHost.scan().plugins.filter((p) => !p.enabled).map((p) => p.id));
+    for (const e of fs.readdirSync(pluginsRoot, { withFileTypes: true })) {
+      if (!e.isDirectory() || e.name.startsWith("_") || e.name.startsWith(".")) continue;
+      const dir = path.join(pluginsRoot, e.name);
+      const manifestFile = path.join(dir, "plugin.json");
+      if (!fs.existsSync(manifestFile)) continue;
+      try {
+        const raw = JSON.parse(fs.readFileSync(manifestFile, "utf-8")) as {
+          id?: unknown;
+          contributes?: { skills?: unknown };
+        };
+        const id = typeof raw.id === "string" ? raw.id : e.name;
+        if (disabled.has(id)) continue;
+        const skills = raw.contributes?.skills;
+        if (!Array.isArray(skills) || !skills.length) continue;
+        const declared = skills.filter((s): s is string => typeof s === "string" && Boolean(s.trim()));
+        if (!declared.length) continue;
+        out.push({ dir, level: "plugin", declared });
+      } catch {
+        /* 坏 manifest 由 PluginHost 报，这里跳过 */
+      }
+    }
+    return out;
   }
 
   /** 命中技能 → 本轮生效：注入预算内内容（拼在当轮消息尾部）+ allowed-tools 强制子集 */
@@ -2004,6 +2405,8 @@ export class Kernel {
   /** 把当前会话绑到某个项目（并把主根设成项目目录） */
   private bindProject(proj: ProjectRecord): void {
     if (!this.currentThreadId) return;
+    // 项目记忆跟着项目走：绑定/换项目后记忆段必须重建（缓存修复 B3）
+    this.resetMemorySnapshot();
     try {
       this.threads.setProjectId(this.currentThreadId, proj.id);
     } catch {
@@ -2023,6 +2426,8 @@ export class Kernel {
    */
   private setSessionRoots(next: RootSet): void {
     const normalized = normalizeRoots(next) ?? emptyRoots();
+    // 换根往往换项目：记忆快照（含项目记忆）要重建
+    this.resetMemorySnapshot();
     this.applyRoots(normalized);
     if (this.currentThreadId) {
       try {
@@ -2309,6 +2714,7 @@ export class Kernel {
       // 不走 switchThread：它会清空 feed，把这一轮已经生成的心跳卡/工具卡一起抹掉。
       // 这里是"给内存里已有的内容补一个归属"，不是"切到另一条会话"。
       this.currentThreadId = meta.id;
+      this.resetMemorySnapshot();
       this.persistThread();
     }
     return this.currentThreadId;
@@ -2658,6 +3064,22 @@ export class Kernel {
       }
     }
 
+    /**
+     * 插件声明的 MCP server（P11-2）。
+     *
+     * 合并进同一份 map：`McpRegistry` 只认 server id，不关心来源。
+     * 插件 server 的 id 已加插件前缀（`lynn.a:fs`），不会与全局/项目配置撞车。
+     *
+     * 顺序：全局 → 项目 → 插件。后者覆盖前者的前提是 id 相同，
+     * 而前缀化让这种情况几乎不可能——所以实际是"三份并列"。
+     */
+    const pluginMcp = scanPluginMcp(this.dataRoot);
+    for (const e of pluginMcp.errors) {
+      this.log("plugin_mcp_error", { error: e });
+      if (!opts.quiet) this.card({ kind: "system", text: `插件 MCP 配置有问题：${e}` });
+    }
+    for (const s of pluginMcp.servers) merged.set(s.id, s);
+
     const servers = [...merged.values()];
     if (!servers.length) return;
     await this.mcp.startAll(servers);
@@ -2776,6 +3198,8 @@ export class Kernel {
    */
   private async consultAdvisorFor(taskId: string, threadId: string, report: string, artifacts: string[]): Promise<void> {
     if (!this.settings.getPrefs().advisorEnabled) return;
+    // 额度熔断期不派顾问（实机 19 次顾问调用全部 abort，白烧一次完整调用）
+    if (this.quotaCoolingDown()) return;
     if (this.advisorReviewed.has(taskId)) return;
     const rec = this.taskStore.get(taskId);
     if (!rec) return;
@@ -2998,12 +3422,20 @@ export class Kernel {
     );
 
     if (announce) {
+      const jobTitle = (this.taskStore.get(taskId)?.title ?? taskId).replace(/\s+/g, " ").slice(0, 24);
+      const gist = String(text ?? "")
+        .replace(/^\s*【[^】]*】\s*/u, "")
+        .replace(/\s+/g, " ")
+        .split(/[。！？\n]/)[0]
+        .slice(0, 36);
       this.cardTo(threadId, {
         kind: "tool",
         badge: "回报",
         title: `${member} · ${taskId}`,
         // 用户只看结果：回报卡就是成员交回的那段结论，不附证据清单与核验计数
         body: text,
+        // 语音必须说清"哪件事、交回什么"——只念名字等于没播（2026-11-16）
+        speak: `${member}交回「${jobTitle}」${gist ? `：${gist}` : "的结果"}。`,
         // 群聊：成员第一次以自己的身份在群里发言（带头像、岗位、名字）
         author: this.memberAuthor(teamId, member),
       });
@@ -3026,7 +3458,7 @@ export class Kernel {
       // 执行成员回报 → 交给本队验收员验收（不叫醒风铃读全文）；验收员回报 → 才叫醒风铃看结论。
       // 队里没设验收员时回落老行为：直接叫醒风铃。
       if (!reporterIsAcceptor && this.teamHasAcceptor(teamId)) {
-        this.engageAcceptor(teamId, taskId, member, text);
+        this.engageAcceptor(teamId, taskId, member, text, verified);
       } else {
         this.wakeLynnForReview(taskId, member, text);
       }
@@ -3076,6 +3508,184 @@ export class Kernel {
     );
   }
 
+  /**
+   * 成员在群里说了一句话（2026-11-16）。
+   *
+   * 取的是"消息总线 + 打断级别"，不是自由聊天（参考 MetaGPT 的 cause_by/watch、
+   * openspawn 的"沉默即成功"与 AutoGen 的群聊终止条件）：
+   *  - 一律落群时间线（作者=成员、带头像），用户看得见成员干到哪、想到哪；
+   *  - update / finding 只落群，**不唤醒任何人**——每条进展都叫一次会烧掉大量预算；
+   *  - question / risk 才进待答队列，她空闲时叫醒（同单合并、每单最多 3 次）。
+   * 返回值是给成员的回执：它据此决定继续做、还是按假设继续并标注。
+   */
+  private memberSaid(
+    threadId: string,
+    teamId: string,
+    taskId: string,
+    member: string,
+    post: MemberPost,
+  ): string {
+    const badge = POST_BADGE[post.kind] ?? "进展";
+    const text = post.text.trim();
+    const rec = this.taskStore.get(taskId);
+    const jobTitle = String(rec?.title ?? taskId).replace(/\s+/g, " ").slice(0, 24);
+    // 1) 群时间线：一次人类式发言（不折叠、带头像）。进展类不写 speak——语音只念需要人接的事
+    const needVoice = post.kind === "question" || post.kind === "risk";
+    this.cardTo(threadId, {
+      kind: "tool",
+      badge,
+      jobId: taskId,
+      title: `${member} · ${taskId}`,
+      body: text,
+      meta: post.needAnswer ? "等你答复" : undefined,
+      author: this.memberAuthor(teamId, member),
+      ...(needVoice
+        ? {
+            speak: `${member}在「${jobTitle}」里${post.kind === "question" ? "问了一句" : "报了个风险"}：${text.slice(0, 40)}`,
+          }
+        : {}),
+    });
+    // 2) 卷宗：发言是过程事实，验收与复盘都要看得到
+    this.taskCase.append(taskId, { kind: "note", member, text: `[${badge}] ${text}` });
+    // 3) 路由：只有提问与风险值得打断她
+    if (post.kind !== "question" && post.kind !== "risk") {
+      return "已经发到群里（进展类不会打断任何人）。继续干活；有结论或卡住了再说。";
+    }
+    this.queueMemberQuestion(threadId, teamId, taskId, member, post);
+    if (post.kind === "risk") {
+      return (
+        "已经发到群里并通知风铃。若她没回，就按简报里最合理的做法继续，" +
+        "并在回报里写明这条风险与你选的处置——不要停在原地等。"
+      );
+    }
+    return post.needAnswer
+      ? "已经发到群里，风铃会在你下一轮前答复。先把不依赖它的部分做完；仍没答复就在回报里标【受阻】写清缺什么。"
+      : "已经发到群里，风铃会在下一轮前答复。不用停在这等——继续做不依赖它的部分。";
+  }
+
+  /** 把一条疑问/风险挂进待答队列（同单合并；本群被终止就不叫醒） */
+  private queueMemberQuestion(
+    threadId: string,
+    teamId: string,
+    taskId: string,
+    member: string,
+    post: MemberPost,
+  ): void {
+    if (this.isThreadHalted(threadId)) return;
+    const item = {
+      id: `mq-${++this.questionSeq}`,
+      kind: post.kind,
+      text: post.text.trim().slice(0, 400),
+      ...(post.needAnswer ? { needAnswer: true } : {}),
+    };
+    const prev = this.questionPending.get(taskId);
+    if (prev) {
+      // 同一单已经在等答复：合并进同一段，不重复叫醒（她一轮就能一起回）
+      prev.items.push(item);
+      this.requestHeartbeat("member_question");
+      return;
+    }
+    this.questionPending.set(taskId, { taskId, teamId, member, threadId, items: [item] });
+    // 事件心跳是兜底（有合并窗口/冷却/配额）；正常路径是 drainQuestionPending 立刻叫醒
+    this.requestHeartbeat("member_question");
+    this.drainQuestionPending();
+  }
+
+  /**
+   * 叫醒风铃答复成员（2026-11-16）。
+   * 与验收队列同一套纪律：忙 / 用户在拍板契约时先挂着，收轮后再叫；
+   * 每单最多 MEMBER_QUESTION_WAKES 次。超过只停止"单独叫醒"，问题仍留在队列里——
+   * 每轮事实段会继续提醒她，不能因为降噪把成员的问题静默吞掉。
+   */
+  private drainQuestionPending(): void {
+    if (this.questionPending.size === 0) return;
+    if (this.isThreadHalted()) return;
+    if (this.busy) return;
+    if (this.turn.phase === "awaiting_plan") return;
+    // 只挑第一张「还没停叫」的单：超过上限的单留在队列里（每轮事实段会继续提醒她），
+    // 但不能堵住后面还能答的单
+    let picked: [string, PendingMemberQuestion] | null = null;
+    for (const entry of this.questionPending) {
+      if (this.questionMuted.has(entry[0])) continue;
+      picked = entry;
+      break;
+    }
+    if (!picked) return;
+    const [taskId, q] = picked;
+    const wakes = this.questionWakes.get(taskId) ?? 0;
+    if (wakes >= MEMBER_QUESTION_WAKES) {
+      /**
+       * 已经为这张单叫过 3 次：不再单独唤醒，但**问题不丢**——
+       * 留在 questionPending 里由每轮事实段持续提醒（她有空时会看到），
+       * 只落一条说明让群里知道为什么不再打断。否则成员的问题会静默消失，
+       * 而用户看到的只是"它问了没人理"。
+       */
+      this.questionMuted.add(taskId);
+      this.cardTo(q.threadId, {
+        kind: "system",
+        badge: "进度",
+        jobId: taskId,
+        text: `${q.member} 又在 ${taskId} 里提了 ${q.items.length} 个问题，但这单已回答过 ${MEMBER_QUESTION_WAKES} 次：不再单独叫醒风铃，问题会留在待办里随每轮提醒她。`,
+      });
+      return;
+    }
+    this.questionPending.delete(taskId);
+    this.questionWakes.set(taskId, wakes + 1);
+    const rec = this.taskStore.get(taskId);
+    const steps = this.memberTrail.get(taskId)?.slice(-3) ?? [];
+    const blocked = [...(this.memberBlockedCmds.get(taskId) ?? [])].slice(-3);
+    this.submitTurn(
+      [
+        `【成员在群里说话】${q.member}（${taskId}「${String(rec?.title ?? taskId).slice(0, 24)}」）说了：`,
+        ...q.items.map((i) => `- [${i.kind === "question" ? "疑问" : "风险"}] ${i.text}`),
+        steps.length ? `\n它最近几步：${steps.join(" / ")}` : "",
+        blocked.length ? `\n最近被拦下的命令：${blocked.join(" / ")}（可能是权限问题，不是它不会做）` : "",
+        "\n作为指挥者处理：",
+        "①提问 → 能一句话答就直接 reply_member（下一轮生效，不重派、不丢已写文件）；答不了就让它按简报最合理做法继续，并要求在回报里标注；",
+        "②风险 → 先判断它说的对不对：对就 reply_member 给新做法或补授权建议；不对就当场纠正错在哪；",
+        "③如果它是在为猜着做找借口（简报其实写清了）→ reply_member 要求它按简报执行，不要再问；",
+        "④只有牵涉花钱/删数据/对用户口径这类你决定不了的事，才 ask_user 转呈用户。",
+        "不要重复派单，也不要把成员的问题原样甩给用户。",
+      ]
+        .filter(Boolean)
+        .join("\n"),
+      undefined,
+      {
+        internal: true,
+        ephemeral: true,
+        mentions: [{ kind: "member", name: q.member, memberId: q.member }],
+      },
+    );
+  }
+
+  /**
+   * 风铃回答 / 纠正成员（2026-11-16）：落到群里 + 送进成员收件箱，下一轮生效。
+   * 与 nudge_member 的区别：nudge 是催办，reply 是"回答疑问 / 纠正错误"，群里的措辞也该看得出。
+   */
+  replyMember(taskId: string, text: string): string {
+    const note = text.trim();
+    if (!note) return "回答不能为空：直接说结论或该怎么做。";
+    const rec = this.taskStore.get(taskId);
+    if (!rec) return `没有这张单：${taskId}（ID 由系统生成，别自己编）。`;
+    const running = this.memberRuns.has(taskId);
+    const owner = rec.threadId ?? this.currentThreadId;
+    // 这条回答覆盖到这一单的待答疑问：从队列里摘掉（不靠模型传问题 id，按单匹配）
+    this.questionPending.delete(taskId);
+    if (!running) {
+      // 成员已经跑完：回答仍要进群（用户要看她的判断），但成员看不到，必须说清怎么让成员继续
+      const at = this.atMember(rec.member ?? "", `（这单已经没人在跑）${note.slice(0, 500)}`);
+      this.cardTo(owner, {
+        kind: "lynn",
+        jobId: taskId,
+        text: at.body,
+        author: { kind: "lynn", name: "风铃" },
+        mentions: at.mentions,
+      });
+      return `${taskId} 已经没人在跑：这句已发到群里，但成员看不到。要它继续改，就用 assign_task 带 reworkTaskId=${taskId} 在原单上重做。`;
+    }
+    return this.nudgeMember(taskId, note, false, "reply");
+  }
+
   /** 这名成员是不是本队的常驻验收员（2026-11-15） */
   private isAcceptor(teamId: string, member: string): boolean {
     try {
@@ -3100,7 +3710,14 @@ export class Kernel {
    * 只等验收员那张紧凑的【验收结论】。验收员只读不写（工具面收窄到 read_file/list_dir/submit_report）。
    * 队里没验收员、或派不动时回落：直接叫醒风铃去验。
    */
-  private engageAcceptor(teamId: string, taskId: string, workerMember: string, workerReport: string): void {
+  private engageAcceptor(
+    teamId: string,
+    taskId: string,
+    workerMember: string,
+    workerReport: string,
+    /** 已验证的证据数（registerReport 里核验过的）：未核验的路径不算"有产物" */
+    verifiedEvidence = 0,
+  ): void {
     const acc = this.teamStore.listMembers(teamId).find((m) => m.acceptor);
     if (!acc) {
       this.wakeLynnForReview(taskId, workerMember, workerReport);
@@ -3115,6 +3732,24 @@ export class Kernel {
       this.wakeLynnForReview(taskId, workerMember, workerReport);
       return;
     }
+    /**
+     * 零产物不派验收员（2026-11-16 实机）：执行成员一个文件没交，验收员照样跑满 15 轮 100s
+     * 只为了得出「docs/perf-audit-output-path.md 不存在」。这种情况不是"待验收"，是"没做出来"，
+     * 直接交回风铃按失败处理（换人 / 换法 / 关单并如实汇报）。
+     * 探索型（explore）不适用——它的交付本来就是结论，没有文件是正常的。
+     */
+    // 只认"核验通过"的证据（2026-11-16）：成员在 evidence 里写一个不存在的路径，以前也算
+    // "有产物" → 派验收员跑 15 轮、100s，只为得出「docs/perf-audit-output-path.md 不存在」。
+    const hasOutput = (task?.deliverables?.length ?? 0) + Math.max(0, verifiedEvidence) > 0;
+    if (task?.mode !== "explore" && !hasOutput) {
+      this.wakeLynnForReview(
+        taskId,
+        workerMember,
+        `${workerReport}\n\n（系统注：这张单**没有任何交付物与证据**，属于没做出来，不要当验收通过；` +
+          `要么换人/换法重做，要么关单并如实说明卡在哪。）`,
+      );
+      return;
+    }
     const acceptance = task?.acceptance && task.acceptance.length ? task.acceptance : ["完成标准全部满足"];
     const brief =
       `你是本队的常驻验收员，现在验收 ${taskId}（执行成员：${workerMember}）。\n` +
@@ -3122,6 +3757,10 @@ export class Kernel {
       `对照完成标准逐条核对：\n${acceptance.map((a, i) => `${i + 1}. ${a}`).join("\n")}\n` +
       `做法：用 list_dir 看工作区产物是否齐全，用 read_file 把关键交付物正文读一遍——` +
       `「文件存在 + 成员说齐全」不是验收，骨架稿 / 占位符 / 空章节只有读了正文才看得见。\n` +
+      // 预算纪律（2026-11-16 实机）：验收员每轮读 5 个大文件，6 轮就超时 error，
+      // 一张单挂了 4 分钟还没结论。核对是"找证据"，不是把相关源码全读一遍。
+      `预算纪律：**每次最多读 2 个文件**，优先读交付物本身（不要通读源码库）；` +
+      `对照每条标准找到能落地的证据就够了，凑齐判据就 submit_report，不要在验收阶段继续做勘察。\n` +
       `核实后用 submit_report 给结论，正文务必以【验收结论】开头：通过 / 打回 + 逐项核对结果 + 证据（哪个文件 / 哪一段）+ ` +
       `打回时写清改什么与期望什么。你只验收并汇报，不要替执行成员重做——风铃会按你的结论决定下一步。`;
     // 执行成员的 run 还没走完 .finally()（memberRuns 要等它清）——宏任务里再派，
@@ -3142,6 +3781,8 @@ export class Kernel {
         badge: "验收",
         title: `验收 · ${acc.name} · ${taskId}`,
         body: `验收员开始核对 ${workerMember} 的交付物，结论出来后会汇报给你。`,
+        // 说清"哪件事在验收、谁验的"，不要只念一个成员名
+        speak: `${acc.name}开始核对「${(task?.title ?? taskId).replace(/\s+/g, " ").slice(0, 20)}」，${workerMember}交的东西我让他逐条验。`,
       });
     }, 0);
   }
@@ -3294,6 +3935,62 @@ export class Kernel {
   }
 
   /**
+   * 这个岗位过去踩过的坑（L2），按「同域 + 简报关键词」挑。
+   *
+   * 失败一律吞掉返回空：老档案没有 memberId、池子里没这个人、或文件坏了，
+   * 都只是"这次没有经验可注入"，绝不能因此把单派不出去。
+   */
+  private memberLessonsFor(profile: MemberProfile, brief: string): Lesson[] {
+    const memberId = profile.memberId;
+    if (!memberId) return [];
+    try {
+      const domain = roleSpec(profile.roleId ?? "")?.domains[0] ?? "general";
+      return this.memberPool.pickLessons(memberId, { domain, brief });
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * 一单收尾后给池子记账（08 章 §3 硬规则 1：**任务结束提取教训只写 L2**）。
+   *
+   * 这里不碰 L1。L1 是进 system prompt 的岗位说明，只有 promoteLesson（人工确认）
+   * 才能改——否则任务 A 的教训会跟着成员进任务 B，前缀哈希每次都变。
+   */
+  private noteMemberOutcomeToPool(profile: MemberProfile, taskId: string, result: MemberRunResult, maxTurns: number): void {
+    const memberId = profile.memberId;
+    if (!memberId) return;
+    try {
+      const domain = roleSpec(profile.roleId ?? "")?.domains[0] ?? "general";
+      const ok = result.status === "reported";
+      const reworkFocus = this.taskStore.get(taskId)?.reworkFocus?.items;
+      const meta = this.memberPool.recordOutcome(memberId, {
+        ok,
+        turns: result.turns,
+        tokens: result.promptTokens + result.completionTokens,
+        rejectReason: ok ? undefined : (reworkFocus?.[0] ?? result.status),
+      });
+      for (const l of lessonsFromOutcome({
+        memberId,
+        taskId,
+        domain,
+        ok,
+        exitStatus: result.status,
+        turns: result.turns,
+        maxTurns,
+        reworkFocus,
+      })) {
+        this.memberPool.appendLesson(memberId, { ...l, evidenceTaskId: taskId });
+      }
+      if (meta.status === "probation") {
+        this.log("member_probation", { memberId, member: profile.name, taskId, failures: meta.consecutiveFailures });
+      }
+    } catch {
+      /* 记账失败不该影响这张单的收尾 */
+    }
+  }
+
+  /**
    * 派单即开工（M0-09）：按岗位档案 + 简报包起真实成员运行时，后台执行不阻塞风铃的工具轮。
    * 工作区 = <dataRoot>/tasks/<taskId>/workspace/（成员文件活动的硬边界）。
    * 回报完成后走 registerReport 同一管线：登记 → 证据验证 → 进待审查 → 发「回报」卡。
@@ -3313,6 +4010,19 @@ export class Kernel {
     if (!cfg || !apiKey) {
       return { ok: false, message: "模型未配置（或 Key 无法解密）：派单已记录，但成员无法开工。请先在设置里配置模型。" };
     }
+    /**
+     * 额度熔断（2026-11-16）：实机 429 之后仍在继续派单，新单第一轮就撞 429，
+     * 立刻 error 退出 → 风铃再派 → 雪球。熔断期内直接拒派，一次请求都不发。
+     */
+    if (this.quotaCoolingDown()) {
+      const mins = Math.max(1, Math.round((this.quotaBlockedUntil - Date.now()) / 60_000));
+      return {
+        ok: false,
+        message: `额度已用尽（429）：自动派单已暂停 ${mins} 分钟。不要重试派单，等用户充值后发消息或冷却结束再继续。`,
+      };
+    }
+    const repickBlocked = this.taskRepickBlocked(taskId);
+    if (repickBlocked) return { ok: false, message: repickBlocked };
     let profile;
     try {
       profile = this.teamStore.readMember(teamId, member);
@@ -3331,6 +4041,10 @@ export class Kernel {
     }
     // 重派 = 新一轮：清掉"成员已自交回报"的标记，这一轮可以重新登记
     this.selfReported.delete(`${taskId}::${member}`);
+    // 上一轮的疑问与唤醒计数也一并作废：旧问题的答复已经不适用新简报
+    this.questionPending.delete(taskId);
+    this.questionWakes.delete(taskId);
+    this.questionMuted.delete(taskId);
     // 后台执行可能跨会话：出发时的线程记下来，回报要写回那一个，不能落到用户当前看的会话里
     const runThreadId = this.currentThreadId;
     // 同一个成员同时跟两张单 = 工具层互相堵死（真实事故：13:24 与 13:26 各派一张，然后两边都不动了）
@@ -3339,13 +4053,25 @@ export class Kernel {
     if (busyTask && busyTask !== taskId) {
       return { ok: false, message: `成员「${member}」正在跑 ${busyTask}，同一成员同时只能跟一张单。等它回报后再派，或换一个成员。` };
     }
-    // 执行工具 = 本次分配 ∩ 内置执行工具；submit_report 是回报通道，不占白名单
+    // 执行工具 = 本次分配 ∩ 内置执行工具；submit_report / post_message 是回报与发言通道，不占白名单
     const assigned = toolsArg ?? profile.tools;
     const allowed = assigned.filter((t) => (MEMBER_EXEC_TOOLS as readonly string[]).includes(t));
     // 名字写错/工具已下架时，以前是静默过滤 → 成员带着缺件的工具集开工，谁都不知道少了一件。
     // 不阻断派单（少一件往往还能干），但必须留痕，便于回查"为什么它没读到文件"。
-    const droppedTools = assigned.filter((t) => !(MEMBER_EXEC_TOOLS as readonly string[]).includes(t));
+    // 2026-11-16：通道类工具不再计为"被裁掉"——它们本来就不在白名单里，记进去只会让日志骗人
+    // （实机 10 条 assign_tools_dropped 全是 submit_report，看着像"成员交不了活"）。
+    const channelTools = new Set(["submit_report", "post_message"]);
+    const droppedTools = assigned.filter(
+      (t) => !(MEMBER_EXEC_TOOLS as readonly string[]).includes(t) && !channelTools.has(t),
+    );
     if (droppedTools.length) this.log("assign_tools_dropped", { taskId, member, dropped: droppedTools.join(",") });
+    // 一件可执行工具都没有的成员等于派出去空转：宁可当场拒，也别让它跑一轮再说"做不了"
+    if (!allowed.length) {
+      return {
+        ok: false,
+        message: `本次给 ${member} 的工具里没有一件可执行（${assigned.join("、") || "空"}）：改工具清单，或这张单不需要成员。`,
+      };
+    }
     // M3-07：带 draftId 的派单（插件工程师），工作区即草稿区——产物只能写进草稿，
     // 不可能落进生效目录（plugin-host 扫描跳过 `_` 前缀目录，草稿永不自动生效）
     // 成员的读写工作区：插件工坊=草稿区；否则用派单时钉住的会话项目目录（可读写），老单补记后同样落在项目目录
@@ -3391,25 +4117,14 @@ export class Kernel {
     const elapsedSec = () => Math.round((Date.now() - startedAt) / 1000);
     this.appendProgress(runThreadId, taskId, member, "（等他第一步）", "刚开工");
     let lastStepAt = Date.now();
-    /** 里程碑汇报：不打断成员，但每 2 分钟给自己留一条可回看的进度卡（不催也要报） */
-    let lastMilestoneAt = Date.now();
     const pushStep = (text: string) => {
       steps.push(text);
       lastStepAt = Date.now();
       this.memberLastStep.set(memberKey, text);
       this.memberStepAt.set(taskId, Date.now());
+      // 每单一张进度卡（滚动 8 行）。里程碑卡已取消：它只是把同一批步骤再贴一遍，
+      // 实机 148/200 条都是这类卡，结论被彻底埋掉。
       this.appendProgress(runThreadId, taskId, member, text, `第 ${steps.length} 步 · ${elapsedSec()}s`);
-      if (Date.now() - lastMilestoneAt >= 120_000) {
-        lastMilestoneAt = Date.now();
-        this.cardTo(runThreadId, {
-          kind: "tool",
-          badge: "进度",
-          jobId: taskId,
-          title: `${member} 第 ${steps.length} 步 · ${taskId}`,
-          meta: `已用时 ${elapsedSec()}s`,
-          body: steps.slice(-3).join("\n"),
-        });
-      }
     };
     // 卡死可见：长时间没有任何动作就报一次（不自动杀，让人决定）
     // 但"正在跑的命令"不算没动作：tool-start 会刷新 lastStepAt，并在这里显示执行了多久。
@@ -3430,15 +4145,61 @@ export class Kernel {
 
     // 禁区与取舍口径随单走（2026-11-12）：派单时定的法，成员第一眼就要看见
     const recNow = this.taskStore.get(taskId);
+    /**
+     * G2 编译闸（2026-11-17 P3-1b / 07 章 §4）：这个成员这次能不能拿到岗位专门纪律。
+     * **失败不拒单**——成员明明能干，只是拿不到该岗位的模板，拒掉是最差的选择。
+     * 但要记下来：悄悄 fallback 等于让风铃以为成员带着岗位纪律在干活。
+     */
+    const compileGate = gateMemberCompile(
+      {
+        roleId: profile.roleId,
+        domain: roleSpec(profile.roleId ?? "")?.domains[0],
+        body: profile.body,
+        tools: allowed,
+        limits: {
+          maxTurns: maxTurns ?? profile.limits?.maxTurns,
+          budgetTokens: profile.limits?.budgetTokens,
+          wallClockMin: profile.limits?.wallClockMin,
+        },
+      },
+      path.join(__dirname, "..", "prompts"),
+    );
+    this.log("member_compile", {
+      taskId,
+      member,
+      roleId: compileGate.roleId,
+      domain: compileGate.domain,
+      templateSource: compileGate.templateSource,
+      templatePath: compileGate.templatePath,
+      promptFallback: compileGate.promptFallback,
+      maxTurns: compileGate.limits.maxTurns,
+      reasons: compileGate.reasons.join(" | "),
+    });
+    if (compileGate.promptFallback) {
+      this.cardTo(runThreadId, {
+        kind: "system",
+        jobId: taskId,
+        text: `${member}（${compileGate.roleId}）这次没有岗位模板，用的是通用纪律（promptFallback）。原因：${compileGate.reasons[0] ?? "未知"}。`,
+      });
+    }
     const run: Promise<MemberRunResult> = runMemberTask({
       profile,
       brief,
       deadline,
       tools: allowed,
-      maxTurns,
+      // G2 夹层后的轮次（07 章「限额合规」）：超出 8–40 的值在这里被夹住，而不是让成员带着离谱的轮次开跑
+      maxTurns: compileGate.limits.maxTurns,
+      // 墙钟预算进成员：轮次之外的另一道约束，用来在 50% / 75% 时提醒"先落盘"
+      budgetMinutes: compileGate.limits.wallClockMin,
       forbidden: recNow?.forbidden,
       priority: recNow?.priority,
       mode: recNow?.mode,
+      /**
+       * L2 经验注入（2026-11-17 P3-2 / 08 章 §4）：按「同域 + 简报关键词」挑，最多 5 条 ≤600 字。
+       * 异域任务**不注入**（08 章 §7）——把 coding 的坑塞给写文档的成员，是用一条错误经验污染它的判断。
+       * 只进首条 user，绝不进 system（system 是每轮都付的固定成本）。
+       */
+      lessons: this.memberLessonsFor(profile, brief),
       // 打回后的重派：只重做这几条（2026-11-15），别把已通过的部分推翻
       focus: recNow?.reworkFocus?.items,
       signal: controller.signal,
@@ -3469,8 +4230,10 @@ export class Kernel {
        * 放手档下改由风铃代批（内核代她执行并写卷宗），不打扰你，也不再是静默放行。
        */
       autoDeleteInWorkspace: () => false,
-      // 出站闸（审计 #2）：计划/询问档成员不能把工作区数据 curl 出本机；自动/全权只审计
-      outboundAllowed: () => this.permission === "auto" || this.permission === "full",
+      // 出站闸（审计 #2，2026-11-17 P5-1 改为**按单**放行）：
+      // 默认不给网；这张单在派单时拿了 network 授权才允许 curl/wget/http。
+      // 为什么不再看全局权限档：一张单要抓数据不代表下一张也要，按单授权才有分寸。
+      outboundAllowed: () => this.taskStore.get(taskId)?.network?.granted === true,
       // 收件箱：风铃/巡检中途补的指示，成员每轮开头取（催办不杀进程、不重派）
       inbox: (() => {
         const box = this.memberInbox.get(taskId) ?? [];
@@ -3493,7 +4256,8 @@ export class Kernel {
       onBeforeWrite: (rel, full, existed) => this.checkpoints.beforeWrite(rel, full, existed),
       // 写作规则（2026-11-15 重做）：成员写文档/回报之前就把规则给它，
       // 而不是等它写完再改稿（改稿会破坏校验、也会让落盘与交付物不一致）。
-      writingRules: this.rulesSection("prose", 1200),
+      // 2026-11-17：只给「交付物是文档」的角色——coding/ops 成员不背这 1,200 字（约 750 tokens/轮）。
+      writingRules: writesProseDocs(profile.role, allowed) ? this.rulesSection("prose", 1200) : "",
       office: {
         read: (file) => readTable(file, this.officeHealth),
         write: (file, table) => writeTable(file, table),
@@ -3523,12 +4287,15 @@ export class Kernel {
           // 光靠 tool-start 刷一次时间戳不够，得让看门狗知道"它现在正在干活"。
           this.memberToolSince.set(taskId, Date.now());
           this.memberLastStep.set(memberKey, ev.text);
+          // 只更新"执行中"的状态标记，不往正文里加行：开始/结束各一条曾让每个动作刷两行
           this.appendProgress(
             runThreadId,
             taskId,
             member,
-            `正在执行（还没返回）：\n${ev.text}`,
+            "",
             `第 ${steps.length + 1} 步 · 执行中 · ${elapsedSec()}s`,
+            "进度",
+            "meta",
           );
           return;
         }
@@ -3544,6 +4311,11 @@ export class Kernel {
           this.setTurn({ phase: "working", taskId, member, progress });
         }
       },
+      /**
+       * 群内中途发言（2026-11-16）：成员自己开口说进展/结论/疑问/风险。
+       * 落卡与"要不要叫醒风铃"的判定都在内核，成员侧只管说。
+       */
+      onMessage: (post) => this.memberSaid(runThreadId, teamId, taskId, member, post),
     });
     this.log("member_start", {
       taskId,
@@ -3555,6 +4327,9 @@ export class Kernel {
     void run
       .then((result) => {
         this.memberProgress.set(member, 100);
+        // 已经写出的文件（2026-11-16）：轮次用尽/中止也算产出，别让它们随失败一起消失
+        const produced = (result.producedFiles ?? []).slice();
+        if (produced.length) this.memberProduced.set(taskId, produced);
         // 预算读数：按真实 token 累计（此前编制表恒显示 0）
         this.memberUsage.set(memberKey, (this.memberUsage.get(memberKey) ?? 0) + result.promptTokens + result.completionTokens);
         // 看板：成员缓存命中率（2026-11-13）——cacheRead / 输入总量，多单累计
@@ -3583,6 +4358,16 @@ export class Kernel {
               : null,
           error: result.error,
         });
+        /**
+         * 池子记账（2026-11-17 P3-2）：战绩进 record.json，教训只进 L2。
+         * 放在 member_exit 之后、任何"报成功"之前——记账失败不该改变这单的结论。
+         */
+        this.noteMemberOutcomeToPool(profile, taskId, result, maxTurns ?? profile.limits?.maxTurns ?? 0);
+        // 失败计数（重派雪球熔断）+ 额度熔断：成员侧撞 429 时不再让风铃接着派
+        this.noteTaskFailure(taskId, result.status);
+        if (result.status === "error" && result.error && isQuotaMessage(result.error)) {
+          this.noteQuotaExhausted(result.error);
+        }
         // 成员侧用量落台账（2026-11-14）：以前只有 member_exit 日志，按次台账查不到成员跑单的命中率。
         // cacheFieldsReported 拿不到（成员 runner 未透传端点字段），明确记 null，不假装有。
         appendUsage(this.dataRoot, {
@@ -3624,12 +4409,38 @@ export class Kernel {
             ref: d.ref,
             ...(d.bytes ? { bytes: d.bytes } : {}),
           }));
+          /**
+           * 播报要带"哪件事 + 交回了什么"（2026-11-16 用户：「播报还是只报成员名称」）。
+           * 只念「阿计交回了结果」等于没说——耳朵里得听到任务名与结论要点。
+           */
+          const jobTitle = (recNow?.title ?? taskId).replace(/\s+/g, " ").slice(0, 24);
+          const gist = String(result.report ?? "")
+            .replace(/^\s*【[^】]*】\s*/u, "")
+            .replace(/\s+/g, " ")
+            .split(/[。！？\n]/)[0]
+            .slice(0, 36);
           this.cardTo(runThreadId, {
             kind: "tool", badge: "回报", jobId: taskId,
             title: `${member} 回报 · ${taskId}`,
             meta: `${result.turns} 轮 · ${used}s`,
             body: result.report.slice(0, 1500),
             author: this.memberAuthor(teamId, member),
+            /**
+             * 验收对象必须说对（2026-11-16 用户：「成员回报指向非正确的验收对象」）：
+             * 队里有常驻验收员时，先验的是他，不是风铃；验收员自己交回的是**结论**，
+             * 不能说成"交回了结果"。
+             */
+            speak: (() => {
+              if (this.isAcceptor(teamId, member)) {
+                return `验收结论出来了「${jobTitle}」${gist ? `：${gist}` : ""}。`;
+              }
+              const receiver = this.teamHasAcceptor(teamId) ? "等验收员逐条核对" : "等我验收";
+              return (
+                `${member}交回「${jobTitle}」${gist ? `：${gist}` : "的结果"}` +
+                (delivered.length ? `，附 ${delivered.length} 个产物` : "") +
+                `，${receiver}。`
+              );
+            })(),
             ...(delivered.length ? { artifacts: delivered } : {}),
           });
           return;
@@ -3638,17 +4449,49 @@ export class Kernel {
           this.cardTo(runThreadId, {
             kind: "tool", badge: "已停止", jobId: taskId,
             title: `${member} 已停止 · ${taskId}`,
-            meta: `${used}s`,
-            body: "用户中止。已写出的文件留在工作区。",
+            meta: `${used}s${produced.length ? ` · 已写 ${produced.length} 个文件` : ""}`,
+            body:
+              "用户中止。已写出的文件留在工作区。" +
+              (produced.length ? `\n\n已写出：${produced.join("、")}` : "\n\n（这一轮还没写出任何文件）"),
+            speak:
+              `${member}这一轮停下了` +
+              (produced.length ? `，已写出的 ${produced.length} 个文件都在工作区。` : "，还没写出文件。"),
           });
           return;
         }
-        // 没回报：如实说清、把单子标成"卡住"让它在待你区里显形，别静默消失
+        /**
+         * 没回报：不能只说「没交出回报」（2026-11-16 实机「无回报这类模糊反馈」）。
+         * 用户要能判断"它到底干到哪了、为什么停、我该做什么"：
+         * 成因（轮次用尽 / 跑完没交 / 模型出错）+ 做了几步 + 最后动作 + 下一步选项，全摆出来。
+         */
+        const why =
+          result.status === "turn_limit"
+            ? `轮次用尽（${result.turns}/${maxTurns} 轮）——不是做不了，是给的时间不够`
+            : result.status === "error"
+              ? `执行出错：${result.error ?? "模型调用失败"}`
+              : "跑完了但没有调用回报通道（可能它以为说一句就算交差）";
+        const nextHint =
+          result.status === "turn_limit"
+            ? "可以给这名成员补一句指示让它接着做（nudge），或提高轮次上限重派剩余部分"
+            : "可以先 nudge 让它补交结论；实在交不出来就在原单上重派";
         this.cardTo(runThreadId, {
           kind: "tool", badge: "未完成", jobId: taskId,
           title: `${member} 没交出回报 · ${taskId}`,
-          meta: `${result.turns} 轮 · ${used}s`,
-          body: `${result.report}\n\n最后 ${Math.min(steps.length, 3)} 步：\n${steps.slice(-3).join("\n") || "（一步都没做）"}`,
+          meta: `${result.turns} 轮 · ${used}s · 做了 ${steps.length} 步`,
+          body:
+            `**为什么没有回报**：${why}\n` +
+            `${result.report ? `\n**它自己的说法**：${result.report}\n` : ""}` +
+            (produced.length
+              ? `\n**已经写出的文件（${produced.length} 个，都在工作区）**：\n${produced.map((f) => `- ${f}`).join("\n")}\n`
+              : "\n**已经写出的文件**：一个都没有——下一轮必须先落盘，别再从头读一遍。\n") +
+            `\n**最后 ${Math.min(steps.length, 3)} 步**：\n${steps.slice(-3).join("\n") || "（一步都没做）"}\n` +
+            `\n**下一步**：${nextHint}。已写出的文件留在工作区，不会丢。`,
+          // 播报说清"哪件事、为什么没交、写出了什么"，不是只念名字
+          speak:
+            `${member}没交出「${(recNow?.title ?? taskId).replace(/\s+/g, " ").slice(0, 20)}」：` +
+            (result.status === "turn_limit" ? "轮次用尽还没收尾" : result.status === "error" ? "执行出错了" : "跑完没交回报") +
+            (produced.length ? `，已写出 ${produced.length} 个文件` : "，一个文件都没写出") +
+            "。",
         });
         try {
           this.taskStore.transition(taskId, "blocked", {
@@ -3666,6 +4509,21 @@ export class Kernel {
           result.status === "turn_limit" ? `轮次用尽（${result.turns} 轮）未交回报` : "成员跑完但没交出带证据的回报",
           runThreadId,
         );
+        /**
+         * 验收员自己没验完（2026-11-16 实机：验收员跑到第 6 轮 error，那张单就一直挂在待审，
+         * 用户看到的是"回报指向了不该指向的人、还迟迟没人验"）。这里明确交回风铃。
+         */
+        if (this.isAcceptor(teamId, member)) {
+          this.cardTo(runThreadId, {
+            kind: "system",
+            badge: "进度",
+            jobId: taskId,
+            text:
+              `验收员没验完（${result.status === "turn_limit" ? "轮次用尽" : "执行出错"}）：${taskId} 仍停在「待审查」，` +
+              "需要风铃自己验或换人验——这张单不会自己往前走。",
+            speak: `验收没做完，「${String(recNow?.title ?? taskId).replace(/\s+/g, " ").slice(0, 20)}」还等你处理。`,
+          });
+        }
       })
       .catch((err: unknown) => {
         this.cardTo(runThreadId, {
@@ -3686,7 +4544,8 @@ export class Kernel {
         this.memberBlocked.delete(taskId);
         this.memberBlockedCmds.delete(taskId);
         this.memberToolSince.delete(taskId);
-        this.progressAt.delete(taskId);
+        // 交接给下一轮：它最后几步做了什么（重派时塞进简报，别让它从零再查一遍）
+        if (steps.length) this.memberTrail.set(taskId, steps.slice(-6));
         if (this.memberActive.get(memberKey) === taskId) this.memberActive.delete(memberKey);
       });
     this.memberRuns.set(taskId, run);
@@ -3695,11 +4554,20 @@ export class Kernel {
     // 自动开工不再单独发系统卡：工作区、工具、只读授权全部并进这一张派单卡（实机刷两张是冗余）。
     const readRoots = this.effectiveReadRoots(taskId, teamId);
     // 群里"谁对谁做了什么"必须看得见：派单一律点名 @成员（工具层强制，模型忘了也补上）
+    /**
+     * 开工卡必须一次把「授权与要求」写全（2026-11-16 实机「启动阶段没交代权限，后面返工」）：
+     * 写哪里、只能读哪里、用哪些工具、多少轮、产物放哪、什么情况必须停手回报——
+     * 这些话既给成员看（契约），也给用户看（他一眼知道这次授权了什么）。
+     */
+    const turnCap = Math.max(1, Math.min(maxTurns ?? profile.limits?.maxTurns ?? 12, 40));
     const at = this.atMember(
       member,
       [
-        `工作区：${workdir}（可读写；删除类命令要你点头；回报后自动进审查台）`,
-        `只读授权：${readRoots.length ? readRoots.join("、") : "无（只能读工作区）"}`,
+        `能不能写：只能写工作区 ${workdir}（可读可写；删除类命令要你点头；.git/ 与 .lynn/ 不可写）`,
+        `能不能读：${readRoots.length ? readRoots.join("、") : "只有工作区（没有额外只读授权）"}`,
+        `用什么做：${allowed.join("、") || "（本次未分配执行工具）"}；最多 ${turnCap} 轮`,
+        `产物落哪：${recForWork?.workspace?.scratchDir ? `交付物写工作区 deliverables/，过程文件写 ${scratchDir}` : "交付物写工作区 deliverables/"}；回报后自动进审查台`,
+        "缺材料/缺权限：第一轮就停手回报【缺上下文】，写明「需要授权：<绝对路径>」——不要换路径硬试。",
       ].join("\n"),
     );
     // 语音只需要一句人话："谁 + 做什么"。卡片标题留给眼睛（工单号 + 工具清单），
@@ -3711,9 +4579,15 @@ export class Kernel {
       title: `${member} 开工 · ${taskId}`,
       meta: `工具：${allowed.join("、") || "无"}`,
       body: at.body,
-      speak: what
-        ? `我把「${what}」交给${member}了，他开始做。`
-        : `我把任务交给${member}了，他开始做。`,
+      /**
+       * 派单播报（2026-11-16 用户：「分配任务后错误地播报成员姓名」）：
+       * 先说**做什么**，名字放后面；重派说"接着做"，不要听起来像又开了一件新事。
+       */
+      speak: (() => {
+        const rework = this.memberTrail.has(taskId) || (recForWork?.rejectRounds ?? 0) > 0;
+        if (!what) return `有活开工了，交给${member}做。`;
+        return rework ? `「${what}」接着做，还是${member}。` : `「${what}」开工了，交给${member}。`;
+      })(),
       author: { kind: "lynn", name: "风铃" },
       mentions: at.mentions,
     });
@@ -3792,6 +4666,14 @@ export class Kernel {
     return { ok: true };
   }
 
+  /**
+   * 语音合成失败/被限流（2026-11-16 壳层回调）：只写日志，不落卡、不弹窗。
+   * Edge Read Aloud 是非官方接口，403/429 是常态；排查时这条是唯一线索。
+   */
+  noteVoiceFailure(message: string, reason: string): void {
+    this.log("voice_failed", { message: String(message ?? "").slice(0, 200), reason });
+  }
+
   /** 这个群现在是不是被终止了（内存副本，O(1)） */
   isThreadHalted(id = this.currentThreadId): boolean {
     return Boolean(id) && this.haltedThreads.has(id);
@@ -3829,6 +4711,13 @@ export class Kernel {
     }
     // 2) 待验收的回报：本群的丢掉（恢复后靠台账与卷宗继续，不靠这半条队列）
     this.reviewPending = this.reviewPending.filter((p) => this.taskStore.get(p.taskId)?.threadId !== tid);
+    // 成员的问题同理：群已终止，答了也没人接；唤醒计数一起清，恢复后能重新答
+    for (const [qTaskId, q] of [...this.questionPending]) {
+      if (q.threadId !== tid) continue;
+      this.questionPending.delete(qTaskId);
+      this.questionWakes.delete(qTaskId);
+      this.questionMuted.delete(qTaskId);
+    }
     /**
      * 3) 挂着等用户拍板的东西一起作废（2026-11-15）。
      * 终止之后没人会来点，留着就是一张骗人的「等你拍板」——实机截图里那枚验收印章
@@ -4040,12 +4929,25 @@ export class Kernel {
   /**
    * 风铃单轮工具轮次上限（settings.prefs.maxAgentRounds，4–80；非法值回退默认 24）。
    * 旧值写死 8，审查→派单→激活技能→验收→汇报一条龙轻松超 8 轮，会把她中途掐断；
-   * 给足后极少触顶，且触顶只总结不硬停（见 runChatDirect 末轮强制无工具）。
+   * 给足后极少触顶，且触顶只总结不硬停（见 runChatDirect：跑满后补一次「只总结」，工具面不变）。
    */
   private agentRounds(): number {
     const raw = Number(this.settings.getPrefs().maxAgentRounds);
     if (!Number.isFinite(raw) || raw < 4) return 24;
     return Math.min(Math.floor(raw), 80);
+  }
+
+  /**
+   * 巡检轮（心跳/验收叫醒）的工具轮次上限（2026-11-16 实测）。
+   * 43 个巡检回合跑了 491 次模型调用（11.4 次/回合）——"看一眼就走"实际上是一条工具链，
+   * 而每次调用都要重放本回合前面所有工具输出。10 轮足够清 3–5 张单；
+   * 触顶走「补一次只总结」（工具面不变，避免换掉工具段白付一次前缀），剩下的下一轮心跳继续。
+   * 实机调参用 LYNN_PATROL_ROUNDS（4–24）。
+   */
+  private patrolRounds(): number {
+    const raw = Number(process.env.LYNN_PATROL_ROUNDS);
+    const cap = Number.isFinite(raw) && raw >= 4 ? Math.min(Math.floor(raw), 24) : 10;
+    return Math.min(cap, this.agentRounds());
   }
 
   /**
@@ -4394,7 +5296,7 @@ export class Kernel {
    * 给在跑的成员补一句指示（风铃催办）：进收件箱，成员下一轮开头就会看到。
    * 不杀进程、不重派，已写出的文件与进度都保留。
    */
-  nudgeMember(taskId: string, note: string, byUser = false): string {
+  nudgeMember(taskId: string, note: string, byUser = false, mode: "nudge" | "reply" = "nudge"): string {
     const text = note.trim();
     if (!text) return "补充指示不能为空：要它改什么、先交什么，写清楚。";
     if (!this.memberRuns.has(taskId)) {
@@ -4410,7 +5312,10 @@ export class Kernel {
       rec?.member ?? "",
       byUser
         ? `用户催了：${text.slice(0, 200)}（已转达，下一轮生效）`
-        : `补了一句（下一轮生效）：${text.slice(0, 200)}`,
+        : mode === "reply"
+          ? // 回答成员的提问 / 纠正他的做法：群里的措辞要让人看得出这是"回答"，不是催办
+            `答你刚才那句（下一轮生效）：${text.slice(0, 200)}`
+          : `补了一句（下一轮生效）：${text.slice(0, 200)}`,
     );
     this.cardTo(owner, {
       kind: "lynn",
@@ -4493,6 +5398,8 @@ export class Kernel {
     if (!prefs.heartbeat) return;
     // 本群被用户终止：心跳是"她主动找事做"，必须先停（2026-11-15）
     if (this.isThreadHalted()) return;
+    // 额度熔断：心跳是这里最大的空转源（实机 429 后仍每 5 分钟叫醒一次，一路空转 100 分钟）
+    if (this.quotaCoolingDown()) return;
     if (this.busy) return;
     const now = Date.now();
     const minutes = Math.max(1, Math.round(prefs.heartbeatMinutes || 5));
@@ -4526,12 +5433,15 @@ export class Kernel {
       );
       return;
     }
+    const tickTasks = this.taskStore.list();
+    const tickById = new Map(tickTasks.map((t) => [t.id, t]));
     const facts: HeartbeatFacts = collectHeartbeatFacts({
-      tasks: this.taskStore.list(),
+      tasks: tickTasks,
       runningTaskIds: [...this.memberRuns.keys()],
       pendingPlanTaskIds: [...this.pendingPlans.values()].map((p) => p.taskId),
       schedules: this.scheduler.list(),
       pendingMentions: this.pendingMentions(),
+      detailOf: (id) => this.taskFactNote(id, tickById.get(id) ?? null),
     });
     if (heartbeatIsEmpty(facts)) return;
     // 堆积闸：堆到 7 张以上说明她已经处理不过来了。整轮跳过会把堆积冻在原处——没人清就
@@ -4631,6 +5541,24 @@ export class Kernel {
     this.taskChangeTimer.unref?.();
   }
 
+  /**
+   * 心跳事实里的"现场摘要"（2026-11-16）：巡检简报只报成员名字时，她无从判断
+   * 是等一等还是重派——把最后动作、产物数、打回轮次一起给她。全部来自内存与卷宗，不编。
+   */
+  private taskFactNote(taskId: string, prefetched?: TaskRecord | null): string | undefined {
+    // prefetched 由调用方从同一次 list() 里带过来：否则每张单都要再读一次盘 + JSON.parse
+    const rec = prefetched === undefined ? this.taskStore.get(taskId) : prefetched;
+    const bits: string[] = [];
+    if (this.memberRuns.has(taskId)) bits.push("成员仍在跑");
+    const stepAt = this.memberStepAt.get(taskId);
+    if (stepAt) bits.push(`上次动作 ${Math.max(1, Math.round((Date.now() - stepAt) / 1000))}s 前`);
+    if (rec?.deliverables?.length) bits.push(`产物 ${rec.deliverables.length} 件`);
+    if (rec?.evidence?.length) bits.push(`证据 ${rec.evidence.length} 项`);
+    if (rec?.rejectRounds) bits.push(`已打回 ${rec.rejectRounds} 轮`);
+    if (rec?.statusNote) bits.push(rec.statusNote.slice(0, 60));
+    return bits.length ? bits.join(" · ") : undefined;
+  }
+
   private requestHeartbeat(reason: string): void {
     const prefs = this.settings.getPrefs();
     if (!prefs.heartbeat) return;
@@ -4638,12 +5566,15 @@ export class Kernel {
     if (this.isThreadHalted()) return;
     let facts: HeartbeatFacts;
     try {
+      const tasks = this.taskStore.list();
+      const byId = new Map(tasks.map((t) => [t.id, t]));
       facts = collectHeartbeatFacts({
-        tasks: this.taskStore.list(),
+        tasks,
         runningTaskIds: [...this.memberRuns.keys()],
         pendingPlanTaskIds: [...this.pendingPlans.values()].map((p) => p.taskId),
         schedules: this.scheduler.list(),
-      pendingMentions: this.pendingMentions(),
+        pendingMentions: this.pendingMentions(),
+        detailOf: (id) => this.taskFactNote(id, byId.get(id) ?? null),
       });
     } catch {
       return;
@@ -4721,9 +5652,21 @@ export class Kernel {
         return JSON.stringify({ teamId: team.id, teamName: team.name, members: team.reused?.members ?? 0 });
       }
       case "create_member": {
+        /**
+         * G1 准入闸（2026-11-17 P3-1 / 07 章 §4）：`role` 不再是自由文本。
+         * 混合岗位（「全栈兼文档专家」）直接拒并给可照抄的改法；自由文本能读出来就推断成 roleId；
+         * 实在读不出来才 fallback 到 implementer，并如实告诉风铃"这次没匹配到模板"。
+         * 位置在建队之前：不合格就不该顺手多建一支空队。
+         */
+        const roleGate = resolveRole({
+          roleId: args.roleId as string | undefined,
+          role: args.role as string | undefined,
+        });
+        if (roleGate.mixed) return mixedRoleRejection(String(args.role ?? ""), roleGate.suggestion ?? null);
         const profile: MemberProfile = {
           name: String(args.name ?? ""),
           role: String(args.role ?? ""),
+          roleId: roleGate.roleId,
           goal: String(args.goal ?? ""),
           boundaries: (args.boundaries as string[]) ?? [],
           tools: (args.tools as string[]) ?? [],
@@ -4765,11 +5708,11 @@ export class Kernel {
           body: `目标：${args.goal}\n边界：${((args.boundaries as string[]) ?? []).join("；") || "（未写）"}`,
           members: [{ name: String(args.name), role: String(args.role), color: face.color, avatarId: face.id }],
         });
-        return `已招募 ${args.name}（岗位档案已落盘，用户可读可改）。团队 ID：${teamId}（**同一条任务线**的后续派单可省略 teamId；换新任务请显式给新团队，不要复用这条任务线的班底）。`;
+        return `已招募 ${args.name}（岗位档案已落盘，用户可读可改）。团队 ID：${teamId}（**同一条任务线**的后续派单可省略 teamId；换新任务请显式给新团队，不要复用这条任务线的班底）。${roleGateNote(roleGate)}`;
       }
       case "assign_task": {
         const member = String(args.member ?? "").trim();
-        const brief = String(args.brief ?? "");
+        let brief = String(args.brief ?? "");
         const deadline = String(args.deadline ?? "");
         if (!member || !brief || !deadline) {
           return "assign_task 缺 member / brief / deadline：先把这三项补齐再派单。";
@@ -4950,6 +5893,27 @@ export class Kernel {
           }
           taskId = reworkRec.id;
           title = reworkRec.title;
+          /**
+           * 重派必须交接上一轮做过什么（2026-11-16）。实机：同一张单重派 6 次，
+           * 每次都从 `list_dir docs → docs/notes → ...` 重新开始，轮次全烧在重复勘察上，
+           * 一次产物都没交出来。这里把上一轮最后几步直接塞进简报，并明确禁止重复。
+           */
+          const trail = this.memberTrail.get(taskId);
+          if (trail && trail.length) {
+            brief +=
+              `\n\n【上一轮交接（这是第 ${reworkRound - 1} 轮，它做了 ${trail.length} 步后没交出结果）】\n` +
+              trail.map((s, i) => `${i + 1}. ${String(s).replace(/\s+/g, " ").slice(0, 160)}`).join("\n") +
+              `\n要求：上面这些**已经做过**，不要再重复勘察同一批目录/文件；把已经读到的内容直接用来产出` +
+              `（写文件 / 给结论）。如果缺的是关键材料，就在回报里点名要哪一份，不要用"再查一遍"代替交付。`;
+          }
+          // 上一轮已经写出的文件：别从零重写，也别把它们丢掉
+          const alreadyWritten = this.memberProduced.get(taskId);
+          if (alreadyWritten?.length) {
+            brief +=
+              `\n\n【上一轮已经写出的文件（${alreadyWritten.length} 个，还在工作区）】\n` +
+              alreadyWritten.map((f) => `- ${f}`).join("\n") +
+              `\n做法：先 read_file 看现有版本，接着补/改；不要把已有内容推翻重写，也不要漏掉它们。`;
+          }
           this.blockedHandled.delete(taskId);
           this.blockedAgedNoted.delete(taskId);
           this.progressPolls.delete(taskId);
@@ -5052,6 +6016,14 @@ export class Kernel {
           forbidden: forbiddenList.length ? forbiddenList : undefined,
           priority: priority || undefined,
           mode: taskMode,
+          /**
+           * 联网授权（P5-1）：待批准的计划也必须带着它。
+           * 默认路径就是「先把契约呈给用户」，漏在这里等于这个功能对默认流程完全无效——
+           * 批准之后建单时才发现没有这条，成员一跑命令就被出站闸挡。
+           */
+          ...(args.network === true
+            ? { network: { granted: true as const, by: "lynn" as const, at: new Date().toISOString(), reason: String(args.networkReason ?? "").slice(0, 200) } }
+            : {}),
         };
         // 重做：复用原单，只改状态 + 追加卷宗；新任务才 create。
         // blocked→todo / in_review→in_progress 都是状态机允许的迁移（task-store LEGAL）。
@@ -5079,6 +6051,13 @@ export class Kernel {
             ...(forbiddenList.length ? { forbidden: forbiddenList } : {}),
             ...(priority ? { priority } : {}),
             mode: taskMode,
+            /**
+             * 联网授权（P5-1）：`network: true` 才给网，缺省不给。
+             * 落盘而不只是记在参数里——派单之后才跑命令，那时已经看不到 args 了。
+             */
+            ...(args.network === true
+              ? { network: { granted: true, by: "lynn" as const, at: new Date().toISOString(), reason: String(args.networkReason ?? "").slice(0, 200) } }
+              : {}),
             scale,
             // 派单时所在的项目（冻结快照）：契约卡上写「项目 · 名字」，
             // 旧单翻出来也知道当初动的是哪个项目
@@ -5217,6 +6196,10 @@ export class Kernel {
       }
       case "nudge_member": {
         return this.nudgeMember(String(args.taskId), String(args.note ?? ""));
+      }
+      case "reply_member": {
+        // 回答成员在群里的提问 / 纠正他的错误（2026-11-16）：与催办分开，文案与意图都不同
+        return this.replyMember(String(args.taskId), String(args.text ?? ""));
       }
       case "stop_task": {
         const taskId = String(args.taskId);
@@ -5396,27 +6379,44 @@ export class Kernel {
         }
         const teamId = this.resolveTeamId(args.teamId ? String(args.teamId) : undefined);
         if (!teamId) return "本机还没有任何团队，无从验收。先 create_team（ID 由系统生成）。";
+        /**
+         * 打回轮次以**工单为唯一真相**（2026-11-16 修「任务被异常打回」）：
+         * 此前 acceptOrReject 自己读派单账本的 reject 条数判上限，而权威工单另有 rejectRounds。
+         * 两本账会漂移（工单不在 in_review 时账本记了、工单没记），于是刚打回一次就被告知
+         * 「已达上限」并把单停成卡住——用户看到的就是任务被莫名其妙打回。
+         * 现在先把轮次落到工单上，再拿着同一个数去判上限，一处口径。
+         */
+        const rejectReasonFor = {
+          what: String(args.what ?? ""),
+          expect: String(args.expect ?? ""),
+          deadline: String(args.deadline ?? ""),
+          member: String(args.member),
+        };
+        // 先校验再落库：三要素不全就不该把工单打回（顺序反了会出现"单被打了、账本没记"）
+        if (
+          args.verdict === "reject" &&
+          (!rejectReasonFor.what.trim() || !rejectReasonFor.expect.trim() || !rejectReasonFor.deadline.trim())
+        ) {
+          return "打回必须写清：哪里不合格（what）/ 期望是什么（expect）/ 多久内重交（deadline）。缺一项就是无理由打回，成员拿不到可执行的修改方向。";
+        }
+        let rejectRounds = 0;
+        if (args.verdict === "reject") {
+          try {
+            rejectRounds = this.taskStore.reject(String(args.taskId), rejectReasonFor).record.rejectRounds;
+          } catch {
+            // 工单已不在 in_review（旧记录/手工单）：按账本既往条数 + 本次估一轮，只用于判上限
+            rejectRounds = this.teamStore.rejectCount(teamId, String(args.taskId)) + 1;
+          }
+        }
         const r = this.tools.acceptOrReject(teamId, String(args.taskId), args.verdict as "accept" | "reject", {
           member: String(args.member),
           rejectReason:
             args.verdict === "reject"
-              ? { what: String(args.what ?? ""), expect: String(args.expect ?? ""), deadline: String(args.deadline ?? "") }
+              ? { what: rejectReasonFor.what, expect: rejectReasonFor.expect, deadline: rejectReasonFor.deadline }
               : undefined,
           evidence: args.evidence as string[] | undefined,
+          priorRejects: rejectRounds,
         });
-        // 打回同步进权威工单：轮次 +1，满 3 轮转 blocked
-        if (args.verdict === "reject") {
-          try {
-            this.taskStore.reject(String(args.taskId), {
-              what: String(args.what ?? ""),
-              expect: String(args.expect ?? ""),
-              deadline: String(args.deadline ?? ""),
-              member: String(args.member),
-            });
-          } catch {
-            // 工单不在 in_review（例如旧记录）：只记派单卷宗
-          }
-        }
         /**
          * 阶段账（2026-11-15）：
          *  - 通过 → 独立验收段结束，全阶段齐了才生成最终验收表（收尾不再靠模型自觉）；
@@ -5642,15 +6642,21 @@ export class Kernel {
           if (!proj) return "当前没有项目目录，写不了项目记忆。先选项目，或者用 scope=memory 写助理记忆。";
           const r = this.memory.learnProject(proj.id, entry);
           if (!r.ok) return `没写成项目记忆：${r.error ?? "未知原因"}`;
-          const hot = this.hotSyncSystemPrompt();
+          /**
+           * 2026-11-17 缓存修复 B3：**不再热同步 system prompt**。
+           * 记忆段在 system 里，一改就把「人设+记忆+全部历史」的前缀整体作废
+           * （实测每天 13 次记忆变更 = 13 次整段重算）。改为当轮尾部提示：
+           * 本会话即时可见，下个会话/切项目时进快照。
+           */
+          if (r.added) this.pendingMemoryNote = `【记忆更新·项目】${entry}`;
           this.card({
             kind: "system",
             badge: "记忆",
             text: r.added ? `已记到项目「${proj.name}」：${entry.slice(0, 120)}` : `项目「${proj.name}」里已有这条，没重复记。`,
           });
-          this.log("project_memory_saved", { projectId: proj.id, added: Boolean(r.added), hot });
+          this.log("project_memory_saved", { projectId: proj.id, added: Boolean(r.added), hot: false });
           return r.added
-            ? `已记进项目「${proj.name}」的项目记忆（换会话也看得见，hot=${hot}）。`
+            ? `已记进项目「${proj.name}」的项目记忆（本会话即时可见，下个会话起进入系统提示）。`
             : `项目「${proj.name}」里已经有这条事实了，没有重复写。`;
         }
         const kind: MemoryKind = args.scope === "user" ? "user" : "memory";
@@ -5658,10 +6664,11 @@ export class Kernel {
         const current = this.memory.load(kind).replace(/\s+$/, "");
         const stamp = new Date().toISOString().slice(0, 16).replace("T", " ");
         this.memory.save(kind, `${current}\n- ${stamp} ${entry}\n`);
-        const hot = this.hotSyncSystemPrompt();
+        // 缓存修复 B3：不动 system 前缀；当轮尾部提示保证"刚记的立刻知道"
+        this.pendingMemoryNote = `【记忆更新】${entry}`;
         this.card({ kind: "system", badge: "记忆", text: `已沉淀到${label}：${entry.slice(0, 120)}` });
-        this.log("memory_saved_by_agent", { scope: kind, chars: entry.length, hot });
-        return `已写入${label}并热更新到你的系统提示词（hot=${hot}）。同类任务再遇到时你会直接想起来。`;
+        this.log("memory_saved_by_agent", { scope: kind, chars: entry.length, hot: false });
+        return `已写入${label}（本会话即时可见，下个会话起进入系统提示）。同类任务再遇到时你会直接想起来。`;
       }
       case "read_memory": {
         // 项目记忆（2026-11-14）：读之前先确认有项目，别拿全局记忆冒充
@@ -5693,11 +6700,158 @@ export class Kernel {
           const cands = (r.candidates ?? []).map((c) => `- 第${c.line}行：${c.text}`).join("\n");
           return `${r.error}${cands ? `\n候选：\n${cands}` : ""}`;
         }
-        const hot = this.hotSyncSystemPrompt();
         const removed = r.removed?.text ?? "";
+        // 缓存修复 B3：不动 system；当轮告诉它别再引用已删的事实
+        this.pendingMemoryNote = `【记忆已删除】${removed}（后续不要再引用这一条）`;
         this.card({ kind: "system", badge: "记忆", text: `已从${label}删除一条记忆：${removed.slice(0, 120)}` });
-        this.log("memory_forgotten_by_agent", { scope: kind, keyword, hot });
-        return `已从${label}删掉这一条：「${removed.slice(0, 120)}」。旧版本已存档（版本 ${r.versionId}），删错了可以回滚；系统提示词已热更新（hot=${hot}）。`;
+        this.log("memory_forgotten_by_agent", { scope: kind, keyword, hot: false });
+        return `已从${label}删掉这一条：「${removed.slice(0, 120)}」。旧版本已存档（版本 ${r.versionId}），删错了可以回滚；本会话起不再引用。`;
+      }
+      /**
+       * 插件自举三件套（2026-11-17 P8-2 / 24 章第 6 节）。
+       *
+       * 为什么需要：自举闭环里「起草 → 审查 → 启用」已经齐了，但**缺三件她自己的操作**——
+       * 看不见装了什么、关不掉装错的、删不掉装错的。没有这三件，"随意增删改插件"
+       * 只能靠用户在面板里点，她没法自己收拾。
+       *
+       * 三件都**只做用户也能做的事**，不越过 Q6 那条线：
+       *  - `list_plugins`：只读，看得到才管得了；
+       *  - `set_plugin_enabled`：停用/启用**已装**的插件（停用永远允许，启用受档位约束）；
+       *  - `uninstall_plugin`：删掉已装的插件（进回收目录，可人工恢复）。
+       *
+       * **注意：这三个都不提供"改已装插件的代码"**。改代码走 `create_plugin_draft`
+       * + 新的 id 重装——因为 `promoteDraft` 明确"冲突即拒"，覆盖式更新会丢掉回滚能力。
+       * 可回滚的 update 是 24 章第 6 节列的缺口，还没做。
+       */
+      case "list_plugins": {
+        const scanned = this.pluginHost.scan();
+        // PluginView 是扁平结构（name/version/tier 直接挂在顶层），不是嵌套 manifest
+        const rows = scanned.plugins.map((p) => ({
+          id: p.id,
+          tier: p.tier,
+          enabled: p.enabled,
+          name: p.name || p.id,
+          version: p.version ?? "",
+          slots: p.slots ?? [],
+          loadable: p.loadable,
+        }));
+        if (!rows.length) return "还没有安装任何插件。";
+        return [
+          `已装插件 ${rows.length} 个：`,
+          ...rows.map(
+            (r) =>
+              `- ${r.id}（${r.tier}${r.enabled ? "" : " · 已停用"}）${r.name} v${r.version}` +
+              (r.slots.length ? ` · 卡槽 ${r.slots.join("、")}` : "") +
+              (r.loadable ? "" : " · ⚠ 该档加载器还没接"),
+          ),
+          scanned.errors.length ? `\n加载错误：${scanned.errors.join("；")}` : "",
+          "\n要关掉某个：set_plugin_enabled；要删掉：uninstall_plugin。",
+        ]
+          .filter(Boolean)
+          .join("\n");
+      }
+      case "set_plugin_enabled": {
+        const id = String(args.id ?? "").trim();
+        const enabled = args.enabled === true;
+        if (!id) return "要指定插件 id（先 list_plugins 看一眼）。";
+        const mf = this.pluginHost.manifestOf(id);
+        if (!mf) return `没有这个插件：${id}`;
+        /**
+         * 停用永远允许；启用受档位约束。
+         *
+         * 为什么停用不受限：停用只会**减少**能力，不可能提权。
+         * 启用则不同——L1 会重新在主进程/隔离进程里加载代码，那是能力扩张。
+         * Q6 的约束是"她不得给自己的产物提权"，而"启用别人装的插件"不是给自己提权，
+         * 但仍然要留痕：谁在什么时候打开了什么。
+         */
+        this.pluginSet.snapshot(enabled ? "enable-by-agent" : "disable-by-agent");
+        this.pluginHost.setEnabled(id, enabled);
+        if (mf.manifest.tier === "L1") {
+          if (!enabled) this.l1.deactivate(id);
+          else if (!this.pluginSet.isSafeMode()) {
+            void this.l1
+              .requestReload(id)
+              .then((msg) => this.emit({ type: "tool", badge: "工具", title: `L1 插件 · ${id}`, body: msg }));
+            void this.resetAgentHost();
+          }
+        }
+        this.log("plugin_toggled_by_agent", { id, enabled, tier: mf.manifest.tier });
+        this.card({
+          kind: "system",
+          badge: "工具",
+          text: `${enabled ? "启用" : "停用"}了插件 ${id}（${mf.manifest.tier}）。`,
+        });
+        return `已${enabled ? "启用" : "停用"} ${id}。${enabled ? "新工具面下一轮生效。" : "它的工具已不可用。"}`;
+      }
+      case "uninstall_plugin": {
+        const id = String(args.id ?? "").trim();
+        if (!id) return "要指定插件 id（先 list_plugins 看一眼）。";
+        const dir = this.pluginHost.dirOf(id);
+        if (!dir) return `没有这个插件：${id}`;
+        /**
+         * 删除是**移到回收目录**而不是 rm：装错的插件可能是她自己写的，
+         * 直接删掉就再也找不回来了。移走 = 用户随时能手工恢复，也留了审计线索。
+         */
+        const trash = path.join(this.dataRoot, "plugins-trash");
+        fs.mkdirSync(trash, { recursive: true });
+        const dest = path.join(trash, `${id}-${Date.now()}`);
+        this.pluginSet.snapshot("uninstall-by-agent");
+        this.pluginHost.setEnabled(id, false);
+        if (this.pluginHost.manifestOf(id)?.manifest.tier === "L1") this.l1.deactivate(id);
+        try {
+          fs.renameSync(dir, dest);
+        } catch (err) {
+          return `删除失败（可能正被占用）：${err instanceof Error ? err.message : String(err)}`;
+        }
+        this.log("plugin_uninstalled_by_agent", { id, movedTo: dest });
+        this.card({
+          kind: "system",
+          badge: "工具",
+          text: `卸载了插件 ${id}。它的文件移到了 plugins-trash/，需要的话可以手工恢复。`,
+        });
+        return `已卸载 ${id}（文件移到 ${path.relative(this.dataRoot, dest)}，不是永久删除）。`;
+      }
+      case "list_plugin_versions": {
+        const pid = String(args.id ?? "").trim();
+        if (!pid) return "要指定插件 id（list_plugins 可查）。";
+        const list = listVersions(this.dataRoot, pid);
+        if (!list.length) return `${pid} 还没有历史版本（第一次更新之后才会出现）。`;
+        return [
+          `${pid} 有 ${list.length} 个历史版本（最多保留 ${KEEP_VERSIONS} 个，新的在前）：`,
+          ...list.map((v) => `- ${v.dir} · v${v.version} · ${(v.bytes / 1024).toFixed(1)}KB · ${v.at}`),
+          "",
+          "要回滚到某个版本：rollback_plugin（当前版本会先归档，回滚本身也能再回滚）。",
+        ].join("\n");
+      }
+      case "rollback_plugin": {
+        const pid = String(args.id ?? "").trim();
+        const vdir = String(args.versionDir ?? "").trim();
+        if (!pid || !vdir) return "要同时给出插件 id 与历史版本目录名（list_plugin_versions 可查）。";
+        const r = rollbackToVersion(this.dataRoot, pid, vdir);
+        if (!r.ok) {
+          return [`回滚失败。原因：`, ...r.issues.map((i) => `- [${i.stage}] ${i.message}`)].join("\n");
+        }
+        this.pluginSet.snapshot("rollback-by-agent");
+        this.log("plugin_rollback_by_agent", { id: pid, to: r.version });
+        this.card({ kind: "system", badge: "工具", text: `把插件 ${pid} 回滚到 v${r.version}。` });
+        return `已把 ${pid} 回滚到 v${r.version}${r.archived ? `（原版本归档为 ${r.archived}，还能再换回来）` : ""}。`;
+      }
+      case "install_plugin": {
+        const pkgPath = String(args.path ?? "").trim();
+        if (!pkgPath) return "要给出插件包路径（.zip 文件或含 plugin.json 的目录）。";
+        const res = importPluginPackage(pkgPath, this.dataRoot, { override: args.override === true });
+        if (!res.ok) {
+          /**
+           * 失败时**逐条**列原因：`stage` 说明卡在哪一步（解包/布局/清单/入口/体积/冲突），
+           * `message` 说明具体是什么。只说"导入失败"等于让用户去猜。
+           */
+          const lines = res.issues.map((i) => `- [${i.stage}] ${i.message}`);
+          return [`插件包没有装进去。原因：`, ...lines, "", "按上面改，或把这段贴给插件的作者。"].join("\n");
+        }
+        this.pluginSet.snapshot("install-by-agent");
+        this.log("plugin_installed_by_agent", { id: res.id });
+        this.card({ kind: "system", badge: "工具", text: `安装了插件 ${res.id}。` });
+        return `已安装 ${res.id}（落点 ${path.relative(this.dataRoot, res.dir ?? "")}）。用 list_plugins 看一眼，需要就 set_plugin_enabled 启用。`;
       }
       case "create_plugin_draft": {
         const title = String(args.title ?? "").trim();
@@ -5888,6 +7042,8 @@ export class Kernel {
     const text = live.text ?? "";
     const thinking = live.thinking ?? "";
     const len = text.length + thinking.length;
+    // 每 400 字扫一次尾巴（成本只有 window×maxUnit，实测可忽略）；间隔别放大——
+    // 复读止损靠的就是"早发现"，拉长间隔会让它多吐上千字才截断。
     if (len - this.lastRepetitionScan < 400) return;
     this.lastRepetitionScan = len;
     const parts: { kind: string; value: string }[] = [
@@ -5945,6 +7101,11 @@ export class Kernel {
       ev.type === "message_update" && nested?.type === "thinking_delta" ? nested.delta : undefined;
     if (typeof thinkingDelta === "string" && thinkingDelta && this.liveCard) {
       this.liveCard.thinking = (this.liveCard.thinking ?? "") + thinkingDelta;
+      // 思考封顶（2026-11-16）：实机一条思考 13739 字，每 80ms 全量推给渲染层 → 界面发涩
+      if (this.liveCard.thinking.length > 12_000) {
+        const t = this.liveCard.thinking;
+        this.liveCard.thinking = `${t.slice(0, 3000)}\n…（中间 ${t.length - 9000} 字已折叠）…\n${t.slice(-8000)}`;
+      }
       const now = Date.now();
       if (now - this.lastDeltaEmit >= 80) {
         this.lastDeltaEmit = now;
@@ -6012,9 +7173,52 @@ export class Kernel {
     return [...COMPACT_TOOL_JSON, ...extra];
   }
 
+  /**
+   * 巡检轮的工具面（2026-11-17 P2-1b）：**内容与顺序完全固定**，只去掉组织类工具。
+   *
+   * 实测量化：全套 20 件序列化 6,781 字符 ≈ 2,211 tokens；巡检 491 次调用光是"带一套用不上的
+   * 工具说明"就付了上百万 tokens。巡检回合只做三件事——看工单、看编制、必要时催/停，
+   * 从不建队、不招人、不解散、不发插件、不写插件草稿、不删记忆（这几件只在用户主动说起时发生，
+   * 那时候走的是普通回合）。
+   *
+   * 保留名单是白名单而不是黑名单：新增工具默认不进巡检（新工具大概率是给正常回合用的），
+   * 要进巡检必须在这里显式加一行，避免悄悄把工具面撑大。
+   */
+  private patrolTools(): ToolSchema[] {
+    const keep = new Set([
+      "assign_task",
+      "check_progress",
+      "check_roster",
+      "read_artifact",
+      "review_result",
+      "accept_or_reject",
+      "report_to_user",
+      "ask_user",
+      "nudge_member",
+      "reply_member",
+      "stop_task",
+      "read_memory",
+      "set_group_notice",
+    ]);
+    const extra = [...this.l1.toolSchemas(), ...this.mcp.schemas()].sort((a, b) =>
+      a.function.name.localeCompare(b.function.name),
+    );
+    return [...COMPACT_TOOL_JSON.filter((t) => keep.has(t.function.name)), ...extra];
+  }
+
   /** 工具面里实际有哪些名字（诊断/测试用） */
   toolNames(): string[] {
     return this.allTools().map((t) => t.function.name);
+  }
+
+  /**
+   * 上一轮 system prompt 的段落构成（诊断/测试用，2026-11-17 P2-1c）。
+   * 只读快照：回答"现在多少字、哪一段最贵"，不必再打印整段提示词。
+   * 调用一次 systemPrompt() 保证有值（未跑过对话时也不会拿到空）。
+   */
+  promptSegments(): { name: string; chars: number }[] {
+    this.systemPrompt();
+    return this.lastPromptSegments.map((s) => ({ name: s.name, chars: s.chars }));
   }
 
   /** 系统生成工单 ID：不透明、可排序，避免模型把「失败复盘」当 id 自造 */
@@ -6152,6 +7356,74 @@ export class Kernel {
     }
   }
 
+  /**
+   * 直连单次调用的记账（2026-11-17）：主循环与「触顶补总结」共用同一份口径。
+   * 口径：sessionIn = 未命中量；cacheRead/cacheWrite 单独累计（DeepSeek 的 miss 已在 promptTokens 里）。
+   */
+  private recordDirectUsage(
+    result: Awaited<ReturnType<typeof streamChatWithRetry>>,
+    opts: { patrol: boolean; usedModel: string },
+  ): void {
+    this.tokensUsed += result.promptTokens + result.completionTokens;
+    const hit = Math.max(0, result.cacheRead);
+    const write = Math.max(0, result.cacheWrite);
+    const unhit = Math.max(0, result.promptTokens - hit - write);
+    const turnPrompt = result.promptTokens + write;
+    const turnHitRate = turnPrompt > 0 ? Math.round((hit / turnPrompt) * 1000) / 10 : null;
+    if (opts.patrol) {
+      // 巡检轮：只记单独的累计，不动 Pi 会话的 usage（下一轮 runChatRpc 会合并展示）
+      this.patrolUsage.in += unhit;
+      this.patrolUsage.out += result.completionTokens;
+      this.patrolUsage.read += hit;
+      this.patrolUsage.write += write;
+      this.setUsage({ turnIn: result.promptTokens, turnOut: result.completionTokens, turnHitRate });
+      this.log("usage_patrol", {
+        in: result.promptTokens,
+        out: result.completionTokens,
+        cacheRead: hit,
+        cacheWrite: write,
+        hitRate: turnHitRate,
+      });
+    } else {
+      this.setUsage({
+        turnIn: result.promptTokens,
+        turnOut: result.completionTokens,
+        sessionIn: this.usage.sessionIn + unhit,
+        sessionOut: this.usage.sessionOut + result.completionTokens,
+        cacheRead: this.usage.cacheRead + hit,
+        cacheWrite: this.usage.cacheWrite + write,
+        turnHitRate,
+        contextTokens: this.usage.contextTokens + result.promptTokens + result.completionTokens,
+      });
+      this.log("usage_direct", {
+        in: result.promptTokens,
+        out: result.completionTokens,
+        cacheRead: hit,
+        cacheWrite: write,
+        cacheMiss: result.cacheMiss,
+        hitRate: turnHitRate,
+        source: "direct",
+        cacheFieldsReported: result.cacheFieldsReported,
+        cacheBreakReason: this.cacheBreakReason,
+      });
+    }
+    // 按次记账（M2-11）+ 软上限检查（达限提示/可切备用模型；不静默停机）
+    appendUsage(this.dataRoot, {
+      at: new Date().toISOString(),
+      kind: "turn",
+      in: result.promptTokens,
+      out: result.completionTokens,
+      model: opts.usedModel,
+      cacheRead: hit,
+      cacheWrite: write,
+      source: "direct",
+      cacheFieldsReported: result.cacheFieldsReported,
+      cacheBreakReason: this.cacheBreakReason,
+    });
+    this.cacheBreakReason = null;
+    this.checkBudget();
+  }
+
   /** 落一轮助手回复（两条路径共用，顺序固定：history → 落盘 → 卡片收尾） */
   private settleAssistant(live: FeedCard, text: string): void {
     if (text.trim()) {
@@ -6214,17 +7486,44 @@ export class Kernel {
     const rec = this.taskStore.get(pending.taskId);
     if (!rec) return;
     const files = (rec.deliverables ?? []).map((d) => d.path.split(/[\\/]/).filter(Boolean).pop() ?? d.path);
+    const bytes = (rec.deliverables ?? []).reduce((sum, d) => sum + (d.bytes ?? 0), 0);
+    /**
+     * 播报要能追溯（2026-11-16 实机「播报单薄，只报成员名字」）：
+     * 一句"XX 交的活已验收"等于没说——用户要的是"做完了什么、交了几件、花了多久、还差什么"。
+     * 这里全部取卷宗事实（轮次 / 耗时 / 产物 / 证据），一个数都不编。
+     */
+    const timeline = this.trackTimeline(rec.id).timeline;
+    const first = timeline[0]?.at ? Date.parse(timeline[0].at) : NaN;
+    const last = timeline[timeline.length - 1]?.at ? Date.parse(timeline[timeline.length - 1].at) : NaN;
+    const spanMin = Number.isFinite(first) && Number.isFinite(last) && last > first ? Math.round((last - first) / 60_000) : 0;
+    const rounds = (rec.rejectRounds ?? 0) + 1;
+    const evCount = rec.evidence?.length ?? 0;
+    const sizeText = bytes > 0 ? ` · 约 ${Math.max(1, Math.round(bytes / 1024))} KB` : "";
+    const filesLine = files.length
+      ? `**交付物**：${files.join("、")}（${files.length} 件${sizeText}；在交付箱里点开就能看）\n`
+      : "**交付物**：（这张单没有留交付物——如果需要文件，让她补一份）\n";
+    const statBits = [
+      `第 ${rounds} 轮`,
+      spanMin > 0 ? `约 ${spanMin} 分钟` : "",
+      evCount > 0 ? `证据 ${evCount} 项` : "",
+    ].filter(Boolean);
     this.card({
       kind: "tool",
       badge: "汇报",
       jobId: rec.id,
       title: `系统汇总 · ${rec.title.slice(0, 40)}`,
-      // 完成播报要说清"哪件事做完了"，不是「这张单已归档」这种过程话
-      speak: `「${rec.title.slice(0, 30)}」做完了，${pending.member}交的活我已经验收归档。`,
+      // 完成播报要说清"哪件事做完了 + 交了几件"，不是「这张单已归档」这种过程话
+      speak: `「${rec.title.slice(0, 30)}」做完了，${pending.member}交的活我已验收归档${
+        files.length ? `，${files.length} 件产物在交付箱` : ""
+      }。`,
       body:
-        `**结论**：${pending.member} 交付的这张单已验收归档。\n` +
-        (files.length ? `**交付物**：${files.join("、")}\n` : "**交付物**：（这张单没有留交付物）\n") +
-        `**未完成**：（她没有单独写汇报；需要细节可打开产物，或直接问她这张单。）`,
+        `**结论**：${pending.member} 交付的「${rec.title.slice(0, 60)}」已验收归档（${statBits.join(" · ")}）。\n` +
+        filesLine +
+        `**未完成**：${
+          pending.member
+            ? "（她没有单独写汇报，以上是卷宗里的实据）需要细节直接在群里问她这张单。"
+            : "（这张单没有登记成员）"
+        }`,
     });
   }
 
@@ -6249,9 +7548,11 @@ export class Kernel {
       // 人设/记忆/技能注入每轮现取：官方扩展在 before_agent_start 重读文件，天然热更新
       await host.updateSystemPrompt(this.systemPrompt());
       this.setTurn({ phase: "accepted", busy: true });
-      // 技能正文也只拼当轮消息（2026-11-14 补）：此前只有直连路径拼了 pendingSkillText，
-      // Pi 路径直接把原话发出去——表现为"技能命中、激活卡也落了，模型却没看到正文"。
-      const outgoing = this.pendingSkillText ? `${this.pendingSkillText}\n\n${userText}` : userText;
+      /**
+       * 技能正文已在 submitTurn 里拼进 history（缓存修复 B1），这里**不能再拼一次**：
+       * 再拼就与历史不一致，下一轮重建时那条 user 消息变短 → 前缀断。
+       */
+      const outgoing = userText;
       // 官方 prompt 的响应只代表被接受；PiRpcHost.prompt() 会等到官方 agent_settled
       const promptResult = await host.prompt(outgoing);
       this.log("prompt_ok", { disposition: promptResult?.disposition ?? "started" });
@@ -6397,15 +7698,8 @@ export class Kernel {
         }
       }
     }
-    // 技能注入只改当轮 user 消息（尾部）：system prompt 与历史前缀原样，缓存命中不被技能抖动打穿
-    if (this.pendingSkillText) {
-      for (let i = messages.length - 1; i >= 0; i -= 1) {
-        if (messages[i].role === "user") {
-          messages[i] = { role: "user", content: `${this.pendingSkillText}\n\n${messages[i].content}` };
-          break;
-        }
-      }
-    }
+    // 技能正文已在 submitTurn 拼进 history（缓存修复 B1），这里不再二次拼接，
+    // 否则发送内容与历史不一致，下一轮重建就会变短、前缀缓存断掉。
     const endpointHost = (() => {
       try {
         return new URL(cfg.baseUrl).host;
@@ -6414,19 +7708,60 @@ export class Kernel {
       }
     })();
     try {
-      const maxRounds = this.agentRounds();
+      const maxRounds = patrol ? this.patrolRounds() : this.agentRounds();
+      /**
+       * 本回合固定的工具面（2026-11-17 B5）：循环内外都用同一份，前缀不因末轮而变。
+       * 巡检回合用精简面（不建队/不招人/不解散/不发插件/不写草稿/不删记忆），其余用全量。
+       */
+      const toolList = patrol ? this.patrolTools() : this.allTools();
+      /** 本回合消息的起点：折叠只折这之后的工具往返，历史前缀原样（缓存不被折碎） */
+      const foldFrom = messages.length;
       for (let round = 0; round < maxRounds; round++) {
+        /**
+         * 巡检轮折叠（2026-11-16）：实测巡检平均每回合跑 11.4 次模型调用，
+         * 每次都要重放本回合前面所有工具输出（单次 in 从 6.6K 涨到 46K）。
+         * 只折 patrol 且只折本回合新增：主会话的历史前缀是缓存主体，折它会按全价重算，反而更贵。
+         */
+        if (patrol && round === Math.floor(maxRounds / 2)) {
+          /**
+           * 巡检只在**回合中段折一次**（2026-11-17 缓存修复 B2）。
+           * 每轮折 = 每轮一个断点；巡检最多 10 轮，折一次就能把前半段的工具输出压掉，
+           * 后半个回合的前缀保持稳定。
+           */
+          const comp = compactToolHistory(messages, { keepRecent: compactKeepRecent(), fromIndex: foldFrom });
+          if (comp.folded > 0) messages.splice(0, messages.length, ...comp.messages);
+        }
         let roundText = "";
-        // 末轮强制无工具：即便前面一直在跑工具，最后一轮也逼风铃落一段总结，
-        // 而不是"硬停在半路"。这样触顶也只算"先总结到这里"，用户说"继续"就能接上。
-        const isLast = round === maxRounds - 1;
+        /**
+         * 工具面**全程不变**（2026-11-17 缓存修复 B5）。
+         *
+         * 此前末轮改成 `tools: []`：工具段在请求最前，一变就让该次请求的前缀全量重算
+         * （实测每次 30–40K），而且巡检回合几乎每次都会跑到末轮。
+         * 现在收口改由「跑满轮次后补一次只总结」完成（见循环之后），
+         * 所有请求的工具面保持一致，缓存不再被自己换掉。
+         */
+        /**
+         * 前缀指纹（P1-5）：命中率掉下来时，日志能直接回答"从哪一轮、因为什么变了"。
+         * 只在变化时记一条，不刷屏。
+         */
+        const fp = prefixFingerprint({ messages, tools: toolList });
+        if (this.lastPrefixFp && this.lastPrefixFp !== fp) {
+          this.log("cache_prefix_changed", {
+            from: this.lastPrefixFp,
+            to: fp,
+            reason: this.cacheBreakReason ?? "unknown",
+            round,
+            messages: messages.length,
+          });
+        }
+        this.lastPrefixFp = fp;
         const result = await streamChatWithRetry(
           {
             baseUrl: cfg.baseUrl,
             apiKey,
             model: usedModel,
             messages,
-            tools: isLast ? [] : this.allTools(),
+            tools: toolList,
             signal: controller.signal,
             onDelta: (t) => {
               roundText += t;
@@ -6449,66 +7784,7 @@ export class Kernel {
           },
         );
         attempts = result.attempts;
-        this.tokensUsed += result.promptTokens + result.completionTokens;
-        // 口径统一：sessionIn = 未命中缓存的输入；命中/写入单独累计。
-        // DeepSeek 的 miss 已在 promptTokens 里，不再重复记到 cacheWrite（2026-11-11 修）。
-        const hit = Math.max(0, result.cacheRead);
-        const write = Math.max(0, result.cacheWrite);
-        const unhit = Math.max(0, result.promptTokens - hit - write);
-        const turnPrompt = result.promptTokens + write;
-        const turnHitRate = turnPrompt > 0 ? Math.round((hit / turnPrompt) * 1000) / 10 : null;
-        if (patrol) {
-          // 巡检轮：只记单独的累计，不动 Pi 会话的 usage（下一轮 runChatRpc 会合并展示）
-          this.patrolUsage.in += unhit;
-          this.patrolUsage.out += result.completionTokens;
-          this.patrolUsage.read += hit;
-          this.patrolUsage.write += write;
-          this.setUsage({ turnIn: result.promptTokens, turnOut: result.completionTokens, turnHitRate });
-          this.log("usage_patrol", {
-            in: result.promptTokens,
-            out: result.completionTokens,
-            cacheRead: hit,
-            cacheWrite: write,
-            hitRate: turnHitRate,
-          });
-        } else {
-          this.setUsage({
-            turnIn: result.promptTokens,
-            turnOut: result.completionTokens,
-            sessionIn: this.usage.sessionIn + unhit,
-            sessionOut: this.usage.sessionOut + result.completionTokens,
-            cacheRead: this.usage.cacheRead + hit,
-            cacheWrite: this.usage.cacheWrite + write,
-            turnHitRate,
-            contextTokens: this.usage.contextTokens + result.promptTokens + result.completionTokens,
-          });
-          this.log("usage_direct", {
-            in: result.promptTokens,
-            out: result.completionTokens,
-            cacheRead: hit,
-            cacheWrite: write,
-            cacheMiss: result.cacheMiss,
-            hitRate: turnHitRate,
-            source: "direct",
-            cacheFieldsReported: result.cacheFieldsReported,
-            cacheBreakReason: this.cacheBreakReason,
-          });
-        }
-        // 按次记账（M2-11）+ 软上限检查（达限提示/可切备用模型；不静默停机）
-        appendUsage(this.dataRoot, {
-          at: new Date().toISOString(),
-          kind: "turn",
-          in: result.promptTokens,
-          out: result.completionTokens,
-          model: usedModel,
-          cacheRead: hit,
-          cacheWrite: write,
-          source: "direct",
-          cacheFieldsReported: result.cacheFieldsReported,
-          cacheBreakReason: this.cacheBreakReason,
-        });
-        this.cacheBreakReason = null;
-        this.checkBudget();
+        this.recordDirectUsage(result, { patrol, usedModel });
         if (result.toolCalls.length > 0) {
           messages.push({
             role: "assistant",
@@ -6533,13 +7809,44 @@ export class Kernel {
         this.emit({ type: "done", tokens: result.promptTokens + result.completionTokens });
         return;
       }
-      // 安全网：理论上末轮强制无工具后模型一定会落总结（上面已 return），
-      // 这里只在极端情况（模型无视空工具集仍带工具调用）兜底——温和提示而非硬停。
-      patchLive(
-        (live.text || "") + "\n\n（本轮工具轮次已用尽，风铃先总结到这里；需要继续就直接说「继续」。）",
-        false,
+      /**
+       * 触顶补一次「只总结」（2026-11-17 缓存修复 B5）。
+       *
+       * 跑满 maxRounds 仍未落总结时，追加一条"别再调工具"的指示再请求一次。
+       * 关键：**这次也带全量工具面**——空工具集会让工具段消失、该次前缀全量重算；
+       * 用提示词收口，语义一样，缓存不断。若模型仍返回工具调用，不执行，直接收尾。
+       */
+      let summaryText = "";
+      const summary = await streamChatWithRetry(
+        {
+          baseUrl: cfg.baseUrl,
+          apiKey,
+          model: usedModel,
+          messages: [
+            ...messages,
+            {
+              role: "user",
+              content:
+                "工具轮次已用尽：不要再调用工具，直接给出最终答复或总结（写清做到了哪一步、还差什么，需要继续就让用户说「继续」）。",
+            },
+          ],
+          tools: toolList,
+          signal: controller.signal,
+          onDelta: (t) => {
+            summaryText += t;
+            patchLive(summaryText, true);
+          },
+        },
+        { maxAttempts: 2 },
       );
-      this.emit({ type: "done", tokens: 0 });
+      this.recordDirectUsage(summary, { patrol, usedModel });
+      const finalText = summary.content?.trim() || summaryText.trim();
+      this.settleAssistant(
+        live,
+        finalText || "（本轮工具轮次已用尽，风铃先总结到这里；需要继续就直接说「继续」。）",
+      );
+      this.settleCheckpoint();
+      this.emit({ type: "done", tokens: summary.promptTokens + summary.completionTokens });
     } catch (err) {
       // 用户主动停止：只收掉流状态，保留已产出文本；session.abort 已经发过 done，不再报错误
       if (controller.signal.aborted || this.abortRequested) {
@@ -6619,11 +7926,28 @@ export class Kernel {
         mentions: mentions.length ? mentions : undefined,
       });
     }
+    /**
+     * 发送什么就存什么（2026-11-17 缓存修复 B1）。
+     *
+     * 此前：history 存原话，runChat 里临时拼「技能正文 + 群定向」再发。
+     * 下一轮从 history 重建请求时那条 user 变短 → 从它起前缀缓存全部失效。
+     * 技能命中率实测 35%，等于每三次对话就人为断一次，成员命中率被压到 81.5%。
+     * 现在：落盘前一次拼好，runChat 不再二次装饰。
+     */
+    // 技能正文与记忆变更提示走同一通道（当轮尾部、进 history，不改 system 前缀）
+    const tailNotes = [this.pendingSkillText, this.pendingMemoryNote].filter(Boolean).join("\n\n");
+    const finalText = composeTurnText({
+      fullText,
+      directive: mentions.length ? this.groupDirective(mentions) : undefined,
+      skillText: tailNotes,
+    });
+    this.pendingSkillText = "";
+    this.pendingMemoryNote = "";
     // 巡检轮（心跳/卡住处置）：消息只用于这一轮，结束后从 history 摘掉、不写时间线。
     // 否则每 5 分钟一次巡检会把上下文越撑越大（token 与延迟都跟着涨）。
     if (opts?.ephemeral) this.ephemeralFrom = this.history.length;
-    this.history.push({ role: "user", content: fullText });
-    if (!opts?.ephemeral) this.persist("user", fullText);
+    this.history.push({ role: "user", content: finalText });
+    if (!opts?.ephemeral) this.persist("user", finalText);
     this.busy = true;
     this.l1.setBusy(true);
     this.abortRequested = false;
@@ -6631,9 +7955,7 @@ export class Kernel {
     if (!opts?.internal) this.threads.autoTitle(this.currentThreadId, text);
     this.checkpoints.begin(`turn-${Date.now()}`);
     this.setTurn({ phase: "accepted", busy: true, startedAt: new Date().toISOString(), canUndo: false, changedFiles: [] });
-    // 群内定向说明只拼当轮（尾部）：历史前缀原样，前缀缓存不被 @ 抖动打穿
-    const ctxText = mentions.length ? `${fullText}\n\n${this.groupDirective(mentions)}` : fullText;
-    void this.runChat(ctxText, opts).finally(() => {
+    void this.runChat(finalText, opts).finally(() => {
       // 巡检轮收尾：把这轮消息（含工具往返）从 history 摘掉，上下文回到巡检前
       if (this.ephemeralFrom >= 0) {
         this.history.splice(this.ephemeralFrom);
@@ -6646,6 +7968,8 @@ export class Kernel {
       this.drainQueue();
       // 成员回报后要验收的：这轮收尾了就叫醒风铃（不等心跳闸）
       this.drainReviewPending();
+      // 成员在群里提的疑问/风险：同样在收轮后再答，别插进用户正在说的话中间
+      this.drainQuestionPending();
       // 忙时被挡下的心跳事件：这一轮（或队列）收尾后再评估一次；闸仍然生效，不会补成刷屏
       if (this.heartbeatPending) {
         const pending = this.heartbeatPending;
@@ -6704,15 +8028,144 @@ export class Kernel {
     return { code: "unknown", message: raw || "未知错误", action: "logs" };
   }
 
-  private failTurn(code: string, message: string, action: FeedCard["action"]): void {
-    this.log("turn_failed", { code, message });
+  /**
+   * 记一次额度用尽并进入熔断。退避 5 → 10 → 20 → 30 分钟；恢复后成功一次即清零。
+   * 5 分钟内只落一张卡：熔断期本来就该安静，刷屏只会让人更慌。
+   */
+  private noteQuotaExhausted(detail: string): void {
+    this.quotaStrikes = Math.min(4, this.quotaStrikes + 1);
+    const minutes = [5, 10, 20, 30][this.quotaStrikes - 1] ?? 30;
+    this.quotaBlockedUntil = Date.now() + minutes * 60_000;
+    this.log("quota_cooldown", { minutes, strikes: this.quotaStrikes, detail: detail.slice(0, 200) });
+    if (Date.now() - this.quotaCardAt < 5 * 60_000) return;
+    this.quotaCardAt = Date.now();
+    this.card({
+      kind: "system",
+      systemTone: "budget",
+      title: "额度用尽，已暂停自动巡检",
+      text:
+        `端点回的是额度上限/欠费类错误（${detail.slice(0, 120)}）。` +
+        `已暂停心跳巡检、验收叫醒与自动派单 ${minutes} 分钟——继续重试只会把请求配额也烧掉。` +
+        "恢复额度后直接发一条消息即可继续（你的消息不受熔断限制）。",
+    });
+  }
+
+  /** 额度还在冷却里：后台动作（心跳/叫醒/派单/顾问）一律不发请求 */
+  private quotaCoolingDown(): boolean {
+    return Date.now() < this.quotaBlockedUntil;
+  }
+
+  /**
+   * 同一张单的连续失败计数（2026-11-16 日志复盘）。
+   * 实机出现过同一 taskId 被跑 6 次（每次中途被超时/中止砍断后整单重来），
+   * 单次成本是几十万 prompt tokens。连续失败到阈值就先拦住重派，逼一次人工判断。
+   */
+  private taskFailStreak = new Map<string, { n: number; at: number }>();
+
+  /** 重派前检查：这张单是不是已经烧了太多次 */
+  private taskRepickBlocked(taskId: string): string | null {
+    const s = this.taskFailStreak.get(taskId);
+    if (!s || s.n < 3) return null;
+    if (Date.now() - s.at >= 30 * 60_000) {
+      this.taskFailStreak.delete(taskId);
+      return null;
+    }
+    return (
+      `这张单最近 30 分钟已连续失败 ${s.n} 次（超时/中止）：先别原地重派。` +
+      "看一下卷宗里它做到哪一步、卡在哪（或是把任务拆小 / 换人 / 换法），" +
+      "确认要重试就等 30 分钟后再派——重复跑同一份简报只会把同样的钱再烧一遍。"
+    );
+  }
+
+  private noteTaskFailure(taskId: string, status: string): void {
+    if (status === "reported") {
+      this.taskFailStreak.delete(taskId);
+      return;
+    }
+    // 用户主动停 / 群终止不算"这张单做不成"——那是外部停止，重派是合理动作
+    if (status === "aborted") return;
+    const prev = this.taskFailStreak.get(taskId);
+    const n = (prev && Date.now() - prev.at < 30 * 60_000 ? prev.n : 0) + 1;
+    this.taskFailStreak.set(taskId, { n, at: Date.now() });
+    if (n >= 3) this.log("task_fail_streak", { taskId, n });
+  }
+
+  /** 一次成功即视为额度恢复（端点能用就说明额度回来了） */
+  private noteQuotaOk(): void {
+    if (!this.quotaStrikes && !this.quotaBlockedUntil) return;
+    const cooled = this.quotaBlockedUntil > 0;
+    this.quotaStrikes = 0;
+    this.quotaBlockedUntil = 0;
+    this.quotaCardAt = 0;
+    if (cooled) this.log("quota_recovered", {});
+  }
+
+  private failTurn(code: string, message: string, _action: FeedCard["action"]): void {
+    // `_action` 保留参数只为不改所有调用方：动作现在由 errorCopy 按 code 重算（F7）
+    // 额度用尽（429 + 套餐/余额语义）→ 全局熔断：心跳、叫醒、派单、顾问一起停手
+    const quotaExhausted = code === "rate_429" && isQuotaMessage(message);
+    if (quotaExhausted) this.noteQuotaExhausted(message);
+    /**
+     * F7（18 章 §5）：文案与动作按 code 重算，**不再直接信 classifyError 给的 action**。
+     *
+     * 原来的问题：429 一律给 `retry`，而额度用尽时点重试必然再撞一次 429——
+     * 用户点三次、烧三次配额，最后还是得去充值。这就是「必然失败的重试」。
+     * 现在 `errorCopy` 按「点了会不会成功」决定给不给按钮：额度用尽给「去设置」，限流才给「重试」。
+     */
+    const copy = errorCopy(code, message, {
+      quotaExhausted,
+      cooldownMinutes: this.quotaBlockedUntil > Date.now() ? Math.round((this.quotaBlockedUntil - Date.now()) / 60_000) : undefined,
+      hasBackupModel: this.hasBackupModel(),
+    });
+    this.log("turn_failed", { code, message, action: copy.action, retryable: copy.retryable });
     this.setTurn({ phase: "failed" });
-    this.card({ kind: "system", text: message, code, action });
+    /**
+     * 同一类错误 5 分钟内合并成一张卡（18 章 §5「同 code 连发合并为一张，角标 ×N」）。
+     * 键带上 action：429 的两种形态（限流 retry / 额度用尽 settings）不能合并——
+     * 否则用户看到「重试」按钮，对应的却是额度用尽，正好是想消灭的那种误导。
+     */
+    const now = Date.now();
+    const prev = this.lastErrorCard;
+    if (shouldMergeError(prev, { code, action: copy.action }, now) && prev?.cardId) {
+      const card = this.feed.find((c) => c.id === prev.cardId) ?? this.threads.loadState(this.currentThreadId ?? "").feed.find((c) => c.id === prev.cardId);
+      if (card) {
+        prev.count += 1;
+        prev.at = now;
+        const bumped = `${copy.title}（同类错误第 ${prev.count} 次；${Math.round(ERROR_MERGE_WINDOW_MS / 60_000)} 分钟内的重复不再单独落卡）`;
+        card.text = bumped;
+        this.emit({ type: "error", code, message, action: copy.action });
+        if (this.liveCard) {
+          this.liveCard.streaming = false;
+          this.liveCard = null;
+        }
+        return;
+      }
+    }
+    const card = this.card({
+      kind: "system",
+      title: copy.title,
+      text: copy.detail,
+      code,
+      action: copy.action,
+      // 不给按钮时如实说明为什么——"没有按钮"和"没做完"是两件事
+      ...(copy.action === "none" ? { meta: "这类错误重试没有意义，所以不提供重试" } : {}),
+    });
+    this.lastErrorCard = { code, action: copy.action, at: now, cardId: card.id, count: 1 };
     if (this.liveCard) {
       this.liveCard.streaming = false;
       this.liveCard = null;
     }
-    this.emit({ type: "error", code, message, action });
+    this.emit({ type: "error", code, message, action: copy.action });
+  }
+
+  /** 有没有配备用模型（决定 5xx 的文案该说"可以切"还是"没得切"） */
+  private hasBackupModel(): boolean {
+    try {
+      const prefs = this.settings.getPrefs() as { backupModel?: unknown };
+      return Boolean(prefs?.backupModel);
+    } catch {
+      return false;
+    }
   }
 
   private async runChat(
@@ -6729,6 +8182,9 @@ export class Kernel {
       );
       return;
     }
+    // 本轮开始前的熔断水位：只有"本轮没把熔断推进过"才算真成功（runChatRpc 内部失败不抛，
+    // 不能用 try 正常返回来判断成功，否则刚熔断就被自己解除）
+    const quotaAtStart = this.quotaBlockedUntil;
     try {
       // 巡检轮（心跳/验收叫醒/卡住处置）走直连（2026-11-13 P1）：
       // Pi 会话里的 ephemeral 是假的——内核只 splice 自己的 history 镜像，Pi 会话把每轮
@@ -6755,6 +8211,8 @@ export class Kernel {
       } else {
         await this.runChatDirect(cfg, apiKey, text, patrol);
       }
+      // 能跑完一轮就说明额度可用：解除熔断（不必等冷却到期）
+      if (this.quotaBlockedUntil === quotaAtStart) this.noteQuotaOk();
     } catch (err) {
       if (this.repetitionAborted) return; // 熔断已落卡说明，不再叠一张「端点错误」
       const fail = this.classifyError(err);
@@ -6815,7 +8273,13 @@ export class Kernel {
 
   // ---------- 指挥板（真实存储推导） ----------
 
-  private listTeams(): BoardData["teams"] {
+  /**
+   * 团队/成员现场（2026-11-16 性能）：
+   * `tasks` 由调用方传进来复用——此前这里在**每支团队循环内**各读一遍全量工单，
+   * 10 支队伍就是 10 次全量 JSON.parse，主进程被同步 IO 占住（界面「未响应」）。
+   */
+  private listTeams(tasks?: TaskRecord[]): BoardData["teams"] {
+    const allTasks = tasks ?? this.taskStore.list();
     const dir = path.join(this.dataRoot, "team");
     if (!fs.existsSync(dir)) return [];
     const teams: BoardData["teams"] = [];
@@ -6826,7 +8290,6 @@ export class Kernel {
       const rec = JSON.parse(fs.readFileSync(tf, "utf-8")) as { id: string; name: string; status: string; threadId?: string };
       // 成员卡必须是"现场"而不是"档案"：状态/预算/打回都从真实指派推导，
       // 原先这里写死 status:"idle"、budgetUsed:0、rejections:0，右栏永远显示空闲
-      const allTasks = this.taskStore.list();
       const members = this.teamStore
         .listMembers(entry.name)
         .map((p) => {
@@ -6901,7 +8364,24 @@ export class Kernel {
    * 只读：不迁移状态、不改写卷宗；全量事件始终留在磁盘 timeline.jsonl。
    * 也是阶段状态机的数据底座——阶段进度由代码持有，不再让模型在压缩后的上下文里自己记。
    */
+  /**
+   * 卷宗时间线缓存（2026-11-16）：每次快照都对每张单读一遍 timeline.jsonl 全文
+   * （append-only，会长到几百行）。按文件 mtime+size 缓存，只有真追加过才重读。
+   */
+  private timelineCache = new Map<string, { stamp: number; size: number; value: { round: number; timeline: { at: string; kind: string; text: string }[] } }>();
+
   private trackTimeline(taskId: string): { round: number; timeline: { at: string; kind: string; text: string }[] } {
+    let stamp = 0;
+    let size = -1;
+    try {
+      const st = fs.statSync(this.taskCase.timelineFile(taskId));
+      stamp = st.mtimeMs;
+      size = st.size;
+    } catch {
+      return { round: 1, timeline: [] };
+    }
+    const hit = this.timelineCache.get(taskId);
+    if (hit && hit.stamp === stamp && hit.size === size) return hit.value;
     let events: TimelineEvent[] = [];
     try {
       events = this.taskCase.readTimeline(taskId);
@@ -6914,7 +8394,11 @@ export class Kernel {
       kind: e.kind,
       text: String(e.text ?? "").replace(/\s+/g, " ").slice(0, 120),
     }));
-    return { round, timeline };
+    const value = { round, timeline };
+    // 缓存只服务展示：单条上限，别让长期运行的进程把每张单的时间线都攥在内存里
+    if (this.timelineCache.size > 400) this.timelineCache.clear();
+    this.timelineCache.set(taskId, { stamp, size, value });
+    return value;
   }
 
   /**
@@ -6930,7 +8414,10 @@ export class Kernel {
     }
   }
 
-  private buildTrack(): BoardData["track"] {
+  private buildTrack(tasks?: TaskRecord[]): BoardData["track"] {
+    const loaded = tasks ?? this.taskStore.list();
+    // id → 工单：一次读盘换掉每张单一次 get()（长任务下这是快照最贵的一段同步 IO）
+    const byId = new Map(loaded.map((t) => [t.id, t]));
     const dir = path.join(this.dataRoot, "team");
     const track: BoardData["track"] = [];
     // 没有 team 目录也不能提前返回：底下的兜底要保证"有工单就必须出现在台账上"
@@ -6947,7 +8434,7 @@ export class Kernel {
         const recs = this.teamStore.readAssignments(entry.name, taskId);
         if (!recs.length) continue;
         const last = recs[recs.length - 1];
-        const task = this.taskStore.get(taskId);
+        const task = byId.get(taskId);
         if (task) {
           // 有权威工单记录就以它为准（status / version / parent / evidence）
           const lastReject = [...task.approvals].reverse().find((a) => a.action === "reject");
@@ -7001,7 +8488,7 @@ export class Kernel {
     // 兜底：有权威工单却没有派单账本的（手工建单 / 迁移 / 账本被删）也要出现在台账上，
     // 否则用户看到的是"单不见了"。
     const seen = new Set(track.map((t) => t.id));
-    for (const task of this.taskStore.list()) {
+    for (const task of loaded) {
       if (seen.has(task.id)) continue;
       track.push({
         id: task.id,
@@ -7029,10 +8516,12 @@ export class Kernel {
     return track.reverse().map((t) => ({ ...t, ...this.trackTimeline(t.id) }));
   }
 
-  private buildBoard(): BoardData {
+  private buildBoard(tasks?: TaskRecord[]): BoardData {
+    // 同一次快照里团队卡与台账共用同一份工单列表（此前各读各的，全量 parse 三遍）
+    const loaded = tasks ?? this.taskStore.list();
     return {
-      teams: this.listTeams(),
-      track: this.buildTrack(),
+      teams: this.listTeams(loaded),
+      track: this.buildTrack(loaded),
       // 2026-11-15：待拍板卡只给当前群——新建群/切群不该冒出别群的问题、契约、审批。
       // 内核这一层过滤是唯一真相源，渲染层、待机页、计数都跟着它走。
       decisions: this.decisionsForCurrentThread().map((d) => ({ ...d })),
@@ -7789,7 +9278,9 @@ export class Kernel {
       case "session.snapshot": {
         const cfg = this.activeModelConfig();
         // C3：会话 → 工单归属计数（按 task.threadId 汇总；老单没记 threadId 就不归到任何会话，不猜）
-        const threadCounts = countTasksByThread(this.taskStore.list());
+        // 一次性读全量工单：下面的 board（团队 + 台账）复用同一份，别各读一遍
+        const snapshotTasks = this.taskStore.list();
+        const threadCounts = countTasksByThread(snapshotTasks);
         const curProject = this.currentProject();
         const snap: RpcContracts["session.snapshot"]["result"] = {
           // 项目名优先用项目身份（用户改过的中文名）；没有项目实体时退回目录 basename。
@@ -7850,7 +9341,7 @@ export class Kernel {
             apiKeySet: !!cfg?.apiKey?.data,
           },
           feed: [...this.feed],
-          board: this.buildBoard(),
+          board: this.buildBoard(snapshotTasks),
           turn: { ...this.turn, pending: this.queue.length },
           usage: { ...this.usage },
           queue: this.queue.map((q) => ({ id: q.id, text: q.text, at: q.at })),
@@ -8633,6 +10124,45 @@ export class Kernel {
       case "plugins.list": {
         const r = this.pluginHost.scan();
         return { plugins: r.plugins, errors: r.errors } as RpcContracts[M]["result"];
+      }
+
+      /** 插件历史版本（P12-1）：新的在前 */
+      case "plugins.versions": {
+        const p = params as { id: string };
+        return { versions: listVersions(this.dataRoot, p.id), keep: KEEP_VERSIONS } as RpcContracts[M]["result"];
+      }
+
+      /** 回滚到某个历史版本（P12-1）：当前版本会先归档，所以回滚本身也能回滚 */
+      case "plugins.rollbackVersion": {
+        const p = params as { id: string; versionDir: string };
+        const r = rollbackToVersion(this.dataRoot, p.id, p.versionDir);
+        if (r.ok) {
+          this.pluginSet.snapshot("rollback-version");
+          this.log("plugin_rollback", { id: p.id, to: r.version });
+        }
+        return { ok: r.ok, ...(r.version ? { version: r.version } : {}), issues: r.issues } as RpcContracts[M]["result"];
+      }
+
+      /** 插件斜杠命令（P11-1）：扫描 plugins/，收集启用插件的 commands */
+      case "plugins.commands": {
+        const r = scanPluginCommands(this.dataRoot);
+        return { commands: r.commands, errors: r.errors } as RpcContracts[M]["result"];
+      }
+
+      /**
+       * 导入插件包（P9-2）：`.zip` 文件或插件目录。
+       *
+       * 这是"手动安装标准插件文件包"的入口。校验失败时把 issues 原样返回，
+       * 让界面能显示**具体到字段**的原因——笼统的"导入失败"对用户毫无用处。
+       */
+      case "plugins.import": {
+        const p = params as { path: string; override?: boolean };
+        const result = importPluginPackage(String(p.path), this.dataRoot, { override: p.override === true });
+        if (result.ok) {
+          this.pluginSet.snapshot("import");
+          this.log("plugin_imported", { id: result.id });
+        }
+        return { ok: result.ok, ...(result.id ? { id: result.id } : {}), issues: result.issues } as RpcContracts[M]["result"];
       }
 
       case "plugins.toggle": {

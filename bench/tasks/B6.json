@@ -1,0 +1,22 @@
+{
+  "id": "B6",
+  "title": "被打回 2 次后收敛",
+  "domain": "coding",
+  "role": "implementer",
+  "mode": "execute",
+  "brief": "实现 fixtures/repo-b6 的 slugify(text)：小写、空格转 -、去掉非字母数字字符。第一次故意只实现小写（用于测打回），打回后按 failedChecks 补齐，第 3 轮必须通过。",
+  "acceptance": [
+    "第 3 轮内通过全部测试",
+    "每轮只改未过项，不推翻已过部分",
+    "最终 npm test 退出码 0"
+  ],
+  "expected": {
+    "deliverables": ["src/slugify.js"],
+    "checks": [
+      { "type": "command", "cmd": "npm test", "cwd": "fixtures/repo-b6", "expect": "exit0" },
+      { "type": "rounds", "maxReject": 2 }
+    ]
+  },
+  "judge": { "auto": true, "script": "checks/B6.mjs" },
+  "limits": { "maxTurns": 16, "budgetTokens": 250000, "minutes": 20 }
+}

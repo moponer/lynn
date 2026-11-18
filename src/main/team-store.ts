@@ -49,6 +49,16 @@ export interface MemberProfile {
   acceptor?: boolean;
   /** 正文：这个岗位怎么做事的说明（由风铃写，可迭代） */
   body: string;
+  /**
+   * 注册表角色 id（2026-11-17 P3-1 / 07 章）：由 G1 准入闸解析并落盘。
+   * 存量档案没有这个字段——读取时按 role 文本现算，不回头改文件。
+   */
+  roleId?: string;
+  /**
+   * 池内 id（2026-11-17 P3-2 / 08 章）：团队只是雇佣关系，人是池子里的那个人。
+   * 名字可以改，这个 id 不变，战绩与经验才跟得住。
+   */
+  memberId?: string;
 }
 
 // ---------- 序列化（手写 YAML 子集：只覆盖本 schema 的形状） ----------
@@ -74,6 +84,8 @@ export function serializeMemberProfile(p: MemberProfile): string {
     `  acceptance:`,
     yamlList(p.outputContract.acceptance, "    "),
     `escalate_when: ${JSON.stringify(p.escalateWhen)}`,
+    ...(p.roleId ? [`role_id: ${JSON.stringify(p.roleId)}`] : []),
+    ...(p.memberId ? [`member_id: ${JSON.stringify(p.memberId)}`] : []),
     ...(p.acceptor ? [`acceptor: true`] : []),
     ...(p.avatarId ? [`avatar_id: ${JSON.stringify(p.avatarId)}`] : []),
   ].join("\n");
@@ -168,6 +180,12 @@ export function parseMemberProfile(md: string): MemberProfile {
           const raw = lines.find((l) => l.startsWith("acceptor:"))!.slice(9).trim();
           return raw === "true";
         })() }
+      : {}),
+    ...(lines.some((l) => l.startsWith("role_id:"))
+      ? { roleId: JSON.parse(lines.find((l) => l.startsWith("role_id:"))!.slice(8).trim()) as string }
+      : {}),
+    ...(lines.some((l) => l.startsWith("member_id:"))
+      ? { memberId: JSON.parse(lines.find((l) => l.startsWith("member_id:"))!.slice(10).trim()) as string }
       : {}),
     body: body.trim(),
   };
@@ -291,6 +309,24 @@ export interface ImportProposal {
 export class TeamStore {
   constructor(readonly dataRoot: string) {}
 
+  /**
+   * 成员列表缓存（2026-11-16「未响应」）：
+   * listMembers 每次都要 readdir + 逐个 readFileSync + 解析档案。而一次快照里
+   * 它会被调用很多遍（团队卡、群成员名单、验收员判定、@ 解析各一次），成员越多越贵。
+   * 按"写入代数 + 短 TTL"缓存；代数存在模块级（按数据根），
+   * 这样内核与壳层/测试各自的实例写成员后，彼此的缓存都会失效。
+   */
+  private static readonly MEMBER_CACHE = new Map<string, { tick: number; at: number; list: MemberProfile[] }>();
+  private static readonly MEMBER_TICK = new Map<string, number>();
+  private static readonly MEMBER_TTL_MS = 300;
+
+  private invalidateMembers(): void {
+    TeamStore.MEMBER_TICK.set(this.dataRoot, (TeamStore.MEMBER_TICK.get(this.dataRoot) ?? 0) + 1);
+    for (const k of [...TeamStore.MEMBER_CACHE.keys()]) {
+      if (k.startsWith(`${this.dataRoot}::`)) TeamStore.MEMBER_CACHE.delete(k);
+    }
+  }
+
   teamDir(teamId: string): string {
     // 目录名就是主键：不做净化等于把数据根暴露给 `../..`
     return path.join(this.dataRoot, "team", assertValidTeamId(teamId));
@@ -312,6 +348,7 @@ export class TeamStore {
     fs.mkdirSync(path.join(dir, "artifacts"), { recursive: true });
     fs.mkdirSync(path.join(dir, "reviews"), { recursive: true });
     fs.writeFileSync(path.join(dir, "team.json"), JSON.stringify(rec, null, 2));
+    this.invalidateMembers();
     return rec;
   }
 
@@ -369,6 +406,7 @@ export class TeamStore {
     const file = path.join(this.teamDir(teamId), "members", memberFileName(p.name));
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, serializeMemberProfile(p), "utf-8");
+    this.invalidateMembers();
     return file;
   }
 
@@ -378,12 +416,19 @@ export class TeamStore {
   }
 
   listMembers(teamId: string): MemberProfile[] {
+    const key = `${this.dataRoot}::${teamId}`;
+    const tick = TeamStore.MEMBER_TICK.get(this.dataRoot) ?? 0;
+    const now = Date.now();
+    const hit = TeamStore.MEMBER_CACHE.get(key);
+    if (hit && hit.tick === tick && now - hit.at < TeamStore.MEMBER_TTL_MS) return hit.list.slice();
     const dir = path.join(this.teamDir(teamId), "members");
     if (!fs.existsSync(dir)) return [];
-    return fs
+    const list = fs
       .readdirSync(dir)
       .filter((f) => f.endsWith(".md"))
       .map((f) => parseMemberProfile(fs.readFileSync(path.join(dir, f), "utf-8")));
+    TeamStore.MEMBER_CACHE.set(key, { tick, at: now, list });
+    return list.slice();
   }
 
   /**
@@ -417,6 +462,7 @@ export class TeamStore {
     // 空编制 = 既派不了活又占着"在职团队"：要清空请直接解散，别留半截状态
     if (rest.length === 0) throw new Error("这是团队最后一名成员：要清空编制请直接解散团队");
     fs.unlinkSync(file);
+    this.invalidateMembers();
   }
 
   /** 派单/回报/打回/验收记录：追加写，永不改写（§4.10.7） */

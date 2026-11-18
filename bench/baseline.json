@@ -1,0 +1,90 @@
+{
+  "generatedAt": "2026-11-16T16:02:00.457Z",
+  "window": {
+    "since": "2026-11-16T04:20",
+    "until": "2026-11-16T10:00",
+    "dataRoot": "C:\\Users\\Administrator\\.lynn"
+  },
+  "parse": {
+    "logRows": 6466,
+    "badLogLines": 0,
+    "usageRows": 983,
+    "badUsageLines": 0
+  },
+  "tasks": {
+    "total": 26,
+    "byStatus": {
+      "canceled": 12,
+      "done": 11,
+      "in_review": 1,
+      "blocked": 2
+    },
+    "doneRate": 42.3
+  },
+  "runs": {
+    "starts": 66,
+    "exits": 59,
+    "byStatus": {
+      "error": 24,
+      "reported": 33,
+      "turn_limit": 2
+    },
+    "errorRate": 40.7
+  },
+  "success": {
+    "firstTry": 21,
+    "firstTryDenom": 34,
+    "firstTryRate": 61.8,
+    "reported": 33,
+    "noDeliverable": 17,
+    "noDeliverableRate": 51.5
+  },
+  "tokens": {
+    "member": {
+      "calls": 59,
+      "in": 13242962,
+      "out": 1030499,
+      "cacheRead": 11225582,
+      "hitRate": 84.8
+    },
+    "turn": {
+      "calls": 496,
+      "in": 11275923,
+      "out": 667472,
+      "cacheRead": 10201615,
+      "hitRate": 90.5
+    },
+    "patrolDetail": {
+      "calls": 491,
+      "in": 10653619,
+      "out": 624162,
+      "cacheRead": 9704398,
+      "hitRate": 91.1
+    },
+    "totalIn": 24518885,
+    "patrolShare": 46
+  },
+  "cache": {
+    "memberHitRate": 84.8,
+    "memberHitRateAvg": 81.5,
+    "turnHitRate": 90.5,
+    "patrolDetailHitRate": 91.1,
+    "breaks": {
+      "cold_start": 3,
+      "thread_switch": 2,
+      "host_restart": 1
+    }
+  },
+  "repeat": {
+    "multiRunTasks": 15,
+    "extraRuns": 28,
+    "avgRunTokens": 200651,
+    "extraTokenEstimate": 5618228
+  },
+  "turns": {
+    "mean": 12,
+    "p50": 12,
+    "p90": 16,
+    "max": 30
+  }
+}

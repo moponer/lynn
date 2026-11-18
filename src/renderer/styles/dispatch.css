@@ -2072,6 +2072,27 @@ button:disabled,
 .sf-row-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 .sf-row-main b { font-size: var(--fs-body); color: var(--ink); font-weight: 500; }
 .sf-row-main small { font-size: var(--fs-label); color: var(--ink-3); }
+/* 版本历史（2026-11-16）：一行一版——时间 / 字符差 / 总字符 / 最近 / 回滚。
+   旧版把时间和字符数叠成两行大字（字符数还漏了样式，继承成 14px），
+   七版就占满一屏，而「回滚到此版」重复了七遍。 */
+.sf-group .sf-row.ver-row { padding: 6px 0; gap: 10px; }
+/* 时间列定宽右对齐：同日只报时刻，宽度不等会让后面的列整体漂移 */
+.ver-when { flex: none; width: 84px; text-align: right; font-size: var(--fs-label); color: var(--ink-2); }
+.ver-delta {
+  flex: none; width: 46px; text-align: right;
+  font-family: var(--f-mono); font-size: var(--fs-label); color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+}
+.ver-chars {
+  flex: 0 1 auto; min-width: 0; font-size: var(--fs-label); color: var(--ink-4);
+  font-variant-numeric: tabular-nums;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ver-tag { flex: none; margin-left: auto; font-family: var(--f-mono); font-size: var(--fs-label); color: var(--ink-4); }
+/* 回滚是每行都有的动作：默认不上底色，否则七行就是七个灰块，压过了时间与字符差 */
+.ver-act { flex: none; margin-left: auto; padding: 2px 9px; font-size: var(--fs-label); background: none; color: var(--ink-3); }
+.ver-tag + .ver-act { margin-left: 6px; }
+.ver-act:hover { background: var(--sheet-3); color: var(--ink); }
 .sf-sub { display: flex; flex-direction: column; gap: 6px; }
 .sf-tile { background: var(--desk); border-radius: var(--r-m); padding: 10px 12px; display: flex; flex-direction: column; gap: 4px; }
 .sf-tile b { font-size: var(--fs-body); color: var(--ink); font-weight: 500; }
@@ -2134,14 +2155,20 @@ button:disabled,
 .sf-market-actions { display: flex; gap: 6px; margin-top: 2px; }
 .sf-market-actions .sf-btn { flex: none; }
 /* ---------- 能力中心（2026-11-15）：五个分段 + 统一开关 + 外部应用卡 ---------- */
-.cap-stat { display: flex; flex-wrap: wrap; gap: 20px; font-family: var(--f-mono); font-size: var(--fs-label); color: var(--ink-4); }
-.cap-stat b { color: var(--ink); font-weight: 400; font-variant-numeric: tabular-nums; margin-left: 5px; }
+/* 分段标签自带计数（2026-11-16）：标签是"去哪"，计数是"那里有多少"，
+   同一处说完，不再单开一排同序同位的数字把首屏占掉。 */
 .cap-seg { display: flex; flex-wrap: wrap; gap: 2px; align-self: flex-start; background: var(--desk); border-radius: var(--r-m); padding: 3px; }
 .cap-seg-btn {
+  display: inline-flex; align-items: baseline; gap: 5px;
   border: 0; background: none; font: inherit; cursor: pointer;
   font-size: var(--fs-meta); color: var(--ink-3); padding: 5px 13px; border-radius: var(--r-s);
   transition: background-color var(--dur-fast) ease, color var(--dur-fast) ease;
 }
+.cap-seg-btn .n {
+  font-family: var(--f-mono); font-size: var(--fs-label); color: var(--ink-4);
+  font-variant-numeric: tabular-nums;
+}
+.cap-seg-btn.on .n { color: var(--ink-3); }
 .cap-seg-btn:hover { color: var(--ink); }
 .cap-seg-btn.on { background: var(--sheet); color: var(--ink); }
 /* 开关：轨道 + 圆钮（零描边；用底色与位移表达状态） */
@@ -2181,8 +2208,18 @@ button:disabled,
 .cap-field { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .cap-field .sf-hint { margin: 0; }
 .cap-skill { color: var(--ink-4); }
+/* 技能行（2026-11-16）：描述与工具面同处一行。描述是主体（可省略），
+   白名单只报件数（最弱一档），完整清单进悬停。 */
+.sk-meta { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+/* 描述不撑满：工具件数紧跟着它，读成「…做什么 · 3 件工具」；
+   撑满会把件数甩到开关旁边，中间空一大片，像缺了列头 */
+.sk-desc { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sk-tools {
+  flex: none; font-family: var(--f-mono); font-size: var(--fs-label);
+  color: var(--ink-4); white-space: nowrap;
+}
 @media (max-width: 560px) {
-  .cap-stat { gap: 12px; }
+  .sk-tools { display: none; }
   .cap-apps { grid-template-columns: 1fr; }
   .cap-seg { width: 100%; }
   .cap-seg-btn { flex: 1; text-align: center; padding: 6px 4px; }
@@ -2749,38 +2786,45 @@ html[data-mode="light"] { color-scheme: light; }
    26 人平铺时，用户是在滚动里找人；这里把「重复的同岗成员」先收起来。
    chip 带计数：点了才知道会剩几个（此前筛完才发现是空的）。 */
 .roster-filter { display: flex; gap: 4px; padding: 0 12px 8px; flex-wrap: wrap; }
+/* 筛选 chip：只有选中态上底色（2026-11-16）。
+   全部上底色时，四个药丸并排就是一面按钮墙，把标题和列表都压下去了。 */
 .rf-chip {
-  padding: 3px 9px; border-radius: 999px;
+  padding: 2px 8px; border-radius: 999px;
   font-size: var(--fs-label); color: var(--ink-4);
-  background: var(--sheet-3); cursor: pointer;
+  background: none; cursor: pointer;
   display: inline-flex; align-items: baseline; gap: 4px;
 }
 .rf-chip .n { font-family: var(--f-mono); font-variant-numeric: tabular-nums; opacity: .75; }
 .rf-chip.zero { opacity: .5; }
 
-/* ---------- 消耗看板（2026-11-15 重做）：一张表、一人一行。
-   列＝名字 / 占比条 / 消耗 / 命中率；条形共用同一把尺子（相对最大消耗），
-   缓存命中不再单独占一块，直接落在同一行的右端。没人跑过活就整块不渲染（JSX 侧控制）。 ---------- */
+/* ---------- 消耗看板（2026-11-16 收紧）：一张表、一人一行。
+   列＝成员 / 占比条 / 消耗 / 命中率。成员列定宽 + 省略号，条形吃剩余宽度，
+   所以所有行的列起点是齐的；身份标（指挥/验收）跟在名字之后，不再挤进名字的省略区
+   （旧版列宽 74px，"验收员 + 验收"两段文字直接压在一起）。
+   没人跑过活就整块不渲染（JSX 侧控制）。 ---------- */
 .usage-board { padding: 2px 12px 10px; display: flex; flex-direction: column; gap: 1px; }
+/* 表头靠一条发丝线与数据分开：没有线时它读起来像第三行数据 */
 .ub-head {
-  display: flex; align-items: center; gap: 8px; padding: 0 0 3px;
+  display: flex; align-items: center; gap: 8px; padding: 0 6px 5px; margin-bottom: 3px;
   font-family: var(--f-mono); font-size: var(--fs-label); color: var(--ink-4);
+  box-shadow: 0 1px 0 var(--rule-soft);
 }
 .ub-row {
   display: flex; align-items: center; gap: 8px;
-  padding: 3px 0; font-size: var(--fs-label);
+  padding: 4px 6px; margin: 0 -6px;
+  font-size: var(--fs-label);
 }
 /* 指挥那一行比成员整档抬一层：底色 + 字重 + 词标，三处同向，不靠单一色块 */
 .ub-row.lynn {
   background: var(--desk-3); border-radius: var(--r-s);
-  padding: 4px 6px; margin: 0 -6px 3px;
+  margin-bottom: 3px;
 }
 .ub-name {
-  flex: none; width: 74px; color: var(--ink-2);
+  flex: none; width: 96px; min-width: 0; color: var(--ink-2);
   display: flex; align-items: center; gap: 5px;
-  overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
 }
-.ub-head .ub-name { width: 74px; }
+/* 名字是本列唯一可伸缩的东西：超长自己省略，身份标始终完整可见 */
+.ub-nm { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ub-row.lynn .ub-name { color: var(--ink); font-weight: 600; }
 /* 「指挥」是身份说明，不是按钮：不上底色（有底色会被当成能点的筛选条）。
    也刻意不用铜色——铜色留给验收员，两个身份标撞色就分不清了。 */
@@ -2823,8 +2867,8 @@ html[data-mode="light"] { color-scheme: light; }
 .ub-row.lynn .ub-hit { color: var(--ink-2); }
 /* 没消耗的人不占表行，末尾一句话交代：名单完整，又不给空条形发位置 */
 .ub-rest { padding: 3px 0 0; font-size: var(--fs-label); color: var(--ink-4); }
-.rf-chip:hover { color: var(--ink-2); }
-.rf-chip.on { color: var(--ink); background: var(--hover-bg); }
+.rf-chip:hover { color: var(--ink-2); background: var(--sheet-3); }
+.rf-chip.on { color: var(--ink); background: var(--sheet-3); }
 .tgroup-toggle {
   flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px;
   background: none; color: inherit; cursor: pointer; text-align: left;
@@ -2922,6 +2966,8 @@ html[data-mode="light"] { color-scheme: light; }
   background: none; color: var(--ink-3); font-size: var(--fs-meta); text-align: left;
 }
 .feed-history:hover { background: var(--hover-bg); color: var(--ink-2); }
+/* 渲染窗口到上限（P6-2 / C2）：不装成可点的按钮，如实说明更早的内容去哪了 */
+.feed-history-cap { cursor: default; opacity: 0.75; }
 
 /* ============================================================
    2026-11-11 · 对话排版 / 对象区分 / 跟踪时间线 / 内置预览
@@ -2967,6 +3013,11 @@ html[data-mode="light"] { color-scheme: light; }
 }
 .fv-who.lynn .fv-tag { color: var(--blue); }
 .fv-who.system .fv-tag { color: var(--ink-3); }
+/* 成员中途发言（2026-11-16）：疑问/风险要一眼看见（他可能在等人接），进展/结论保持弱化。
+   只改标签字色，不加底色与描边——群时间线的层级靠底色与留白，不靠装饰。 */
+.feed-item.talk[data-badge="疑问"] .fv-tag { color: var(--blue); }
+.feed-item.talk[data-badge="风险"] .fv-tag { color: var(--red); }
+.feed-item.talk[data-badge="结论"] .fv-tag { color: var(--ink-2); }
 /* 任务号 / 轮次 / 耗时：属于"调试细节"，压成弱化尾注，能省则省、长了就截 */
 .fv-sub {
   flex: 1 1 auto; min-width: 0;
@@ -3565,4 +3616,48 @@ html[data-mode="light"] { color-scheme: light; }
   .pet-hit-fx { display: none; }
   /* 关掉淡出后底层必须直接藏掉，否则同样会透出重影 */
   .pet-layer-base { display: none; }
+}
+/* ---------- 插件错误隔离卡（P9-1）----------
+ * 一个 UI 插件崩了只留这一块，旁边的界面照常工作。
+ * 设计上刻意"低调但不隐藏"：用 warn 色描边提示异常，但不用刺眼红——
+ * 插件出错是常态，不该让用户以为整个应用坏了。 */
+.plugin-error {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 10px 12px; margin: 6px 0;
+  border-radius: var(--r-s);
+  background: var(--desk-2);
+  box-shadow: inset 0 0 0 1px var(--edge);
+}
+.plugin-error-head { display: flex; align-items: baseline; gap: 8px; }
+.plugin-error-head b { color: var(--ink); font-size: var(--fs-body); font-weight: 600; }
+.plugin-error-head small { color: var(--ink-3); font-size: var(--fs-meta); }
+.plugin-error-body {
+  margin: 0; padding: 6px 8px;
+  background: var(--desk-3); border-radius: var(--r-s);
+  color: var(--ink-2); font-size: var(--fs-meta);
+  white-space: pre-wrap; word-break: break-word;
+  max-height: 120px; overflow: auto;
+}
+.plugin-error-actions { display: flex; gap: 8px; }
+.plugin-error-note { color: var(--ink-3); font-size: var(--fs-meta); }
+/* ---------- 插件包导入（P9-4）----------
+ * 两个入口（zip / 目录）+ 逐条失败原因。
+ * 失败列表用等宽字：stage 是机读词（manifest/entry/conflict），
+ * 对齐之后用户能一眼看出"卡在哪一步"。 */
+.plugin-import { display: flex; flex-direction: column; gap: 8px; }
+.plugin-import-issues {
+  margin: 6px 0 0; padding-left: 18px;
+  color: var(--ink-2); font-size: var(--fs-meta); line-height: 1.6;
+}
+.plugin-import-issues code {
+  color: var(--brass); font-size: var(--fs-meta);
+  margin-right: 4px;
+}
+.plugin-import-hint { display: block; margin-top: 6px; color: var(--ink-3); font-size: var(--fs-meta); }
+/* 指令台：插件命令加载失败的提示（P11-1）。
+ * 用 brass（预算/消耗色）而不是红：命令没加载不是错误，是"有些东西没生效"。 */
+.cmdk-err {
+  padding: 6px 14px;
+  color: var(--brass); font-size: var(--fs-meta);
+  box-shadow: inset 0 1px 0 var(--edge);
 }

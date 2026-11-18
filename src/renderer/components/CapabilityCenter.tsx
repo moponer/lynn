@@ -11,6 +11,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import type { CSSProperties } from "react";
 import type { RpcContracts } from "../../shared/contract";
 import { useUiPlugins } from "../desk/ui-host";
+import { PluginImportPanel } from "./PluginImportPanel";
 import { fmtTime } from "../desk/model";
 import { useT } from "../i18n";
 import { askConfirm } from "./ConfirmCard";
@@ -224,6 +225,18 @@ export function CapabilityCenter({
     };
   }, [plugins.length, mcp, skills.length, schedules.length, conn]);
 
+  /** 分段标签上的计数（2026-11-16：原来单独一排计数与标签同序同位，等于同一句话说两遍） */
+  const countOf = (k: Section) =>
+    k === "plugins"
+      ? `${counts.plugins}`
+      : k === "mcp"
+        ? `${counts.mcp}`
+        : k === "skills"
+          ? `${counts.skills}`
+          : k === "auto"
+            ? `${counts.auto}`
+            : `${counts.apps}/${counts.appsTotal}`;
+
   /** 预装卡（四类共用）：来源、先决条件、配套技能、已装状态 */
   const PresetCard = ({ p }: { p: PresetRow }) => (
     <div className="sf-market-card" key={`${p.kind}:${p.id}`}>
@@ -292,6 +305,23 @@ export function CapabilityCenter({
     if (p.tier === "L2") return { label: t("plugins.kindCmd"), title: "L2" };
     return { label: t("plugins.kindDeclarative"), title: p.tier };
   };
+  /**
+   * 插件版本面板（P12-1）：改插件不用卸载重装。
+   * 展开在列表下方而不是弹窗——版本列表通常只有几条，弹窗反而更绕。
+   */
+  const [verOf, setVerOf] = useState<string | null>(null);
+  const [vers, setVers] = useState<{ dir: string; version: string; at: string; bytes: number }[]>([]);
+  const [verKeep, setVerKeep] = useState(5);
+  const openVersions = async (id: string) => {
+    if (verOf === id) {
+      setVerOf(null);
+      return;
+    }
+    const r = await window.lynn.rpc("plugins.versions", { id });
+    setVers(r.versions ?? []);
+    setVerKeep(r.keep ?? 5);
+    setVerOf(id);
+  };
   const slotOnly = uiPlugins.filter((u) => !plugins.some((p) => p.id === u.id));
   const themePlugins = plugins.filter((p) => p.theme && p.enabled);
 
@@ -354,6 +384,14 @@ export function CapabilityCenter({
                     >
                       {t("plugins.probe")}
                     </button>
+                    {/* P12-1：改插件不用卸载重装——看历史版本、一键回滚 */}
+                    <button
+                      type="button"
+                      className="sf-btn"
+                      onClick={() => void openVersions(p.id)}
+                    >
+                      {t("plugins.versions")}
+                    </button>
                     <Switch
                       on={p.enabled}
                       title={p.enabled ? t("plugins.disable") : t("common.enable")}
@@ -367,6 +405,52 @@ export function CapabilityCenter({
                   </div>
                 );
               })}
+            </div>
+          )}
+          {/*
+            版本面板（P12-1）：展开在列表下方。
+            空态要说清"更新之后才会有历史版本"——否则用户会以为坏了。
+          */}
+          {verOf && (
+            <div className="sf-group">
+              <div className="sf-group-head">
+                <b>{t("plugins.versionsOf", { id: verOf })}</b>
+                <small>{t("plugins.versionsKeep", { n: verKeep })}</small>
+              </div>
+              {vers.length === 0 ? (
+                <p className="sf-empty">{t("plugins.versionsEmpty")}</p>
+              ) : (
+                <div className="sf-list">
+                  {vers.map((v) => (
+                    <div className="sf-row" key={v.dir}>
+                      <div className="sf-row-main">
+                        <b>v{v.version}</b>
+                        <small className="mono">
+                          {v.dir} · {(v.bytes / 1024).toFixed(1)}KB
+                        </small>
+                      </div>
+                      <button
+                        type="button"
+                        className="sf-btn"
+                        onClick={() =>
+                          void window.lynn.rpc("plugins.rollbackVersion", { id: verOf, versionDir: v.dir }).then((r) => {
+                            setMsg({
+                              ok: r.ok,
+                              text: r.ok ? t("plugins.rollbackVersionOk", { version: r.version ?? "" }) : r.issues.map((i) => i.message).join("；"),
+                            });
+                            if (r.ok) {
+                              setVerOf(null);
+                              void refreshPlugins();
+                            }
+                          })
+                        }
+                      >
+                        {t("plugins.rollbackToThis")}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
           {pluginErrors.length > 0 && <div className="sf-result bad">{pluginErrors.join("；")}</div>}
@@ -385,6 +469,16 @@ export function CapabilityCenter({
             </button>
           </div>
         </div>
+      </div>
+
+      {/* 从插件包装（P9-4）：补上"只有 RPC、界面点不到"的缺口。
+          放在插件列表下方：用户先看到已装的，再决定要不要装新的。 */}
+      <div className="sf-group">
+        <div className="sf-group-head">
+          <b>{t("pluginImport.title")}</b>
+          <small>{t("pluginImport.hint")}</small>
+        </div>
+        <PluginImportPanel onImported={() => void refreshPlugins()} />
       </div>
 
       <PresetGroup kind="plugin" />
@@ -621,10 +715,20 @@ export function CapabilityCenter({
                     <span className="sf-badge">{LEVEL_LABEL[s.level] ? t(LEVEL_LABEL[s.level]) : s.level}</span>
                     {s.disabled && <span className="sf-badge warn">{t("skills.off")}</span>}
                   </b>
-                  <small title={s.dir}>{s.description || t("skills.noDesc")}</small>
-                  <small className="mono">
-                    {s.allowedTools.length ? s.allowedTools.join("、") : t("skills.noTools")}
-                  </small>
+                  {/* 描述是主体，白名单只是"激活后收窄到哪"（2026-11-16）：
+                      一长串工具名单独占一行时会被读成正文，把技能名彻底压住。
+                      这里只报件数，完整清单在悬停里。 */}
+                  <div className="sk-meta">
+                    <small className="sk-desc" title={s.dir}>
+                      {s.description || t("skills.noDesc")}
+                    </small>
+                    <span
+                      className="sk-tools"
+                      title={s.allowedTools.length ? s.allowedTools.join("、") : t("skills.noTools")}
+                    >
+                      {s.allowedTools.length ? t("skills.toolCount", { n: s.allowedTools.length }) : t("skills.noTools")}
+                    </span>
+                  </div>
                 </div>
                 <Switch
                   on={!s.disabled}
@@ -893,24 +997,8 @@ export function CapabilityCenter({
       <h3>{t("cap.title")}</h3>
       <p className="sf-lede">{t("cap.lede")}</p>
 
-      <div className="cap-stat">
-        <span>
-          {t("cap.tabPlugins")} <b>{counts.plugins}</b>
-        </span>
-        <span>
-          {t("cap.tabMcp")} <b>{counts.mcp}</b>
-        </span>
-        <span>
-          {t("cap.tabSkills")} <b>{counts.skills}</b>
-        </span>
-        <span>
-          {t("cap.tabAuto")} <b>{counts.auto}</b>
-        </span>
-        <span>
-          {t("cap.tabApps")} <b>{counts.apps}/{counts.appsTotal}</b>
-        </span>
-      </div>
-
+      {/* 计数并进标签（2026-11-16）：原来标签与计数各占一排、同序同位，
+          等于把同一句话说了两遍，而 lede 已经交代过这里有什么。 */}
       <div className="cap-seg" role="tablist">
         {SECTIONS.map((s) => (
           <button
@@ -922,6 +1010,7 @@ export function CapabilityCenter({
             onClick={() => onSection(s.k)}
           >
             {t(s.labelKey)}
+            <span className="n">{countOf(s.k)}</span>
           </button>
         ))}
       </div>

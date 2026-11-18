@@ -28,18 +28,30 @@ const LYNN_TOOLS = [
   "dissolve_team",
   // 2026-11-13：记忆要能删一条（forget_memory）与读清单（read_memory）——归风铃自己管
   "forget_memory",
+  // P9-2 从插件包装（zip 或目录）——她自开发的产物也走这条路
+  "install_plugin",
+  // P12-1 版本管理：看历史版本 / 回滚（改插件不用卸载重装）
+  "list_plugin_versions",
+  // P8-2 自举三件套 + P9-2 装包（2026-11-17）：看清单 / 开关 / 卸载 / 从包安装
+  // 放在这里是为了保持数组的字母序（install < list < nudge < read）
+  "list_plugins",
   // 2026-11-04：指挥者要能"管"——催办在跑的成员、停掉明显做不到的单
   "nudge_member",
   // 2026-11-12：验收前读产物正文（只看文件在不在会把骨架稿当成品）
   "read_artifact",
   "read_memory",
+  // 2026-11-16 群内协作：成员会中途提问/报风险，回答与纠正归她（成员没有问领导的通道）
+  "reply_member",
   "report_to_user",
   "review_result",
+  "rollback_plugin",
   "save_memory",
   // 2026-11-12：群公告（全局段）只有风铃能写——成员看不到群，也不该改群的分工
   "set_group_notice",
+  "set_plugin_enabled",
   "ship_plugin",
   "stop_task",
+  "uninstall_plugin",
 ];
 
 /** 执行类工具：这些只发给成员，永远不该出现在她的工具面里 */
@@ -73,7 +85,7 @@ const member = (over = {}) => ({
   ...over,
 });
 
-test("风铃的工具面恰好是 18 件管理工具", () => {
+test("风铃的工具面恰好是 26 件管理工具", () => {
   assert.deepEqual([...AGENT_TOOL_NAMES].sort(), LYNN_TOOLS);
 });
 

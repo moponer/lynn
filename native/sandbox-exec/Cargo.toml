@@ -1,0 +1,17 @@
+[package]
+name = "sandbox-exec"
+version = "0.1.0"
+edition = "2021"
+description = "Lynn 成员的进程级沙箱（AppContainer，无网络 + Job Object 限额）"
+
+# 刻意**不引任何 crate**：全部走 use 出来的系统 DLL 导出。
+# 理由：本项目三条硬约束是「完全本地 / 离线可用 / 随包分发」。引 windows crate 会把
+# crates.io 的依赖树和编译链带进来，`cargo build` 就不再是离线可复现的了。
+# 裸 FFI 的代价是代码啰嗦，但换来的是「clone 下来就能编」。
+[dependencies]
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+panic = "abort"

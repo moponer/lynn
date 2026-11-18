@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useT } from "../i18n";
 import type { KernelEvent } from "../../shared/contract";
 import type { AvatarState } from "../../shared/avatar";
 import { PetStage } from "./PetStage";
@@ -38,6 +39,7 @@ function eventToState(ev: KernelEvent): AvatarState | null {
 const TRANSIENT_MS = 2600;
 
 export function Pet() {
+  const t = useT();
   const [state, setState] = useState<AvatarState>("idle");
   const resetTimer = useRef<number | null>(null);
   /** 结果态保护窗：done 之后内核常紧跟着发 turn(busy=false)，别让「搞定啦」被秒冲掉 */
@@ -82,7 +84,7 @@ export function Pet() {
       <button
         type="button"
         className="pet-close"
-        title="收起桌宠"
+        title={t("look.petClose")}
         onClick={(e) => {
           e.stopPropagation();
           void window.lynn.rpc("pet.close");

@@ -1,9 +1,10 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useT } from "../i18n";
 import type { FeedCard, FeedMention } from "../../shared/contract";
 import { Icon, type IconName } from "../components/Icon";
 import { RichText } from "../components/RichText";
 import { MemberAvatar } from "./MemberAvatar";
+import { FEED_MAX_VISIBLE, FEED_PAGE_SIZE, feedWindow, feedAwaitingLynn, nextVisibleCount } from "./feed-window";
 
 /**
  * 滚动容器（参考 tether-ai 的 stick-to-bottom）：
@@ -26,6 +27,25 @@ export function FeedScroller({ resetKey, children }: { resetKey?: string; childr
     userScroll.current = false;
     toEnd();
   }, [resetKey]);
+  /**
+   * 「暂停贴底跟随」（2026-11-17 P6-2 / 18 章 C4）。
+   *
+   * 原来的毛病：点「更早的往来」把 scrollTop 归零，但贴底跟随还开着——
+   * 下一次内容变化又把你拽回底部，**展开历史等于没展开**。
+   * 这里给滚动容器一个明确的"我主动去读历史了"的入口：关掉跟随，
+   * 用户自己滚回底部时 onScroll 会重新打开（离底 <96px 就算回到底部）。
+   *
+   * 用 window 事件而不是 ref 传递：FeedScroller 与 FeedView 不是父子，
+   * 为了一个开关去穿透几层 props 不划算，事件语义也更清楚。
+   */
+  useEffect(() => {
+    const pause = () => {
+      stick.current = false;
+      userScroll.current = true;
+    };
+    window.addEventListener("lynn:feed-pause-follow", pause);
+    return () => window.removeEventListener("lynn:feed-pause-follow", pause);
+  }, []);
   // 每次渲染（含流式补字）都贴底；用户主动上翻过就不抢
   useLayoutEffect(() => {
     if (stick.current) toEnd();
@@ -260,6 +280,8 @@ const BADGE_ICON: Record<string, IconName> = {
   顾问: "eye", 汇报: "clip", "需要你拍板": "warn", 工具: "term", 已拦截: "shield",
   出站: "globe", 提醒: "clock", 心跳: "clock", 记忆: "brain",
   已停止: "x", 未完成: "warn", 崩溃: "warn", 放行: "check",
+  // 成员的中途发言（2026-11-16）：进展=在推、结论=想清了、疑问=要人答、风险=前提有问题
+  进展: "target", 结论: "check", 疑问: "info", 风险: "warn",
 };
 
 /**
@@ -267,9 +289,9 @@ const BADGE_ICON: Record<string, IconName> = {
  * 正文一律走 Markdown（标题、列表、表格、代码块），纯文本直出只会出现在思考块里。
  * 不做聊天气泡（设计规范 §2.1），层级靠底色、字距与左侧的细色条。
  */
-const FEED_PAGE_SIZE = 80;
+// 窗口相关的常量与纯函数都在 ./feed-window.ts（P6-2 抽出去的：C1/C2/C3/C5 都在那里）
 
-export function FeedView({
+function FeedViewInner({
   cards,
   empty,
   onAction,
@@ -293,45 +315,19 @@ export function FeedView({
   const [showHistory, setShowHistory] = useState(false);
   const [visibleCount, setVisibleCount] = useState(FEED_PAGE_SIZE);
   const t = useT();
-  // 分割点 = 最后一条"你"的消息：它之前的全是上一回合的账
-  let split = -1;
-  if (collapseHistory) {
-    for (let i = cards.length - 1; i >= 0; i -= 1) {
-      if (cards[i].kind === "user") {
-        split = i;
-        break;
-      }
-    }
-  }
-  const historyCount = split > 0 ? split : 0;
-  const base = collapseHistory && !showHistory && split > 0 ? cards.slice(split) : cards;
-  // 权威 cards 原样保留，只给渲染加窗口；更早的内容每次按 80 条补回，不截断、不删数据。
-  const recent = base.slice(-visibleCount);
-  // 带可行动作的错误卡即使被折叠成「历史」也要留在屏上：用户刚发了新消息，
-  // 上一条 429/5xx 的「重试」入口不能凭空消失（2026-11-11 修）。
-  const pinned = cards
-    .filter((c) => c.kind === "system" && Boolean(c.code) && Boolean(c.action) && c.action !== "none")
-    .slice(-1);
-  const visible = pinned.length && !recent.some((c) => c.id === pinned[0].id) ? [...pinned, ...recent] : recent;
   /**
-   * 群里被 @ 的消息是否还没人接（群聊模式）：
-   * 其后还没有风铃的回应 → 标「待风铃处理」。纯界面判断，不额外烧 token。
-   * 判定与内核 pendingMentions 一致：出错的卡不算回应（模型挂掉的重试提示也是 lynn 卡）。
+   * 窗口计算全部交给纯函数 `feedWindow`（P6-2）。
+   *
+   * 组件只留一行 useMemo：依赖是 (cards, collapseHistory, showHistory, visibleCount)，
+   * 别的一概不参与——这样 C3（每帧从尾扫）与 C5（渲染内现算）都不再随渲染跑，
+   * 而且那份逻辑现在可以被单测钉住（项目还没有 RTL）。
    */
-  const awaitingLynn = (() => {
-    const set = new Set<string>();
-    let answered = false;
-    for (let i = visible.length - 1; i >= 0; i -= 1) {
-      const c = visible[i];
-      if (c.code) continue;
-      if (c.author?.kind === "lynn" || (c.kind === "lynn" && (c.text ?? "").trim())) {
-        answered = true;
-        continue;
-      }
-      if (c.kind === "user" && c.mentions?.length && !answered) set.add(c.id);
-    }
-    return set;
-  })();
+  const win = useMemo(
+    () => feedWindow(cards, { collapseHistory, showHistory, visibleCount }),
+    [cards, collapseHistory, showHistory, visibleCount],
+  );
+  const { historyCount, base, visible, capped, moreAvailable } = win;
+  const awaitingLynn = useMemo(() => feedAwaitingLynn(visible), [visible]);
   if (cards.length === 0) return <div className="feed-empty">{empty ?? "还没有往来。"}</div>;
   return (
     <div className="feed">
@@ -341,7 +337,8 @@ export function FeedView({
           className="feed-history"
           onClick={() => {
             setShowHistory(true);
-            // 展开后跳回最前面读：贴底跟随会被这次程序化滚动关掉
+            // 展开是要**读历史**：先明确暂停贴底跟随，否则下一次内容变化就把刚翻出来的内容拽回底部
+            window.dispatchEvent(new Event("lynn:feed-pause-follow"));
             requestAnimationFrame(() => {
               const node = document.querySelector<HTMLElement>("[data-feed-scroll]");
               if (node) node.scrollTop = 0;
@@ -351,21 +348,29 @@ export function FeedView({
           {t("feed.earlier", { n: historyCount })}
         </button>
       )}
-      {base.length > visibleCount && (
+      {moreAvailable > 0 && (
         <button
           type="button"
           className="feed-history"
           onClick={() => {
-            setVisibleCount((count) => count + FEED_PAGE_SIZE);
-            // 新补的是当前列表前面的内容，回到这一批的起点继续读。
+            // C2：步进有上限，否则翻几次历史就把整段历史挂进 DOM，流式期每帧重排整棵树
+            setVisibleCount((count) => nextVisibleCount(count));
+            // 同上：补回更早的内容也是"读历史"，先暂停贴底跟随
+            window.dispatchEvent(new Event("lynn:feed-pause-follow"));
             requestAnimationFrame(() => {
               const node = document.querySelector<HTMLElement>("[data-feed-scroll]");
               if (node) node.scrollTop = 0;
             });
           }}
         >
-          {t("feed.earlier", { n: Math.min(FEED_PAGE_SIZE, base.length - visibleCount) })}
+          {t("feed.earlier", { n: Math.min(FEED_PAGE_SIZE, moreAvailable) })}
         </button>
+      )}
+      {capped && base.length > visibleCount && (
+        // 到上限了要**说出来**：不给按钮却也不解释，用户只会以为界面坏了
+        <div className="feed-history feed-history-cap">
+          {t("feed.capped", { n: FEED_MAX_VISIBLE })}
+        </div>
       )}
       {visible.map((c, i) => {
         if (c.kind === "user") {
@@ -439,7 +444,7 @@ export function FeedView({
           const tail = [what, c.meta].filter(Boolean).join(" · ");
           const headTag = `${badge}${c.count && c.count > 1 ? ` ×${c.count}` : ""}`;
           return (
-            <div className={`feed-item talk author-${a.kind}`} key={c.id}>
+            <div className={`feed-item talk author-${a.kind}`} data-badge={badge} key={c.id}>
               <Who
                 icon={a.kind === "member" ? "users" : a.kind === "lynn" ? "bell" : "term"}
                 name={speaker}
@@ -500,6 +505,15 @@ export function FeedView({
     </div>
   );
 }
+
+/**
+ * 加 memo（P6-2 / 18 章 F2）：同一个 feed 引用不变时别整块重渲。
+ *
+ * 效果取决于调用方：`Sheet` 里的 `channel` 是 `useMemo([feed])`（稳定，命中 memo），
+ * 而 `jobCards` 是行内派生（每帧新数组，memo 会被击穿）。这一点**如实记在 PROGRESS 里**，
+ * 不假装一处 memo 就把所有入口都优化了。
+ */
+export const FeedView = memo(FeedViewInner);
 
 // 用户只看结果：结论 / 未完成 / 待拍板。证据是内部核对记录，不在回报卡上占位置。
 const REPORT_ROWS: [string, "conclusion" | "unfinished" | "decision"][] = [

@@ -1,0 +1,22 @@
+{
+  "id": "lynn.template.combo",
+  "name": "组合插件（模板）",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "tier": "L1",
+  "engines": { "kernel": ">=0.0.1" },
+  "entry": "index.ts",
+  "permissions": {
+    "fs": [],
+    "net": [],
+    "proc": false,
+    "secrets": []
+  },
+  "contributes": {
+    "tools": ["echo"],
+    "langs": ["lang-zh.json"],
+    "style": "style.css",
+    "commands": ["commands/echo-demo.md"],
+    "skills": ["echo-skill"]
+  }
+}

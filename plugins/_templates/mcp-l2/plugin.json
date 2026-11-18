@@ -1,0 +1,11 @@
+{
+  "id": "lynn.template.mcp",
+  "name": "示例 MCP（模板）",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "tier": "L2",
+  "engines": { "kernel": ">=0.0.1" },
+  "mcp": {
+    "recipe": "recipe.json"
+  }
+}

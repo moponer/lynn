@@ -1,0 +1,23 @@
+{
+  "id": "B5",
+  "title": "批量重命名 200 个文件",
+  "domain": "ops",
+  "role": "implementer",
+  "mode": "execute",
+  "brief": "fixtures/rename/ 下有 200 个文件，名字形如 IMG_0001.JPG。全部改成 2026-trip-0001.jpg（小写扩展名），不得移动目录、不得删除。",
+  "acceptance": [
+    "200 个文件全部改名成功",
+    "扩展名统一为小写 .jpg",
+    "数量不变（200 个）",
+    "没有文件被写到目录外"
+  ],
+  "expected": {
+    "deliverables": [],
+    "checks": [
+      { "type": "count", "dir": "fixtures/rename", "expect": 200 },
+      { "type": "pattern", "dir": "fixtures/rename", "regex": "^2026-trip-\\d{4}\\.jpg$" }
+    ]
+  },
+  "judge": { "auto": true, "script": "checks/B5.mjs" },
+  "limits": { "maxTurns": 8, "budgetTokens": 120000, "minutes": 10 }
+}

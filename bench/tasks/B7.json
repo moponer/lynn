@@ -1,0 +1,24 @@
+{
+  "id": "B7",
+  "title": "断网 / 429 下恢复",
+  "domain": "ops",
+  "role": "implementer",
+  "mode": "execute",
+  "brief": "在端点返回 429（额度类）的情况下派一张小单，验证系统：①不反复重试；②进入冷却并告知；③用户发消息后能恢复；④已读内容不被重新消耗。",
+  "acceptance": [
+    "429 后没有连续重试（同一轮 ≤1 次请求）",
+    "落一张说明卡，含恢复时间",
+    "冷却期内不再派单/巡检",
+    "恢复后同一张单能续跑，不从头读"
+  ],
+  "expected": {
+    "deliverables": [],
+    "checks": [
+      { "type": "log", "kind": "quota_cooldown", "min": 1 },
+      { "type": "log", "assertNoBurst": { "code": "rate_429", "perTurnMax": 1 } },
+      { "type": "card", "contains": ["恢复", "暂停"] }
+    ]
+  },
+  "judge": { "auto": true, "script": "checks/B7.mjs" },
+  "limits": { "maxTurns": 6, "budgetTokens": 60000, "minutes": 10 }
+}

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { BUILTIN_UI_PLUGINS, enabledUiPlugins, pluginsForSlot, type UiPluginManifest, type UiSlot } from "../../shared/ui-plugin";
+import { PluginBoundary } from "../components/PluginBoundary";
 
 /**
  * U 插件宿主（计划书 §4.2.4）。
@@ -91,16 +92,46 @@ export function useUiPlugins(): {
   };
 }
 
-/** 某个卡槽上的插件（按声明顺序） */
+/**
+ * 某个卡槽上的插件（按声明顺序）。
+ *
+ * 2026-11-17 P9-1：每个插件渲染位都套一层 `PluginBoundary`。
+ *
+ * 为什么必须在这里做而不是在调用处：卡槽有 8 个，调用处分散在 Composer/TopRail/
+ * CapabilityCenter 等地方——指望每个调用处都记得套边界，迟早会漏一个。
+ * 放在 `Slot` 里，**只要走卡槽就自动有隔离**，这是结构上的保证而不是纪律上的。
+ *
+ * 一个插件崩了：只留一张可读的错误卡（含插件 id + 摘要 + 重试/停用），
+ * 同卡槽的其它插件与整个界面照常工作。
+ */
 export function Slot({
   slot,
   render,
+  onDisable,
 }: {
   slot: UiSlot;
   render: (p: UiPluginEntry) => React.ReactNode;
+  /** 停用回调（可选）：崩了的插件要能一键关掉，不该逼用户去设置页翻 */
+  onDisable?: (id: string) => void;
 }) {
   const { enabled } = useUiPlugins();
-  return <>{pluginsForSlot(enabled, slot).map((p) => render(p as UiPluginEntry))}</>;
+  return (
+    <>
+      {pluginsForSlot(enabled, slot).map((p) => {
+        const entry = p as UiPluginEntry;
+        return (
+          <PluginBoundary
+            key={entry.id}
+            pluginId={entry.id}
+            pluginName={entry.name}
+            {...(onDisable ? { onDisable: () => onDisable(entry.id) } : {})}
+          >
+            {render(entry)}
+          </PluginBoundary>
+        );
+      })}
+    </>
+  );
 }
 
 /** 磁盘插件的 iframe 宿主：只下发颜色 Token，只收 action/resize */

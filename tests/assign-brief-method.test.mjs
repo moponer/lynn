@@ -7,7 +7,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Kernel } from "../dist/main/kernel.js";
 import { TeamStore } from "../dist/main/team-store.js";
-import { memberSystemPrompt } from "../dist/main/member-runner.js";
+import { memberSystemPrompt, memberTaskIntro } from "../dist/main/member-runner.js";
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), "lynn-brief-"));
 
@@ -57,7 +57,7 @@ const BRIEF =
   "【目标】把 9 月材料整理成月报\n【完成标准】产出月报文件，数字与源材料核对一致\n【材料与位置】材料文件在工作区\n【限制】只做 9 月，不要改源材料";
 
 test("成员提示词：禁区是法、取舍口径、探索型都进成员眼前", () => {
-  const prompt = memberSystemPrompt({
+  const input = {
     profile: {
       name: "林工",
       role: "数据整理员",
@@ -78,13 +78,23 @@ test("成员提示词：禁区是法、取舍口径、探索型都进成员眼�
     priority: "算得对 > 做得全 > 做得快",
     mode: "explore",
     model: { baseUrl: "http://127.0.0.1:9/v1", apiKey: "k", model: "m" },
-  });
-  assert.match(prompt, /不许把测试 skip 掉/, "禁区要进成员提示词");
-  assert.match(prompt, /不许 mock 被测对象/);
-  assert.match(prompt, /违反即不合格/, "禁区是法，不是建议");
-  assert.match(prompt, /算得对 > 做得全 > 做得快/, "取舍口径要明确");
-  assert.match(prompt, /探索型/, "探索型任务另给一套要求");
-  assert.match(prompt, /别硬凑文件|别为了交差硬凑/, "探索型不强压产物");
+  };
+  const prompt = memberSystemPrompt(input);
+  /**
+   * P3-1b：禁区/取舍/探索型是**任务级**内容，已从 system 移到首条 user 的任务段。
+   * 所以这里断言的是「成员真的看得到它们」（两段合起来），
+   * 外加一条更关键的：它们**不许**回到 system 里（那会让同一岗位的每个任务都重发一遍）。
+   */
+  const seen = `${prompt}\n${memberTaskIntro(input)}`;
+  assert.match(seen, /不许把测试 skip 掉/, "禁区要进成员眼前");
+  assert.match(seen, /不许 mock 被测对象/);
+  assert.match(seen, /违反即不合格/, "禁区是法，不是建议");
+  assert.match(seen, /算得对 > 做得全 > 做得快/, "取舍口径要明确");
+  assert.match(seen, /探索型/, "探索型任务另给一套要求");
+  assert.match(seen, /别硬凑文件|别为了交差硬凑/, "探索型不强压产物");
+
+  assert.doesNotMatch(prompt, /不许把测试 skip 掉/, "禁区是任务级的，不许留在 system");
+  assert.doesNotMatch(prompt, /探索型/, "探索型是任务级的，不许留在 system");
 });
 
 test("派单：禁区/取舍/型态落进工单与契约卡", async () => {

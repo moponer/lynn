@@ -21,6 +21,7 @@ export function CommandPalette({
   onPickProject,
   onClearWorkspace,
   onAddReadRoots,
+  onRunPrompt,
 }: {
   desk: Desk;
   onClose: () => void;
@@ -32,10 +33,39 @@ export function CommandPalette({
   onPickProject?: () => void;
   onClearWorkspace?: () => void;
   onAddReadRoots?: () => void;
+  /** 选中插件命令后：把它的 prompt 填进输入台（不直接发送） */
+  onRunPrompt?: (text: string) => void;
 }) {
   const t = useT();
   const [q, setQ] = useState("");
   const [idx, setIdx] = useState(0);
+  /**
+   * 插件斜杠命令（P11-1）。
+   *
+   * 命令 = 一段预置提示词。选中后**填进输入台**（不直接发送）——
+   * 用户还能改几个字再发。这是刻意的：命令是"省打字"，不是"代替你决定"。
+   *
+   * 扫描失败不静默：errors 会显示在面板底部。用户写了命令却没出现时，
+   * 得能看到"为什么"——否则又是一次"写了没反应"。
+   */
+  const [pluginCmds, setPluginCmds] = useState<{ id: string; name: string; description: string; prompt: string; pluginName: string }[]>([]);
+  const [cmdErrors, setCmdErrors] = useState<string[]>([]);
+  useEffect(() => {
+    let alive = true;
+    void window.lynn
+      .rpc("plugins.commands")
+      .then((r) => {
+        if (!alive) return;
+        setPluginCmds(r.commands ?? []);
+        setCmdErrors(r.errors ?? []);
+      })
+      .catch(() => {
+        /* 桥不可用（预览/测试环境）就当没有命令 */
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
   const items = useMemo<CmdItem[]>(() => {
     const list: CmdItem[] = [];
     for (const j of desk.jobs) {
@@ -43,6 +73,16 @@ export function CommandPalette({
     }
     for (const th of desk.threads) {
       list.push({ key: `th:${th.id}`, group: t("cmdk.threads"), label: th.title, hint: fmtTime(th.updatedAt), run: () => onThread?.(th.id) });
+    }
+    // 插件命令排在动作之前：它们是"常用起手式"，比设置/待机更常被选
+    for (const c of pluginCmds) {
+      list.push({
+        key: `cmd:${c.id}`,
+        group: t("cmdk.pluginCommands"),
+        label: c.name,
+        hint: `${c.pluginName}${c.description ? ` · ${c.description}` : ""}`,
+        run: () => onRunPrompt?.(c.prompt),
+      });
     }
     list.push(
       { key: "a:new", group: t("cmdk.actions"), label: t("cmdk.newThread"), run: () => onNew?.() },
@@ -54,7 +94,7 @@ export function CommandPalette({
     );
     return list;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [desk.jobs, desk.threads, t]);
+  }, [desk.jobs, desk.threads, t, pluginCmds]);
   const filtered = q.trim() ? items.filter((i) => i.label.toLowerCase().includes(q.trim().toLowerCase())) : items;
   const sel = Math.min(idx, Math.max(0, filtered.length - 1));
 
@@ -132,6 +172,12 @@ export function CommandPalette({
             </div>
           ))}
         </div>
+        {/*
+          命令加载失败要让用户看见。
+          写了命令却没出现在列表里，如果什么都不显示，用户只会以为"插件系统坏了"——
+          实际原因可能是文件名不合规或文件不存在。这一行就是答案的入口。
+        */}
+        {cmdErrors.length > 0 && <div className="cmdk-err">{t("cmdk.cmdErrors", { n: cmdErrors.length })}</div>}
       </div>
     </div>
   );

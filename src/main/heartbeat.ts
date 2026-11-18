@@ -17,6 +17,11 @@ export interface HeartbeatTaskFact {
   member?: string;
   /** 卡住的机读成因（user_stop / no_report / reject_limit / reconcile / crash）：她按因判断，不是只看个 blocked */
   reason?: string;
+  /**
+   * 这一单的现场摘要（2026-11-16）：进度到哪一步、多久前有动作、交了几件产物、被打回几轮。
+   * 只报成员名字的巡检等于没报——她得知道"要不要重派、卡在哪里"。
+   */
+  note?: string;
 }
 
 export interface HeartbeatScheduleFact {
@@ -70,6 +75,8 @@ export function collectHeartbeatFacts(input: {
   schedules: { id: string; name: string; enabled?: boolean; lastStatus?: string }[];
   /** 群里 @ 了人但风铃还没回应的（由内核从对话流派生） */
   pendingMentions?: { member: string; text: string; at: string }[];
+  /** 单张单的现场摘要（内核给：最后动作 / 产物数 / 打回轮次）；不参与去重签名 */
+  detailOf?: (taskId: string) => string | undefined;
 }): HeartbeatFacts {
   const running = new Set(input.runningTaskIds);
   const awaitingPlan = new Set(input.pendingPlanTaskIds);
@@ -78,13 +85,14 @@ export function collectHeartbeatFacts(input: {
   const orphanTasks: HeartbeatTaskFact[] = [];
   for (const t of input.tasks) {
     if (running.has(t.id) || awaitingPlan.has(t.id)) continue;
+    const note = input.detailOf?.(t.id) || undefined;
     if (REVIEWABLE.has(t.status)) {
-      awaitingReview.push({ taskId: t.id, title: t.title ?? t.id, status: t.status, member: t.member });
+      awaitingReview.push({ taskId: t.id, title: t.title ?? t.id, status: t.status, member: t.member, note });
       continue;
     }
     if (t.status === "in_progress") {
       // 在跑集合里已排除：状态在跑但没人跟，交给风铃判断是崩了还是没交接完
-      orphanTasks.push({ taskId: t.id, title: t.title ?? t.id, status: t.status, member: t.member });
+      orphanTasks.push({ taskId: t.id, title: t.title ?? t.id, status: t.status, member: t.member, note });
       continue;
     }
     if (STALLED.has(t.status)) {
@@ -94,6 +102,7 @@ export function collectHeartbeatFacts(input: {
         status: t.status,
         member: t.member,
         reason: t.blockedReason,
+        note,
       });
     }
   }
@@ -237,17 +246,19 @@ export function heartbeatWakeDecision(input: {
 /** 巡检简报：只摆事实与处置工具面，判断权在她 */
 export function heartbeatPrompt(facts: HeartbeatFacts): string {
   const lines: string[] = ["【心跳巡检】以下是当前需要你关注的机器事实，判断与处置由你做主："];
+  /** 现场摘要跟在名字后面：进度/产物/打回轮次——只报名字的巡检没法判断下一步 */
+  const tail = (t: HeartbeatTaskFact) => (t.note ? `：${t.note}` : "");
   if (facts.awaitingReview.length) {
     lines.push(
       "- 待审查（成员已交回报，等你验收）：" +
-        facts.awaitingReview.map((t) => `${t.taskId}「${t.title}」（${t.member ?? "成员"}）`).join("、"),
+        facts.awaitingReview.map((t) => `${t.taskId}「${t.title}」（${t.member ?? "成员"}${tail(t)}）`).join("、"),
     );
   }
   if (facts.orphanTasks.length) {
     lines.push(
       "- 状态在跑但没人跟（成员已结束或进程重启）：" +
         facts.orphanTasks
-          .map((t) => `${t.taskId}「${t.title}」${t.member ? `（原 ${t.member}）` : ""}`)
+          .map((t) => `${t.taskId}「${t.title}」${t.member ? `（原 ${t.member}${tail(t)}）` : tail(t)}`)
           .join("、"),
     );
   }
@@ -257,7 +268,7 @@ export function heartbeatPrompt(facts: HeartbeatFacts): string {
         facts.stalledTasks
           .map(
             (t) =>
-              `${t.taskId}「${t.title}」（${t.status}${t.reason ? `/${t.reason}` : ""}${t.member ? `·原 ${t.member}` : ""}）`,
+              `${t.taskId}「${t.title}」（${t.status}${t.reason ? `/${t.reason}` : ""}${t.member ? `·原 ${t.member}` : ""}${tail(t)}）`,
           )
           .join("、"),
     );

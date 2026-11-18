@@ -1,0 +1,22 @@
+{
+  "id": "B2",
+  "title": "修一个 bug 并跑测试",
+  "domain": "coding",
+  "role": "implementer",
+  "mode": "execute",
+  "brief": "fixtures/repo-b2 里 sum.js 的 sum() 对空数组返回 NaN，应当返回 0。修好它并让 npm test 通过，不要改测试文件。",
+  "acceptance": [
+    "npm test 退出码 0",
+    "只改 sum.js（不得改测试或断言）",
+    "空数组返回 0，普通数组仍正确"
+  ],
+  "expected": {
+    "deliverables": ["src/sum.js"],
+    "checks": [
+      { "type": "command", "cmd": "npm test", "cwd": "fixtures/repo-b2", "expect": "exit0" },
+      { "type": "diff", "allow": ["src/sum.js"], "deny": ["test/**"] }
+    ]
+  },
+  "judge": { "auto": true, "script": "checks/B2.mjs" },
+  "limits": { "maxTurns": 10, "budgetTokens": 200000, "minutes": 15 }
+}

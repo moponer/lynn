@@ -1,0 +1,7 @@
+{
+  "lang": "en",
+  "strings": {
+    "demo.greeting": "Hello (from the sample language pack)",
+    "demo.hint": "This text comes from a plugin, not the built-in dictionary"
+  }
+}

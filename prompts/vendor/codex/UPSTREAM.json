@@ -1,0 +1,13 @@
+{
+  "upstream": "codex",
+  "sourcePath": "F:\\tmp\\ref-codex\\codex-rs",
+  "license": "Apache-2.0",
+  "vendoredAt": "2026-11-17T07:44:28Z",
+  "note": "Codex 的多代理编排与压缩协议。只取 templates 正文；gpt_5_*_prompt.md 这类整段系统提示词没有引入——我们的编译器自己组装，直接用别人的整段会覆盖掉人设与工具事实。",
+  "files": {
+    "roles/orchestrator.md": "sha256:d3778c3b7bbd32a95b69e588b7d85a05fb6cba6614e6a641a8d5b798647b6a8b",
+    "roles/multi-agent.md": "sha256:68dda6e7fce39efcd8afe394208b6a900f035a4c56cf6c05f546839a74391513",
+    "protocol/compact.md": "sha256:bcdd8c0240c38c88a1beb53b0736a606bed60b278e0170912d4ebbc7d3b419eb",
+    "LICENSE": "sha256:aa5e89edcbbd01fc3fb188a527d8bdc0da5812305cab220c84348c14ea427288"
+  }
+}

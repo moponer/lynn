@@ -1,0 +1,7 @@
+{
+  "lang": "zh",
+  "strings": {
+    "demo.greeting": "你好（来自示例语言包）",
+    "demo.hint": "这条文案是插件提供的，不是内置的"
+  }
+}

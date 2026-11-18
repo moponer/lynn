@@ -4,7 +4,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useT } from "../i18n";
 import { Icon } from "../components/Icon";
-import { Slot, SandboxAction } from "./ui-host";
+import { Slot, SandboxAction, useUiPlugins } from "./ui-host";
 import { UsageMeter } from "../components/UsageMeter";
 import { useTick } from "./use-tick";
 import type { CaptureShot, QueueItem, UsageView } from "../../shared/contract";
@@ -63,6 +63,8 @@ export function ComposerZone({
   initialDraft?: string;
   onDraftChange?: (draft: string) => void;
 }) {
+  /** P9-1：插件崩了要能一键停用（卡槽里的错误卡会用到） */
+  const { toggle: toggleUi } = useUiPlugins();
   const [draft, setDraft] = useState(initialDraft ?? "");
   const [mode, setMode] = useState<"queue" | "steer">("queue");
   const busy = turn.busy;
@@ -410,6 +412,8 @@ export function ComposerZone({
         )}
         <Slot
           slot="composer.action"
+          /* P9-1：崩了的插件要能一键停用，不该逼用户去设置页翻 */
+          onDisable={(id) => toggleUi(id)}
           render={(p) =>
             p.sandbox ? (
               <SandboxAction plugin={p} onAction={(label) => setDraft((d) => `${d}!${label} `)} />

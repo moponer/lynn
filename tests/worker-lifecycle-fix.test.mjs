@@ -243,7 +243,17 @@ setInterval(() => {}, 1000);
 `,
   );
   const { captured, spawnImpl } = captureSpawn();
-  const host = makeL1Host(root, workerEntry, spawnImpl, 2_000);
+  /**
+   * 激活窗口给 8s（原 2s）。
+   *
+   * 这条测试要验的是「**半行缓冲超限**杀进程」，不是「激活超时」。
+   * 假 worker 只写 stdout 不回复，激活必然失败；两个分支谁先到取决于调度。
+   * 缓冲上限 1MB、每 5ms 写 64KB，空载约 80ms 触发；但全量跑时（6 核跑 200+ 文件）
+   * 子进程调度会被拖慢，2s 窗口下常常先撞上超时——那样测到的是超时分支，覆盖不到缓冲上限。
+   *
+   * 放宽是为了让**被测分支**有机会先触发，不是掩盖变慢。
+   */
+  const host = makeL1Host(root, workerEntry, spawnImpl, 8_000);
   const audits = [];
   const originalError = console.error;
   console.error = (...args) => audits.push(args.map(String).join(" "));
