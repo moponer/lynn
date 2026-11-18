@@ -96,5 +96,8 @@
     "remark-gfm": "^4.0.1",
     "typescript": "^5.5.4",
     "vite": "^5.4.3"
+  },
+  "optionalDependencies": {
+    "@larksuiteoapi/node-sdk": "^1.76.0"
   }
 }

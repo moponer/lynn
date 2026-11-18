@@ -146,6 +146,25 @@ interface SettingsFile {
   defaultModelId?: string;
   /** 视觉/OCR 模型（M2-13）：与对话模型解耦，可独立配置 */
   vision?: StoredModelConfig;
+  /**
+   * IM 渠道（2026-11-18 P14-1）。
+   *
+   * 存的是**渠道配置**，不是凭据明文——appSecret 走加密路径后存，
+   * 与模型 Key 同一套（`setEncryptors` 注入的 safeStorage）。
+   */
+  im?: {
+    /** 是否启用本地 IM 端点（默认 false：联网能力必须显式开） */
+    bridgeEnabled?: boolean;
+    feishu?: {
+      appId: string;
+      /** 加密后的 appSecret（与 model.apiKey 同形） */
+      appSecret: { encrypted: boolean; data: string };
+      /** 允许驱动 Agent 的用户 open_id 白名单（空 = 拒绝所有人） */
+      allowOpenIds: string[];
+      allowGroup?: boolean;
+      enabled?: boolean;
+    };
+  };
   prefs?: Partial<Prefs>;
 }
 
@@ -212,6 +231,22 @@ export class SettingsStore {
   /** 视觉/OCR 模型（M2-13）：独立配置，与对话模型解耦；未配置返回 null（调用方如实降级） */
   getVisionModel(): StoredModelConfig | null {
     return this.read().vision ?? null;
+  }
+
+  /**
+   * IM 渠道配置（2026-11-18 P14-1）。
+   *
+   * 返回**原始形态**（secret 仍是加密的），解密由 kernel 做——
+   * 因为 decryptor 是内核注入的，settings 层不该知道怎么解。
+   */
+  getIm(): SettingsFile["im"] | null {
+    return this.read().im ?? null;
+  }
+
+  /** 写 IM 渠道配置（整体替换；调用方负责先把 secret 加密） */
+  saveIm(im: NonNullable<SettingsFile["im"]>): void {
+    const cur = this.read();
+    this.write({ ...cur, im });
   }
 
   getPrefs(): Prefs {

@@ -1517,6 +1517,42 @@ export class Kernel {
    *  - IM 入口需要的是"用户发消息"这一种语义，不该让它能选 internal 轮。
    * 窄接口既是封装，也是**权限收窄**——IM 进来的消息不能伪装成巡检轮。
    */
+  /**
+   * IM 渠道配置（2026-11-18 P14-1）：解密后的形态。
+   *
+   * 为什么由 kernel 提供而不是让 main.ts 直接读 settings：
+   *  - `settings` 是 private；
+   *  - **解密要经 kernel 的 decryptor**（safeStorage），那是内核注入的，
+   *    壳层直接调会绕开这条路径。
+   */
+  imChannels(): {
+    bridgeEnabled: boolean;
+    feishu: { appId: string; appSecret: string; allowOpenIds: string[]; allowGroup: boolean; enabled: boolean } | null;
+  } {
+    const im = this.settings.getIm();
+    const f = im?.feishu;
+    return {
+      bridgeEnabled: im?.bridgeEnabled === true,
+      feishu:
+        f && f.appId && f.appSecret
+          ? {
+              appId: f.appId,
+              appSecret: f.appSecret.encrypted
+                ? this.decryptBlob(Buffer.from(f.appSecret.data, "base64"))
+                : f.appSecret.data,
+              allowOpenIds: f.allowOpenIds ?? [],
+              allowGroup: f.allowGroup === true,
+              enabled: f.enabled === true,
+            }
+          : null,
+    };
+  }
+
+  /** 壳层用的公开日志入口（`log` 是 private，IM 渠道要记审计） */
+  logFromShell(event: string, detail?: Record<string, unknown>): void {
+    this.log(event, detail ?? {});
+  }
+
   imHost(): ImHostDeps {
     return {
       listThreads: () =>

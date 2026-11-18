@@ -11,6 +11,7 @@ import { newRendererLogGate, RENDERER_LOG_LIMITS, rendererLogGate } from "./log-
 import { trayFallbackBuffer, trayIconPaths } from "./tray-icon";
 import { startBridge } from "./im-bridge";
 import { buildImHandlers } from "./im-handlers";
+import { FeishuChannel } from "./im-feishu";
 import { needsUserAttention } from "./notify-policy";
 import { VoiceService } from "./voice";
 import { handleShellRpc, handleKernelAsync, isKernelAsyncMethod, type ShellRpcCtx } from "./shell-rpc";
@@ -106,6 +107,8 @@ const logRenderer = (entry: Record<string, unknown>) => {
 const kernel = new Kernel();
 /** IM 端点句柄（未启用时为 null；退出时要关掉，否则进程退不干净） */
 let imBridge: Awaited<ReturnType<typeof startBridge>> | null = null;
+/** 飞书渠道句柄（未启用为 null；退出时要停，否则 WSClient 的 socket 会让进程退不干净） */
+let feishu: FeishuChannel | null = null;
 // 用系统凭据库加密 API Key（§4.7：凭据只经内核注入，不下发渲染层）
 kernel.setEncryptors(
   (plain) => safeStorage.encryptString(plain),
@@ -579,6 +582,42 @@ app.whenReady().then(async () => {
            */
           console.log(`[im] token: ${imBridge.token}`);
           console.log(`[im] 用法：POST ${imBridge.baseUrl}/api/host.describe`);
+
+          /**
+           * 飞书渠道（2026-11-18 P14-1）：端点起来后按配置启动。
+           *
+           * 三道闸都在 `FeishuChannel` 里：白名单为空拒绝启动、发送者不在白名单忽略、
+           * 群聊默认不响应。这里只负责解密 secret 并传下去。
+           */
+          const fs2 = kernel.imChannels().feishu;
+          if (fs2?.enabled) {
+            try {
+              feishu = new FeishuChannel({
+                config: {
+                  appId: fs2.appId,
+                  appSecret: fs2.appSecret,
+                  allowOpenIds: fs2.allowOpenIds,
+                  allowGroup: fs2.allowGroup,
+                },
+                ask: async (text) => {
+                  const host = kernel.imHost();
+                  host.submitTurn(text);
+                  await host.waitTurn();
+                  // 取这一轮最后一条助手消息作为回答
+                  const msgs = host.threadHistory(host.currentThreadId());
+                  const last = [...msgs].reverse().find((m) => (m as { role?: string }).role === "assistant");
+                  return String((last as { text?: string })?.text ?? "（这一轮没有产出文本）");
+                },
+                log: (event, detail) => kernel.logFromShell(event, detail),
+                onState: (state, detail) => console.log(`[im] 飞书：${state}${detail ? `（${detail}）` : ""}`),
+              });
+              await feishu.start();
+              console.log("[im] 飞书渠道已连接");
+            } catch (err) {
+              // 渠道连不上不该影响应用启动
+              console.error("[im] 飞书渠道启动失败：", err instanceof Error ? err.message : err);
+            }
+          }
         } catch (err) {
           // 端点起不来不该影响应用启动——记日志，继续用本地功能
           console.error("[im] 端点启动失败：", err);
@@ -604,7 +643,13 @@ app.on("before-quit", (event) => {
   quitting = true;
   // 收尾：Pi 子进程与 MCP server 都要停掉，不靠进程退出时被顺带回收
   void (async () => {
-    // IM 端点先关：它监听端口，不关会让进程退不干净
+    // IM 渠道先停：WSClient 持有 socket，不关会让进程退不干净
+    try {
+      feishu?.stop();
+    } catch (err) {
+      console.error("[im] 停止飞书渠道失败：", err);
+    }
+    // 再关端点：它监听端口
     try {
       await imBridge?.close();
     } catch (err) {
