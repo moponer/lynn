@@ -18,7 +18,7 @@ import { fileURLToPath } from "node:url";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.resolve(here, "..");
 
-const DOCS = ["AGENTS.md", "docs/plan/25-plugin-package-spec.md", "docs/plan/24-self-hosting.md"];
+const DOCS = ["AGENTS.md"];
 
 const issues = [];
 
@@ -96,10 +96,17 @@ for (const file of DOCS) {
   checkNodeScripts(file);
 }
 
-// 5) AGENTS.md 必须指向 25 章（插件规范）与 PROGRESS（进度）
+/**
+ * 5) AGENTS.md 必须指向**仓库里真实存在**的入口。
+ *
+ * 2026-11-18 调整：原来强制指向 `docs/plan/25-*.md` 与 `PROGRESS.md`，
+ * 但那两个文档已从 git 历史中移除（不公开）。检查改成指向**仓库内**的真入口：
+ * 模板目录、校验脚本、manifest 定义。这样这条检查仍然有意义（agent 找得到东西），
+ * 又不会因为"指向一个不存在的文件"而假通过。
+ */
 {
   const agents = fs.readFileSync(path.join(repo, "AGENTS.md"), "utf8");
-  for (const must of ["25-plugin-package-spec.md", "PROGRESS.md", "plugins/_templates"]) {
+  for (const must of ["plugins/_templates", "check-plugin-package.mjs", "plugin-manifest.ts"]) {
     if (!agents.includes(must)) issues.push(`AGENTS.md: 缺少对「${must}」的指引——agent 会找不到`);
   }
 }

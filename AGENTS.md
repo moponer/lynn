@@ -21,7 +21,7 @@
 
 | 你要做什么 | 读这个 |
 |---|---|
-| **了解插件包格式** | [`docs/plan/25-plugin-package-spec.md`](docs/plan/25-plugin-package-spec.md) |
+| **了解插件包格式** | 读 `plugins/_templates/` 里任意一个模板的 `plugin.json` + README（模板即规范） |
 | **复制一个能跑的起点** | `plugins/_templates/`（6 个模板，覆盖 L0 主题 / L0 语言包 / L1 工具 / U 界面 / L1 组合 / L2 MCP） |
 | **校验你写的东西** | `node scripts/check-plugin-package.mjs <你的目录>` |
 
@@ -62,9 +62,8 @@ node scripts/check-plugin-package.mjs my-plugin   # 2. 校验（报错会告诉�
 它们不是四种插件，是同一个 `contributes` 里的几个字段。
 
 **八种能力现在都有加载器**（主题 / 形态 CSS / 语言包 / 工具 / UI 卡槽 / 内置视图 / 斜杠命令 / MCP），
-且都**声明即生效**——写了不会没反应。具体哪些能用、哪些刻意不给，
-看 [`docs/plan/26-plugin-coverage.md`](docs/plan/26-plugin-coverage.md)
-——那里按「真能用 / 声明了没接 / 刻意不给」三档列清。
+且都**声明即生效**——写了不会没反应。判断某个能力是否真的生效，
+看 `contributes` 里的字段在 `src/main/` 有没有对应加载器。
 
 ## 4. 改代码前必须跑什么
 
@@ -87,8 +86,8 @@ npm run lint:i18n        # JSX 里的中文必须走 t()
 | **`dist/` 是构建产物，不要手改** | `npm run build:main` 会覆盖 |
 | **改提示词必须更新 golden 快照** | `npm run bench:golden:write`；否则 `tests/prompt-golden.test.mjs` 红 |
 | **vendor 目录只读** | `prompts/vendor/` 有 sha256 清单；改它会被 `lint:prompts` 抓出来。改动只能进 `prompts/adapters/` |
-| **工具面顺序不能随便变** | 顺序决定请求前缀；变了等于把缓存命中率打回原点（见 `docs/plan/03-cache-hit.md`） |
-| **不要给插件 `system-prompt` 替换权** | 同上：前缀稳定性是命中率地基（见 `docs/plan/23-plugin-model-research.md`） |
+| **工具面顺序不能随便变** | 顺序决定请求前缀；变了等于把缓存命中率打回原点 |
+| **不要给插件 `system-prompt` 替换权** | 同上：前缀稳定性是命中率地基 |
 | **删插件是移到 `plugins-trash/`** | 不是永久删除——装错的可能是用户自己写的 |
 | **改插件是"更新"不是"覆盖"** | 更新会先归档旧版（`plugins/.versions/`），可一键回滚 |
 
@@ -113,17 +112,18 @@ npm run lint:i18n        # JSX 里的中文必须走 t()
 - `contributes.skills`（P12-2）：技能改成按声明加载，不再是"填不填都一样"
 - `commands` / `mcp`（P11-1/P11-2）：斜杠命令与 L2 MCP 都接上了加载器
 
-## 8. 权威文档在哪
+## 8. 设计文档在哪
 
-| 主题 | 文件 |
+**设计文档不在本仓库**（原 plan 目录已从 git 历史中移除，只保留在本机与内部归档）。
+仓库里能找到的设计信息只有：
+
+| 主题 | 位置 |
 |---|---|
-| 方案总览与批次 | `docs/plan/00-overview.md`、`20-roadmap.md` |
-| **当前进度（先看这个）** | `docs/plan/PROGRESS.md` |
-| 插件化评估 | `docs/plan/22-pluginization.md` |
-| 参照物研究（Codex / DSH） | `docs/plan/23-plugin-model-research.md` |
-| 自举与自修改边界 | `docs/plan/24-self-hosting.md` |
-| **插件包规范** | `docs/plan/25-plugin-package-spec.md` |
-| **插件覆盖范围（能做什么）** | `docs/plan/26-plugin-coverage.md` |
+| 插件包格式 | `plugins/_templates/` 的模板 + README（模板即规范） |
+| 插件能力边界 | `src/main/plugin-manifest.ts` 的 `contributes` 定义 |
+| 隔离与权限 | `src/main/l1-sandbox.ts` / `l1-net-guard.ts` 的头注 |
+| 缓存与前缀稳定性 | `src/main/prefix-hash.ts` 的头注 |
+| 测试约定 | 本文件第 6 节 |
 
-**动手前先读 `PROGRESS.md`**：它记着哪项做完了、哪项标了"待生产复测"、
-以及哪些坑已经踩过。跳过它会重复别人的错误。
+**动手前先读代码里的头注**：这个项目的关键决策都写在实现文件顶部
+（为什么这么设计、踩过什么坑），比外部文档更可靠——因为它跟代码一起演进。

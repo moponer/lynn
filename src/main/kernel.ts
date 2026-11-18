@@ -10238,7 +10238,7 @@ export class Kernel {
 
       // 清 Key / 视觉/OCR 模型（M2-13）已迁到 rpc-registry.ts 的 config 域
       // 消息平台（M2-16）已于 2026-11-18 移除：它只能发不能收（receiveSupported: false），
-      // 是半成品。IM 能力改由插件提供（见 docs/plan/30-dsh-im-port-plan.md）。
+      // 是半成品。IM 能力改由插件提供（外部网关通过本地 HTTP 端点接入）。
 
       case "trust.set": {
         const { trusted } = params as { trusted: boolean };

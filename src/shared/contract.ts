@@ -1201,7 +1201,7 @@ export interface RpcContracts {
    *
    * 原实现只有 feishuSend / qqSend——**只能发不能收**（`msg.status` 自己就写着
    * `receiveSupported: false`），是半成品。IM 能力改由插件提供，
-   * 见 docs/plan/30-dsh-im-port-plan.md。
+   * IM 能力改由插件提供（外部网关通过本地 HTTP 端点接入）。
    */
   /** MCP 扩展服务器（L2）：配置里有什么 + 实际连上没连上，两个都如实报 */
   "mcp.status": {

@@ -290,7 +290,7 @@ function bindUpdater(): void {
 }
 
 // 消息平台（M2-16）已于 2026-11-18 移除：只能发不能收的半成品。
-// IM 能力改由插件提供，见 docs/plan/30-dsh-im-port-plan.md。
+// IM 能力改由插件提供（外部网关通过本地 HTTP 端点接入）。
 
 async function handleUpdateRpc(method: string): Promise<unknown> {
   // update.check 可能在这里才补配 feed；幂等初始化必须先于任何 feed 校验。

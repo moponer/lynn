@@ -129,7 +129,7 @@ test("模板目录被 .gitignore 排除（它们随源码走，但不该出现�
  */
 test("模板不许声明没有加载器的字段（commands / mcp）", () => {
   /**
-   * 已知没有加载器的字段：见 docs/plan/26-plugin-coverage.md 第 3 节。
+   * 已知没有加载器的字段（历史上踩过：写了不生效比不支持更伤信任）。
    *
    * 2026-11-18 更新：
    *  - `commands` 补上了加载器（`plugin-commands.ts`）
@@ -164,7 +164,7 @@ test("模板声明的每种能力都真有加载器", () => {
       assert.ok(
         HAS_LOADER.has(field),
         `${name} 声明了 ${field}，但它不在"有加载器"清单里。` +
-          `要么先实现加载器，要么从模板移除（见 docs/plan/26-plugin-coverage.md）`,
+          `要么先实现加载器，要么从模板移除`,
       );
     }
   }

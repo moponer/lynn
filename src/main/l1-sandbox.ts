@@ -168,7 +168,7 @@ export function isSelfInstallSafe(plan: SandboxPlan): { ok: boolean; reason: str
       ok: false,
       reason:
         "网络未强制：Node 权限模型不支持拦网络，且未注入网络守卫。插件仍可直连外网，" +
-        "所以 L1 自启用保持关闭（见 docs/plan/24-self-hosting.md 3.1）",
+        "所以 L1 自启用保持关闭（这是实测结论，不是保守）",
     };
   }
   return { ok: true, reason: "" };
