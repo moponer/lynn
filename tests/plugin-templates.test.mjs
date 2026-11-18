@@ -156,8 +156,10 @@ test("模板声明的每种能力都真有加载器", () => {
    * 这张表是"真能用"的白名单（26 章第 1 节）。
    * 新增能力要先有加载器再进这张表——反过来会让模板演示空功能。
    * 2026-11-18 P12-2：`skills` 也进来了（之前是"填不填都加载"，现在按声明加载）。
+   * 2026-11-18 设计系统重建：`icons` 进来了 —— 主进程 checkIconsFile 消毒 +
+   * plugin-host 读文件 + 渲染层 applyPluginIcons 覆盖内置字形，三段都通了。
    */
-  const HAS_LOADER = new Set(["theme", "style", "langs", "tools", "slots", "view", "commands", "skills"]);
+  const HAS_LOADER = new Set(["theme", "icons", "style", "langs", "tools", "slots", "view", "commands", "skills"]);
   for (const name of templateDirs()) {
     const manifest = JSON.parse(fs.readFileSync(path.join(TEMPLATES, name, "plugin.json"), "utf8"));
     for (const field of Object.keys(manifest.contributes ?? {})) {

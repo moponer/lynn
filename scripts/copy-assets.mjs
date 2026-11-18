@@ -54,4 +54,16 @@ function copyTree(src, dst, label) {
 
 const nAssets = copyFlat(path.join(repo, "assets"), path.join(repo, "dist", "assets"), "assets/");
 const nPrompts = copyTree(path.join(repo, "prompts"), path.join(repo, "dist", "prompts"), "prompts/");
-console.log(`[copy-assets] ${nAssets} files → dist/assets，${nPrompts} files → dist/prompts`);
+/**
+ * vendored 渠道实现（2026-11-18 P16-1）。
+ *
+ * 它们是 `.mjs`，tsc 不会编译也不会拷贝——但运行时真的需要（飞书/钉钉/QQ/
+ * 企微/微信六个渠道的实现都在里面）。不复制的话 `dist` 里缺文件，
+ * 表现为"渠道加载失败：Cannot find module"。
+ */
+const nImVendor = copyTree(
+  path.join(repo, "src", "main", "im", "vendor"),
+  path.join(repo, "dist", "main", "im", "vendor"),
+  "src/main/im/vendor/",
+);
+console.log(`[copy-assets] ${nAssets} files → dist/assets，${nPrompts} files → dist/prompts，${nImVendor} files → dist/main/im/vendor`);

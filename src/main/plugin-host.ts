@@ -30,6 +30,8 @@ export interface PluginView {
   theme?: ThemeFile;
   /** L0 形态层：插件目录里的 CSS 内容（已过 checkPluginCss），无则不下发 */
   style?: string;
+  /** L0 图标覆盖：图标名 → SVG 内联路径串（已过 checkIconsFile） */
+  icons?: Record<string, string>;
   /** M3-08：L0 语言包插件才有（可能同时带 zh/en 多个包） */
   langs?: LangPack[];
   /** 占用的卡槽（设置页据此标注「控制台视图」等） */
@@ -91,6 +93,67 @@ export function checkThemeFile(raw: unknown): { ok: boolean; issues: string[]; t
 
   if (!theme.dark && !theme.light) issues.push("至少要有 dark 或 light 一组 Token");
   return { ok: issues.length === 0, issues, theme: issues.length ? undefined : theme };
+}
+
+/** 单个图标的体积上限：一条 24 网格的路径串通常 < 1KB */
+const ICON_MAX_LEN = 4096;
+const ICON_MAX_COUNT = 128;
+/** 图标名：与内置 PATHS 同一命名（小写字母/数字/连字符） */
+const ICON_NAME_RE = /^[a-z][a-z0-9-]{0,31}$/;
+/**
+ * 图标覆盖文件的准入检查（contributes.icons → icons.json）。
+ *
+ * 只接受 **SVG 内联路径**（<path>/<circle>/<rect>/<line>/<polyline>/<polygon>/<g>），
+ * 一律拒绝：script / 事件属性 / 外链 / foreignObject / style / image。
+ * 为什么这么严：这段字符串最终会进 dangerouslySetInnerHTML ——
+ * 主机若放行，等于给插件一个在宿主 DOM 里执行脚本的通道。
+ */
+export function checkIconsFile(raw: unknown): { ok: boolean; issues: string[]; icons?: Record<string, string> } {
+  const issues: string[] = [];
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return { ok: false, issues: ["icons.json 必须是对象（图标名 → SVG 路径串）"] };
+  }
+  const src = raw as Record<string, unknown>;
+  // 允许一个可选的元数据键，避免主题作者写说明时被拒
+  const keys = Object.keys(src).filter((k) => k !== "$comment");
+  if (keys.length === 0) issues.push("icons.json 至少要有一个图标");
+  if (keys.length > ICON_MAX_COUNT) issues.push(`图标数量超过 ${ICON_MAX_COUNT} 上限`);
+
+  const icons: Record<string, string> = {};
+  for (const name of keys) {
+    const val = src[name];
+    if (!ICON_NAME_RE.test(name)) {
+      issues.push(`图标名 "${name}" 不合法（小写字母开头，只含小写字母/数字/连字符，≤32 字符）`);
+      continue;
+    }
+    if (typeof val !== "string") {
+      issues.push(`图标 "${name}" 的值必须是字符串`);
+      continue;
+    }
+    const markup = val.trim();
+    if (markup.length > ICON_MAX_LEN) {
+      issues.push(`图标 "${name}" 超过 ${ICON_MAX_LEN} 字符`);
+      continue;
+    }
+    if (/<script|<foreignObject|<iframe|<style|<image|<use/i.test(markup)) {
+      issues.push(`图标 "${name}" 含禁止的元素（script/foreignObject/iframe/style/image/use）`);
+      continue;
+    }
+    if (/\son[a-z]+\s*=/i.test(markup) || /javascript\s*:/i.test(markup)) {
+      issues.push(`图标 "${name}" 含事件属性或 javascript: URL`);
+      continue;
+    }
+    if (/href|xlink/i.test(markup)) {
+      issues.push(`图标 "${name}" 不得引用外部资源（href/xlink）`);
+      continue;
+    }
+    if (!/^<[a-z]/i.test(markup)) {
+      issues.push(`图标 "${name}" 必须是一段 SVG 标记（以 < 开头）`);
+      continue;
+    }
+    icons[name] = markup;
+  }
+  return { ok: issues.length === 0, issues, icons: issues.length ? undefined : icons };
 }
 
 export class PluginHost {
@@ -183,8 +246,8 @@ export class PluginHost {
         const slotList = m.contributes?.slots ?? [];
         // L0 是声明式档：主题 / 形态层 / 语言包 / 内置视图卡槽，任一种都算有产物。
         // 占内置视图卡槽的插件零代码（组件在宿主注册表里），所以 slots 单独也算数。
-        if (!themeRel && !langRels.length && !slotList.length && !m.contributes?.style) {
-          errors.push(`${entry.name}: L0 插件至少要有 contributes.theme / style / langs / slots 之一（技能加载器后续接入）`);
+        if (!themeRel && !langRels.length && !slotList.length && !m.contributes?.style && !m.contributes?.icons) {
+          errors.push(`${entry.name}: L0 插件至少要有 contributes.theme / icons / style / langs / slots 之一`);
           continue;
         }
         if (themeRel) {
@@ -220,6 +283,26 @@ export class PluginHost {
             continue;
           }
           view.style = css;
+        }
+        // 图标覆盖：与 theme.json 同级纪律（路径不出插件目录 + 消毒），坏文件整插件跳过
+        const iconsRel = m.contributes?.icons;
+        if (iconsRel) {
+          const iconsPath = path.resolve(dir, iconsRel);
+          if (!iconsPath.startsWith(path.resolve(dir) + path.sep) || !fs.existsSync(iconsPath)) {
+            errors.push(`${entry.name}: icons 文件不存在或跳出插件目录`);
+            continue;
+          }
+          try {
+            const iconsCheck = checkIconsFile(JSON.parse(fs.readFileSync(iconsPath, "utf-8")));
+            if (!iconsCheck.ok) {
+              errors.push(`${entry.name}: ${iconsCheck.issues.join("；")}`);
+              continue;
+            }
+            view.icons = iconsCheck.icons;
+          } catch {
+            errors.push(`${entry.name}: icons.json 不是合法 JSON`);
+            continue;
+          }
         }
         // M3-08：语言包——同一沙箱纪律（路径不出插件目录 + 结构校验），坏包跳过不拖垮其它
         const packs: LangPack[] = [];

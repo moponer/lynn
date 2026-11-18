@@ -13,7 +13,7 @@ import { startBridge } from "./im-bridge";
 import { buildChannelHandlers } from "./im-dsh-shapes";
 import { recordEvent } from "./im-ledger";
 import { mapKernelEvent } from "./im-event-map";
-import { FeishuChannel } from "./im-feishu";
+import { createFeishuVendorChannel } from "./im-feishu-vendor";
 import { needsUserAttention } from "./notify-policy";
 import { VoiceService } from "./voice";
 import { handleShellRpc, handleKernelAsync, isKernelAsyncMethod, type ShellRpcCtx } from "./shell-rpc";
@@ -110,7 +110,7 @@ const kernel = new Kernel();
 /** IM 端点句柄（未启用时为 null；退出时要关掉，否则进程退不干净） */
 let imBridge: Awaited<ReturnType<typeof startBridge>> | null = null;
 /** 飞书渠道句柄（未启用为 null；退出时要停，否则 WSClient 的 socket 会让进程退不干净） */
-let feishu: FeishuChannel | null = null;
+let feishu: Awaited<ReturnType<typeof createFeishuVendorChannel>> | null = null;
 // 用系统凭据库加密 API Key（§4.7：凭据只经内核注入，不下发渲染层）
 kernel.setEncryptors(
   (plain) => safeStorage.encryptString(plain),
@@ -622,30 +622,28 @@ app.whenReady().then(async () => {
           console.log(`[im] 用法：POST ${imBridge.baseUrl}/api/host.describe`);
 
           /**
-           * 飞书渠道（2026-11-18 P14-1）：端点起来后按配置启动。
+           * 飞书渠道（2026-11-18 P16-2）：用 **vendored 原实现**，不是手写版。
            *
-           * 三道闸都在 `FeishuChannel` 里：白名单为空拒绝启动、发送者不在白名单忽略、
-           * 群聊默认不响应。这里只负责解密 secret 并传下去。
+           * 手写版只有"收文本 → 跑一轮 → 回文本"（约 260 行）；
+           * vendored 版（608 KB / 26 个文件）有卡片、流式、斜杠命令、群历史、
+           * 语音、审批、二维码修复——能力差一个量级。手写版已被取代。
+           *
+           * 这里只做三件事：解密 secret、把本地桥的地址与 token 传下去、
+           * 把状态打到日志。渠道逻辑全在 vendor 里。
            */
           const fs2 = kernel.imChannels().feishu;
           if (fs2?.enabled) {
             try {
-              feishu = new FeishuChannel({
+              feishu = await createFeishuVendorChannel({
                 config: {
                   appId: fs2.appId,
                   appSecret: fs2.appSecret,
                   allowOpenIds: fs2.allowOpenIds,
                   allowGroup: fs2.allowGroup,
                 },
-                ask: async (text) => {
-                  const host = kernel.imHost();
-                  host.submitTurn(text);
-                  await host.waitTurn();
-                  // 取这一轮最后一条助手消息作为回答
-                  const msgs = host.threadHistory(host.currentThreadId());
-                  const last = [...msgs].reverse().find((m) => (m as { role?: string }).role === "assistant");
-                  return String((last as { text?: string })?.text ?? "（这一轮没有产出文本）");
-                },
+                bridgeBaseUrl: imBridge.baseUrl,
+                bridgeToken: imBridge.token,
+                dataRoot: kernel.dataRoot,
                 log: (event, detail) => kernel.logFromShell(event, detail),
                 onState: (state, detail) => console.log(`[im] 飞书：${state}${detail ? `（${detail}）` : ""}`),
               });
@@ -683,7 +681,7 @@ app.on("before-quit", (event) => {
   void (async () => {
     // IM 渠道先停：WSClient 持有 socket，不关会让进程退不干净
     try {
-      feishu?.stop();
+      await feishu?.stop();
     } catch (err) {
       console.error("[im] 停止飞书渠道失败：", err);
     }

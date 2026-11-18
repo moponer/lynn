@@ -340,6 +340,21 @@ const ratio = (a, b) => {
 }
 
 // ============================================================
+// 10b) 圆角：只许用 --r-* 令牌（50% 是"圆"，不是圆角档）
+// ============================================================
+for (const file of SHEETS) {
+  if (file === TOKENS_FILE) continue;
+  const text = readCode(file);
+  text.split("\n").forEach((line, idx) => {
+    const m = /border-radius:\s*([^;]+)/.exec(line);
+    if (!m) return;
+    if (/var\(--r-/.test(m[1])) return;
+    if (/^(0|50%|inherit)(\s|;|$)/.test(m[1].trim())) return;
+    fail(file, idx + 1, `圆角必须走令牌：${line.trim().slice(0, 60)}`);
+  });
+}
+
+// ============================================================
 // 11) 层级：z-index 只许用令牌
 // ============================================================
 for (const file of SHEETS) {

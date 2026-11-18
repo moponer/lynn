@@ -58,6 +58,16 @@ export interface PluginManifest {
   entry?: string;
   contributes?: {
     theme?: string;
+    /**
+     * L0 声明式图标覆盖：指向 icons.json。
+     *
+     * 为什么需要：图标是"视觉语言"的一部分。一个主题插件如果只能换颜色、
+     * 换不了字形，那它做出的是"同一个界面的不同色"，不是另一套皮肤。
+     *
+     * 安全边界（与 theme.json / style.css 同级）：只接受 SVG **内联路径**
+     * 字符串，禁止 script / 事件属性 / 外链 —— 见 plugin-host 的 checkIconsFile。
+     */
+    icons?: string;
     skills?: string[];
     /**
      * 斜杠命令（P11-1）。两种写法：
@@ -211,6 +221,15 @@ export function checkManifest(raw: unknown): ManifestCheck {
     }
     if (contributes.theme !== undefined && tier === "L0" && typeof contributes.theme !== "string") {
       fail("contributes.theme", "L0 主题必须指向 theme.json");
+    }
+    if (contributes.icons !== undefined) {
+      if (tier !== "L0") {
+        fail("contributes.icons", "图标覆盖是 L0 声明式能力（只有主题/皮肤档可以声明）");
+      } else if (typeof contributes.icons !== "string" || !contributes.icons.trim()) {
+        fail("contributes.icons", "图标覆盖必须是非空相对路径");
+      } else if (!contributes.icons.endsWith(".json")) {
+        fail("contributes.icons", "图标覆盖必须是 .json 文件");
+      }
     }
     if (contributes.style !== undefined) {
       if (typeof contributes.style !== "string" || !contributes.style.trim()) {
