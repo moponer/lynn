@@ -1780,6 +1780,35 @@ export interface RpcContracts {
     };
   };
   /**
+   * IM 渠道（P14-2）：读状态 / 存飞书配置。
+   *
+   * **只回传"有没有配过 secret"，不回传明文**——凭据不下发渲染层是项目既有约定。
+   */
+  "im.status": {
+    params: void;
+    result: {
+      bridgeEnabled: boolean;
+      feishu: {
+        appId: string;
+        secretSet: boolean;
+        allowOpenIds: string[];
+        allowGroup: boolean;
+        enabled: boolean;
+      } | null;
+    };
+  };
+  "im.saveFeishu": {
+    params: {
+      appId: string;
+      /** 空 = 不修改已存的 secret（用户只改别的字段时不必重输） */
+      appSecret?: string;
+      allowOpenIds: string[];
+      allowGroup?: boolean;
+      enabled?: boolean;
+    };
+    result: { ok: boolean; error?: string };
+  };
+  /**
    * 插件版本（P12-1）：列出历史版本 / 回滚到某一版。
    * 更新走 `plugins.import` 带 `override: true`（会先归档旧版）。
    */

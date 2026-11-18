@@ -10095,6 +10095,86 @@ export class Kernel {
         return { plugins: r.plugins, errors: r.errors } as RpcContracts[M]["result"];
       }
 
+      /**
+       * IM 渠道状态（P14-2）。
+       *
+       * **不回传 secret 明文**：只告诉界面"配过没配过"。
+       * 这是"凭据只经内核注入，不下发渲染层"的具体落实。
+       */
+      case "im.status": {
+        const ch = this.imChannels();
+        return {
+          bridgeEnabled: ch.bridgeEnabled,
+          feishu: ch.feishu
+            ? {
+                appId: ch.feishu.appId,
+                secretSet: Boolean(ch.feishu.appSecret),
+                allowOpenIds: ch.feishu.allowOpenIds,
+                allowGroup: ch.feishu.allowGroup,
+                enabled: ch.feishu.enabled,
+              }
+            : null,
+        } as RpcContracts[M]["result"];
+      }
+
+      /**
+       * 存飞书配置（P14-2）。
+       *
+       * `appSecret` 为空 = 不修改已存的（用户只改白名单时不必重输）。
+       * 加密走 `this.encryptBlob`——与模型 API Key 同一条路径。
+       */
+      case "im.saveFeishu": {
+        const p = params as {
+          appId: string;
+          appSecret?: string;
+          allowOpenIds: string[];
+          allowGroup?: boolean;
+          enabled?: boolean;
+        };
+        const appId = String(p.appId ?? "").trim();
+        if (!appId) return { ok: false, error: "appId 不能为空" } as RpcContracts[M]["result"];
+        const ids = (p.allowOpenIds ?? []).map((s) => String(s).trim()).filter(Boolean);
+        if (!ids.length) {
+          /**
+           * 白名单为空**不允许保存**：渠道会拒绝启动（见 im-feishu.ts），
+           * 与其让用户保存后发现连不上，不如当场说清。
+           */
+          return {
+            ok: false,
+            error: "白名单不能为空：飞书消息来自陌生人，而成员有文件与命令权限。至少填一个 open_id。",
+          } as RpcContracts[M]["result"];
+        }
+        const cur = this.settings.getIm();
+        const old = cur?.feishu;
+        const secretPlain = String(p.appSecret ?? "").trim();
+        let secret: Buffer | null = old?.appSecret ? Buffer.from(old.appSecret.data, "base64") : null;
+        if (secretPlain) {
+          /**
+           * 加密器由 `setEncryptors` 注入（safeStorage）。未注入时（测试/预览环境）
+           * **拒绝保存**而不是明文落盘——明文存凭据比不能存更糟。
+           */
+          if (!this.connectorEnc) {
+            return { ok: false, error: "当前环境没有加密能力（safeStorage 不可用），拒绝明文保存凭据" } as RpcContracts[M]["result"];
+          }
+          secret = this.connectorEnc(secretPlain);
+        }
+        if (!secret) {
+          return { ok: false, error: "还没填 appSecret" } as RpcContracts[M]["result"];
+        }
+        this.settings.saveIm({
+          ...(cur ?? {}),
+          feishu: {
+            appId,
+            appSecret: { encrypted: true, data: secret.toString("base64") },
+            allowOpenIds: ids,
+            allowGroup: p.allowGroup === true,
+            enabled: p.enabled === true,
+          },
+        });
+        this.log("im_feishu_saved", { appId, allow: ids.length, enabled: p.enabled === true });
+        return { ok: true } as RpcContracts[M]["result"];
+      }
+
       /** 插件历史版本（P12-1）：新的在前 */
       case "plugins.versions": {
         const p = params as { id: string };

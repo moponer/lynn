@@ -14,6 +14,7 @@ import { AVATARS, avatarById, avatarFor } from "../../shared/avatars";
 import { MemberAvatar } from "../desk/MemberAvatar";
 import { PerfPanel } from "./PerfPanel";
 import { AboutPane } from "./settings/AboutPane";
+import { ImSettingsPane } from "./settings/ImSettingsPane";
 import { PersonaPane } from "./settings/PersonaPane";
 import { askConfirm } from "./ConfirmCard";
 import { CapabilityCenter } from "./CapabilityCenter";
@@ -40,7 +41,7 @@ const PRESETS = [
   { name: "MiniMax", baseUrl: "https://api.minimax.chat/v1", model: "MiniMax-M2" },
 ];
 
-type Tab = "overview" | "model" | "persona" | "memory" | "team" | "auto" | "plugins" | "safety" | "look" | "data" | "about";
+type Tab = "overview" | "model" | "persona" | "memory" | "team" | "auto" | "plugins" | "safety" | "im" | "look" | "data" | "about";
 
 /** 定时任务（M2-02）：界面只回读调度器的真实状态 */
 type ScheduleRow = {
@@ -76,6 +77,8 @@ const NAV_GROUPS: { capKey: I18nKey; items: { k: Tab; labelKey: I18nKey; icon: I
     capKey: "nav.capSystem",
     items: [
       { k: "safety", labelKey: "nav.safety", icon: "shield" },
+      // IM 渠道（2026-11-18 P14-2）：联网能力，单独一页，默认关
+      { k: "im", labelKey: "nav.im", icon: "layers" },
       { k: "look", labelKey: "nav.look", icon: "pen" },
       { k: "data", labelKey: "nav.data", icon: "folder" },
     ],
@@ -1916,6 +1919,11 @@ export function SettingsModal({
           )}
         </div>
       );
+    }
+
+    if (tab === "im") {
+      // P14-2：IM 渠道设置（独立组件，不往这个 2814 行的文件里再加东西）
+      return <ImSettingsPane />;
     }
 
     if (tab === "plugins") {
