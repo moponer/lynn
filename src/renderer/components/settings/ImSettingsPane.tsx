@@ -31,6 +31,8 @@ interface ImStatus {
     allowOpenIds: string[];
     allowGroup: boolean;
     enabled: boolean;
+    /** 见过的发送者（P18-2）：被白名单拒掉的也在，最有用 */
+    seenSenders: { openId: string; chatType: string; at: string; inAllowList: boolean }[];
   } | null;
 }
 
@@ -96,16 +98,23 @@ export function ImSettingsPane() {
 
   /** 自检结果（P14-3）：逐步展示，用户不用开终端就知道哪里错了 */
   const [checks, setChecks] = useState<{ label: string; ok: boolean; detail: string }[]>([]);
+  /** 自检查出的候选 open_id（P17-1）：点一下填进白名单，不用手抄 */
+  const [candidates, setCandidates] = useState<{ openId: string; source: string; maybeBot?: boolean }[]>([]);
+  const [probeNotes, setProbeNotes] = useState<string[]>([]);
   const [checking, setChecking] = useState(false);
   const runCheck = async () => {
     setChecking(true);
     setChecks([]);
+    setCandidates([]);
+    setProbeNotes([]);
     try {
       const r = await window.lynn.rpc("im.checkFeishu", {
         ...(appId.trim() ? { appId: appId.trim() } : {}),
         ...(appSecret.trim() ? { appSecret: appSecret.trim() } : {}),
       });
       setChecks(r.steps ?? []);
+      setCandidates(r.candidates ?? []);
+      setProbeNotes(r.notes ?? []);
     } catch (e) {
       setChecks([{ label: t("im.checkFailed"), ok: false, detail: e instanceof Error ? e.message : String(e) }]);
     } finally {
@@ -206,6 +215,90 @@ export function ImSettingsPane() {
         </div>
 
         {msg && <div className={`sf-result ${msg.ok ? "ok" : "bad"}`}>{msg.text}</div>}
+
+        {/* 见过的发送者（P18-2）：被白名单拒掉的也在这里，最有用 */}
+        {(f?.seenSenders ?? []).length > 0 && (
+          <div className="sf-list">
+            <div className="sf-row">
+              <div className="sf-row-main">
+                <b>{t("im.seenTitle")}</b>
+                <small>{t("im.seenHint")}</small>
+              </div>
+            </div>
+            {(f?.seenSenders ?? []).map((s) => (
+              <div className="sf-row" key={s.openId}>
+                <div className="sf-row-main">
+                  <b>{s.openId}</b>
+                  <small>
+                    {s.chatType || "?"} · {new Date(s.at).toLocaleString()}
+                    {s.inAllowList ? ` · ${t("im.inList")}` : ` · ${t("im.notInList")}`}
+                  </small>
+                </div>
+                {!s.inAllowList && (
+                  <button
+                    type="button"
+                    className="sf-btn"
+                    onClick={() => {
+                      const cur = allowOpenIds
+                        .split(/[\s,;]+/)
+                        .map((x) => x.trim())
+                        .filter(Boolean);
+                      if (!cur.includes(s.openId)) cur.push(s.openId);
+                      setAllowOpenIds(cur.join("\n"));
+                    }}
+                  >
+                    {t("im.useThis")}
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {candidates.length > 0 && (
+          <div className="sf-list">
+            <div className="sf-row">
+              <div className="sf-row-main">
+                <b>{t("im.candidatesTitle")}</b>
+                <small>{t("im.candidatesHint")}</small>
+              </div>
+            </div>
+            {candidates.map((c) => (
+              <div className="sf-row" key={c.openId}>
+                <div className="sf-row-main">
+                  <b>{c.openId}</b>
+                  <small>
+                    {c.source}
+                    {c.maybeBot ? ` · ${t("im.maybeBot")}` : ""}
+                  </small>
+                </div>
+                {/* 点一下填进白名单：手抄 35 个字符最容易多一个少一个 */}
+                <button
+                  type="button"
+                  className="sf-btn"
+                  onClick={() => {
+                    const cur = allowOpenIds
+                      .split(/[\s,;]+/)
+                      .map((s) => s.trim())
+                      .filter(Boolean);
+                    if (!cur.includes(c.openId)) cur.push(c.openId);
+                    setAllowOpenIds(cur.join("\n"));
+                  }}
+                >
+                  {t("im.useThis")}
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {probeNotes.length > 0 && (
+          <div className="sf-result">
+            {probeNotes.map((n, i) => (
+              <div key={i}>{n}</div>
+            ))}
+          </div>
+        )}
 
         {checks.length > 0 && (
           <div className="sf-list">

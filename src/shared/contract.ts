@@ -1799,6 +1799,8 @@ export interface RpcContracts {
         allowOpenIds: string[];
         allowGroup: boolean;
         enabled: boolean;
+        /** 见过的发送者（P18-2）：被白名单拒掉的也会记在这里 */
+        seenSenders: { openId: string; chatType: string; at: string; inAllowList: boolean }[];
       } | null;
     };
   };

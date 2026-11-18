@@ -1680,6 +1680,25 @@ export class Kernel {
     };
   }
 
+  /**
+   * 记一个"见过的飞书发送者"（P18-2）。
+   *
+   * 渠道收到任何消息（包括被白名单拒掉的）都会调它。设置页据此列出候选
+   * open_id —— 不依赖 `im:chat:readonly`，也不要求用户自己去翻日志。
+   *
+   * 只存 id 与会话 id，**不存消息内容**；最多留 10 条，按时间倒序去重。
+   */
+  noteImSender(seen: { openId: string; chatType: string; chatId: string; at?: string }): void {
+    const im = this.settings.getIm();
+    const f = im?.feishu;
+    if (!f) return;
+    const prev = f.seenSenders ?? [];
+    const at = seen.at ?? new Date().toISOString();
+    // 同一个 open_id 只留最新一条，避免刷屏
+    const next = [{ openId: seen.openId, chatType: seen.chatType, chatId: seen.chatId, at }, ...prev.filter((s) => s.openId !== seen.openId)].slice(0, 10);
+    this.settings.saveIm({ ...(im ?? {}), feishu: { ...f, seenSenders: next } });
+  }
+
   /** 壳层用的公开日志入口（`log` 是 private，IM 渠道要记审计） */
   logFromShell(event: string, detail?: Record<string, unknown>): void {
     this.log(event, detail ?? {});
@@ -10244,6 +10263,16 @@ export class Kernel {
                 allowOpenIds: ch.feishu.allowOpenIds,
                 allowGroup: ch.feishu.allowGroup,
                 enabled: ch.feishu.enabled,
+                /**
+                 * 见过的发送者（P18-2）：界面直接列出候选，不用用户翻日志。
+                 * `inAllowList` 让用户一眼看出"就是差这一个字符"。
+                 */
+                seenSenders: (this.settings.getIm()?.feishu?.seenSenders ?? []).map((s) => ({
+                  openId: s.openId,
+                  chatType: s.chatType,
+                  at: s.at,
+                  inAllowList: ch.feishu!.allowOpenIds.includes(s.openId),
+                })),
               }
             : null,
         } as RpcContracts[M]["result"];

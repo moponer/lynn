@@ -646,6 +646,14 @@ app.whenReady().then(async () => {
                 dataRoot: kernel.dataRoot,
                 log: (event, detail) => kernel.logFromShell(event, detail),
                 onState: (state, detail) => console.log(`[im] 飞书：${state}${detail ? `（${detail}）` : ""}`),
+                /**
+                 * 每条进来的消息都记账（P18-2）：设置页据此列出候选 open_id。
+                 * 被白名单拒掉的消息也会记——那正是用户最需要看到的。
+                 */
+                onSender: (seen) => {
+                  kernel.noteImSender(seen);
+                  console.log(`[im] 收到来自 ${seen.openId} 的消息（${seen.chatType || "?"}）`);
+                },
               });
               await feishu.start();
               console.log("[im] 飞书渠道已连接");

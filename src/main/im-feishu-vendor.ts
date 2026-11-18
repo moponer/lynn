@@ -36,6 +36,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import { isValidOpenId } from "./im-openid";
+import { observeFeishuSdk } from "./im-feishu-observe";
 
 /** 飞书渠道配置 */
 export interface FeishuVendorConfig {
@@ -57,6 +58,13 @@ export interface FeishuVendorDeps {
   dataRoot: string;
   log(event: string, detail?: Record<string, unknown>): void;
   onState?(state: string, detail?: string): void;
+  /**
+   * 每条进来的消息都会回调（P18-2）。
+   *
+   * 壳层用它把"见过的发送者"记进设置，设置页就能直接列出候选 id —— 
+   * 不依赖 `im:chat:readonly`，也不依赖用户先去翻日志。
+   */
+  onSender?(seen: { openId: string; chatType: string; chatId: string }): void;
 }
 
 /** vendored 飞书 runtime 的最小类型（不引 .d.ts：那是 JS） */
@@ -113,7 +121,27 @@ export async function createFeishuVendorChannel(deps: FeishuVendorDeps): Promise
     );
   }
   // 有些包是 { default: {...} } 形态
-  const sdk = ((lark as { default?: unknown }).default ?? lark) as Record<string, unknown>;
+  const rawSdk = ((lark as { default?: unknown }).default ?? lark) as Record<string, unknown>;
+  /**
+   * 包一层：观察每条进来的消息的发送者（P18-2）。
+   *
+   * 为什么必须这样做：**open_id 按应用隔离**，用户必须拿到这个 app 下的 id；
+   * 而 `GET /im/v1/chats` 只返回群、不返回私聊，API 查不到"只私聊过"的情形。
+   * vendored 渠道拒收时又只打一句没有 id 的警告。
+   *
+   * 观察器包裹 SDK 的 `EventDispatcher.register`——vendor 一行不改，
+   * 被白名单拒掉的消息也会先被我们记下来。
+   */
+  const sdk = observeFeishuSdk(rawSdk, (seen) => {
+    deps.log("feishu_sender_seen", {
+      openId: seen.openId,
+      chatType: seen.chatType,
+      chatId: seen.chatId,
+      // 是否在白名单里——用户一眼能看出"就是差这一个字符"
+      inAllowList: config.allowOpenIds.includes(seen.openId),
+    });
+    deps.onSender?.(seen);
+  });
 
   /**
    * 加载 vendor 的 `.mjs`。

@@ -163,6 +163,16 @@ interface SettingsFile {
       allowOpenIds: string[];
       allowGroup?: boolean;
       enabled?: boolean;
+      /**
+       * 见过的发送者（P18-2）：渠道收到消息时自动记录，最多留 10 条。
+       *
+       * 为什么需要：用户不知道自己的 open_id，而
+       * `GET /im/v1/chats` **只返回群不返回私聊**，API 查不到"只私聊过"的情形。
+       * 这里把实际收到的发送者记下来，设置页直接列出候选。
+       *
+       * 只存 open_id 与会话 id，**不存消息内容**。
+       */
+      seenSenders?: { openId: string; chatType: string; chatId: string; at: string }[];
     };
   };
   prefs?: Partial<Prefs>;
