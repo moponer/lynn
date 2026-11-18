@@ -29,6 +29,16 @@
 - **头像**：只用 DiceBear JS 库离线生成 SVG（data-uri），不请求 `api.dicebear.com`，没有外链图片；12 张脸的 seed 固定在 `src/shared/avatars.ts`，同名成员跨会话不换脸。
 - **内置预览**：`preview.read` 只在 `~/.lynn/tasks/<taskId>/` 内读字节，md / html / csv / 代码 / 图片全在渲染层本地排版，不调用 `shell.openPath`；外部程序打开只作为用户显式点击的备选出口。HTML 预览放进 `sandbox=""` 的 iframe，不执行脚本。
 - 消息平台（QQ / 飞书）只走官方开放平台 API + 用户自建应用凭据，不接非官方协议。
+- **IM 渠道实现（vendored 代码）**：`src/main/im/vendor/` 下的 220 个文件来自
+  [xmanrui/dsh-im](https://github.com/xmanrui/dsh-im)（**MIT License**，
+  Copyright (c) 2026 xmanrui）。原样保留，**未做修改**——本项目的改动只发生在
+  `src/main/im-*.ts` 适配层。覆盖六个国内渠道（飞书 / 钉钉 / QQ / 企业微信 /
+  企业微信应用 / 微信）及其公共层（命令系统、审批队列、延迟投递、群历史）。
+  上游版本与拉取时间记录在 `src/main/im/vendor/UPSTREAM.json`；
+  完整许可文本见同目录 `LICENSE`。重新拉取用 `node scripts/vendor-im.mjs`。
+  **注意**：这些渠道运行时才用到的平台 SDK（`@larksuiteoapi/node-sdk`、
+  `dingtalk-stream`、`@tencent-connect/qqbot-nodejs`、`@wecom/aibot-node-sdk`、
+  `qrcode`）放在 `optionalDependencies`——不装也能启动应用，只是对应渠道不可用。
 
 ## 提示词资产（一次性引入，非运行时依赖）
 
@@ -50,7 +60,7 @@
 ## 依赖清单（自动生成）
 
 <!-- AUTO-DEPS START（由 scripts/gen-notices.mjs 生成，勿手改） -->
-共 631 个顶层包（含直接与传递依赖）：
+共 662 个顶层包（含直接与传递依赖）：
 
 ```
 @anthropic-ai/sdk@0.129.0
@@ -176,6 +186,7 @@
 @jridgewell/sourcemap-codec@1.6.0
 @jridgewell/trace-mapping@0.3.31
 @js-preview/excel@1.7.14
+@larksuiteoapi/node-sdk@1.76.0
 @malept/cross-spawn-promise@2.0.0
 @malept/flatpak-bundler@0.4.0
 @napi-rs/canvas-android-arm64@1.1.1
@@ -260,6 +271,7 @@
 @smithy/types@4.19.0
 @stablelib/base64@1.0.1
 @szmarczak/http-timer@4.0.6
+@tencent-connect/qqbot-nodejs@1.0.5
 @types/babel__core@7.20.5
 @types/babel__generator@7.27.0
 @types/babel__template@7.4.4
@@ -284,6 +296,7 @@
 @types/unist@3.0.3
 @ungap/structured-clone@1.4.0
 @vitejs/plugin-react@4.7.0
+@wecom/aibot-node-sdk@1.0.7
 @xmldom/xmldom@0.8.15
 abbrev@4.0.0
 agent-base@9.0.0
@@ -298,6 +311,7 @@ async@3.2.6
 asynckit@0.4.0
 at-least-node@1.0.0
 aws4@1.13.2
+axios@1.21.1
 bail@2.0.2
 balanced-match@4.0.4
 base64-js@1.5.1
@@ -316,6 +330,8 @@ bytestreamjs@2.0.1
 cacheable-lookup@5.0.4
 cacheable-request@7.0.4
 call-bind-apply-helpers@1.0.2
+call-bound@1.0.4
+camelcase@5.3.1
 caniuse-lite@1.0.30001820
 ccount@2.0.1
 chalk@6.0.0
@@ -341,6 +357,7 @@ cross-spawn@7.0.6
 csstype@3.2.3
 data-uri-to-buffer@4.0.1
 debug@4.4.3
+decamelize@1.2.0
 decode-named-character-reference@1.3.0
 decompress-response@6.0.0
 defer-to-connect@2.0.1
@@ -351,6 +368,8 @@ dequal@2.0.3
 detect-node@2.1.0
 devlop@1.1.0
 diff@9.0.0
+dijkstrajs@1.0.3
+dingtalk-stream@2.1.5
 dir-compare@4.2.0
 dmg-builder@26.18.1
 docx-preview@0.4.1
@@ -381,6 +400,7 @@ esbuild@0.21.5
 escalade@3.2.0
 escape-string-regexp@4.0.0
 estree-util-is-identifier-name@3.0.0
+eventemitter3@5.0.4
 execa@8.0.1
 exponential-backoff@3.1.3
 extend@3.0.2
@@ -390,6 +410,8 @@ fast-uri@3.1.9
 fdir@6.5.0
 fetch-blob@3.2.0
 filelist@1.0.6
+find-up@4.1.0
+follow-redirects@1.16.3
 form-data@4.0.6
 formdata-polyfill@4.0.10
 fs-extra@10.1.0
@@ -462,8 +484,12 @@ jws@4.0.1
 keyv@4.5.4
 lazy-val@1.0.5
 lie@3.3.0
+locate-path@5.0.0
 lodash.escaperegexp@4.1.2
+lodash.identity@3.0.0
 lodash.isequal@4.5.0
+lodash.merge@4.6.2
+lodash.pickby@4.6.0
 lodash@4.18.1
 long@5.3.2
 longest-streak@3.1.0
@@ -553,6 +579,7 @@ node-screenshots@0.2.8
 nopt@9.0.0
 normalize-url@6.1.0
 npm-run-path@5.3.0
+object-inspect@1.13.4
 object-keys@1.1.1
 once@1.4.0
 onetime@6.0.0
@@ -560,10 +587,13 @@ openai@7.19.0
 oxlint@1.93.0
 p-cancelable@2.1.1
 p-limit@3.1.0
+p-locate@4.1.0
 p-retry@4.6.2
+p-try@2.2.0
 pako@1.0.11
 parse-entities@4.0.2
 partial-json@0.1.7
+path-exists@4.0.0
 path-is-absolute@1.0.1
 path-key@3.1.1
 pdfjs-dist@6.5.438
@@ -573,6 +603,7 @@ picomatch@4.0.7
 pkijs@3.4.3
 playwright-core@1.64.1
 plist@3.1.0
+pngjs@5.0.0
 postcss@8.5.32
 postject@1.0.0-alpha.6
 pptx-preview@1.0.7
@@ -584,9 +615,12 @@ proper-lockfile@4.1.2
 property-information@7.2.0
 protobufjs@7.6.6
 proxy-agent-negotiate@1.1.0
+proxy-from-env@2.1.0
 pump@3.0.4
 pvtsutils@1.3.6
 pvutils@1.2.0
+qrcode@1.5.4
+qs@6.17.1
 quick-lru@5.1.1
 quickjs-wasi@3.6.2
 react-dom@18.3.1
@@ -601,6 +635,7 @@ remark-rehype@11.1.2
 remark-stringify@11.0.0
 require-directory@2.1.1
 require-from-string@2.0.2
+require-main-filename@2.0.0
 resedit@1.7.2
 resolve-alpn@1.2.1
 responselike@2.0.1
@@ -616,9 +651,14 @@ scheduler@0.23.2
 semver-compare@1.0.0
 semver@6.3.1
 serialize-error@7.0.1
+set-blocking@2.0.0
 setimmediate@1.0.5
 shebang-command@2.0.0
 shebang-regex@3.0.0
+side-channel-list@1.0.1
+side-channel-map@1.0.1
+side-channel-weakmap@1.0.2
+side-channel@1.1.1
 signal-exit@3.0.7
 simple-update-notifier@2.0.0
 source-map-js@1.2.2
@@ -671,6 +711,7 @@ vfile@6.0.3
 vite@5.4.21
 web-streams-polyfill@3.3.3
 webcrypto-core@1.9.2
+which-module@2.0.1
 which@2.0.2
 wrap-ansi@7.0.0
 wrappy@1.0.2
