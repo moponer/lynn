@@ -1699,6 +1699,60 @@ export class Kernel {
     this.settings.saveIm({ ...(im ?? {}), feishu: { ...f, seenSenders: next } });
   }
 
+  /**
+   * 其余国内渠道的解密配置（P19-2）。
+   *
+   * 只返回**已启用**的渠道，并按建渠道需要的形状给好（secret 已解密）。
+   * 解密集中在内核做：`safeStorage` 是内核注入的，壳层直接调会绕开这条路径。
+   */
+  imSimpleChannels(): {
+    channel: "dingtalk" | "qq" | "wecom" | "weixin";
+    primary: string;
+    secret: string;
+    ownerUserId?: string;
+    baseUrl?: string;
+    approvedSenders?: string[];
+  }[] {
+    const map = this.settings.getIm()?.channels ?? {};
+    const out: {
+      channel: "dingtalk" | "qq" | "wecom" | "weixin";
+      primary: string;
+      secret: string;
+      ownerUserId?: string;
+      baseUrl?: string;
+      approvedSenders?: string[];
+    }[] = [];
+    for (const id of ["dingtalk", "qq", "wecom", "weixin"] as const) {
+      const c = map[id];
+      if (!c?.enabled || !c.primary || !c.secret?.data) continue;
+      let secret = "";
+      try {
+        secret = c.secret.encrypted
+          ? this.decryptBlob(Buffer.from(c.secret.data, "base64"))
+          : c.secret.data;
+      } catch (e) {
+        /**
+         * 解密失败**跳过这个渠道**并记日志，不影响其它渠道启动。
+         * 常见原因：换过系统账户 / 换过机器 → DPAPI 密文失效。
+         */
+        this.log("im_channel_decrypt_failed", {
+          channel: id,
+          error: e instanceof Error ? e.message.slice(0, 160) : String(e).slice(0, 160),
+        });
+        continue;
+      }
+      out.push({
+        channel: id,
+        primary: c.primary,
+        secret,
+        ...(c.ownerUserId ? { ownerUserId: c.ownerUserId } : {}),
+        ...(c.baseUrl ? { baseUrl: c.baseUrl } : {}),
+        ...(c.approvedSenders?.length ? { approvedSenders: c.approvedSenders } : {}),
+      });
+    }
+    return out;
+  }
+
   /** 壳层用的公开日志入口（`log` 是 private，IM 渠道要记审计） */
   logFromShell(event: string, detail?: Record<string, unknown>): void {
     this.log(event, detail ?? {});
@@ -10294,6 +10348,93 @@ export class Kernel {
        * 所以这里不能 `await`，而是把异步逻辑收进内部函数并**返回它的 Promise**。
        * 这与 `modelTest` 的写法一致（`return probeEndpoint(...)`）。
        */
+      /** 其余国内渠道状态（P19-2）：只回传"配过没配过"，不回传明文 */
+      case "im.statusSimple": {
+        const map = this.settings.getIm()?.channels ?? {};
+        const list = (["dingtalk", "qq", "wecom", "weixin"] as const).map((id) => {
+          const c = map[id];
+          return {
+            channel: id,
+            primary: c?.primary ?? "",
+            secretSet: Boolean(c?.secret?.data),
+            enabled: c?.enabled === true,
+            ...(c?.ownerUserId ? { ownerUserId: c.ownerUserId } : {}),
+            ...(c?.baseUrl ? { baseUrl: c.baseUrl } : {}),
+            ...(c?.approvedSenders?.length ? { approvedSenders: c.approvedSenders } : {}),
+          };
+        });
+        return { channels: list } as RpcContracts[M]["result"];
+      }
+
+      /**
+       * 存渠道配置（P19-2）。
+       *
+       * `secret` 为空 = 不修改已存的（用户只改开关时不必重输）。
+       * 加密走 `connectorEnc` —— 与模型 API Key、飞书 secret 同一条路径。
+       */
+      case "im.saveSimple": {
+        const p = params as {
+          channel: "dingtalk" | "qq" | "wecom" | "weixin";
+          primary: string;
+          secret?: string;
+          enabled?: boolean;
+          ownerUserId?: string;
+          baseUrl?: string;
+          approvedSenders?: string[];
+        };
+        const id = p.channel;
+        if (!(["dingtalk", "qq", "wecom", "weixin"] as const).includes(id)) {
+          return { ok: false, error: `未知渠道：${String(id)}` } as RpcContracts[M]["result"];
+        }
+        const primary = String(p.primary ?? "").trim();
+        if (!primary) {
+          return {
+            ok: false,
+            error: "主标识不能为空（钉钉 clientId / QQ appId / 企微 bot 标识 / 微信账号 id）",
+          } as RpcContracts[M]["result"];
+        }
+        if (id === "weixin" && !String(p.ownerUserId ?? "").trim()) {
+          /**
+           * 微信必须指定 owner：vendor 用它做 owner 校验。
+           * 不给就是"谁都能驱动 Agent"——比不能启动更糟。
+           */
+          return {
+            ok: false,
+            error: "微信渠道必须填 ownerUserId（允许驱动 Agent 的用户 id）",
+          } as RpcContracts[M]["result"];
+        }
+        const im = this.settings.getIm() ?? {};
+        const channels = { ...(im.channels ?? {}) };
+        const cur = channels[id];
+        const plain = String(p.secret ?? "").trim();
+        let secretBuf: Buffer | null = cur?.secret?.data ? Buffer.from(cur.secret.data, "base64") : null;
+        if (plain) {
+          if (!this.connectorEnc) {
+            return {
+              ok: false,
+              error: "当前环境没有加密能力（safeStorage 不可用），拒绝明文保存凭据",
+            } as RpcContracts[M]["result"];
+          }
+          secretBuf = this.connectorEnc(plain);
+        }
+        if (!secretBuf) {
+          return { ok: false, error: "还没填 secret" } as RpcContracts[M]["result"];
+        }
+        channels[id] = {
+          primary,
+          secret: { encrypted: true, data: secretBuf.toString("base64") },
+          enabled: p.enabled === true,
+          ...(p.ownerUserId ? { ownerUserId: String(p.ownerUserId).trim() } : {}),
+          ...(p.baseUrl ? { baseUrl: String(p.baseUrl).trim() } : {}),
+          ...(p.approvedSenders?.length
+            ? { approvedSenders: p.approvedSenders.map((s) => String(s).trim()).filter(Boolean) }
+            : {}),
+        };
+        this.settings.saveIm({ ...im, channels });
+        this.log("im_simple_saved", { channel: id, primary, enabled: p.enabled === true });
+        return { ok: true } as RpcContracts[M]["result"];
+      }
+
       case "im.checkFeishu": {
         const p = params as { appId?: string; appSecret?: string };
         const cur = this.imChannels().feishu;

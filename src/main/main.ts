@@ -14,6 +14,7 @@ import { buildChannelHandlers } from "./im-dsh-shapes";
 import { recordEvent } from "./im-ledger";
 import { mapKernelEvent } from "./im-event-map";
 import { createFeishuVendorChannel } from "./im-feishu-vendor";
+import { createSimpleChannel, deriveBotId } from "./im-channels";
 import { needsUserAttention } from "./notify-policy";
 import { VoiceService } from "./voice";
 import { handleShellRpc, handleKernelAsync, isKernelAsyncMethod, type ShellRpcCtx } from "./shell-rpc";
@@ -111,6 +112,8 @@ const kernel = new Kernel();
 let imBridge: Awaited<ReturnType<typeof startBridge>> | null = null;
 /** 飞书渠道句柄（未启用为 null；退出时要停，否则 WSClient 的 socket 会让进程退不干净） */
 let feishu: Awaited<ReturnType<typeof createFeishuVendorChannel>> | null = null;
+/** 其余国内渠道的句柄（P19-2）；退出时要逐个停，否则连接不断开 */
+const simpleChannels: Awaited<ReturnType<typeof createSimpleChannel>>[] = [];
 // 用系统凭据库加密 API Key（§4.7：凭据只经内核注入，不下发渲染层）
 kernel.setEncryptors(
   (plain) => safeStorage.encryptString(plain),
@@ -662,6 +665,30 @@ app.whenReady().then(async () => {
               console.error("[im] 飞书渠道启动失败：", err instanceof Error ? err.message : err);
             }
           }
+          /**
+           * 其余国内渠道（P19-2）：钉钉 / QQ / 企业微信 / 微信。
+           *
+           * 逐个启，**一个失败不影响其它**——某个 SDK 没装或有凭据问题，
+           * 不该让飞书也起不来。每个渠道的错误都单独记日志。
+           */
+          for (const cfg of kernel.imSimpleChannels()) {
+            try {
+              const handle = await createSimpleChannel({
+                config: { ...cfg, botId: deriveBotId(cfg.channel, cfg.primary) },
+                bridgeBaseUrl: imBridge.baseUrl,
+                bridgeToken: imBridge.token,
+                dataRoot: kernel.dataRoot,
+                log: (event, detail) => kernel.logFromShell(event, detail),
+                onState: (state, detail) =>
+                  console.log(`[im] ${cfg.channel}：${state}${detail ? `（${detail}）` : ""}`),
+              });
+              await handle.start();
+              simpleChannels.push(handle);
+              console.log(`[im] ${cfg.channel} 渠道已连接`);
+            } catch (err) {
+              console.error(`[im] ${cfg.channel} 渠道启动失败：`, err instanceof Error ? err.message : err);
+            }
+          }
         } catch (err) {
           // 端点起不来不该影响应用启动——记日志，继续用本地功能
           console.error("[im] 端点启动失败：", err);
@@ -692,6 +719,14 @@ app.on("before-quit", (event) => {
       await feishu?.stop();
     } catch (err) {
       console.error("[im] 停止飞书渠道失败：", err);
+    }
+    // 其余渠道也要停：它们各自持有连接（WS / stream）
+    for (const ch of simpleChannels) {
+      try {
+        await ch.stop();
+      } catch (err) {
+        console.error("[im] 停止渠道失败：", err);
+      }
     }
     // 再关端点：它监听端口
     try {

@@ -122,6 +122,73 @@ export function ImSettingsPane() {
     }
   };
 
+  /** 其余国内渠道（P19-2）：共用一套表单，channel 决定写哪一格 */
+  const [simple, setSimple] = useState<
+    { channel: "dingtalk" | "qq" | "wecom" | "weixin"; primary: string; secret: string; enabled: boolean; ownerUserId: string; busy: boolean; msg: string }[]
+  >(
+    (["dingtalk", "qq", "wecom", "weixin"] as const).map((c) => ({
+      channel: c,
+      primary: "",
+      secret: "",
+      enabled: false,
+      ownerUserId: "",
+      busy: false,
+      msg: "",
+    })),
+  );
+  useEffect(() => {
+    void (async () => {
+      try {
+        const r = await window.lynn.rpc("im.statusSimple");
+        setSimple((prev) =>
+          prev.map((s) => {
+            const got = r.channels.find((c) => c.channel === s.channel);
+            return got
+              ? {
+                  ...s,
+                  primary: got.primary,
+                  enabled: got.enabled,
+                  ownerUserId: got.ownerUserId ?? "",
+                }
+              : s;
+          }),
+        );
+      } catch {
+        /* 读不到就保持默认空表单 */
+      }
+    })();
+  }, []);
+
+  const CHANNEL_LABEL: Record<string, string> = {
+    dingtalk: t("im.dingtalk"),
+    qq: t("im.qq"),
+    wecom: t("im.wecom"),
+    weixin: t("im.weixin"),
+  };
+
+  const saveSimple = async (idx: number) => {
+    const s = simple[idx]!;
+    setSimple((prev) => prev.map((x, i) => (i === idx ? { ...x, busy: true, msg: "" } : x)));
+    try {
+      const r = await window.lynn.rpc("im.saveSimple", {
+        channel: s.channel,
+        primary: s.primary.trim(),
+        ...(s.secret.trim() ? { secret: s.secret.trim() } : {}),
+        enabled: s.enabled,
+        ...(s.ownerUserId.trim() ? { ownerUserId: s.ownerUserId.trim() } : {}),
+      });
+      setSimple((prev) =>
+        prev.map((x, i) =>
+          i === idx ? { ...x, busy: false, secret: "", msg: r.ok ? t("im.saved") : (r.error ?? t("im.saveFailed")) } : x,
+        ),
+      );
+    } catch (e) {
+      setSimple((prev) =>
+        prev.map((x, i) => (i === idx ? { ...x, busy: false, msg: e instanceof Error ? e.message : String(e) } : x)),
+      );
+    }
+  };
+
   const f = status?.feishu;
 
   return (
@@ -312,6 +379,60 @@ export function ImSettingsPane() {
             ))}
           </div>
         )}
+      </div>
+
+      {/* 其余国内渠道（P19-2） */}
+      <div className="sf-group">
+        <div className="sf-group-head">
+          <b>{t("im.otherTitle")}</b>
+          <small>{t("im.otherHint")}</small>
+        </div>
+        {simple.map((s, idx) => (
+          <div key={s.channel} className="sf-field">
+            <span className="sf-label">{CHANNEL_LABEL[s.channel]}</span>
+            <input
+              className="sf-input"
+              value={s.primary}
+              onChange={(e) => setSimple((prev) => prev.map((x, i) => (i === idx ? { ...x, primary: e.target.value } : x)))}
+              placeholder={t("im.primaryPlaceholder")}
+              spellCheck={false}
+            />
+            <input
+              className="sf-input"
+              type="password"
+              value={s.secret}
+              onChange={(e) => setSimple((prev) => prev.map((x, i) => (i === idx ? { ...x, secret: e.target.value } : x)))}
+              placeholder={t("im.secretPlaceholder")}
+              spellCheck={false}
+              autoComplete="off"
+            />
+            {s.channel === "weixin" && (
+              <input
+                className="sf-input"
+                value={s.ownerUserId}
+                onChange={(e) =>
+                  setSimple((prev) => prev.map((x, i) => (i === idx ? { ...x, ownerUserId: e.target.value } : x)))
+                }
+                placeholder={t("im.ownerPlaceholder")}
+                spellCheck={false}
+              />
+            )}
+            <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <input
+                type="checkbox"
+                checked={s.enabled}
+                onChange={(e) => setSimple((prev) => prev.map((x, i) => (i === idx ? { ...x, enabled: e.target.checked } : x)))}
+              />
+              <span className="sf-label">{t("im.enable")}</span>
+            </label>
+            <div className="sf-actions">
+              <button type="button" className="sf-btn" disabled={s.busy} onClick={() => void saveSimple(idx)}>
+                {s.busy ? t("im.saving") : t("im.save")}
+              </button>
+              {s.msg && <small className="sf-hint">{s.msg}</small>}
+            </div>
+          </div>
+        ))}
       </div>
 
       {/* 怎么拿到 open_id：不写这一步用户会卡住 */}

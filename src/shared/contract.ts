@@ -1824,6 +1824,39 @@ export interface RpcContracts {
       notes?: string[];
     };
   };
+  /**
+   * 其余国内渠道（P19-2）：钉钉 / QQ / 企业微信 / 微信。
+   *
+   * 它们共用一个形状，所以一个 RPC 管四个渠道——`channel` 决定写哪一格。
+   * **只回传"有没有配过 secret"，不回传明文**（与飞书同一纪律）。
+   */
+  "im.statusSimple": {
+    params: void;
+    result: {
+      channels: {
+        channel: "dingtalk" | "qq" | "wecom" | "weixin";
+        primary: string;
+        secretSet: boolean;
+        enabled: boolean;
+        ownerUserId?: string;
+        baseUrl?: string;
+        approvedSenders?: string[];
+      }[];
+    };
+  };
+  "im.saveSimple": {
+    params: {
+      channel: "dingtalk" | "qq" | "wecom" | "weixin";
+      primary: string;
+      /** 空 = 不修改已存的 secret */
+      secret?: string;
+      enabled?: boolean;
+      ownerUserId?: string;
+      baseUrl?: string;
+      approvedSenders?: string[];
+    };
+    result: { ok: boolean; error?: string };
+  };
   "im.saveFeishu": {
     params: {
       appId: string;

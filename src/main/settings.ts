@@ -174,6 +174,37 @@ interface SettingsFile {
        */
       seenSenders?: { openId: string; chatType: string; chatId: string; at: string }[];
     };
+    /**
+     * 其余国内渠道（P19-2）：钉钉 / QQ / 企业微信 / 微信。
+     *
+     * 它们共用同一个适配工厂，所以配置形状统一成
+     * `{ primary, secret, owner?, enabled }` —— 差别只在字段含义：
+     *
+     * | 渠道 | primary 是 | secret 是 | owner |
+     * |---|---|---|---|
+     * | dingtalk | clientId | clientSecret | approvedSenders（数组） |
+     * | qq | appId | appSecret | — |
+     * | wecom | remoteBotId | secret | — |
+     * | weixin | accountId | token | ownerUserId（必需） |
+     */
+    channels?: Partial<
+      Record<
+        "dingtalk" | "qq" | "wecom" | "weixin",
+        {
+          /** 主标识（appId / clientId / bot 标识 / 账号 id） */
+          primary: string;
+          /** 加密后的 secret（与模型 Key 同一套加密） */
+          secret: { encrypted: boolean; data: string };
+          enabled?: boolean;
+          /** 微信必需：允许驱动 Agent 的用户 id */
+          ownerUserId?: string;
+          /** 微信可选：iLink 服务地址 */
+          baseUrl?: string;
+          /** 钉钉可选：允许的发送者 staffId */
+          approvedSenders?: string[];
+        }
+      >
+    >;
   };
   prefs?: Partial<Prefs>;
 }
