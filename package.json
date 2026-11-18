@@ -59,7 +59,9 @@
     "check:plugin": "node scripts/check-plugin-package.mjs",
     "check:docs": "node scripts/check-docs-links.mjs",
     "probe:im": "node scripts/probe-im-bridge.mjs",
-    "check:feishu": "node scripts/check-feishu.mjs"
+    "check:feishu": "node scripts/check-feishu.mjs",
+    "feishu:admin": "node scripts/run-electron.cjs scripts/feishu-admin.cjs",
+    "feishu:watch": "node scripts/run-electron.cjs scripts/feishu-watch-identity.cjs"
   },
   "dependencies": {
     "@earendil-works/pi-agent-core": "1.4.0",

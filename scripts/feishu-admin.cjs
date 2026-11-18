@@ -26,6 +26,24 @@
  * - 只读命令（whoami/chats/members）不动任何数据
  * - `send` 会**真的以机器人身份发消息**，要显式指定 chat_id
  */
+/**
+ * 保护：如果 ELECTRON_RUN_AS_NODE=1，electron 会按**纯 node** 运行，
+ * `require("electron").app` 是 undefined，后面全崩。与其让人看天书般的
+ * "Cannot read properties of undefined"，不如当场说清怎么改。
+ */
+if (typeof require("electron").app === "undefined") {
+  console.error(
+    [
+      "✖ 检测到 ELECTRON_RUN_AS_NODE 被设置，Electron 退化成纯 Node，拿不到 safeStorage。",
+      "",
+      "  PowerShell:  Remove-Item Env:\ELECTRON_RUN_AS_NODE",
+      "  bash/zsh :  unset ELECTRON_RUN_AS_NODE",
+      "",
+      "然后重跑本命令。",
+    ].join("\n"),
+  );
+  process.exit(2);
+}
 const { app, safeStorage } = require("electron");
 const fs = require("node:fs");
 const os = require("node:os");
