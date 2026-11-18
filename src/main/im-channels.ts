@@ -187,7 +187,8 @@ export async function createSimpleChannel(deps: SimpleChannelDeps): Promise<Chan
   await loadStateStore(state);
 
   // ---------- Harness ----------
-  const harness = await createVendorHarness(bridgeBaseUrl, bridgeToken);
+  /** 第三个参数是渠道标识：桥据此把消息卡标成「你（渠道名）」（P20-1） */
+  const harness = await createVendorHarness(bridgeBaseUrl, bridgeToken, config.channel);
 
   // ---------- 组装 ----------
   const extra = recipe.extra ? await recipe.extra() : {};

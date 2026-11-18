@@ -37,7 +37,7 @@ import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import { isValidOpenId } from "./im-openid";
 import { observeFeishuSdk } from "./im-feishu-observe";
-import { loadStateStore } from "./im-harness";
+import { createVendorHarness, loadStateStore } from "./im-harness";
 
 /** 飞书渠道配置 */
 export interface FeishuVendorConfig {
@@ -165,10 +165,6 @@ export async function createFeishuVendorChannel(deps: FeishuVendorDeps): Promise
   const { StateStore } = (await importEsm(pathToFileURL(path.join(vendorDir, "feishu", "state-store.mjs")).href)) as {
     StateStore: new (p: string) => unknown;
   };
-  const { HarnessClient } = (await importEsm(pathToFileURL(path.join(vendorDir, "shared", "harness-client.mjs")).href)) as {
-    HarnessClient: new (opts: Record<string, unknown>) => unknown;
-  };
-
   // ---------- 状态落盘目录 ----------
   const stateDir = path.join(dataRoot, "im", "feishu");
   fs.mkdirSync(stateDir, { recursive: true });
@@ -176,30 +172,13 @@ export async function createFeishuVendorChannel(deps: FeishuVendorDeps): Promise
   /** 必须显式 load：vendor 不会自己调（见 im-harness.ts 的说明） */
   await loadStateStore(state);
 
-  // ---------- Harness：指向我们的本地桥 ----------
-  const harness = new HarnessClient({
-    baseUrl: bridgeBaseUrl,
-    autostart: false,
-    /**
-     * 两处注入都是必需的：
-     *  - `fetchImpl`：vendor 自己**不发鉴权头**（它假设宿主端点不验），
-     *    我们的桥要 Bearer token，所以在这里加；
-     *  - `createWebSocket`：WS 构造器不能设自定义头，token 只能走 query。
-     */
-    fetchImpl: (url: string, init?: RequestInit) =>
-      fetch(url, {
-        ...init,
-        headers: { ...((init?.headers as Record<string, string>) ?? {}), authorization: `Bearer ${bridgeToken}` },
-      }),
-    createWebSocket: (url: string) => {
-      const u = new URL(url);
-      u.searchParams.set("token", bridgeToken);
-      // Node 26 有全局 WebSocket；真需要时换成 ws
-      const WS = (globalThis as { WebSocket?: new (u: string) => unknown }).WebSocket;
-      if (!WS) throw new Error("当前 Node 没有全局 WebSocket（需要 22+）");
-      return new WS(u.toString());
-    },
-  });
+  /**
+   * Harness：指向我们的本地桥（复用 im-harness 的共享构造）。
+   *
+   * 第三个参数是**渠道标识**——它会作为 `x-lynn-channel` 头随每个 RPC 发出，
+   * 桥据此把消息卡标成「你（飞书）」。六个渠道共用一个桥，只能走传输层传。
+   */
+  const harness = await createVendorHarness(bridgeBaseUrl, bridgeToken, "feishu");
 
   // ---------- 组装 runtime ----------
   const runtime = new FeishuRuntime({

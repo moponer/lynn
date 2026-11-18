@@ -1787,9 +1787,9 @@ export class Kernel {
        * 如果指定了 threadId 且不是当前会话，先切过去——IM 的一条消息
        * 对应一个会话，不能把它塞进用户正在看的另一个会话里。
        */
-      submitTurn: (text: string, threadId?: string) => {
+      submitTurn: (text: string, threadId?: string, source?: string) => {
         if (threadId && threadId !== this.currentThreadId) this.switchThread(threadId);
-        this.submitTurn(text);
+        this.submitTurn(text, undefined, source ? { source } : undefined);
       },
       waitTurn: () =>
         runTurnAndWait({
@@ -8224,7 +8224,7 @@ export class Kernel {
   private submitTurn(
     text: string,
     att?: TurnAttachments,
-    opts?: { internal?: boolean; ephemeral?: boolean; mentions?: FeedMention[] },
+    opts?: { internal?: boolean; ephemeral?: boolean; mentions?: FeedMention[]; source?: string },
   ): void {
     // 会话可以一条不剩：这时候开口说话，就地开一条再写，不用先点「新建会话」
     this.ensureThreadId();
@@ -8245,6 +8245,8 @@ export class Kernel {
     }
     // 群内 @（2026-11-12）：只认本群成员，陌生名字已被 resolveMentions 丢掉
     const mentions = opts?.mentions ?? [];
+    /** 外部渠道来源（P20-1）：空 = 用户在本应用内自己输入的 */
+    const source = opts?.source?.trim() || undefined;
     // 本轮随附（M1-16）：文件注入 + 图片落盘；带不上的如实出卡，不静默丢
     let fullText = text;
     if (opts?.internal) {
@@ -8263,7 +8265,7 @@ export class Kernel {
       this.card({
         kind: "user",
         text,
-        author: { kind: "user" },
+        author: { kind: "user", ...(source ? { source } : {}) },
         mentions: mentions.length ? mentions : undefined,
         meta: built.pieces.length ? `随附 ${built.pieces.map((p) => p.label).join("、")}` : undefined,
       });
@@ -8271,7 +8273,7 @@ export class Kernel {
       this.card({
         kind: "user",
         text,
-        author: { kind: "user" },
+        author: { kind: "user", ...(source ? { source } : {}) },
         mentions: mentions.length ? mentions : undefined,
       });
     }
@@ -8519,7 +8521,7 @@ export class Kernel {
 
   private async runChat(
     userText: string,
-    opts?: { internal?: boolean; ephemeral?: boolean; mentions?: FeedMention[] },
+    opts?: { internal?: boolean; ephemeral?: boolean; mentions?: FeedMention[]; source?: string },
   ): Promise<void> {
     const cfg = this.activeModelConfig();
     const apiKey = this.activeApiKey();

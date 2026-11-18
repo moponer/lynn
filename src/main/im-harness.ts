@@ -41,7 +41,18 @@ export async function loadVendor(rel: string): Promise<Record<string, unknown>> 
  *   我们的桥要 Bearer token，所以在这里加；
  * - `createWebSocket`：WS 构造器不能设自定义头，token 只能走 query。
  */
-export async function createVendorHarness(bridgeBaseUrl: string, bridgeToken: string): Promise<unknown> {
+export async function createVendorHarness(
+  bridgeBaseUrl: string,
+  bridgeToken: string,
+  /**
+   * 渠道标识（P20-1）：会作为 `x-lynn-channel` 头随每个 RPC 发出去。
+   *
+   * 为什么用头而不是参数：六个渠道**共用一个桥**，`session.prompt` 的
+   * payload 由 vendor 生成，我们插不进字段。但 `fetchImpl` 是**我们提供**的，
+   * 所以能在传输层加一个头——vendor 一行不改，桥也能知道是谁在调。
+   */
+  channel = "",
+): Promise<unknown> {
   const { HarnessClient } = (await loadVendor("shared/harness-client.mjs")) as {
     HarnessClient: new (opts: Record<string, unknown>) => unknown;
   };
@@ -51,7 +62,11 @@ export async function createVendorHarness(bridgeBaseUrl: string, bridgeToken: st
     fetchImpl: (url: string, init?: RequestInit) =>
       fetch(url, {
         ...init,
-        headers: { ...((init?.headers as Record<string, string>) ?? {}), authorization: `Bearer ${bridgeToken}` },
+        headers: {
+          ...((init?.headers as Record<string, string>) ?? {}),
+          authorization: `Bearer ${bridgeToken}`,
+          ...(channel ? { "x-lynn-channel": channel } : {}),
+        },
       }),
     createWebSocket: (url: string) => {
       const u = new URL(url);

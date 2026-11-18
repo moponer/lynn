@@ -56,7 +56,13 @@ export interface ImHostDeps {
    * 它之后回答通过 `delta` 事件推给界面。
    * 要等它结束，用 `waitTurn()`（见 turn-wait.ts）。
    */
-  submitTurn(text: string, threadId?: string): void;
+  /**
+   * 发一轮消息。
+   *
+   * `source` 是渠道名（飞书 / QQ / …），会标在消息气泡上——
+   * 否则手机来的消息和本地敲的看起来一模一样，分不清。
+   */
+  submitTurn(text: string, threadId?: string, source?: string): void;
   /**
    * 等这一轮结束。
    *
@@ -101,6 +107,30 @@ interface DshWorkspaceItem {
  * 与 `buildImHandlers` 的区别：只做形状，不做权限判断。
  * 权限（白名单、群聊开关）在渠道侧——那里才知道消息是谁发的。
  */
+/**
+ * 渠道 id → 给人看的名字（P20-1）。
+ *
+ * 只有白名单里的 id 会进来（桥侧已校验），所以这里可以直接映射。
+ */
+
+function channelLabel(id?: string): string | undefined {
+  switch (id) {
+    case "feishu":
+      return "飞书";
+    case "dingtalk":
+      return "钉钉";
+    case "qq":
+      return "QQ";
+    case "wecom":
+    case "wecom-app":
+      return "企业微信";
+    case "weixin":
+      return "微信";
+    default:
+      return undefined;
+  }
+}
+
 export function buildChannelHandlers(deps: ImHostDeps): Record<string, RpcHandler> {
   /**
    * 把 Lynn 的"线程"当 DSH 的"会话"。
@@ -256,7 +286,7 @@ export function buildChannelHandlers(deps: ImHostDeps): Record<string, RpcHandle
       const promptRpcId = String(meta?.rpcId ?? "");
       const turnId = beginTurn(sessionId, promptRpcId, text);
       try {
-        deps.submitTurn(text, sessionId);
+        deps.submitTurn(text, sessionId, channelLabel(meta?.channel));
         await deps.waitTurn();
       } finally {
         // 无论成功失败都要收轮，否则渠道会一直停在"正在生成"

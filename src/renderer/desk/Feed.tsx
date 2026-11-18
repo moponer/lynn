@@ -5,6 +5,7 @@ import { Icon, type IconName } from "../components/Icon";
 import { RichText } from "../components/RichText";
 import { MemberAvatar } from "./MemberAvatar";
 import { FEED_MAX_VISIBLE, FEED_PAGE_SIZE, feedWindow, feedAwaitingLynn, nextVisibleCount } from "./feed-window";
+import type { I18nKey } from "../../shared/i18n-strings";
 
 /**
  * 滚动容器（参考 tether-ai 的 stick-to-bottom）：
@@ -104,6 +105,7 @@ export function FeedScroller({ resetKey, children }: { resetKey?: string; childr
  * 用户自己点过之后不再自动收（不跟用户抢控制权）。
  */
 function ThinkingBlock({ text, live }: { text: string; live: boolean }) {
+  const t = useT();
   const [open, setOpen] = useState(live);
   const touched = useRef(false);
   useEffect(() => {
@@ -122,8 +124,8 @@ function ThinkingBlock({ text, live }: { text: string; live: boolean }) {
         }}
       >
         <Icon name="chev" size="sm" />
-        <span className="k">思考</span>
-        <span className="hint">{live ? "进行中" : `${text.trim().length} 字`}</span>
+        <span className="k">{t("feed.thinking")}</span>
+        <span className="hint">{live ? t("feed.inProgress") : t("feed.thinkChars", { n: text.trim().length })}</span>
       </button>
       {open && <p className="feed-think-body">{text}</p>}
     </div>
@@ -223,6 +225,7 @@ function Who({
  * pending = 这条 @ 还没人接（等风铃）：标出来，别让人干等。
  */
 function Mentions({ mentions, pending }: { mentions?: FeedMention[]; pending?: boolean }) {
+  const t = useT();
   if (!mentions || !mentions.length) return null;
   return (
     <div className="feed-at">
@@ -232,7 +235,7 @@ function Mentions({ mentions, pending }: { mentions?: FeedMention[]; pending?: b
           {m.kind === "lynn" ? "风铃" : m.name}
         </span>
       ))}
-      {pending && <span className="at-pending">待风铃处理</span>}
+      {pending && <span className="at-pending">{t("feed.awaitLynn")}</span>}
     </div>
   );
 }
@@ -376,7 +379,13 @@ function FeedViewInner({
         if (c.kind === "user") {
           return (
             <div className="feed-item user" key={c.id}>
-              <Who icon="user" name="你" tone="user" meta={c.meta || c.createdAt} />
+              {/* 外部渠道来的消息要标出来（P20-1）：否则手机问的和本地敲的分不清 */}
+              <Who
+                icon="user"
+                name={c.author?.source ? `${t("feed.you")}（${c.author.source}）` : t("feed.you")}
+                tone="user"
+                meta={c.meta || c.createdAt}
+              />
               <Mentions mentions={c.mentions} pending={awaitingLynn.has(c.id)} />
               <div className="feed-text md-wrap">
                 <RichText text={c.text ?? ""} />
@@ -410,12 +419,12 @@ function FeedViewInner({
           const meta = SYSTEM_META[tone];
           return (
             <div className={`feed-item system tone-${tone}${c.code ? " bad" : ""}`} key={c.id}>
-              <Who icon={meta.icon} name={c.title ?? meta.label} tone="system" meta={c.createdAt} />
+              <Who icon={meta.icon} name={c.title ?? t(meta.key)} tone="system" meta={c.createdAt} />
               <div className="feed-text md-wrap">
                 <RichText text={c.text ?? ""} />
                 {c.action && c.action !== "none" && (
                   <button type="button" className="feed-action" onClick={() => onAction?.(c)}>
-                    {ACTION_LABEL[c.action]}
+                    {t(ACTION_KEY[c.action as Exclude<NonNullable<FeedCard["action"]>, "none">])}
                   </button>
                 )}
               </div>
@@ -536,6 +545,7 @@ function ReportBlock({
   /** 右键产物：打开所在目录 / 复制路径（2026-11-13） */
   onRefMenu?: (taskId: string, ref: string, label: string, x: number, y: number) => void;
 }) {
+  const t = useT();
   const hasReport = Boolean(card.report);
   const hasFiles = Boolean(card.artifacts?.length);
   if (!hasReport && !hasFiles) return null;
@@ -552,7 +562,7 @@ function ReportBlock({
         ))}
       {hasFiles && (
         <div className="rp-row">
-          <div className="rp-k">产物</div>
+          <div className="rp-k">{t("feed.artifact")}</div>
           <div className="rp-v">
             <div className="rp-files">
               {card.artifacts?.map((a) => (
@@ -583,24 +593,27 @@ function ReportBlock({
 }
 
 /** 系统消息的类别元数据：标签 + 图标；底色与字色在 CSS 的 .tone-* 里 */
+/* 系统消息的分类元数据：**只存 key**，不存文案。
+   2026-11-18：此前这里直接写中文标签，等于绕过了 i18n ——
+   英文环境下系统消息永远显示中文。现在渲染时用 t(meta.key)。 */
 const SYSTEM_META: Record<
   "cleanup" | "budget" | "recover" | "patrol" | "auth" | "notice" | "error",
-  { label: string; icon: IconName }
+  { key: I18nKey; icon: IconName }
 > = {
-  cleanup: { label: "清理", icon: "archive" },
-  budget: { label: "预算", icon: "target" },
-  recover: { label: "恢复", icon: "undo" },
-  patrol: { label: "巡检", icon: "bell" },
-  auth: { label: "授权", icon: "lock" },
-  error: { label: "需要注意", icon: "warn" },
-  notice: { label: "系统", icon: "term" },
+  cleanup: { key: "sys.cleanup", icon: "archive" },
+  budget: { key: "sys.budget", icon: "target" },
+  recover: { key: "sys.recover", icon: "undo" },
+  patrol: { key: "sys.patrol", icon: "bell" },
+  auth: { key: "sys.auth", icon: "lock" },
+  error: { key: "sys.error", icon: "warn" },
+  notice: { key: "sys.notice", icon: "term" },
 };
 
-const ACTION_LABEL: Record<NonNullable<FeedCard["action"]>, string> = {
-  settings: "去设置",
-  retry: "重试",
-  logs: "看日志",
-  reload: "重启运行时",
-  stopRunning: "全部停掉",
-  none: "",
+/** 系统卡上的动作按钮：同样只存 key（理由见 SYSTEM_META） */
+const ACTION_KEY: Record<Exclude<NonNullable<FeedCard["action"]>, "none">, I18nKey> = {
+  settings: "act.settings",
+  retry: "act.retry",
+  logs: "act.logs",
+  reload: "act.reload",
+  stopRunning: "act.stopRunning",
 };

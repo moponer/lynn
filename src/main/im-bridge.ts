@@ -35,14 +35,33 @@
 import * as http from "node:http";
 import * as crypto from "node:crypto";
 import type { AddressInfo } from "node:net";
+import type { IncomingMessage } from "node:http";
 import { WebSocketServer } from "ws";
 
 /** 请求体上限：8MB（图片 base64 会比较大，但再大就不该走这个通道） */
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
 
 /** 一个 RPC 处理函数 */
-/** 处理函数的第二个参数：目前只给 rpcId（渠道靠它把 turn 绑定到某次 prompt） */
-export type RpcHandler = (payload: unknown, meta?: { rpcId?: unknown }) => Promise<unknown> | unknown;
+/**
+ * 处理函数的第二个参数：rpcId（渠道靠它把 turn 绑定到某次 prompt）与渠道标识。
+ */
+export type RpcHandler = (payload: unknown, meta?: { rpcId?: unknown; channel?: string }) => Promise<unknown> | unknown;
+
+/**
+ * 从请求头取渠道标识（P20-1）。
+ *
+ * 六个渠道**共用一个桥**，`session.prompt` 的 payload 由 vendor 生成、
+ * 插不进字段。但适配层的 `fetchImpl` 是**我们提供**的，所以渠道标识走传输层：
+ * 每个渠道的 Harness 在请求上带 `x-lynn-channel` 头。
+ *
+ * 取值**白名单化**——这个值会进日志与消息卡，不能让任意字符串透进去。
+ */
+const CHANNEL_IDS = new Set(["feishu", "dingtalk", "qq", "wecom", "wecom-app", "weixin"]);
+function channelOf(req: IncomingMessage): string | undefined {
+  const raw = req.headers["x-lynn-channel"];
+  const v = Array.isArray(raw) ? raw[0] : raw;
+  return typeof v === "string" && CHANNEL_IDS.has(v) ? v : undefined;
+}
 
 export interface BridgeOptions {
   /** 已实现的方法表（方法名 → 处理函数） */
@@ -204,7 +223,7 @@ export async function startBridge(opts: BridgeOptions): Promise<BridgeHandle> {
          * 那就是"发消息没反应"的来源。
          */
         try {
-          const value = await opts.handlers[method]!(msg.payload, { rpcId: msg.rpcId });
+          const value = await opts.handlers[method]!(msg.payload, { rpcId: msg.rpcId, channel: channelOf(req) });
           reply(200, { type: "server-response", rpcId: msg.rpcId, result: { ok: true, value } });
         } catch (err) {
           reply(200, {
