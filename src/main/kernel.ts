@@ -1648,6 +1648,18 @@ export class Kernel {
         const probed = await probeFeishuIdentities(token, botOpenId ? { botOpenId } : {});
         candidates = probed.candidates;
         probeNotes = probed.notes;
+        /**
+         * 把「见过的发送者」并进来（P18-2）。
+         *
+         * API 只列群、不列私聊，所以最有价值的来源其实是**实际收到过的消息**。
+         * 两者合并去重，界面就能一次列全。
+         */
+        const seen = this.settings.getIm()?.feishu?.seenSenders ?? [];
+        for (const s of seen) {
+          if (!candidates.some((c) => c.openId === s.openId)) {
+            candidates.push({ openId: s.openId, source: `收到过消息（${s.chatType || "?"}）` });
+          }
+        }
         if (candidates.length) {
           steps.push({
             label: `找到 ${candidates.length} 个候选 open_id`,

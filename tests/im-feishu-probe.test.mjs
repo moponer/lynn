@@ -80,15 +80,43 @@ test("缺 im:chat:readonly → 说明要开哪个权限并要重新发布", asyn
   );
 });
 
-test("机器人没进任何会话 → 告诉用户先发一条消息", async () => {
+test("会话列表为空 → 说明「这个接口只列群聊」，不误导用户", async () => {
+  /**
+   * 真实事故：用户发了消息、点自检，看到「机器人还没有加入任何会话，
+   * 先给它发一条消息」——但 `/im/v1/chats` **只返回群聊，不返回私聊**，
+   * 所以"只私聊过"这个最常见的情形它永远查不到。
+   *
+   * 第一版的文案把"接口限制"说成了"你没发消息"，非常误导。
+   * 这条测试守的是**如实说明 + 指向真正管用的路**。
+   */
   await withFetch(
     () => ({ code: 0, data: { items: [] } }),
     async () => {
       const r = await probeFeishuIdentities("t");
       assert.equal(r.candidates.length, 0);
+
+      // 必须承认这是接口的局限，不是用户没操作
       assert.ok(
-        r.notes.some((n) => n.includes("发一条消息")),
-        `要给出下一步动作：${r.notes.join(" | ")}`,
+        r.notes.some((n) => n.includes("只列群聊")),
+        `要说清接口限制：${r.notes.join(" | ")}`,
+      );
+      assert.ok(
+        r.notes.some((n) => n.includes("查不到是正常的")),
+        "不要让用户以为是自己没做对",
+      );
+      // 必须指出真正管用的两条路
+      assert.ok(
+        r.notes.some((n) => n.includes("见过的发送者")),
+        `要指向 seenSenders：${r.notes.join(" | ")}`,
+      );
+      assert.ok(
+        r.notes.some((n) => n.includes("feishu:watch")),
+        `要给出可执行的命令：${r.notes.join(" | ")}`,
+      );
+      // 绝不能出现"先给它发一条消息"这类误导
+      assert.ok(
+        !r.notes.some((n) => n.includes("还没加入任何会话")),
+        "这句是错的：私聊本来就不出现在这个接口里",
       );
     },
   );
