@@ -37,6 +37,7 @@ import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import { isValidOpenId } from "./im-openid";
 import { observeFeishuSdk } from "./im-feishu-observe";
+import { loadStateStore } from "./im-harness";
 
 /** 飞书渠道配置 */
 export interface FeishuVendorConfig {
@@ -172,6 +173,8 @@ export async function createFeishuVendorChannel(deps: FeishuVendorDeps): Promise
   const stateDir = path.join(dataRoot, "im", "feishu");
   fs.mkdirSync(stateDir, { recursive: true });
   const state = new StateStore(path.join(stateDir, "state.json"));
+  /** 必须显式 load：vendor 不会自己调（见 im-harness.ts 的说明） */
+  await loadStateStore(state);
 
   // ---------- Harness：指向我们的本地桥 ----------
   const harness = new HarnessClient({

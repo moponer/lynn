@@ -26,7 +26,7 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { createVendorHarness, loadVendor, vendorLogger } from "./im-harness";
+import { createVendorHarness, loadStateStore, loadVendor, vendorLogger } from "./im-harness";
 
 /** 本文件支持的渠道 */
 export type SimpleChannelId = "dingtalk" | "qq" | "wecom" | "weixin";
@@ -183,6 +183,8 @@ export async function createSimpleChannel(deps: SimpleChannelDeps): Promise<Chan
   const stateDir = path.join(dataRoot, "im", config.channel);
   fs.mkdirSync(stateDir, { recursive: true });
   const state = new (StateStore as new (p: string) => unknown)(path.join(stateDir, "state.json"));
+  /** 必须显式 load：vendor 不会自己调，否则会话映射每次重启都丢 */
+  await loadStateStore(state);
 
   // ---------- Harness ----------
   const harness = await createVendorHarness(bridgeBaseUrl, bridgeToken);

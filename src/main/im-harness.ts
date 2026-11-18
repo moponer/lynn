@@ -64,6 +64,23 @@ export async function createVendorHarness(bridgeBaseUrl: string, bridgeToken: st
 }
 
 /**
+ * 从磁盘加载状态。
+ *
+ * **必须显式调用**：vendor 的 runtime 不会自己调 `state.load()`
+ * （DSH 的胶水层负责），我们替代了那一层，就得自己补上。
+ *
+ * 不调的后果（实测过）：
+ *  - `sessionFor` / `setSession` 的**会话映射不落盘** → 每次重启后
+ *    同一个飞书群会被当成新会话，**在界面上新开一个线程**；
+ *  - `seenMessageIds` 丢失 → 飞书重投的消息可能被当成新消息再跑一遍；
+ *  - `deferred` / `watches` 也丢。
+ */
+export async function loadStateStore(state: unknown): Promise<void> {
+  const load = (state as { load?: () => Promise<void> } | null)?.load;
+  if (typeof load === "function") await load.call(state);
+}
+
+/**
  * 统一的日志器（vendor 里 `logger` 是 console 形态）。
  *
  * 把 info/warn/error 都收进结构化日志，debug 丢掉——

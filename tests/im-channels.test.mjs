@@ -171,3 +171,56 @@ test("deriveBotId：稳定且按渠道区分（同 id 不同渠道不撞）", ()
   assert.equal(deriveBotId("weixin", "123"), "weixin:123");
   assert.notEqual(deriveBotId("qq", "123"), deriveBotId("dingtalk", "123"));
 });
+
+/**
+ * 会话映射跨重启保留（P19-4）。
+ *
+ * 这条守的是一个**真实缺陷**：vendor 的 runtime 不会自己调 `state.load()`，
+ * 那是 DSH 胶水层的责任。我们替代了那层却漏了这一步，后果是：
+ *  - 同一个飞书群/QQ 群每次重启都被当成新会话 → 界面上**新开一个线程**
+ *  - `seenMessageIds` 丢失 → 平台重投的消息会被再跑一遍
+ *
+ * 所以测试必须验证"第二次构造能读到第一次写下的映射"，
+ * 而不只是"没有抛错"。
+ */
+test("状态落盘：load 后能读回上一次写的会话映射（跨重启保留）", async () => {
+  const fs2 = await import("node:fs");
+  const path2 = await import("node:path");
+  const root = fs2.mkdtempSync(path2.join(os.tmpdir(), "lynn-st-"));
+  const { bridge } = await setup();
+
+  const mk = () =>
+    createSimpleChannel({
+      config: { channel: "qq", primary: "1", secret: "s", botId: "qq:1" },
+      bridgeBaseUrl: bridge.baseUrl,
+      bridgeToken: bridge.token,
+      dataRoot: root,
+      log: () => {},
+    });
+
+  try {
+    // 第一次：构造后手动写一个映射（模拟收到消息后建立的会话）
+    await mk();
+    const stateFile = path2.join(root, "im", "qq", "state.json");
+    assert.ok(fs2.existsSync(stateFile), "load() 应当把状态文件建出来");
+
+    const raw = JSON.parse(fs2.readFileSync(stateFile, "utf-8"));
+    assert.equal(raw.version, 1, "状态文件应有 version: 1 —— 说明结构对得上");
+
+    // 模拟 vendor 写映射：直接写盘（等价于 setSession 的效果）
+    raw.sessions = { "chat-1": "thread-abc" };
+    fs2.writeFileSync(stateFile, JSON.stringify(raw), "utf-8");
+
+    // 第二次构造（等价于应用重启）：load() 必须把这些读回来
+    await mk();
+    const after = JSON.parse(fs2.readFileSync(stateFile, "utf-8"));
+    assert.equal(
+      after.sessions["chat-1"],
+      "thread-abc",
+      "重启后映射丢了 —— 说明没有真正 load（会表现为界面上新开线程）",
+    );
+  } finally {
+    await bridge.close();
+    fs2.rmSync(root, { recursive: true, force: true, maxRetries: 3 });
+  }
+});
