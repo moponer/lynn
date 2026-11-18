@@ -56,3 +56,14 @@ Local State
 
 # Rust 构建产物（npm run build:native 生成；二进制随 dist/ 走）
 /native/*/target/
+# 内部文档不进仓库（2026-11-18 用户要求：文档过滤掉、不推送）
+# 只过滤内部笔记/方案/审计；docs/site（产品站文案）、docs/badges、docs/screenshots
+# 要保留——tests/docs.test.mjs 直接读 docs/site/**，删了仓库就坏。
+docs/notes/
+docs/archive/
+docs/im-vendor-plan.md
+docs/feishu-setup.md
+docs/token-cache-audit-lynn.md
+# 兜底：以后往 docs/ 根目录丢的任何 md 都不进仓库（pet-assets 是产品规格，例外）
+docs/*.md
+!docs/pet-assets.md
