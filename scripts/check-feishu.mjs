@@ -175,6 +175,45 @@ if (token) {
   }
 }
 
+// ---------- 4b) 候选 open_id（P17-1）----------
+if (token) {
+  console.log("\n=== 4b) 你的 open_id ===");
+  const chats = await api("/im/v1/chats?page_size=20", { token });
+  if (chats.json?.code !== 0) {
+    console.log(`  ⚠  读不到会话列表（code=${chats.json?.code} ${chats.json?.msg ?? ""}）`);
+    console.log("     → 需要 im:chat:readonly 权限；开通后要重新发布版本");
+  } else {
+    const items = chats.json.data?.items ?? [];
+    if (!items.length) {
+      console.log("  ⚠  机器人还没加入任何会话");
+      console.log("     → 先在飞书里搜到机器人、给它发一条消息（私聊会自成一个会话），再跑一次");
+    } else {
+      const botOpenId = bot?.json?.bot?.open_id;
+      const seen = new Set();
+      for (const chat of items) {
+        const label = chat.chat_mode === "p2p" ? "私聊" : `群「${chat.name || chat.chat_id}」`;
+        const members = await api(
+          `/im/v1/chats/${encodeURIComponent(chat.chat_id)}/members?member_id_type=open_id&page_size=50`,
+          { token },
+        );
+        if (members.json?.code !== 0) {
+          console.log(`  ⚠  ${label}：读不到成员（code=${members.json?.code}）`);
+          continue;
+        }
+        for (const m of members.json.data?.items ?? []) {
+          const id = String(m.member_id ?? "");
+          if (!id.startsWith("ou_") || seen.has(id)) continue;
+          seen.add(id);
+          const isBot = botOpenId && id === botOpenId;
+          console.log(`  ${isBot ? "🤖" : "👤"} ${id}  ←  ${label}${isBot ? "（机器人自己）" : ""}`);
+        }
+      }
+      if (seen.size === 0) console.log("  ⚠  没查到成员 id（可能都缺 im:chat:readonly）");
+      else console.log("\n  👤 就是你。把它填进 设置 → IM 渠道 → 允许的用户 open_id");
+    }
+  }
+}
+
 // ---------- 5) 人工核对清单 ----------
 console.log("\n=== 5) 还需要你在飞书后台做的（脚本查不到）===");
 const checklist = [

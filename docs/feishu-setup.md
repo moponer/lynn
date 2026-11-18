@@ -82,7 +82,18 @@ open.feishu.cn → 你的应用 → 应用功能 → 机器人 → 启用
 **白名单是必填的**——留空保存不了。原因：飞书消息来自陌生人，
 而 Lynn 的成员有文件与命令权限。
 
-### 方式二：手改 settings.json
+### 方式二：命令行
+```bash
+npm run check:feishu -- --app-id cli_xxx --app-secret yyy
+```
+
+它会调 `GET /im/v1/chats` + `GET /im/v1/chats/{id}/members`，
+把机器人所在会话的成员列出来，标 `👤` 的就是你（标 `🤖` 的是机器人自己）。
+
+需要 `im:chat:readonly` 权限（读会话信息）。缺了会明确告诉你，
+**并且提醒你开完权限要重新发布版本**——不发布不生效。
+
+### 方式三：手改 settings.json
 
 ```jsonc
 // ~/.lynn/settings.json
@@ -104,6 +115,16 @@ open.feishu.cn → 你的应用 → 应用功能 → 机器人 → 启用
 
 ## 四、拿你自己的 open_id
 
+> **2026-11-18 更新**：不再需要"发消息然后翻日志"。
+> 应用里点「自检」，它会用官方 API 列出你的 open_id，点「用这个」直接填。
+>
+> **关键前提**：`open_id` 是**按应用隔离**的——同一个人在你 A 应用下的 open_id
+> 与 B 应用下的**不同**。所以从别处抄来的 open_id 一定对不上，
+> 表现为日志里 `ignored a message from a sender outside the legacy allowlist`。
+> 必须从**这个 app** 查出来的才有效。
+
+### 方式一：自检（推荐）
+
 这是最容易卡住的一步，因为它**必须先把前面都配好**。
 
 ```
@@ -115,6 +136,10 @@ open.feishu.cn → 你的应用 → 应用功能 → 机器人 → 启用
                               ^^^^^^^^^^^^^ 这个就是你的 open_id
 5. 把它填进设置页的白名单
 ```
+
+**如果日志里是 `ignored a message from a sender outside the legacy allowlist`**，
+说明消息**已经进来了**，只是白名单里的 open_id 对不上。最常见的原因是
+open_id 来自另一个应用（按应用隔离）。用上面的「自检」重新查一次。
 
 **如果日志里没有 `feishu_incoming`**，说明消息没进来。按这个顺序查：
 

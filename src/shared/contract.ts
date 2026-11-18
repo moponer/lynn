@@ -1769,6 +1769,11 @@ export interface RpcContracts {
         theme?: { name?: string; dark?: Record<string, string>; light?: Record<string, string> };
         /** L0 形态层：插件内 CSS 原文（渲染层注入 <style>，不经脚本求值） */
         style?: string;
+        /**
+         * L0 图标覆盖：图标名 → SVG 内联路径串。
+         * 主进程已过 checkIconsFile（元素/事件/外链白名单），渲染层只当标记用。
+         */
+        icons?: Record<string, string>;
         /** M3-08：L0 语言包插件才有 */
         langs?: { lang: "zh" | "en"; strings: Record<string, string> }[];
         /** 占用的卡槽（设置页据此标注「控制台视图」等） */
@@ -1808,6 +1813,13 @@ export interface RpcContracts {
       steps: { label: string; ok: boolean; detail: string }[];
       /** 机器人的 open_id（提醒用户白名单要填自己的，不是这个） */
       botOpenId?: string;
+      /**
+       * 候选 open_id（P17-1）：open_id **按应用隔离**，别处抄来的必然对不上。
+       * 这里用官方 API 列出机器人所在会话的成员，让用户直接选。
+       */
+      candidates?: { openId: string; source: string; maybeBot?: boolean }[];
+      /** 给人看的诊断（权限没开、机器人没进会话等） */
+      notes?: string[];
     };
   };
   "im.saveFeishu": {

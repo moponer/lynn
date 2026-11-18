@@ -158,6 +158,7 @@ import { scanPluginCommands } from "./plugin-commands";
 import { scanPluginMcp } from "./plugin-mcp";
 import { runTurnAndWait } from "./turn-wait";
 import { isValidOpenId } from "./im-openid";
+import { probeFeishuIdentities } from "./im-feishu-probe";
 import type { ImHostDeps } from "./im-dsh-shapes";
 import { listVersions, rollbackToVersion, KEEP_VERSIONS } from "./plugin-versions";
 import { PluginHost } from "./plugin-host";
@@ -1631,8 +1632,52 @@ export class Kernel {
       }
     }
 
-    this.log("im_feishu_checked", { appId, passed: steps.filter((s) => s.ok).length, total: steps.length });
-    return { steps, ...(botOpenId ? { botOpenId } : {}) };
+    /**
+     * 查候选 open_id（P17-1）。
+     *
+     * 为什么需要：open_id **按应用隔离**——同一个人在 A 应用下的 open_id
+     * 与 B 应用下的不同。用户从别处抄一个必然对不上，
+     * 而 vendored 渠道拒收时只打一句没有 id 的警告，用户无从下手。
+     *
+     * 这里用官方 API 列出机器人所在会话的成员，把候选 id 直接给出来。
+     */
+    let candidates: { openId: string; source: string; maybeBot?: boolean }[] = [];
+    let probeNotes: string[] = [];
+    if (token) {
+      try {
+        const probed = await probeFeishuIdentities(token, botOpenId ? { botOpenId } : {});
+        candidates = probed.candidates;
+        probeNotes = probed.notes;
+        if (candidates.length) {
+          steps.push({
+            label: `找到 ${candidates.length} 个候选 open_id`,
+            ok: true,
+            detail: candidates.map((c) => `${c.openId}（${c.source}${c.maybeBot ? "，可能是机器人" : ""}）`).join(" / "),
+          });
+        } else {
+          steps.push({
+            label: "查不到候选 open_id",
+            ok: false,
+            detail: probeNotes.join("；") || "机器人还没加入任何会话——先在飞书里给它发一条消息",
+          });
+        }
+      } catch (e) {
+        steps.push({ label: "查 open_id 失败", ok: false, detail: e instanceof Error ? e.message : String(e) });
+      }
+    }
+
+    this.log("im_feishu_checked", {
+      appId,
+      passed: steps.filter((s) => s.ok).length,
+      total: steps.length,
+      candidates: candidates.length,
+    });
+    return {
+      steps,
+      ...(botOpenId ? { botOpenId } : {}),
+      ...(candidates.length ? { candidates } : {}),
+      ...(probeNotes.length ? { notes: probeNotes } : {}),
+    };
   }
 
   /** 壳层用的公开日志入口（`log` 是 private，IM 渠道要记审计） */
