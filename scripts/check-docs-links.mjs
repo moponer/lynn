@@ -106,7 +106,12 @@ for (const file of DOCS) {
  */
 {
   const agents = fs.readFileSync(path.join(repo, "AGENTS.md"), "utf8");
-  for (const must of ["plugins/_templates", "check-plugin-package.mjs", "plugin-manifest.ts"]) {
+  /**
+   * 2026-11-18 调整（第二次）：AGENTS.md 重建后，设计系统的真相在样式表里，
+   * `plugin-manifest.ts` 不再是它引用的入口。这里跟着改成**当前文档真实的入口**——
+   * 检查的意义是"agent 找得到东西"，不是"必须提到某个文件名"。
+   */
+  for (const must of ["plugins/_templates", "check-plugin-package.mjs", "tokens.css"]) {
     if (!agents.includes(must)) issues.push(`AGENTS.md: 缺少对「${must}」的指引——agent 会找不到`);
   }
 }

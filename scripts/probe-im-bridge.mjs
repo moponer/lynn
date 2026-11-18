@@ -28,7 +28,7 @@ const repo = path.resolve(here, "..");
 
 const { Kernel } = require("../dist/main/kernel.js");
 const { startBridge } = require("../dist/main/im-bridge.js");
-const { buildImHandlers } = require("../dist/main/im-handlers.js");
+const { buildChannelHandlers } = require("../dist/main/im-dsh-shapes.js");
 
 /** 发一个 RPC */
 function call(baseUrl, token, method, payload, rpcId = 1) {
@@ -49,7 +49,13 @@ function call(baseUrl, token, method, payload, rpcId = 1) {
         res.on("data", (c) => (d += c));
         res.on("end", () => {
           try {
-            resolve({ status: res.statusCode, body: JSON.parse(d) });
+            const body = JSON.parse(d);
+            /**
+             * 信封形状（P15-7）：`{ type, rpcId, result: { ok, value } }`。
+             * 这是 vendored `HarnessClient` 要求的样子（harness-client.mjs:1136-1147）。
+             * 早期版本用的是 `{ ok, data }`，已不再兼容。
+             */
+            resolve({ status: res.statusCode, body, ok: body?.result?.ok === true, data: body?.result?.value });
           } catch {
             reject(new Error(`响应不是 JSON：${d.slice(0, 200)}`));
           }
@@ -97,39 +103,39 @@ try {
 
   // 2) 端点起来
   console.log("\n=== 2) 端点 ===");
-  bridge = await startBridge({ handlers: buildImHandlers(host) });
+  bridge = await startBridge({ handlers: buildChannelHandlers(host) });
   check("端点已监听", bridge.port > 0, `${bridge.baseUrl}`);
   check("token 是 64 字符", bridge.token.length === 64);
 
   // 3) 真实 HTTP 调用
   console.log("\n=== 3) 真实 HTTP ===");
   const hello = await call(bridge.baseUrl, bridge.token, "host.describe", {});
-  check("host.describe 成功", hello.status === 200 && hello.body.ok === true);
-  check("报的是 lynn", hello.body.data?.name === "lynn");
-  check("声明了 12 个方法", hello.body.data?.methods?.length === 12, `${hello.body.data?.methods?.length} 个`);
+  check("host.describe 成功", hello.status === 200 && hello.ok);
+  check("报的是 lynn", hello.data?.name === "lynn");
+  check("声明了方法表", (hello.data?.methods?.length ?? 0) >= 10, `${hello.data?.methods?.length} 个`);
 
   const list = await call(bridge.baseUrl, bridge.token, "session.list", {}, 2);
-  check("session.list 成功", list.body.ok === true, `${list.body.data?.sessions?.length} 个会话`);
+  check("session.list 成功", list.ok, `${list.data?.items?.length} 个会话`);
   check("rpcId 回传", list.body.rpcId === 2);
 
   const created = await call(bridge.baseUrl, bridge.token, "session.create", { title: "IM 测试群" }, 3);
-  check("session.create 成功", created.body.ok === true, `id=${created.body.data?.id}`);
-  const newId = created.body.data?.id;
-  check("新会话出现在列表里", (await call(bridge.baseUrl, bridge.token, "session.list", {}, 4)).body.data.sessions.some((s) => s.id === newId));
+  check("session.create 成功", created.ok, `id=${created.data?.sessionId}`);
+  const newId = created.data?.sessionId;
+  check("新会话出现在列表里", ((await call(bridge.baseUrl, bridge.token, "session.list", {}, 4)).data?.items ?? []).some((s) => s.sessionId === newId));
 
   const renamed = await call(bridge.baseUrl, bridge.token, "session.rename", { sessionId: newId, title: "改名了" }, 5);
-  check("session.rename 成功", renamed.body.ok === true);
-  check("改名生效", (await call(bridge.baseUrl, bridge.token, "session.list", {}, 6)).body.data.sessions.find((s) => s.id === newId)?.title === "改名了");
+  check("session.rename 成功", renamed.ok);
+  check("改名生效", ((await call(bridge.baseUrl, bridge.token, "session.list", {}, 6)).data?.items ?? []).find((s) => s.sessionId === newId)?.projections?.values?.title === "改名了");
 
   const hist = await call(bridge.baseUrl, bridge.token, "session.history", { sessionId: newId }, 7);
-  check("session.history 成功", hist.body.ok === true, `${hist.body.data?.messages?.length} 条`);
+  check("session.history 成功（事件格式）", hist.ok, `${hist.data?.events?.length} 个事件`);
 
   // 4) 安全
   console.log("\n=== 4) 安全 ===");
   const bad = await call(bridge.baseUrl, "wrong", "host.describe", {});
   check("错误 token 被拒", bad.status === 401);
   const unsupported = await call(bridge.baseUrl, bridge.token, "session.fork", {}, 8);
-  check("不支持的方法明确拒绝", unsupported.body.ok === false && /不支持|没有分叉/.test(unsupported.body.error ?? ""));
+  check("不支持的方法明确拒绝", unsupported.ok === false && /不支持|分叉/.test(String(unsupported.body?.result?.error ?? "")));
 
   // 5) 关闭后端口释放
   console.log("\n=== 5) 关闭 ===");

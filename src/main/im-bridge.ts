@@ -35,18 +35,31 @@
 import * as http from "node:http";
 import * as crypto from "node:crypto";
 import type { AddressInfo } from "node:net";
+import { WebSocketServer } from "ws";
 
 /** 请求体上限：8MB（图片 base64 会比较大，但再大就不该走这个通道） */
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
 
 /** 一个 RPC 处理函数 */
-export type RpcHandler = (payload: unknown) => Promise<unknown> | unknown;
+/** 处理函数的第二个参数：目前只给 rpcId（渠道靠它把 turn 绑定到某次 prompt） */
+export type RpcHandler = (payload: unknown, meta?: { rpcId?: unknown }) => Promise<unknown> | unknown;
 
 export interface BridgeOptions {
   /** 已实现的方法表（方法名 → 处理函数） */
   handlers: Record<string, RpcHandler>;
   /** 固定端口（0 = 随机）；默认 0 */
   port?: number;
+  /**
+   * 事件源（2026-11-18 P15-3）：提供后 `/api/events.mux` 才可用。
+   *
+   * 为什么要它：vendored 渠道的 `HarnessClient` 在 `baseUrl` 模式下
+   * 不只发 HTTP，还要连一个 **WebSocket** 收事件流（`/api/events.mux`）。
+   * 只实现 HTTP 的话，渠道能建会话但收不到流式回答——表现为"发消息没反应"。
+   *
+   * 签名：`subscribe(push)` 返回取消订阅函数。`push` 每调一次就向所有
+   * 已连接的 socket 广播一帧。
+   */
+  subscribeEvents?(push: (envelope: unknown) => void): () => void;
 }
 
 export interface BridgeHandle {
@@ -108,12 +121,12 @@ export async function startBridge(opts: BridgeOptions): Promise<BridgeHandle> {
     const have = Buffer.from(got);
     const okLen = want.length === have.length;
     if (!okLen || !crypto.timingSafeEqual(want, have)) {
-      reply(401, { type: "server-response", ok: false, error: "token 不对" });
+      reply(401, { type: "server-response", result: { ok: false, error: "token 不对" } });
       return;
     }
 
     if (req.method !== "POST") {
-      reply(405, { type: "server-response", ok: false, error: "只接受 POST" });
+      reply(405, { type: "server-response", result: { ok: false, error: "只接受 POST" } });
       return;
     }
 
@@ -172,25 +185,98 @@ export async function startBridge(opts: BridgeOptions): Promise<BridgeHandle> {
           reply(404, {
             type: "server-response",
             rpcId: msg.rpcId,
-            ok: false,
-            error: `没有这个方法：${method}（已实现：${[...allowed].sort().join(", ")}）`,
+            result: {
+              ok: false,
+              error: `没有这个方法：${method}（已实现：${[...allowed].sort().join(", ")}）`,
+            },
           });
           return;
         }
+        /**
+         * 响应形状必须与 vendored `HarnessClient` 期待的一致（见 harness-client.mjs:1136-1147）：
+         *
+         * ```
+         * { type: "server-response", rpcId, result: { ok, value?, error? } }
+         * ```
+         *
+         * 它检查三样：`type === 'server-response'`、`rpcId` 相等、
+         * `result.ok` 是布尔。任何一项不对都报 `harness-response-invalid`——
+         * 那就是"发消息没反应"的来源。
+         */
         try {
-          const data = await opts.handlers[method]!(msg.payload);
-          reply(200, { type: "server-response", rpcId: msg.rpcId, ok: true, data });
+          const value = await opts.handlers[method]!(msg.payload, { rpcId: msg.rpcId });
+          reply(200, { type: "server-response", rpcId: msg.rpcId, result: { ok: true, value } });
         } catch (err) {
           reply(200, {
             type: "server-response",
             rpcId: msg.rpcId,
-            ok: false,
-            error: err instanceof Error ? err.message : String(err),
+            result: { ok: false, error: err instanceof Error ? err.message : String(err) },
           });
         }
       })();
     });
   });
+
+  /**
+   * WebSocket 事件流（2026-11-18 P15-3）：`/api/events.mux`。
+   *
+   * 为什么必须有它：vendored 渠道的 `HarnessClient` 在 `baseUrl` 模式下
+   * 用 WebSocket 收事件（见 vendor/shared/harness-mux.mjs:60）。
+   * 只有 HTTP 的话，渠道能建会话、能发消息，但**收不到流式回答**——
+   * 表现为"发消息没反应"。
+   *
+   * 鉴权用 **query token**（`?token=...`）：浏览器与 Node 的 WebSocket 构造器
+   * 都不能设自定义头，所以只能放 query。我们的 `createWebSocket` 工厂会拼上它。
+   */
+  const wss = new WebSocketServer({ noServer: true });
+  /** 已连接的客户端（广播用） */
+  const clients = new Set<import("ws").WebSocketLike>();
+
+  server.on("upgrade", (req, socket, head) => {
+    const url = new URL(req.url ?? "/", `http://127.0.0.1:${(server.address() as AddressInfo)?.port ?? 0}`);
+    if (url.pathname !== "/api/events.mux") {
+      socket.destroy();
+      return;
+    }
+    // query token 校验（与 HTTP 的 Bearer 是同一个 token）
+    const got = url.searchParams.get("token") ?? "";
+    const want = Buffer.from(token);
+    const have = Buffer.from(got);
+    if (want.length !== have.length || !crypto.timingSafeEqual(want, have)) {
+      socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+      socket.destroy();
+      return;
+    }
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      clients.add(ws);
+      ws.on("close", () => clients.delete(ws));
+      ws.on("error", () => clients.delete(ws));
+    });
+  });
+
+  /**
+   * 订阅事件源并广播。
+   *
+   * 广播而不是排队：这些帧是**状态更新**（一轮的开始/正文增量/结束），
+   * 后到的客户端只关心"从现在起发生什么"，不需要补发历史。
+   */
+  let unsubscribe: (() => void) | null = null;
+  if (opts.subscribeEvents) {
+    unsubscribe = opts.subscribeEvents((envelope) => {
+      if (!clients.size) return;
+      const text = JSON.stringify(envelope);
+      for (const ws of clients) {
+        // 1 = OPEN
+        if (ws.readyState === 1) {
+          try {
+            ws.send(text);
+          } catch {
+            clients.delete(ws);
+          }
+        }
+      }
+    });
+  }
 
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -204,6 +290,20 @@ export async function startBridge(opts: BridgeOptions): Promise<BridgeHandle> {
     token,
     baseUrl: `http://127.0.0.1:${addr.port}`,
     async close() {
+      try {
+        unsubscribe?.();
+      } catch {
+        /* 取消失败不阻止关闭 */
+      }
+      for (const ws of clients) {
+        try {
+          ws.close();
+        } catch {
+          /* 忽略 */
+        }
+      }
+      clients.clear();
+      await new Promise<void>((resolve) => wss.close(() => resolve()));
       await new Promise<void>((resolve) => server.close(() => resolve()));
     },
   };

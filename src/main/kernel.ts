@@ -158,7 +158,7 @@ import { scanPluginCommands } from "./plugin-commands";
 import { scanPluginMcp } from "./plugin-mcp";
 import { runTurnAndWait } from "./turn-wait";
 import { isValidOpenId } from "./im-feishu";
-import type { ImHostDeps } from "./im-handlers";
+import type { ImHostDeps } from "./im-dsh-shapes";
 import { listVersions, rollbackToVersion, KEEP_VERSIONS } from "./plugin-versions";
 import { PluginHost } from "./plugin-host";
 import { PluginSetStore } from "./plugin-set";

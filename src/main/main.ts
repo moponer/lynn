@@ -10,7 +10,9 @@ import { resolveFeedUrl, feedUrlIssue, transition, type UpdateState } from "./up
 import { newRendererLogGate, RENDERER_LOG_LIMITS, rendererLogGate } from "./log-policy";
 import { trayFallbackBuffer, trayIconPaths } from "./tray-icon";
 import { startBridge } from "./im-bridge";
-import { buildImHandlers } from "./im-handlers";
+import { buildChannelHandlers } from "./im-dsh-shapes";
+import { recordEvent } from "./im-ledger";
+import { mapKernelEvent } from "./im-event-map";
 import { FeishuChannel } from "./im-feishu";
 import { needsUserAttention } from "./notify-policy";
 import { VoiceService } from "./voice";
@@ -584,7 +586,32 @@ app.whenReady().then(async () => {
       const imEnabled = imCfg.feishu?.enabled === true;
       if (imEnabled) {
         try {
-          imBridge = await startBridge({ handlers: buildImHandlers(kernel.imHost()) });
+          /**
+           * 事件接线（P15-7）：内核事件 → 账本 + WebSocket。
+           *
+           * 为什么两条都要：
+           *  - **账本**：vendored `HarnessClient.ask()` 每 300ms 轮询
+           *    `session.history` 读事件，不靠 WS 等回复；
+           *  - **WebSocket**：`watchHarnessEvents` 用它做实时展示。
+           *
+           * 只接一条会表现为"发消息没反应"（只接 WS）或"没有流式"（只接账本）。
+           */
+          let pushEvents: (env: unknown) => void = () => {};
+          const unsubscribeKernel = kernel.onEvent((ev) => {
+            const sessionId = kernel.imHost().currentThreadId();
+            recordEvent(ev, sessionId);
+            for (const env of mapKernelEvent(ev, sessionId)) pushEvents(env);
+          });
+          imBridge = await startBridge({
+            handlers: buildChannelHandlers(kernel.imHost()),
+            subscribeEvents: (push) => {
+              pushEvents = push as (env: unknown) => void;
+              return () => {
+                pushEvents = () => {};
+                unsubscribeKernel();
+              };
+            },
+          });
           console.log(`[im] 端点已启动：${imBridge.baseUrl}`);
           /**
            * token 打到日志里是有意的：这是**本机**的一次性凭据，

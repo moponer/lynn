@@ -12,6 +12,21 @@
  *  4. 未实现的方法 404，且错误里列出已实现清单（排障友好）；
  *  5. 超大 body 被拒，不打满内存。
  */
+/**
+ * 桥的信封形状（P15-7）：
+ *
+ * ```
+ * 请求：{ type: "client-request", rpcId, method, payload }
+ * 响应：{ type: "server-response", rpcId, result: { ok, value?, error? } }
+ * ```
+ *
+ * 这个形状不是随意定的——vendored `HarnessClient` 逐字段校验它
+ * （harness-client.mjs:1136-1147）：`type` 必须是 `server-response`、
+ * `rpcId` 必须相等、`result.ok` 必须是布尔。任何一项不对都报
+ * `harness-response-invalid`，表现为"发消息没反应"。
+ *
+ * 早期版本用的是 `{ ok, data }`，对 vendor 完全不工作。
+ */
 import test from "node:test";
 import assert from "node:assert/strict";
 import * as http from "node:http";
@@ -79,8 +94,8 @@ test("正常调用：带正确 token 能拿到结果", async () => {
       payload: {},
     });
     assert.equal(r.status, 200);
-    assert.equal(r.body.ok, true);
-    assert.equal(r.body.data.name, "lynn");
+    assert.equal(r.body.result.ok, true);
+    assert.equal(r.body.result.value.name, "lynn");
     assert.equal(r.body.rpcId, 1, "rpcId 要原样回传（调用方靠它配对）");
   });
 });
@@ -95,7 +110,7 @@ test("payload 原样透传给 handler", async () => {
       payload,
     });
     assert.equal(r.status, 200);
-    assert.deepEqual(r.body.data.echoed, payload);
+    assert.deepEqual(r.body.result.value.echoed, payload);
   });
 });
 
@@ -108,7 +123,7 @@ test("token 不对：401，且不透露任何业务信息", async () => {
       payload: {},
     });
     assert.equal(r.status, 401);
-    assert.equal(r.body.ok, false);
+    assert.equal(r.body.result.ok, false);
     assert.doesNotMatch(r.raw, /lynn|version/, "401 的响应里不该带业务数据");
   });
 });
@@ -147,8 +162,8 @@ test("未实现的方法：404，且错误里列出已实现清单", async () =>
       payload: {},
     });
     assert.equal(r.status, 404);
-    assert.equal(r.body.ok, false);
-    assert.match(r.body.error, /host\.describe/, "错误里要列出已实现的方法，方便排障");
+    assert.equal(r.body.result.ok, false);
+    assert.match(r.body.result.error, /host\.describe/, "错误里要列出已实现的方法，方便排障");
   });
 });
 
@@ -180,8 +195,8 @@ test("handler 抛错：返回 ok:false 而不是 500（调用方要能读到原�
       payload: {},
     });
     assert.equal(r.status, 200, "业务错误用 200 + ok:false，不是 500");
-    assert.equal(r.body.ok, false);
-    assert.match(r.body.error, /模型没配置/);
+    assert.equal(r.body.result.ok, false);
+    assert.match(r.body.result.error, /模型没配置/);
   } finally {
     await bridge.close();
   }
@@ -284,6 +299,6 @@ test("非 ASCII 方法名：按解码后的名字判未知方法（404，不是 
       payload: {},
     });
     assert.equal(r.status, 404, "应当报「没有这个方法」，而不是「path 与 body 不一致」");
-    assert.match(r.body.error, /没有这个方法/);
+    assert.match(r.body.result.error, /没有这个方法/);
   });
 });
