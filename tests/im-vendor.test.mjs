@@ -174,3 +174,39 @@ test("vendor 不含测试文件（那些依赖 DSH 环境，跑不了）", () =>
   walk(VENDOR);
   assert.equal(tests, 0, `vendor 里有 ${tests} 个测试文件，它们的 import 会指向不存在的路径`);
 });
+
+/**
+ * 六个国内渠道的 **runtime** 能加载（P15-9）。
+ *
+ * 比"配置模块能加载"更进一步：runtime 是真正干活的那一层，
+ * 它 import 了平台 SDK。缺 SDK 时这里会明确报出缺哪个包——
+ * 这比运行时才崩在某个消息上强得多。
+ *
+ * 依赖是按渠道懒装的（optionalDependencies）：
+ *   飞书 → @larksuiteoapi/node-sdk + qrcode
+ *   钉钉 → dingtalk-stream
+ *   QQ   → @tencent-connect/qqbot-nodejs
+ *   企微 / 企微应用 → @wecom/aibot-node-sdk
+ *   微信 → （无额外 SDK，走 HTTP）
+ */
+test("六个国内渠道的 runtime 都能加载（缺 SDK 时报出具体包名）", async () => {
+  const runtimes = {
+    飞书: "feishu/feishu-runtime.mjs",
+    钉钉: "dingtalk/dingtalk-runtime.mjs",
+    QQ: "qq/qq-runtime.mjs",
+    企业微信: "wecom/wecom-runtime.mjs",
+    企微应用: "wecom-app/wecom-app-runtime.mjs",
+    微信: "weixin/weixin-runtime.mjs",
+  };
+  const failed = [];
+  for (const [label, rel] of Object.entries(runtimes)) {
+    try {
+      const mod = await import(`../src/main/im/vendor/${rel}`);
+      assert.ok(Object.keys(mod).length > 0, `${label} 加载了但没有导出`);
+    } catch (err) {
+      const missing = String(err?.message ?? "").match(/Cannot find (?:module|package) '([^']+)'/);
+      failed.push(`${label}：${missing ? `缺依赖 ${missing[1]}（npm install ${missing[1]}）` : String(err?.message).slice(0, 90)}`);
+    }
+  }
+  assert.deepEqual(failed, [], `这些渠道的 runtime 加载失败：\n  ${failed.join("\n  ")}`);
+});
