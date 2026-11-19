@@ -118,8 +118,18 @@ export function probeSandbox(opts: { appRoot?: string; timeoutMs?: number } = {}
   }
 
   const launchVerified = parsed.launchVerified === true;
-  // 档位优先级：AppContainer（能断网+文件隔离）> 受限令牌（写隔离，任意账户）> jobonly
+  // 档位优先级：AppContainer（能断网+文件隔离）> restricted（降权运行，能跑程序但不隔离写）> jobonly
   const mode: SandboxMode = launchVerified ? "appcontainer" : restrictedOk ? "restricted" : "jobonly";
+  /**
+   * 诚实说明「restricted」到底是什么（2026-11-19 实测定论）：
+   *
+   * 它不是文件写隔离——实测加 restricting SID 会让 node/powershell 起不来
+   * （0xC0000142），真正的写隔离要 Codex 那套预配置 ACL。当前 restricted 能给的
+   * 是：**夺掉管理员特权（SeDebug/SeBackup/SeTakeOwnership…）+ Job Object 资源上限**，
+   * 比裸跑/纯 jobonly 少了一份"以管理员身份乱来"的能力，但**不限制文件读写范围**。
+   *
+   * 所以 fileIsolation 如实报 false（不含糊其辞），只把"降权"作为 distinct 信息暴露。
+   */
   return {
     mode,
     provisioned: parsed.provisioned === true,
@@ -127,17 +137,17 @@ export function probeSandbox(opts: { appRoot?: string; timeoutMs?: number } = {}
     reason: launchVerified
       ? String(parsed.reason ?? "")
       : restrictedOk
-        ? "受限令牌可用：写操作限制在工作区（AppContainer 不可用时的最佳档）；读仍全盘，断网未启用"
+        ? "降权运行：已夺管理员特权 + Job Object 资源上限（能跑 node/powershell）；但不做文件写隔离、不断网——那是 AppContainer/WFP 阶段"
         : String(parsed.reason ?? ""),
     helperPath: found,
     probed: true,
     limits: {
       processes: 64,
       memoryMb: 2048,
-      // 断网只有 AppContainer 能给；受限令牌也不断网
+      // 断网只有 AppContainer 能给
       noNetwork: launchVerified,
-      // 文件隔离：AppContainer 全隔离；受限令牌只做写隔离（这里按"有写隔离"算 true）
-      fileIsolation: launchVerified || restrictedOk,
+      // 文件写隔离：受限令牌档**没有**（只有降权 + 资源上限），如实 false
+      fileIsolation: launchVerified,
     },
   };
 }

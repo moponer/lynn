@@ -772,25 +772,54 @@ fn make_restricted_token() -> Option<Handle> {
         // 用字符串 SID 换成 psid：Users(S-1-5-32-545)、Authenticated Users(S-1-5-11)
         let users_sid = sid_from_string("S-1-5-32-545");
         let authed_sid = sid_from_string("S-1-5-11");
-        let mut restrict: Vec<SidAndAttributes> = vec![SidAndAttributes {
-            sid: user.as_ptr() as Psid,
-            attributes: 0,
-        }];
-        if let Some(p) = users_sid {
-            restrict.push(SidAndAttributes { sid: p, attributes: 0 });
+        // 诊断：LYNN_SBX_RESTRICT_MODE = none/user/users/authed/all 控制 restrict 集合
+        let rmode = std::env::var("LYNN_SBX_RESTRICT_MODE").unwrap_or_else(|_| "all".to_string());
+        let mut restrict: Vec<SidAndAttributes> = Vec::new();
+        if rmode != "none" {
+            restrict.push(SidAndAttributes {
+                sid: user.as_ptr() as Psid,
+                attributes: 0,
+            });
         }
-        if let Some(p) = authed_sid {
-            restrict.push(SidAndAttributes { sid: p, attributes: 0 });
+        if (rmode == "users" || rmode == "all") {
+            if let Some(p) = users_sid {
+                restrict.push(SidAndAttributes { sid: p, attributes: 0 });
+            }
         }
-        // Everyone 兜底（若上面两个都取不到，至少不空）
-        if users_sid.is_none() && authed_sid.is_none() {
+        if (rmode == "authed" || rmode == "all") {
+            if let Some(p) = authed_sid {
+                restrict.push(SidAndAttributes { sid: p, attributes: 0 });
+            }
+        }
+        // 全取不到时 Everyone 兜底
+        if restrict.is_empty() && rmode != "none" {
             restrict.push(SidAndAttributes {
                 sid: world.as_ptr() as Psid,
                 attributes: 0,
             });
         }
         let mut new_token: Handle = std::ptr::null_mut();
-        let flags = DISABLE_MAX_PRIVILEGE | WRITE_RESTRICTED;
+        /**
+         * 默认用 **降权不隔离**（DISABLE_MAX_PRIVILEGE，restrict=none）——2026-11-19 实测定论。
+         *
+         * 走过的弯路：加任何 restricting SID（user/users/authed/all）都会让
+         * node / powershell 在 DLL 初始化阶段 0xC0000142，因为它们要访问的
+         * 临时目录/模块目录 ACL 只认 Users 组，restricting 令牌把它们屏蔽了。
+         * 要真正"写隔离且能跑程序"必须像 Codex 那样预配置整套 ACL（给 sandbox
+         * 身份显式授权所有程序目录），那是独立的大工程。
+         *
+         * 所以本档诚实定位为「**降权运行**」：夺掉管理员特权（SeDebug/SeBackup/
+         * SeTakeOwnership 等）+ Job Object 资源上限，但**不做文件写隔离**。
+         * 环境变量可覆盖（诊断/将来接 ACL 时用）。
+         */
+        let flags = match std::env::var("LYNN_SBX_FLAGS").ok().and_then(|s| s.parse::<u32>().ok()) {
+            Some(f) => f,
+            None => DISABLE_MAX_PRIVILEGE,
+        };
+        // 默认不 restrict（restrict 会让程序起不来，见上）；环境变量可开
+        let use_restrict = std::env::var("LYNN_SBX_RESTRICT_MODE")
+            .map(|m| m != "none")
+            .unwrap_or(false);
         let ok = CreateRestrictedToken(
             base,
             flags,
@@ -798,8 +827,8 @@ fn make_restricted_token() -> Option<Handle> {
             std::ptr::null(),
             0,
             std::ptr::null(),
-            restrict.len() as u32,
-            restrict.as_mut_ptr(),
+            if use_restrict { restrict.len() as u32 } else { 0 },
+            if use_restrict { restrict.as_mut_ptr() } else { std::ptr::null() },
             &mut new_token,
         );
         CloseHandle(base);
@@ -892,6 +921,9 @@ fn launch_restricted(cmdline: &str, memory_mb: usize, processes: u32) -> ! {
         let mut si = StartupInfo::default();
         si.cb = std::mem::size_of::<StartupInfo>() as u32;
         si.dw_flags = STARTF_USESTDHANDLES;
+        // 关键：受限令牌进程必须能访问交互桌面，否则 DLL 初始化阶段就 0xC0000142。
+        let desktop = wide("winsta0\\default");
+        si.lp_desktop = desktop.as_ptr();
         si.h_std_input = GetStdHandle(STD_INPUT_HANDLE);
         si.h_std_output = GetStdHandle(STD_OUTPUT_HANDLE);
         si.h_std_error = GetStdHandle(STD_ERROR_HANDLE);
@@ -947,14 +979,12 @@ fn probe_restricted() -> ! {
         }
     };
     /**
-     * 真刀真枪跑 **powershell**（不是 cmd exit 0）。
+     * 真刀真枪跑 **node --version**（不是 cmd exit 0，也不只是 powershell）。
      *
-     * 为什么用 powershell 而非 cmd：cmd 内建命令不加载复杂 DLL，受限令牌下
-     * 侥幸能跑；但成员的真实任务大量用 node / powershell 脚本。若受限令牌连
-     * powershell 都起不来（0xC0000142），那这个档对成员毫无用处——必须报 false，
-     * 退回 jobonly，绝不谎报 restricted 让成员全挂。
+     * node 是成员最常用的运行时；降权档若连 node 都起不来，就对成员毫无用处。
+     * 起得来才算 restricted 可用——绝不谎报让成员任务全挂。
      */
-    let mut cmd_w = wide("powershell -NoProfile -NonInteractive -Command \"exit 0\"");
+    let mut cmd_w = wide("node --version");
     unsafe {
         let mut si = StartupInfo::default();
         si.cb = std::mem::size_of::<StartupInfo>() as u32;

@@ -119,18 +119,20 @@ test("真实沙箱探针：本机档位如实现（有 helper 就不是 off）",
   }
 });
 
-test("受限令牌档：fileIsolation=true 但 noNetwork=false（诚实：写隔离有、断网无）", () => {
+test("受限令牌档：fileIsolation=false（诚实：降权运行，不做文件写隔离），且能跑 node", () => {
   const v = probeSandbox({ appRoot: process.cwd() });
   if (v.mode === "restricted") {
-    assert.equal(v.limits.fileIsolation, true, "受限令牌应有写隔离");
-    assert.equal(v.limits.noNetwork, false, "受限令牌不断网，必须如实报 false");
+    // 2026-11-19 实测：restricted 是"降权运行"，不是写隔离——fileIsolation 必须如实 false
+    assert.equal(v.limits.fileIsolation, false, "restricted 不做文件写隔离，不许报 true");
+    assert.equal(v.limits.noNetwork, false, "restricted 不断网，不许报 true");
+    assert.match(v.reason, /降权|资源上限/, "reason 要说清它是降权不是隔离");
   }
-  // 非 restricted 机器跳过（不同机器档位不同）
+  // 非 restricted 机器跳过
 });
 
-test("受限令牌档实测：工作区内能写、系统盘被拒（本机 restricted 时才有意义）", async () => {
+test("受限令牌档实测：能跑 node（降权档的意义就是能跑真实程序）", async () => {
   const v = probeSandbox({ appRoot: process.cwd() });
-  if (v.mode !== "restricted") return; // 跳过非 restricted 机器
+  if (v.mode !== "restricted") return; // 仅 restricted 机器
   const root = tmp();
   const { Toolkit } = await import("../dist/main/toolkit.js");
   const { sandboxVerdict, runInSandbox } = await import("../dist/main/sandbox.js");
@@ -143,14 +145,10 @@ test("受限令牌档实测：工作区内能写、系统盘被拒（本机 rest
       run: (cmd, o) => runInSandbox(cmd, { timeoutMs: o.timeoutMs, cwd: o.cwd, env: o.env }),
     },
   });
-  // 工作区内写：应成功且真落盘
-  const out1 = await tk.runCommand({ command: "echo INSIDE > inside.txt" });
-  assert.ok(fs.existsSync(path.join(root, "inside.txt")), `工作区内应能写：${out1.slice(0, 80)}`);
-  // 系统盘写：应被拒（文件不该出现）
-  const sysPath = "C:\\Windows\\lynn-sbx-e2e-probe.txt";
-  try {
-    if (fs.existsSync(sysPath)) fs.rmSync(sysPath);
-  } catch {}
-  await tk.runCommand({ command: `echo x > "${sysPath}"` });
-  assert.equal(fs.existsSync(sysPath), false, "受限令牌下系统盘写必须被拒");
+  // node 能跑（降权档的核心价值）
+  const out = await tk.runCommand({ command: "node --version" });
+  assert.match(out, /v\d+\.\d+/, `降权档下 node 必须能跑：${out.slice(0, 120)}`);
+  // 工作区内能写
+  const out2 = await tk.runCommand({ command: "echo HI > inside.txt" });
+  assert.ok(fs.existsSync(path.join(root, "inside.txt")), `工作区内应能写：${out2.slice(0, 80)}`);
 });
