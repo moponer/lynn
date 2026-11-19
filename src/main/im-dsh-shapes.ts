@@ -313,6 +313,13 @@ export function buildChannelHandlers(deps: ImHostDeps): Record<string, RpcHandle
       /**
        * 回答正文从账本读——`waitTurn` 期间内核的 delta 事件
        * 由 `recordEvent` 累积（见 im-bridge 的事件接线）。
+       *
+       * `historyEvents` 会把 `rec.answer` 包成
+       * `assistant/message`（带 `data.message.content`），
+       * vendor 的 `accumulateFinalAssistantText` 从中读到定稿。
+       *
+       * 之前账本既发 `assistant/chunk` 又发 `assistant/message`（data.text），
+       * 同一文本推两次 update → 飞书卡片里正文出现两遍（"回复重复"）。
        */
       void turnId;
       return true;

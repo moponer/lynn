@@ -152,7 +152,9 @@ export function recordEvent(ev: KernelEvent, sessionId: string): boolean {
   }
 }
 
-/** 结束一轮（`session.prompt` 的 handler 在 waitTurn 之后调） */
+/**
+ * 结束一轮（`session.prompt` 的 handler 在 waitTurn 之后调）。
+ */
 export function endTurn(sessionId: string, reason = "completed"): void {
   const rec = openTurn(sessionId);
   if (!rec || rec.done) return;
@@ -197,17 +199,37 @@ export function historyEvents(sessionId: string, afterSeq = -1): { seq: number; 
     });
     // 3) 正文
     if (rec.hasText && rec.answer) {
-      out.push({
-        seq: rec.seqBase + 3,
-        event: {
-          type: "assistant/chunk",
-          seq: rec.seqBase + 3,
-          data: { turn: rec.turnId, chunk: { type: "text-delta", text: rec.answer } },
-        },
-      });
+      /**
+       * 只发 `assistant/message`（完整定稿），**不再发 `assistant/chunk`**。
+       *
+       * 原因（真实事故）：之前两条都发，且 chunk 携带的是 `rec.answer`
+       * （累积全文）。vendor 的 history 路径（harness-client.mjs:783-813）
+       * 先 `appendDelta` 再 `commitText`（推一次 update），
+       * 然后 `setCanonical` + `commitText`（再推一次 update）+
+       * `pushUpdate({type:'assistant-message'})`（又推一次）。
+       *
+       * 飞书 bot 对每次 update 都调 `#appendStepCardUpdate` 追加内容，
+       * 结果卡片里同一段正文出现两遍——用户看到的"回复重复"。
+       *
+       * 去掉 chunk 后只剩 message 一条路径。
+       *
+       * **data 格式必须带 `message.content`**：
+       * vendor 的 `accumulateFinalAssistantText`（:481-483）读的是
+       * `event.data.message.content`（harness content 数组），
+       * `assistantMessageText`（:803）也是。
+       * 之前只给 `data.text`，vendor 读不到 → `finalAnswer` 为空 →
+       * `ask()` 返回"没有文本回复"。
+       */
       out.push({
         seq: rec.seqBase + 4,
-        event: { type: "assistant/message", seq: rec.seqBase + 4, data: { turn: rec.turnId, text: rec.answer } },
+        event: {
+          type: "assistant/message",
+          seq: rec.seqBase + 4,
+          data: {
+            turn: rec.turnId,
+            message: { content: [{ type: "text", text: rec.answer }] },
+          },
+        },
       });
     }
     // 4) 收轮

@@ -54,7 +54,9 @@ async function harness() {
     threadHistory: () => [],
     currentThreadId: () => SESSION,
     submitTurn: () => {
-      setTimeout(() => emitKernel({ type: "turn", turn: { busy: true } }), 5);
+      setTimeout(() => {
+        emitKernel({ type: "turn", turn: { busy: true } });
+      }, 5);
       setTimeout(() => emitKernel({ type: "delta", text: "回答正文" }), 15);
       setTimeout(() => emitKernel({ type: "done" }), 25);
     },
@@ -103,7 +105,7 @@ test("账本：事件自带 seq，且收轮用 completed", () => {
   endTurn(SESSION);
   const events = historyEvents(SESSION);
   const types = events.map((e) => e.event.type);
-  assert.deepEqual(types, ["turn/start", "user/message", "assistant/chunk", "assistant/message", "turn/end"], `实际：${types.join(",")}`);
+  assert.deepEqual(types, ["turn/start", "user/message", "assistant/message", "turn/end"], `实际：${types.join(",")}`);
 
   /**
    * 关键：`seq` 必须在**事件对象内部**。

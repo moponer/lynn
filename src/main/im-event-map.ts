@@ -89,12 +89,16 @@ export function mapKernelEvent(ev: KernelEvent, sessionId: string, rpcId = "lynn
           ...(currentTurn ? { turn: currentTurn } : {}),
         });
       }
-      if (typeof d.text === "string" && d.text) {
-        wrap("assistant/chunk", {
-          chunk: { type: "text-delta", text: d.text },
-          ...(currentTurn ? { turn: currentTurn } : {}),
-        });
-      }
+      /**
+       * **text-delta 不再发 WS 帧**。
+       *
+       * 原因（真实事故）：delta 走 WS 推一次、账本走 history 轮询又推一次，
+       * 同一段正文在飞书卡片里出现两遍。
+       *
+       * WS 只保留 `turn/start`、`turn/end`、`tool/call` 等**控制面**事件；
+       * 正文统一由账本的 `assistant/message` 在轮询时一次性给全。
+       * 代价是失去实时流式——但 300ms 的轮询间隔已经足够快。
+       */
       break;
     }
 
