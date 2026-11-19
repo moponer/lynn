@@ -210,6 +210,14 @@ export interface MemberRunInput {
    */
   sandbox?: ToolkitOptions["sandbox"];
   onSandboxDegraded?: (reason: string) => void;
+  /**
+   * 可注入的技能清单（2026-11-19 修 C1b：成员侧此前**完全不加载技能**）。
+   *
+   * 只有"技能的 allowed-tools 全部在本次工具集内"的才会被注入——这是**客观判据**，
+   * 不靠关键词猜任务类型。注入位置是首条 user（不进 system，保住缓存前缀）。
+   * 不传 = 不注入（旧行为，零影响）。
+   */
+  skills?: readonly { name: string; description: string; allowedTools: readonly string[]; body: string }[];
   model: { baseUrl: string; apiKey: string; model: string };
   /** 测试注入；默认真流式 */
   chatFn?: MemberChatFn;
@@ -607,6 +615,56 @@ export function memberTaskIntro(input: MemberRunInput): string {
 
 // ---------- 执行循环 ----------
 
+/** 成员最多注入几个技能（多了会把首条 user 撑爆，反而挤掉简报重点） */
+const MEMBER_SKILL_LIMIT = 2;
+/** 技能正文总字数上限 */
+const MEMBER_SKILL_BUDGET = 2_000;
+
+/**
+ * 给成员注入技能（2026-11-19 修 C1b）。
+ *
+ * ## 为什么之前是空的
+ *
+ * `member-runner` 里**完全没有技能加载逻辑**：技能只被风铃读（`kernel.discoverSkills`
+ * 写进 `dataRoot/skills`），成员从来看不到。于是"text-check / csv-analysis / text-diff"
+ * 这类**讲成员工具**的预置技能，风铃读了也调不到（她只有管理工具），成员又根本收不到——
+ * 三段能力等于全部悬空。
+ *
+ * ## 判据为什么是 allowed-tools 而不是关键词
+ *
+ * 猜任务类型（"这单是不是写作"）只能靠关键词，错一次就注入错技能、白占上下文。
+ * 而"技能声明的 allowed-tools 是否**全部**在本次工具集里"是**客观事实**：
+ * 成员手上没有那个工具，就算注入技能它也做不了——反过来说，工具都在，技能就能落地。
+ *
+ * ## 位置
+ *
+ * 注入首条 user（不进 system）：技能随单变，塞进 system 会把缓存前缀每单打散。
+ */
+export function renderMemberSkills(
+  skills: readonly { name: string; description: string; allowedTools: readonly string[]; body: string }[] | undefined,
+  tools: readonly string[],
+): string {
+  if (!skills?.length) return "";
+  const have = new Set(tools);
+  const matched: string[] = [];
+  let used = 0;
+  for (const s of skills) {
+    if (matched.length >= MEMBER_SKILL_LIMIT) break;
+    // 客观判据：技能要求的工具必须全在本次工具集里（submit_report/post_message 是固定通道）
+    const need = s.allowedTools.filter(Boolean).filter((t) => t !== "submit_report" && t !== "post_message");
+    if (!need.length || !need.every((t) => have.has(t))) continue;
+    const body = String(s.body ?? "").trim();
+    if (!body) continue;
+    const room = MEMBER_SKILL_BUDGET - used;
+    if (room < 200) break;
+    const clipped = body.length <= room ? body : `${body.slice(0, room)}…（技能正文已截断）`;
+    matched.push(`### ${s.name}\n${s.description}\n\n${clipped}`);
+    used += clipped.length;
+  }
+  if (!matched.length) return "";
+  return ["【可用技能（本次工具集覆盖的技能，按它做能少走弯路）】", ...matched].join("\n\n");
+}
+
 export async function runMemberTask(input: MemberRunInput): Promise<MemberRunResult> {
   /**
    * 成员的单轮调用**必须有重试**（2026-11-16 日志复盘：此前默认直连 `streamChat`，
@@ -672,6 +730,8 @@ export async function runMemberTask(input: MemberRunInput): Promise<MemberRunRes
         `【本次授权】\n${authLines}`,
         // 任务级内容（简报/禁区/取舍/探索型/重做项）：每单都不同，所以只在这里出现一次
         memberTaskIntro(input),
+        // 技能（2026-11-19 C1b）：只注入"allowed-tools 全在本次工具集内"的技能
+        renderMemberSkills(input.skills, input.tools),
         "先读一遍简报，用 list_dir/read_file 核对材料是否真的在；缺关键材料、缺权限或目标不清就立刻 submit_report 标【缺上下文】" +
           "（写明「需要授权：<绝对路径>」），不要换路径硬试、不要猜着做。材料齐了就开工，完成后 submit_report。",
         // 经验放最后：前面几段是每单都一样的骨架，接在后面不会把稳定前缀推开

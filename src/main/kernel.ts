@@ -4854,6 +4854,12 @@ export class Kernel {
           }),
       },
       onSandboxDegraded: (reason) => this.log("sandbox_degraded", { taskId, reason }),
+      /**
+       * 成员侧技能（2026-11-19 修 C1b）：把已发现的技能交给成员 runner，
+       * 由它按"allowed-tools 是否全在本次工具集内"做客观匹配后注入首条 user。
+       * 之前成员完全收不到技能——讲成员工具的那几个预置技能因此全部悬空。
+       */
+      skills: this.skillEntries,
       // 收件箱：风铃/巡检中途补的指示，成员每轮开头取（催办不杀进程、不重派）
       inbox: (() => {
         const box = this.memberInbox.get(taskId) ?? [];
@@ -9985,7 +9991,43 @@ export class Kernel {
           errors: r.errors,
         };
       },
+      panelAction: (params) => this.uiPanelAction(params),
     };
+  }
+
+  /**
+   * 工作台动作闸口（2026-11-19）：白名单插件 + 白名单动作。
+   *
+   * 为什么不让 iframe 直接调 L1 工具：沙箱 HTML 只该拿到"它能干什么"的最小集合。
+   * 这里把动作收敛到 4 个只读/需确认的操作，并**每次都重新确认插件已启用**，
+   * 这样停用插件后残留的 iframe 也动不了内核。
+   */
+  private async uiPanelAction(params: RpcContracts["ui.panelAction"]["params"]): Promise<RpcContracts["ui.panelAction"]["result"]> {
+    const rid = params.requestId;
+    const bad = (error: string): RpcContracts["ui.panelAction"]["result"] => ({ ok: false, error, requestId: rid });
+    const CLEANER = "lynn.core.junk-cleaner.ui";
+    if (params.plugin !== CLEANER) return bad("插件动作未授权：" + params.plugin);
+    // 主进程 PluginSetStore 是 U 启用的单一真相；每次检查，停用后残留 iframe 也动不了内核
+    const uEnabled = this.pluginHost.scan().plugins.some((p) => p.id === CLEANER && p.enabled);
+    if (!uEnabled) return bad("插件已停用");
+    // L1 工具也必须处于启用态
+    const l1Entry = this.pluginHost.scan().plugins.find((p) => p.id === "lynn.core.junk-cleaner");
+    if (!l1Entry?.enabled) return bad("清理工具插件已停用");
+    const toolName =
+      params.action === "scan" ? "junk_scan"
+      : params.action === "dryRun" || params.action === "clean" ? "junk_clean"
+      : "resource_report";
+    const args = params.action === "dryRun" ? { dryRun: true }
+      : params.action === "clean" ? { dryRun: false }
+      : {};
+    try {
+      // l1.execute 的 fullName 形如 lynn.<plugin>.<tool>；由它统一走执行闸/日志/审计
+      const raw = await this.l1.execute("lynn.core.junk-cleaner." + toolName, args);
+      const value = typeof raw === "string" ? JSON.parse(raw) : raw;
+      return { ok: true, requestId: rid, value };
+    } catch (e) {
+      return bad("工具执行失败：" + (e instanceof Error ? e.message : String(e)));
+    }
   }
 
   /** 写作规则状态（第五批）：只读入口；开关写入口在 config.prefs */
