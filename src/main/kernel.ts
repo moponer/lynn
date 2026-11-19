@@ -6701,6 +6701,19 @@ export class Kernel {
             /* 状态已就位 */
           }
           this.taskCase.append(taskId, { kind: "note", text: `第 ${reworkRound} 轮重做：沿用原工单，未新建工单` });
+          /**
+           * 补推契约阶段（2026-11-19 修 T4）。
+           *
+           * 首次 dispatchMember 失败（模型未配/并发满/成员忙）时 startAssignment 不会
+           * advanceStage("contract")，阶段账停在"契约进行中"。之后用 rework 重派是复用的
+           * 同一份 stagePlan，原代码**不再补推** contract → 该段永远 active →
+           * shouldFinalize 永远为假，阶段账与工单实际状态长期不符。
+           * 这里在重做派单时补一次（advanceStage 对已完成的段是幂等的）。
+           */
+          this.advanceStage(taskId, "contract", [
+            `契约 ${taskId} · 重做第 ${reworkRound} 轮派单生效`,
+            `工作区 ${wsFinal ?? "（继承会话主根）"}`,
+          ]);
         } else if (!this.taskStore.get(taskId)) {
           /**
            * 派生单挂父单（2026-11-19 今日复盘）。

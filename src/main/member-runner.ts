@@ -894,7 +894,30 @@ export async function runMemberTask(input: MemberRunInput): Promise<MemberRunRes
             ? String(args.url ?? args.target ?? args.selector ?? "")
             : String(args.path ?? args.name ?? "");
       input.onEvent?.({ kind: "tool-start", text: `${name}${head ? "：" + head.slice(0, 400) : ""}` });
-      const out = await toolkit.execute(name, args);
+      /**
+       * 长命令期间让进度条也动（2026-11-19 修 C7）。
+       *
+       * 问题：progress 只在每轮 `turn` 事件里更新（turns/maxTurns），一条跑 100s 的命令
+       * 期间进度条完全不动，用户看到"卡住"（实机把在跑看成卡死的经典形态）。
+       * 修法：命令执行期间每 2s 推一次**时间插值**进度——从本轮基准往上爬，最多到
+       * "下一轮之前"，命令结束立刻停。这样进度条一直在动，也不会越过下一轮的真实值。
+       */
+      const out = await (async () => {
+        const base = Math.min(95, Math.round((turns / Math.max(1, maxTurns)) * 100));
+        const step = Math.max(1, Math.round(95 / Math.max(1, maxTurns)));
+        const startedAt = Date.now();
+        const timer = setInterval(() => {
+          const frac = Math.min(0.95, (Date.now() - startedAt) / 120_000); // 以命令超时 120s 作预期上限
+          const p = Math.min(base + step - 1, Math.round(base + step * frac));
+          input.onEvent?.({ kind: "turn", text: `第 ${turns} / ${maxTurns} 轮（${name} 执行中）`, progress: p });
+        }, 2_000);
+        (timer as { unref?: () => void }).unref?.();
+        try {
+          return await toolkit.execute(name, args);
+        } finally {
+          clearInterval(timer);
+        }
+      })();
       if (name === "write_file" || name === "edit_file") {
         const ch = toolkit.changes().at(-1);
         const rel = String(args.path ?? "");

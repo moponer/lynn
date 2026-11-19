@@ -387,7 +387,14 @@ function FeedViewInner({
     [cards, collapseHistory, showHistory, visibleCount],
   );
   const { historyCount, base, visible, capped, moreAvailable } = win;
-  const awaitingLynn = useMemo(() => feedAwaitingLynn(visible), [visible]);
+  /**
+   * "这条 @ 还没人接"必须基于**全量 cards**判定（2026-11-19 修 F4）。
+   *
+   * 之前传 `visible`：若"风铃已回应"的那张卡因为折叠/分页/400 上限被切出窗口，
+   * answered 永远为 false → 那条 @ 一直挂着"等风铃"红标，用户以为消息丢了。
+   * 全量扫描还与内核 pendingMentions（同样扫全量 feed）口径一致。
+   */
+  const awaitingLynn = useMemo(() => feedAwaitingLynn(cards), [cards]);
   if (cards.length === 0) return <div className="feed-empty">{empty ?? "还没有往来。"}</div>;
   return (
     <div className="feed">

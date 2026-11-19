@@ -106,3 +106,29 @@ test("C5：风铃说过话之后，之前的 @ 不再算待答", () => {
   const visible = [userCard("u1", [{ name: "林工" }]), card({ id: "l1", kind: "lynn", text: "收到，我去办" })];
   assert.equal(feedAwaitingLynn(visible).size, 0);
 });
+
+test("F4：窗口外已回应过的 @ 不该被误判待答（必须基于全量 cards）", () => {
+  /**
+   * 场景：用户 @ 了成员，风铃回过，但她的回应卡因为分页/折叠被切出可见窗口。
+   * 若拿 visible 判定 → answered 永远 false → 那条 @ 一直挂"等风铃"红标。
+   * 正确做法是拿全量 cards 判定（Feed 现在这么调）。
+   */
+  const all = [
+    userCard("u1", [{ name: "林工" }]),
+    card({ id: "l1", kind: "lynn", text: "收到，我去办" }),
+    userCard("u2", [{ name: "林工" }]),
+  ];
+  // 全量判定：u1 已被 l1 回应，只剩 u2 待答
+  const byAll = feedAwaitingLynn(all);
+  assert.ok(!byAll.has("u1"), "u1 已有回应，不该待答");
+  assert.ok(byAll.has("u2"), "u2 还没有回应，应待答");
+
+  // 对照：只拿窗口（只剩 u2）判定——这正是修复前的错误输入
+  const onlyVisible = [all[2]];
+  const byVisible = feedAwaitingLynn(onlyVisible);
+  assert.ok(byVisible.has("u2"));
+  // 关键差异：窗口里丢了 l1，若窗口里还有 u1 就会误判。这里用"窗口含 u1 但不含 l1"复现：
+  const partial = [all[0], all[2]];
+  const byPartial = feedAwaitingLynn(partial);
+  assert.ok(byPartial.has("u1"), "复现：窗口丢了回应卡时 u1 会被误判待答（这就是 F4 的 bug）");
+});
