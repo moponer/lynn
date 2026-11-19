@@ -672,9 +672,29 @@ export class Toolkit {
       }
     }
     const rel = path.relative(this.root, real);
-    const head = rel.split(/[\\/]/)[0];
-    if (head === ".git" || head === ".lynn") {
-      throw new Error(`拒绝写入 ${rel}：${head}/ 是项目元数据 / 风铃配置，不归成员改（要改请让用户处理）。`);
+    const parts = rel.split(/[\\/]+/).filter(Boolean);
+    if (parts.length === 0) return;
+    /**
+     * 工作区内敏感路径写保护（2026-11-19 扩展，借鉴 Codex allow.rs 的 deny 逻辑）：
+     * 原版只挡首段 .git/.lynn；这里补齐——
+     *  - 任何层级的版本库/凭据目录（.git/.hg/.svn/.ssh/.aws/.gnupg/.kube/.terraform、
+     *    以及 agent 自己的 .lynn/.agents/.codex）都不许写，防篡改历史/泄密/越权；
+     *  - 凭据类文件名（.env/.npmrc/.netrc/.git-credentials/id_rsa…）也不许写。
+     * 只拒**写**：读仍允许（成员常需读 .env 才知道配置键）。
+     */
+    const DENY_DIR = new Set([
+      ".git", ".hg", ".svn", ".ssh", ".aws", ".gnupg", ".kube", ".terraform",
+      ".lynn", ".agents", ".codex",
+    ]);
+    const DENY_FILE = /^(\.env(\..+)?|\.npmrc|\.netrc|\.git-credentials|id_rsa|id_ed25519|credentials(\.json)?|\.htpasswd)$/i;
+    for (const seg of parts.slice(0, -1)) {
+      if (DENY_DIR.has(seg.toLowerCase())) {
+        throw new Error(`拒绝写入 ${rel}：${seg}/ 是受保护的敏感目录（版本库/凭据/配置），不归成员改（要改请让用户处理）。`);
+      }
+    }
+    const leaf = parts[parts.length - 1] ?? "";
+    if (DENY_FILE.test(leaf)) {
+      throw new Error(`拒绝写入 ${rel}：${leaf} 是凭据/配置文件，不归成员改（可能泄密或被滥用；要改请让用户处理）。`);
     }
   }
 
