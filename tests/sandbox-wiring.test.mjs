@@ -119,18 +119,18 @@ test("真实沙箱探针：本机档位如实现（有 helper 就不是 off）",
   }
 });
 
-test("受限令牌档：fileIsolation=false（诚实：降权运行，不做文件写隔离），且能跑 node", () => {
+test("受限令牌档：标准用户级写隔离（fileIsolation=true），不断网（noNetwork=false）", () => {
   const v = probeSandbox({ appRoot: process.cwd() });
   if (v.mode === "restricted") {
-    // 2026-11-19 实测：restricted 是"降权运行"，不是写隔离——fileIsolation 必须如实 false
-    assert.equal(v.limits.fileIsolation, false, "restricted 不做文件写隔离，不许报 true");
-    assert.equal(v.limits.noNetwork, false, "restricted 不断网，不许报 true");
-    assert.match(v.reason, /降权|资源上限/, "reason 要说清它是降权不是隔离");
+    // LUA_TOKEN 降权到标准用户：系统盘写被拒=有实际写隔离；但非仅工作区、不断网
+    assert.equal(v.limits.fileIsolation, true, "标准用户级有写隔离");
+    assert.equal(v.limits.noNetwork, false, "不断网");
+    assert.match(v.reason, /标准用户|降权|工作区/, "reason 要说清粒度");
   }
   // 非 restricted 机器跳过
 });
 
-test("受限令牌档实测：能跑 node（降权档的意义就是能跑真实程序）", async () => {
+test("受限令牌档实测：node 能跑 + 系统盘写被拒 + 用户目录能写", async () => {
   const v = probeSandbox({ appRoot: process.cwd() });
   if (v.mode !== "restricted") return; // 仅 restricted 机器
   const root = tmp();
@@ -145,10 +145,17 @@ test("受限令牌档实测：能跑 node（降权档的意义就是能跑真实
       run: (cmd, o) => runInSandbox(cmd, { timeoutMs: o.timeoutMs, cwd: o.cwd, env: o.env }),
     },
   });
-  // node 能跑（降权档的核心价值）
+  // 1) node 能跑（降权档的核心价值）
   const out = await tk.runCommand({ command: "node --version" });
   assert.match(out, /v\d+\.\d+/, `降权档下 node 必须能跑：${out.slice(0, 120)}`);
-  // 工作区内能写
+  // 2) 工作区内能写
   const out2 = await tk.runCommand({ command: "echo HI > inside.txt" });
   assert.ok(fs.existsSync(path.join(root, "inside.txt")), `工作区内应能写：${out2.slice(0, 80)}`);
+  // 3) 系统盘写被拒（标准用户无写权限）
+  const sysPath = "C:\\Windows\\lynn-sbx-e2e-probe.txt";
+  try {
+    if (fs.existsSync(sysPath)) fs.rmSync(sysPath);
+  } catch {}
+  await tk.runCommand({ command: `echo x > "${sysPath}"` });
+  assert.equal(fs.existsSync(sysPath), false, "标准用户下系统盘写必须被拒");
 });

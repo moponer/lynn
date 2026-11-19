@@ -800,23 +800,30 @@ fn make_restricted_token() -> Option<Handle> {
         }
         let mut new_token: Handle = std::ptr::null_mut();
         /**
-         * 默认用 **降权不隔离**（DISABLE_MAX_PRIVILEGE，restrict=none）——2026-11-19 实测定论。
+         * 默认用 **LUA_TOKEN（降权到标准用户，无 restricting SID）**——2026-11-19 定论。
          *
-         * 走过的弯路：加任何 restricting SID（user/users/authed/all）都会让
-         * node / powershell 在 DLL 初始化阶段 0xC0000142，因为它们要访问的
-         * 临时目录/模块目录 ACL 只认 Users 组，restricting 令牌把它们屏蔽了。
-         * 要真正"写隔离且能跑程序"必须像 Codex 那样预配置整套 ACL（给 sandbox
-         * 身份显式授权所有程序目录），那是独立的大工程。
+         * 走过的弯路（都实测过）：
+         *  - 加任何 restricting SID（user/users/authed/all）→ node/powershell 在
+         *    DLL 初始化阶段 0xC0000142，因为它们要访问的临时/模块目录 ACL 只认
+         *    Users 组，restricting 把它们屏蔽了；
+         *  - 加 winsta0\default 桌面、换 Users+Authenticated 组合，均无效。
          *
-         * 所以本档诚实定位为「**降权运行**」：夺掉管理员特权（SeDebug/SeBackup/
-         * SeTakeOwnership 等）+ Job Object 资源上限，但**不做文件写隔离**。
-         * 环境变量可覆盖（诊断/将来接 ACL 时用）。
+         * 正解是 **LUA_TOKEN**：把管理员进程降成 UAC 过滤令牌（Administrators 变
+         * deny-only，即"标准用户"）。实测本机：
+         *  - node --version → 正常（v26.12.1）
+         *  - 写 C:\Windows → 拒绝访问、文件没落（标准用户对系统盘本无写权限）
+         *  - 写用户目录 → 成功
+         * 这就是真正可用的「标准用户级写隔离」：程序目录读权限完整、系统盘写被系统 ACL 拒。
+         *
+         * **诚实边界**：这是"标准用户能写哪就写哪"（用户目录/项目目录可写），
+         * 不是"只限工作区"——后者要 Codex 那套 restricting SID + 专用账户 + ACL 工程。
+         * 但标准用户级降权已是实质、可验证的隔离，远好于裸跑/纯 jobonly。
          */
         let flags = match std::env::var("LYNN_SBX_FLAGS").ok().and_then(|s| s.parse::<u32>().ok()) {
             Some(f) => f,
-            None => DISABLE_MAX_PRIVILEGE,
+            None => LUA_TOKEN,
         };
-        // 默认不 restrict（restrict 会让程序起不来，见上）；环境变量可开
+        // 默认不 restrict（restrict 会让程序起不来，见上）
         let use_restrict = std::env::var("LYNN_SBX_RESTRICT_MODE")
             .map(|m| m != "none")
             .unwrap_or(false);

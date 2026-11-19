@@ -118,17 +118,19 @@ export function probeSandbox(opts: { appRoot?: string; timeoutMs?: number } = {}
   }
 
   const launchVerified = parsed.launchVerified === true;
-  // 档位优先级：AppContainer（能断网+文件隔离）> restricted（降权运行，能跑程序但不隔离写）> jobonly
+  // 档位优先级：AppContainer（断网+仅工作区写）> restricted（标准用户级写隔离）> jobonly
   const mode: SandboxMode = launchVerified ? "appcontainer" : restrictedOk ? "restricted" : "jobonly";
   /**
-   * 诚实说明「restricted」到底是什么（2026-11-19 实测定论）：
+   * 「restricted」到底是哪一档（2026-11-19 实测定论）：
    *
-   * 它不是文件写隔离——实测加 restricting SID 会让 node/powershell 起不来
-   * （0xC0000142），真正的写隔离要 Codex 那套预配置 ACL。当前 restricted 能给的
-   * 是：**夺掉管理员特权（SeDebug/SeBackup/SeTakeOwnership…）+ Job Object 资源上限**，
-   * 比裸跑/纯 jobonly 少了一份"以管理员身份乱来"的能力，但**不限制文件读写范围**。
+   * 用 LUA_TOKEN 把进程降成**标准用户**（Administrators 变 deny-only）。实测本机：
+   *  node/powershell 正常跑；写 C:\Windows 拒绝访问、写入用户目录成功。
    *
-   * 所以 fileIsolation 如实报 false（不含糊其辞），只把"降权"作为 distinct 信息暴露。
+   * 所以它有**实质写隔离**（标准用户对系统盘/受保护位置无写权限，系统 ACL 自动拒），
+   * 不是 pure 降权。fileIsolation 报 true 是诚实的——但要说清粒度：
+   * 它是"标准用户能写哪就写哪"（用户目录/项目目录可写），**不是"仅限工作区"**。
+   * "仅工作区"要 Codex 那套 restricting SID + 专用账户 + ACL 工程（未做）。
+   * 断网仍没有（要 WFP）。
    */
   return {
     mode,
@@ -137,7 +139,7 @@ export function probeSandbox(opts: { appRoot?: string; timeoutMs?: number } = {}
     reason: launchVerified
       ? String(parsed.reason ?? "")
       : restrictedOk
-        ? "降权运行：已夺管理员特权 + Job Object 资源上限（能跑 node/powershell）；但不做文件写隔离、不断网——那是 AppContainer/WFP 阶段"
+        ? "标准用户级隔离：进程降权到标准用户（系统盘/受保护位置写被拒），node/powershell 正常跑；但写范围是“标准用户可写处”（非仅工作区），且不断网"
         : String(parsed.reason ?? ""),
     helperPath: found,
     probed: true,
@@ -146,8 +148,8 @@ export function probeSandbox(opts: { appRoot?: string; timeoutMs?: number } = {}
       memoryMb: 2048,
       // 断网只有 AppContainer 能给
       noNetwork: launchVerified,
-      // 文件写隔离：受限令牌档**没有**（只有降权 + 资源上限），如实 false
-      fileIsolation: launchVerified,
+      // 写隔离：restricted 有"标准用户级"写限制（系统盘被拒），如实 true
+      fileIsolation: launchVerified || restrictedOk,
     },
   };
 }

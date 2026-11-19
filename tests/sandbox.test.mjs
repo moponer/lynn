@@ -41,9 +41,9 @@ test("档位判定只认 launchVerified，不认探针自报的 mode", () => {
     assert.equal(v.limits.noNetwork, true);
     assert.equal(v.limits.fileIsolation, true);
   } else if (v.mode === "restricted") {
-    // 降权档：夺管理员特权 + 资源上限，但**不做文件写隔离、不断网**（诚实）
+    // 标准用户级降权：系统盘写被拒=有写隔离；但非仅工作区、不断网
     assert.equal(v.launchVerified, true, "报 restricted 必须实测起得来");
-    assert.equal(v.limits.fileIsolation, false, "restricted 只是降权，不做文件写隔离");
+    assert.equal(v.limits.fileIsolation, true, "标准用户级有写隔离");
     assert.equal(v.limits.noNetwork, false, "restricted 不断网，不许写 true");
   } else {
     assert.equal(v.launchVerified, false);
