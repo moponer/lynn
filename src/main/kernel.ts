@@ -436,6 +436,11 @@ const TOOL_JSON: ToolSchema[] = [
             type: "string",
             description: "重做/打回/卡住重来填**原工单 ID**（沿用状态与卷宗，不新建单）；新任务不填",
           },
+          parentTaskId: {
+            type: "string",
+            description:
+              "从一张单拆出来的子任务/派生单，填**父工单 ID**——否则派生单和父单脱钩，你会忘了跟它（实机：验收时顺手派生一张单，之后查不到它、用户喊停才发现）。独立的新任务不填。",
+          },
           evidencePolicy: {
             type: "string",
             enum: ["required", "optional"],
@@ -582,6 +587,21 @@ const TOOL_JSON: ToolSchema[] = [
           ref: { type: "string", description: "产物在卷宗里的路径（如 artifacts/报告.docx）；省略=最后一件交付物" },
           maxChars: { type: "number", description: "最多读多少字（默认 8000，上限 20000）" },
           offset: { type: "number", description: "从第几个字开始读（被截断后要读后续就传上次的 offset+maxChars）" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "probe_path",
+      description:
+        "【派单前探路】只读检查一个路径能否被成员访问、多大、是否敏感目录被拒——派单前先探一次，别等成员跑起来连撞三次拒绝才发现授权覆盖不到。返回：是否可授权为只读根、是否目录、条目数/大小、拒的原因。不是万能：盘符根/系统目录/用户根一律拒（那是边界），探了就知道。",
+      parameters: {
+        type: "object",
+        required: ["path"],
+        properties: {
+          path: { type: "string", description: "要探的绝对路径（目录或文件）" },
         },
       },
     },
@@ -886,6 +906,7 @@ const COMPACT_TOOL_DESC: Record<string, string> = {
   create_member: "招募 1 名成员（岗位档案）：只写能力域/做事风格/稳定边界/通用产出，禁写本次路径、文件名、阶段、数字、截止与验收；具体任务进简报。名字用通用岗位名，不带任务词或编号。",
   assign_task: "派单。简报四段自足；按规模自动配轮次/预算；证据默认可选，关键任务才强制。",
   check_progress: "查工单/团队进度与状态。",
+  probe_path: "派单前探路：只读查路径能否授权、多大、为何被拒——别等成员撞墙才发现授权覆盖不到。",
   nudge_member: "给在跑的成员补一句指示。",
   reply_member: "回答/纠正成员在群里的提问或错误（下一轮生效）。",
   stop_task: "停单后由你决定：同单重做（dismiss=false）或自行关单（dismiss=true），别问用户。",
@@ -1026,7 +1047,7 @@ interface PendingMemberQuestion {
 }
 
 /** 计划档位下也允许的只读工具 */
-const READ_ONLY_TOOLS = new Set(["check_progress", "check_roster", "read_artifact"]);
+const READ_ONLY_TOOLS = new Set(["check_progress", "check_roster", "read_artifact", "probe_path"]);
 
 /**
  * C4：新会话提示（纯函数，便于单测）。
@@ -3093,7 +3114,12 @@ export class Kernel {
     this.createFreshSession = st.history.length === 0;
     void this.resetAgentHost();
     this.checkpoints.discard();
-    this.setTurn({ phase: "idle", busy: false, pending: 0, taskId: undefined, startedAt: undefined, canUndo: false, changedFiles: [] });
+    /**
+     * silent=true：这次 idle 只是"切了显示"，不是正在跑的轮次结束。
+     * IM 的 waitTurn / 账本据此忽略（2026-11-19），否则桌面切群会让飞书
+     * 轮次被误判结束、提前拿走半截正文。
+     */
+    this.setTurn({ phase: "idle", busy: false, pending: 0, taskId: undefined, startedAt: undefined, canUndo: false, changedFiles: [], silent: true });
   }
 
   /**
@@ -3115,7 +3141,7 @@ export class Kernel {
     this.createFreshSession = true;
     void this.resetAgentHost();
     this.checkpoints.discard();
-    this.setTurn({ phase: "idle", busy: false, pending: 0, taskId: undefined, startedAt: undefined, canUndo: false, changedFiles: [] });
+    this.setTurn({ phase: "idle", busy: false, pending: 0, taskId: undefined, startedAt: undefined, canUndo: false, changedFiles: [], silent: true });
   }
 
   /**
@@ -6483,6 +6509,17 @@ export class Kernel {
           }
           this.taskCase.append(taskId, { kind: "note", text: `第 ${reworkRound} 轮重做：沿用原工单，未新建工单` });
         } else if (!this.taskStore.get(taskId)) {
+          /**
+           * 派生单挂父单（2026-11-19 今日复盘）。
+           *
+           * 实机：验收某张单时顺手派生一张新单（新 taskId），但没记父单，
+           * 结果是"我没派的单"——用户喊停才发现它。现在支持 parentTaskId：
+           * 建单时记下来源父单，check_progress / 巡检能看到这层关系，
+           * 父单收尾时子单不会漏跟。
+           */
+          const parentTaskId = typeof args.parentTaskId === "string" && args.parentTaskId.trim()
+            ? args.parentTaskId.trim()
+            : "";
           // 建单时就钉住会话与工作区：任务线判定、往来归属、成员在哪儿干活都靠它
           this.taskStore.create({
             id: taskId,
@@ -6494,6 +6531,7 @@ export class Kernel {
             workspace: wsRec,
             evidencePolicy: evPolicy,
             brief,
+            ...(parentTaskId && this.taskStore.get(parentTaskId) ? { parentId: parentTaskId } : {}),
             ...(acceptanceList.length ? { acceptance: acceptanceList } : {}),
             ...(forbiddenList.length ? { forbidden: forbiddenList } : {}),
             ...(priority ? { priority } : {}),
@@ -6625,6 +6663,17 @@ export class Kernel {
               ...(rec.reworkFocus?.items.length
                 ? { reworkFocus: `本轮只重做 ${rec.reworkFocus.items.length} 条未过项` }
                 : {}),
+              /**
+               * 派生关系（2026-11-19 今日复盘）：让风铃查一张单时能看到
+               * 它的父单与子单，不再出现"我没派过的单"漏跟。
+               */
+              ...(rec.parentId ? { parentTask: rec.parentId } : {}),
+              ...(() => {
+                const children = this.taskStore.list().filter((t) => t.parentId === taskId && t.status !== "canceled");
+                return children.length
+                  ? { childTasks: children.map((t) => `${t.id}「${t.title}」(${t.status})`) }
+                  : {};
+              })(),
             };
             sig = JSON.stringify(p, null, 2);
           }
@@ -6680,6 +6729,61 @@ export class Kernel {
       }
       case "check_roster": {
         return JSON.stringify(this.tools.roster(args.teamId ? String(args.teamId) : undefined), null, 2);
+      }
+      case "probe_path": {
+        /**
+         * 派单前探路（2026-11-19 今日复盘）。
+         *
+         * 实机：C 盘梳理单连续三次 readRoots 被拒（盘符根/系统目录/Program Files），
+         * 派单前不知道能不能读，越想全盘越跑不完。给她一个只读探路能力：
+         * 派单前探一次，知道哪些路径可授权、多大、为什么被拒，就不用靠成员跑起来撞墙试错。
+         *
+         * 复用 assign_task 同一套校验（forbiddenRootReason + 存在性），口径一致。
+         */
+        const raw = String(args.path ?? "").trim();
+        if (!raw) return "path 必填：要探哪个绝对路径。";
+        if (!path.isAbsolute(raw)) {
+          return `探路用绝对路径（收到相对路径：${raw}）。先确认材料的完整路径。`;
+        }
+        let st: fs.Stats;
+        try {
+          st = fs.statSync(raw);
+        } catch {
+          return JSON.stringify({ path: raw, exists: false, hint: "路径不存在或没权限 stat。先 ask_user 确认材料位置。" }, null, 2);
+        }
+        const real = (() => {
+          try {
+            return fs.realpathSync(raw);
+          } catch {
+            return raw;
+          }
+        })();
+        const forbidden = forbiddenRootReason(raw, this.dataRoot) ?? forbiddenRootReason(real, this.dataRoot);
+        const result: Record<string, unknown> = {
+          path: raw,
+          exists: true,
+          isDirectory: st.isDirectory(),
+        };
+        if (st.isDirectory()) {
+          try {
+            const entries = fs.readdirSync(raw);
+            result.entryCount = entries.length;
+          } catch {
+            result.entryCount = null;
+            result.readDirDenied = true;
+          }
+        } else {
+          result.bytes = st.size;
+        }
+        if (forbidden) {
+          result.canAuthorizeReadonly = false;
+          result.rejectedReason = forbidden;
+          result.hint = "这个目录不能作为只读根授权（边界，不是 bug）。改用更具体的子目录，或把材料复制进工作区再派单。";
+        } else {
+          result.canAuthorizeReadonly = true;
+          result.hint = "可以把它作为 readRoots 授权给成员只读。派单时把它填进 readRoots。";
+        }
+        return JSON.stringify(result, null, 2);
       }
       case "read_artifact": {
         /**

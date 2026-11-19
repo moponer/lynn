@@ -37,6 +37,8 @@ const LYNN_TOOLS = [
   "list_plugins",
   // 2026-11-04：指挥者要能"管"——催办在跑的成员、停掉明显做不到的单
   "nudge_member",
+  // 2026-11-19：派单前只读探路（连撞三次拒绝 → 先探再派）
+  "probe_path",
   // 2026-11-12：验收前读产物正文（只看文件在不在会把骨架稿当成品）
   "read_artifact",
   "read_memory",
@@ -85,7 +87,7 @@ const member = (over = {}) => ({
   ...over,
 });
 
-test("风铃的工具面恰好是 26 件管理工具", () => {
+test("风铃的工具面恰好是 27 件管理工具", () => {
   assert.deepEqual([...AGENT_TOOL_NAMES].sort(), LYNN_TOOLS);
 });
 

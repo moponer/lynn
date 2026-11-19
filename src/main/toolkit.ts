@@ -1081,6 +1081,25 @@ export class Toolkit {
           stderr: done.stderr as Buffer | undefined,
           exitCode: done.exitCode,
           budget: this.outputCap,
+          /**
+           * 超长输出落盘（2026-11-19 今日复盘）：
+           * 完整原文写进工作区 `_tool-output/`，返回相对路径供成员 read_file 分段读。
+           * 落盘失败（只读盘/无权限）就返回 null，退回头尾各留一半——不丢执行。
+           */
+          spill: (label, full) => {
+            try {
+              const dir = path.resolve(this.root, "_tool-output");
+              fs.mkdirSync(dir, { recursive: true });
+              const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+              const name = `${label}-${stamp}.txt`;
+              const abs = path.join(dir, name);
+              fs.writeFileSync(abs, full, "utf-8");
+              // 给相对路径（成员的工作目录就是 root），并说明可用 read_file 分段读
+              return `_tool-output/${name}`;
+            } catch {
+              return null;
+            }
+          },
         });
       } finally {
         signal?.removeEventListener("abort", onAbort);

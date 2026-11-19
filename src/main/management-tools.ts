@@ -68,6 +68,8 @@ export const MANAGEMENT_ONLY_TOOLS = [
   "assign_task",
   "check_progress",
   "check_roster",
+  // 2026-11-19：派单前只读探路（连撞三次拒绝 → 先探再派）。成员不需要探路能力。
+  "probe_path",
   // 验收前读产物正文：成员不能自己读自己的卷宗去自证（审查归风铃）
   "read_artifact",
   "review_result",

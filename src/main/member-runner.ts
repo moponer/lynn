@@ -91,6 +91,34 @@ export function validateBrief(brief: string, acceptance?: string[]): string | nu
   const text = (brief ?? "").trim();
   const hasAcceptance = Array.isArray(acceptance) && acceptance.filter((a) => String(a).trim()).length > 0;
   const missing: string[] = [];
+
+  /**
+   * 大文本直接贴进简报 → 退回并教她分片（2026-11-19 今日复盘）。
+   *
+   * 实机：写作单把 1200~1800 字成稿规格 + 整套禁用词清单全贴进简报，
+   * 10 轮用尽、桌面零产出。复盘自己的结论是「大文本分片写」——但那是
+   * **派单侧**该做的：底稿不该整篇塞进简报，应拆成 part 文件让成员读。
+   *
+   * 判据用「最长连续行」而非总长：简报四段模板本身有几百字正常，
+   * 但一段连续正文（>600 字、无换行、不像路径/命令）通常是"把成稿贴进来了"。
+   */
+  const longestRun = text
+    .split("\n")
+    .reduce((max, line) => Math.max(max, line.trim().length), 0);
+  // 排除：整行像路径/命令/JSON（这类长行是正当的）
+  const looksLikePathOrCode = (line: string) =>
+    /^[A-Za-z]:[\\/]/.test(line) || /^[{[]/.test(line) || line.includes("\\") || line.includes("/");
+  if (longestRun > 600 && !text.split("\n").some((l) => l.trim().length === longestRun && looksLikePathOrCode(l.trim()))) {
+    return [
+      "简报里有一段超长正文（单行 >600 字），已退回，没有派单。",
+      "不要把成稿/长正文整段贴进简报——成员用 write_file 一次写不了这么长，会卡到轮次耗尽仍零产出（实机反复踩）。",
+      "正确做法（大产出分片）：",
+      "  1) 把正文拆成 2~3 个 part 文件，先用 write_file 落到工作区（如 draft-part1.md / part2.md）；",
+      "  2) 简报里只写「读 draft-part1..N.md，核对/改写/合并到 <产物>」，把大内容放在文件里、不放简报里；",
+      "  3) 若必须贴，选关键约束（禁用词、字数、格式），不要整篇。",
+    ].join("\n");
+  }
+
   if (text.length < 30) {
     return [
       "简报太薄（不足 30 字），已退回，没有派单。成员看不到你们的对话，只看得到简报包，按下面模板重写后再 assign_task：",

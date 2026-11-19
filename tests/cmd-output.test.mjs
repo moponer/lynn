@@ -39,7 +39,7 @@ test("拼接：stdout / stderr 分开，exit code 如实", () => {
   assert.equal(formatCommandResult({ stdout: Buffer.from(""), stderr: Buffer.from(""), exitCode: 0, budget: 1000 }), "exit code: 0");
 });
 
-test("集成：大输出 + 非零退出，报错行留在结果里", async () => {
+test("集成：大输出 + 非零退出，超长部分落盘（数据不丢），stderr 仍留在结果里", async () => {
   const root = tmp();
   fs.writeFileSync(
     path.join(root, "emit.js"),
@@ -47,7 +47,20 @@ test("集成：大输出 + 非零退出，报错行留在结果里", async () =>
   );
   const tk = new Toolkit(root, { outputCap: 300 });
   const out = await tk.execute("run_command", { command: "node emit.js" });
-  assert.match(out, /TAIL_ERROR_MARK/, "stderr 末尾必须保住（旧实现会截掉）");
-  assert.match(out, /中间省略/);
+  // stderr 未超 300，原样保留
+  assert.match(out, /TAIL_ERROR_MARK/, "stderr 必须保住");
   assert.match(out, /exit code: 3/);
+  // stdout 超 300 → 落盘，结果里给路径（2026-11-19：不再只头尾截断丢数据）
+  const spillMatch = out.match(/_tool-output\/stdout-[^\]]+\.txt/);
+  assert.ok(spillMatch, `超长 stdout 应落盘并给路径，实际：${out.slice(0, 120)}`);
+  // 落盘文件里是完整 5000 字符
+  const spilled = fs.readFileSync(path.join(root, spillMatch[0].replace(/\//g, path.sep)), "utf-8");
+  assert.equal(spilled.length, 5000, "落盘文件必须是完整原文，不丢数据");
+});
+
+test("集成：超预算但没给 spill 时，退回头尾各留一半（不丢执行）", () => {
+  const big = "A".repeat(3000) + "ERR_TAIL";
+  const out = formatCommandResult({ stdout: Buffer.from(big), stderr: Buffer.from(""), exitCode: 1, budget: 200 });
+  assert.match(out, /中间省略/, "没有落盘通道时退回旧的头尾截断");
+  assert.match(out, /ERR_TAIL/, "尾部要保留");
 });
