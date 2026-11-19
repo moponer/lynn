@@ -104,11 +104,14 @@ test("memberSystemPrompt：岗位字段进 system，任务内容不进（P3-1b 0
   assert.ok(sys.includes("把数据整理干净"));
   assert.ok(sys.includes("只动工作区"));
   assert.ok(sys.includes("report.md"));
-  assert.ok(sys.includes("read_file、write_file"));
+  // C2（2026-11-19）：工具清单挪到首条 user，system 里不再逐条列工具（保缓存前缀稳定）
+  assert.ok(!sys.includes("执行工具：read_file、write_file"), "工具清单不该留在 system（C2 缓存）");
   assert.ok(sys.includes("submit_report"));
   // 群内中途发言（2026-11-16）：成员要能被教会在群里说话，而不是只交终局回报
   assert.ok(sys.includes("post_message"));
   assert.match(sys, /【群内发言/);
+  // 首条 user 的【本次授权】里必须有工具清单
+  const intro0 = memberTaskIntro(input);
   assert.ok(!sys.includes("run_command")); // 未分配的工具不出现在提示词里
   // 死字段修复回归：escalateWhen / body 必须编译进成员提示词（2026-11-09 实锤此前从未注入）
   assert.match(sys, /何时必须停手升级.*卡住/);

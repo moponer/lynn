@@ -494,7 +494,17 @@ function FeedViewInner({
         // tool：进度 / 回报 / 拦截 / 派单…都用同一张卡，但记号与正文形态不同
         const badge = c.badge ?? "工具";
         const progress = badge === "进度";
-        const live = progress && c.jobId != null && runningIds?.includes(c.jobId) === true;
+        /**
+         * F1（2026-11-19）：进度卡的"执行中"不能只看外部 desk.running——
+         * 任务结束时 running 移除有滞后，进度卡会一直脉冲"执行中"，用户以为还在跑。
+         * 这里加一道**基于卡片流的终态判定**：同一 job 在**本卡之后**已出现非"进度"卡
+         * （回报/审查/拦截等），说明这单已经有后续结论 → 本进度卡不再是"进行中"。
+         * 两者取与：外部 running 里有它 且 后面还没有该 job 的终态卡。
+         */
+        const hasLaterFinal = progress && c.jobId != null
+          ? visible.slice(i + 1).some((x) => x.jobId === c.jobId && (x.badge ?? "工具") !== "进度")
+          : false;
+        const live = progress && c.jobId != null && runningIds?.includes(c.jobId) === true && !hasLaterFinal;
         // 同一工单的连续工具卡视觉成组：读起来是一条工单时间线，不是一堆散卡
         const prev = visible[i - 1];
         const sameJob = Boolean(c.jobId && prev?.kind === "tool" && prev.jobId === c.jobId);

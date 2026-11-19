@@ -28,6 +28,7 @@ import { ambientForTheme, type AmbientMode } from "../shared/ambient";
 import { ZH_STRINGS } from "../shared/i18n-strings";
 import { useVoicePlayer } from "./voice/useVoicePlayer";
 import { AskHost, askConfirm } from "./components/ConfirmCard";
+import { Wallpaper } from "./components/Wallpaper";
 
 /** 舞台视图选择（跨会话记住）：值台 = 原来的桌面，控制台 = stage.console 视图 */
 const STAGE_KEY = "lynn.stage.view";
@@ -93,16 +94,23 @@ function upsertCard(feed: FeedCard[], card: FeedCard): FeedCard[] {
   const next = feed.slice();
   next[i] = card;
   /**
-   * 就地更新的卡要跟着时间走（2026-11-16）：进度卡是同一张卡反复更新，
-   * 如果只替换内容不挪位置，最新一步会永远停在它第一次出现的地方（长任务里就在很上面）。
-   * 规则与内核 floatAboveLive 一致：插到她的实时输出卡之前。
+   * 就地更新后跟着 live 卡走（2026-11-19 F2 修：与内核 floatAboveLive 逐条对齐）。
+   *
+   * 之前的 bug：前端对每次就地更新都 `i>live` 就挪，而内核 floatAboveLive 用
+   * `i<l && i!==l-1` 的边界（已紧邻 / 已在 live 后都不动）。两边边界不同 →
+   * 前端把卡挪了、内核快照又把它打回原位，用户看到卡片"跳一下又弹回去"。
+   * 现在完全照内核的边界：只有卡在 live 之前、且不紧邻 live 时才挪到 live 前。
    */
-  const live = next.findIndex((c) => c.kind === "lynn" && c.streaming && c.id !== card.id);
-  if (live >= 0 && i > live) {
-    next.splice(i, 1);
-    const l = next.findIndex((c) => c.kind === "lynn" && c.streaming && c.id !== card.id);
-    if (l >= 0) next.splice(l, 0, card);
-    else next.push(card);
+  const liveIdx = next.findIndex((c) => c.kind === "lynn" && c.streaming && c.id !== card.id);
+  if (liveIdx >= 0) {
+    const iNow = next.findIndex((c) => c.id === card.id);
+    // 与内核一致：i < live 且不紧邻（i !== live-1）才挪
+    if (iNow >= 0 && iNow < liveIdx && iNow !== liveIdx - 1) {
+      next.splice(iNow, 1);
+      const l = next.findIndex((c) => c.kind === "lynn" && c.streaming && c.id !== card.id);
+      if (l >= 0) next.splice(l, 0, card);
+      else next.push(card);
+    }
   }
   return next;
 }
@@ -620,17 +628,17 @@ export default function App() {
     async (taskId: string) => {
       setNotice(null);
       try {
-        const picked = await rpc("app.pickDirs", { title: "选择要授权只读访问的目录（可多选）" });
+        const picked = await rpc("app.pickDirs", { title: i18nStrings["app.pickReadDirs"] });
         const paths = picked?.paths ?? [];
         if (!paths.length) return;
         const drives = paths.filter((p) => /^[a-zA-Z]:[\\/]?$/.test(p));
         let allowDriveRoot = false;
         if (drives.length) {
           const ok = await askConfirm({
-            title: "把整个磁盘授权为只读？",
-            body: `${drives.join("、")} 会被整盘授权：成员能读盘上的所有文件。`,
-            note: "写仍然只能在任务工作区；读的范围一旦放开，等于把整台机器的文件摊开给她看。",
-            confirmLabel: "仍然授权",
+            title: i18nStrings["app.grantDriveTitle"],
+            body: i18nStrings["app.grantDriveBody"].replace("{drives}", drives.join("、")),
+            note: i18nStrings["app.grantDriveNote"],
+            confirmLabel: i18nStrings["app.stillGrant"],
             danger: true,
           });
           if (!ok) return;
@@ -664,8 +672,8 @@ export default function App() {
       const a = arg.trim();
       try {
         if (!a) {
-          const picked = await rpc("app.pickDir", { title: "切到哪个工作区" });
-          if (!picked?.path) return "已取消";
+          const picked = await rpc("app.pickDir", { title: i18nStrings["app.pickWorkspaceTitle"] });
+          if (!picked?.path) return i18nStrings["app.canceled"];
           const r = await rpc("project.setRoot", { root: picked.path });
           await refresh();
           return r.ok ? `工作区：${r.root}` : (r.error ?? "切换失败");
@@ -697,17 +705,17 @@ export default function App() {
   const onAddReadRoots = useCallback(async () => {
     setNotice(null);
     try {
-      const picked = await rpc("app.pickDirs", { title: "选择要加入当前会话的只读目录（可多选）" });
+      const picked = await rpc("app.pickDirs", { title: i18nStrings["app.addReadDirs"] });
       const paths = picked?.paths ?? [];
       if (!paths.length) return;
       const isDrive = (p: string) => /^[a-zA-Z]:[\\/]?$/.test(p);
       const drives = paths.filter(isDrive);
       if (drives.length) {
         const ok = await askConfirm({
-          title: "把整个磁盘作为只读根？",
-          body: `${drives.join("、")} 会作为本群的可读根：成员能读盘上所有文件。`,
-          note: "写仍然只能在工作区。",
-          confirmLabel: "仍然添加",
+          title: i18nStrings["app.readRootDriveTitle"],
+          body: i18nStrings["app.readRootDriveBody"].replace("{drives}", drives.join("、")),
+          note: i18nStrings["app.readRootNote"],
+          confirmLabel: i18nStrings["app.stillAdd"],
           danger: true,
         });
         if (!ok) return;
@@ -734,9 +742,9 @@ export default function App() {
     async (taskId: string) => {
       setNotice(null);
       const ok = await askConfirm({
-        title: "把工作区复制进任务沙箱？",
-        body: "会排除 node_modules / .git / dist 等大目录，原项目一个字节都不动；之后成员在副本里跑构建和测试。",
-        confirmLabel: "复制进沙箱",
+        title: i18nStrings["app.snapshotTitle"],
+        body: i18nStrings["app.snapshotBody"],
+        confirmLabel: i18nStrings["app.snapshotConfirm"],
       });
       if (!ok) return;
       try {
@@ -839,7 +847,7 @@ export default function App() {
   const onPickProject = useCallback(async () => {
     setNotice(null);
     try {
-      const picked = await rpc("app.pickDir", { title: "选择这个会话的工作区" });
+      const picked = await rpc("app.pickDir", { title: i18nStrings["app.pickThreadWorkspace"] });
       if (!picked?.path) return;
       const r = await rpc("project.setRoot", { root: picked.path });
       if (!r.ok) {
@@ -987,7 +995,8 @@ export default function App() {
   // ?boot=1 是走查夹具：让启动页常驻（进度停在 90% 等真实快照），方便截图检查版式与动效
   const bootPreview = typeof location !== "undefined" && new URLSearchParams(location.search).get("boot") === "1";
   // 同时保留 !desk || !snap 这个收窄：下方所有分支都依赖 desk/snap 非空
-  if (!bootDone || bootPreview || !desk || !snap) return <BootScreen ready={!!(desk && snap) && !bootPreview} />;
+  if (!bootDone || bootPreview || !desk || !snap)
+    return <BootScreen ready={!!(desk && snap) && !bootPreview} label={i18nStrings["boot.starting"]} />;
 
   if (wizardOpen) {
     // 向导也要包 I18nProvider：WindowControls 的 tooltip 走 useT，
@@ -1015,6 +1024,11 @@ export default function App() {
 
   return (
     <I18nProvider strings={i18nStrings}>
+      {/* 桌面壁纸（2026-11-19）：**两层**——壁纸 + 磨砂遮罩，组件本身保持不透明。
+          为什么不是"给每张卡调透明度"：实测白卡 60% 不透明叠在黑壁纸上，ink-3 只有
+          2.9:1（要 4.5）。遮罩把壁纸压到安全亮度区间，卡片里的字一个像素都不用妥协。
+          性能：全屏就这 2 个图层，模糊只发生 1 次；绝不给每张卡加 backdrop-filter（那是 O(卡片数)）。 */}
+      <Wallpaper />
       {/* 确认卡片宿主：所有"做了就回不去"的动作都走这一张卡（2026-11-15） */}
       <AskHost />
       {/* 右下角提示堆叠（2026-11-16）：版本提示与错误条同时出现时按列排、按内容各自长高，
@@ -1253,10 +1267,10 @@ export default function App() {
       )}
       {/* 有控制台可用、但当前不在控制台时才给入口（插件停用 → 卡槽空 → 入口一并消失） */}
       {consoleSlot && !ConsoleHost && !settingsOpen && (
-        <div className="cs-viewswitch" role="group" aria-label="视图切换">
-          <span className="cs-vs-cur">值台</span>
-          <button type="button" onClick={() => chooseStage("console")} title="切到沉浸控制台（大屏态势视图）">
-            控制台 <span aria-hidden="true">›</span>
+        <div className="cs-viewswitch" role="group" aria-label={i18nStrings["app.viewSwitch"]}>
+          <span className="cs-vs-cur">{i18nStrings["app.desk"]}</span>
+          <button type="button" onClick={() => chooseStage("console")} title={i18nStrings["app.toConsole"]}>
+            {i18nStrings["app.console"]} <span aria-hidden="true">›</span>
           </button>
         </div>
       )}
@@ -1303,7 +1317,7 @@ export default function App() {
           className="perm-overlay"
           onClick={(e) => e.target === e.currentTarget && setTrustAsk(null)}
         >
-          <div className="perm-ask" role="dialog" aria-modal="true" aria-label="信任这个项目？">
+          <div className="perm-ask" role="dialog" aria-modal="true" aria-label={i18nStrings["trust.askTitle"]}>
             <div className="perm-ask-head">
               <Icon name="shield" size="sm" />
               <span>{i18nStrings["trust.askTitle"] ?? "信任这个项目？"}</span>
@@ -1361,6 +1375,8 @@ export default function App() {
           voiceMaxChars={snap.prefs.voiceMaxChars ?? 120}
           voiceWhenHidden={snap.prefs.voiceWhenHidden ?? false}
           voiceProxy={snap.prefs.voiceProxy ?? ""}
+          wallpaper={snap.prefs.wallpaper ?? ""}
+          wallpaperStrength={snap.prefs.wallpaperStrength ?? 40}
           project={snap.project}
           usage={snap.usage}
           onTheme={changeTheme}

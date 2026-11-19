@@ -438,8 +438,6 @@ function clipText(text: string, budget: number): string {
 
 export function memberSystemPrompt(input: MemberRunInput): string {
   const p = input.profile;
-  const readRoots = (typeof input.readRoots === "function" ? input.readRoots() : input.readRoots) ?? [];
-  const writableRoots = (typeof input.writableRoots === "function" ? input.writableRoots() : input.writableRoots) ?? [];
   /**
    * 按工具面裁剪（2026-11-17 P3-1b / 05 章 §5「领域假设裁剪」）。
    *
@@ -469,7 +467,8 @@ export function memberSystemPrompt(input: MemberRunInput): string {
       : []),
     "",
     "【你的工具】",
-    `- 执行工具：${input.tools.filter((t) => (MEMBER_EXEC_TOOLS as readonly string[]).includes(t)).join("、") || "（本次未分配执行工具，只能靠推理完成）"}`,
+    // 具体工具清单不写进 system（2026-11-19 C2 缓存修复）：工具集随单变，写进 system 会让
+    // 每单整段前缀作废。清单在首条 user 的【本次授权】里给（已有）。这里只说纪律。
     "- submit_report：回报通道（终局）。**剩最后 2 轮必须停手交回**，没做完也交（做到哪、卡在哪、需要什么）。不交 = 这张单白跑。",
     "- post_message：群内中途发言（纪律见【群内发言】）；它不是回报，交活仍用 submit_report。",
     // 实机事故：简报给了 `src/components`，成员却用 `Get-ChildItem -Recurse` 扫整个仓库找 components，
@@ -508,25 +507,12 @@ export function memberSystemPrompt(input: MemberRunInput): string {
     "- **内容型产物不许交骨架**：每章至少 2~3 句实质内容。只给标题加一句概括＝骨架稿，会被打回；宁可少写两章也不要每章空的。拼正文时检查 undefined / 空字段——模板变量没取到值会原样印进文档。",
     "",
     "【工作区与文件去向】",
-    ...(input.projectName
-      ? [`项目：${input.projectName}（这次活属于这个项目；回报和交付物里要让人看得出是哪个项目）。`]
-      : []),
-    `工作区：${input.workdir}（**可读可写**）。写文件用工作区内相对路径。`,
-    ...(input.scratchDir
-      ? [`过程文件（下载/解压/测试输出/缓存）写到：${input.scratchDir}；交付物（用户要带走的报告/表格/图）写到工作区里的 deliverables/ 或简报指定位置。`]
-      : []),
-    "- 不能写 `.git/` 与 `.lynn/`（项目元数据与风铃配置，工具层直接拒）。",
-    "- **删除类命令（del/rm/rmdir/move/改名/git clean/reset --hard）必须用户点头**：被拒就别换写法绕，改成可撤销的覆盖写或在回报里说明。",
-    ...(readRoots.length
-      ? [
-          `只读授权（用户已批准）：${readRoots.join("、")}。可用 read_file / list_dir / office_read_table 读，**写入仍只在工作区**；读时用绝对路径。`,
-        ]
-      : []),
-    ...(writableRoots.length
-      ? [
-          `可写根（仅用于跑命令）：${writableRoots.join("、")}。run_command 可用 cwd 指到这些目录跑构建/测试；write_file 仍只能写工作区。`,
-        ]
-      : []),
+    // 具体工作区/projectName/scratchDir/readRoots/writableRoots 不写进 system（2026-11-19 C2 缓存修复）：
+    // 这些每单都不同，写进 system 会让缓存前缀每单作废。取值在首条 user 的【本次授权】里给。
+    // system 只讲**跨任务不变**的纪律。
+    "- 写文件用工作区内相对路径；过程文件写进过程目录、交付物写进 deliverables/（具体路径见【本次授权】）。写永远只在工作区，只读根随单给。",
+    "- 不能写 `.git/` 与 `.lynn/`（工具层直接拒）。",
+    "- **删除类命令（del/rm/rmdir/move/改名/git clean/reset --hard）必须用户点头**：被拒就改成可撤销的覆盖写或在回报里说明，别换写法绕。",
     "",
     // 权限/地点边界（2026-11-15）：实机里成员读不到系统目录会反复换路径硬试，
     // 一条路失败十几次，最后交回一张"什么都找不到"的回报——空转的真正来源。
@@ -668,7 +654,11 @@ export async function runMemberTask(input: MemberRunInput): Promise<MemberRunRes
   const rootsNow = (): string[] => (typeof input.readRoots === "function" ? input.readRoots() : input.readRoots) ?? [];
   const initialRoots = rootsNow();
   const authLines = [
+    ...(input.projectName ? [`- 项目：${input.projectName}（回报和交付物里要让人看得出是哪个项目）`] : []),
     `- 写入范围：${input.workdir}（只有这里可写；.git/ 与 .lynn/ 除外）`,
+    ...(input.scratchDir
+      ? [`- 过程目录（下载/解压/测试输出/缓存）：${input.scratchDir}`]
+      : []),
     `- 只读范围：${initialRoots.length ? initialRoots.join("、") : "无额外授权（工作区之外读不到）"}`,
     `- 本次工具：${input.tools.join("、") || "（无执行工具）"} + submit_report`,
     `- 轮次上限：${maxTurns} 轮（剩最后 2 轮必须停手交回，哪怕没做完）`,
