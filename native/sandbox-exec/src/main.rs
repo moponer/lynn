@@ -130,6 +130,8 @@ extern "system" {
     fn GetStdHandle(which: u32) -> Handle;
     fn SetHandleInformation(h: Handle, mask: u32, flags: u32) -> Bool;
     fn GetCurrentProcess() -> Handle;
+    fn LoadLibraryW(name: *const u16) -> Handle;
+    fn GetProcAddress(module: Handle, name: *const u8) -> *mut c_void;
     fn CloseHandle(h: Handle) -> Bool;
     fn LocalFree(p: *mut c_void) -> *mut c_void;
     fn CreateJobObjectW(attrs: *mut c_void, name: *const u16) -> Handle;
@@ -402,6 +404,7 @@ fn main() {
             launch(&format!("cmd.exe /d /s /c \"{}\"", cmd), mem, procs);
         }
         "--probe-restricted" => probe_restricted(),
+        "--appcontainer-probe" => appcontainer_probe(),
         /**
          * `--restricted-shell [--memory-mb N] [--processes N] -- <命令原文>`：
          * 受限令牌 + Job Object 执行（写受限；读仍全盘）。语法同 --shell。
@@ -975,7 +978,7 @@ fn launch_restricted(cmdline: &str, memory_mb: usize, processes: u32) -> ! {
     }
 }
 
-/// `--probe-restricted`：真刀真枪地用受限令牌跑一次 `cmd /c exit 0`，
+/// `--probe-restricted`：真刀真枪地用受限令牌跑一次 node，
 /// 成功才说 restricted 可用（launchVerified=true 的唯一依据）。
 fn probe_restricted() -> ! {
     let token = match make_restricted_token() {
@@ -1026,6 +1029,117 @@ fn probe_restricted() -> ! {
         println!(
             "{{\"restricted\":{},\"launchVerified\":{},\"exit\":{}}}",
             ok, ok, code
+        );
+        std::process::exit(0);
+    }
+}
+
+/// SECURITY_CAPABILITIES（CreateAppContainerToken 的入参）
+#[repr(C)]
+struct SecurityCapabilities {
+    app_container_sid: Psid,
+    capabilities: *const SidAndAttributes,
+    capability_count: u32,
+    reserved: u32,
+}
+
+/**
+ * `--appcontainer-probe`：实验 AppContainer 真启动路径。
+ *
+ * 之前的探针说"内置管理员用不了 AppContainer"是因为 CreateAppContainerProfile 被拒；
+ * 但 DeriveAppContainerSidFromAppContainerName 能成功拿到 SID。这里试**用 derive 的
+ * SID + CreateAppContainerToken 建容器令牌再起 node**——这是 AppContainer 真正的
+ * 启动路径（从没实现过），能起来就有"仅工作区写 + 断网"的可能。
+ */
+fn appcontainer_probe() -> ! {
+    let name = wide("Lynn.MemberSandbox");
+    unsafe {
+        let mut sid: Psid = std::ptr::null_mut();
+        let hr = DeriveAppContainerSidFromAppContainerName(name.as_ptr(), &mut sid);
+        if !ok(hr) || sid.is_null() {
+            println!("{{\"appcontainer\":false,\"stage\":\"derive\",\"hr\":\"0x{:08x}\"}}", hr);
+            std::process::exit(0);
+        }
+        // 拿当前进程令牌
+        let mut base: Handle = std::ptr::null_mut();
+        if OpenProcessToken(GetCurrentProcess(), MAXIMUM_ALLOWED, &mut base) == 0 {
+            println!("{{\"appcontainer\":false,\"stage\":\"open-token\"}}");
+            std::process::exit(0);
+        }
+        let caps = SecurityCapabilities {
+            app_container_sid: sid,
+            capabilities: std::ptr::null(),
+            capability_count: 0,
+            reserved: 0,
+        };
+        let mut new_token: Handle = std::ptr::null_mut();
+        // CreateAppContainerToken 不是常规导出符号，GetProcAddress 动态取
+        type CreateTokenFn =
+            unsafe extern "system" fn(Psid, *const c_void, *mut Handle) -> Hresult;
+        let userenv = LoadLibraryW(wide("userenv.dll").as_ptr());
+        if userenv.is_null() {
+            println!("{{\"appcontainer\":false,\"stage\":\"load-userenv\"}}");
+            FreeSid(sid);
+            std::process::exit(0);
+        }
+        let proc = GetProcAddress(userenv, b"CreateAppContainerToken\0".as_ptr());
+        if proc.is_null() {
+            println!("{{\"appcontainer\":false,\"stage\":\"getproc\"}}");
+            FreeSid(sid);
+            std::process::exit(0);
+        }
+        let create_token: CreateTokenFn = std::mem::transmute(proc);
+        let hrc = create_token(sid, &caps as *const _ as *const c_void, &mut new_token);
+        CloseHandle(base);
+        if !ok(hrc) || new_token.is_null() {
+            FreeSid(sid);
+            println!(
+                "{{\"appcontainer\":false,\"stage\":\"create-token\",\"hr\":\"0x{:08x}\"}}",
+                hrc
+            );
+            std::process::exit(0);
+        }
+        // 用容器令牌起 node --version（绝对路径，容器内可能看不到 PATH）
+        let mut cmd_w = wide("node --version");
+        let mut si = StartupInfo::default();
+        si.cb = std::mem::size_of::<StartupInfo>() as u32;
+        let desktop = wide("winsta0\\default");
+        si.lp_desktop = desktop.as_ptr();
+        let mut pi = ProcessInformation::default();
+        let started = CreateProcessAsUserW(
+            new_token,
+            std::ptr::null(),
+            cmd_w.as_mut_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            0,
+            CREATE_NO_WINDOW,
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            &mut si as *mut _ as *mut c_void,
+            &mut pi,
+        );
+        if started == 0 {
+            let err = GetLastError();
+            println!(
+                "{{\"appcontainer\":false,\"stage\":\"spawn\",\"err\":{}}}",
+                err
+            );
+            CloseHandle(new_token);
+            FreeSid(sid);
+            std::process::exit(0);
+        }
+        WaitForSingleObject(pi.process, 15_000);
+        let mut code: u32 = 1;
+        GetExitCodeProcess(pi.process, &mut code);
+        CloseHandle(pi.thread);
+        CloseHandle(pi.process);
+        CloseHandle(new_token);
+        FreeSid(sid);
+        println!(
+            "{{\"appcontainer\":{},\"stage\":\"spawn-ok\",\"exit\":{}}}",
+            code == 0,
+            code
         );
         std::process::exit(0);
     }

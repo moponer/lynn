@@ -117,8 +117,26 @@ export function probeSandbox(opts: { appRoot?: string; timeoutMs?: number } = {}
     restrictedOk = false;
   }
 
-  const launchVerified = parsed.launchVerified === true;
-  // 档位优先级：AppContainer（断网+仅工作区写）> restricted（标准用户级写隔离）> jobonly
+  /**
+   * AppContainer 真启动探测（第三阶段尝试）：
+   * 用 derive 的 SID + CreateAppContainerToken 起 node。实测本机（Win10 19042 +
+   * 内置管理员 -500 + 非提权）该 API 未导出 / 不可用，故 fullIsolation 会如实为 false。
+   * 记录这个探测，是为了让界面/用户知道"为什么只能到标准用户级，到不了仅工作区+断网"。
+   */
+  const acProbe = spawnSync(found, ["--appcontainer-probe"], {
+    encoding: "utf8",
+    timeout: opts.timeoutMs ?? 15_000,
+  });
+  let appcontainerOk = false;
+  try {
+    const ap = JSON.parse(String(acProbe.stdout ?? "").trim()) as { appcontainer?: boolean };
+    appcontainerOk = ap.appcontainer === true;
+  } catch {
+    appcontainerOk = false;
+  }
+
+  const launchVerified = appcontainerOk || parsed.launchVerified === true;
+  // 档位优先级：AppContainer（仅工作区写+断网）> restricted（标准用户级写隔离）> jobonly
   const mode: SandboxMode = launchVerified ? "appcontainer" : restrictedOk ? "restricted" : "jobonly";
   /**
    * 「restricted」到底是哪一档（2026-11-19 实测定论）：
