@@ -541,13 +541,31 @@ function FeedViewInner({
                 tag={headTag}
                 sub={tail}
               />
+              {/**
+               * 三分支的取舍（2026-11-19 修 F5）。
+               *
+               * 原来的写法是"report ? ReportBlock : body ? 正文 : ReportBlock"——
+               * ① 第三分支与第一分支重复，读起来像 dead code；
+               * ② 更实际的问题：**有 artifacts + body、但没有 report** 的卡会走第二分支，
+               *    产物行被吞掉（用户看不到可点开的交付物）。
+               *
+               * 现在的规则：
+               *  - 有 report（汇报卡）→ 只渲染 ReportBlock：它的 body 就是四段报告的文字复述，
+               *    再显示一遍等于同一份内容画两遍（2026-11-13 实机截图）；
+               *  - 没 report 但有 artifacts → ReportBlock（文件行）+ 正文（若有），两者都要；
+               *  - 只有正文 → FoldBody；
+               *  - 都没有 → 什么都不渲染。
+               */}
               {c.report ? (
                 <ReportBlock card={c} onPreview={onPreview} onRefMenu={onRefMenu} />
+              ) : c.artifacts?.length ? (
+                <>
+                  <ReportBlock card={c} onPreview={onPreview} onRefMenu={onRefMenu} />
+                  {c.body ? <FoldBody text={c.body} /> : null}
+                </>
               ) : c.body ? (
                 <FoldBody text={c.body} />
-              ) : (
-                <ReportBlock card={c} onPreview={onPreview} onRefMenu={onRefMenu} />
-              )}
+              ) : null}
             </div>
           );
         }

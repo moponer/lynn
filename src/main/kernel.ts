@@ -6105,19 +6105,50 @@ export class Kernel {
     // 让她清，其余只报数，下一轮接着清；对话流里同一堆积量 30 分钟只说一次。
     const backlog = facts.awaitingReview.length + facts.orphanTasks.length + facts.stalledTasks.length;
     if (backlog > 6) {
-      // 自适应节流：上一批没清掉就别每 5 分钟烧一轮——间隔逐级翻倍到 1 小时，清动了立刻恢复常速。
+      /**
+       * 自适应节流（2026-11-19 修 T2）。
+       *
+       * 原实现：没清动就把间隔逐级翻倍到 **60 分钟**，而每轮只交 3 张（BACKLOG_BATCH）
+       * → 吞吐被压到 3 张/小时；而且"没清动"恰恰可能是节流本身造成的，形成自我强化：
+       * 越卡越慢、越慢越卡，待审的单迟迟没人验收。
+       *
+       * 现在：
+       *  - 上限降到 **15 分钟**（仍会退避，但不会饿死队列）；
+       *  - 去重键带上**本批成分**（taskId 集合），同样数量但换了一批单也要能提示；
+       *  - 连续两轮停在同一个上限（说明她确实清不动）→ 给用户一次可见提示，
+       *    而不是在后台无声空转。
+       */
       const gate = this.backlogGate;
+      const CAP_MIN = 15;
       if (gate.at > 0) {
         if (now - gate.at < (gate.waitMin || minutes) * 60_000) return;
-        gate.waitMin = backlog >= gate.count ? Math.min(60, (gate.waitMin || minutes) * 2) : 0;
+        gate.waitMin = backlog >= gate.count ? Math.min(CAP_MIN, (gate.waitMin || minutes) * 2) : 0;
       }
       gate.count = backlog;
       gate.at = now;
+      // 卡死可见：退避已经到顶、队列还没缩小 → 提示用户一次（30 分钟冷却）
+      if ((gate.waitMin || 0) >= CAP_MIN) {
+        const stuckKey = "backlog-stuck";
+        const stuckAt = this.heartbeatNoted.get(stuckKey);
+        if (stuckAt === undefined || now - stuckAt >= 30 * 60_000) {
+          this.heartbeatNoted.set(stuckKey, now);
+          this.card({
+            kind: "system",
+            badge: "心跳",
+            title: "巡检",
+            systemTone: "patrol",
+            text:
+              `队列已经堆到 ${backlog} 张，自动巡检退避到 ${CAP_MIN} 分钟一轮仍没缩小。` +
+              "可能是这批单都卡在等同一个东西（材料/权限/你的拍板）。你可以直接说「清一批」或逐张给指令。",
+          });
+        }
+      }
       const capped = capHeartbeatFacts(facts, BACKLOG_BATCH);
       const batch = [...capped.facts.awaitingReview, ...capped.facts.orphanTasks, ...capped.facts.stalledTasks].map(
         (t) => t.taskId,
       );
-      const key = `backlog:${backlog}`;
+      // 去重键含批次成分：数量相同但换了一批单时也要能提示（原来只看数量会静默跳过）
+      const key = `backlog:${backlog}:${batch.slice().sort().join(",")}`;
       const notedAt = this.heartbeatNoted.get(key);
       this.lastHeartbeatAt = now;
       if (notedAt === undefined || now - notedAt >= 30 * 60_000) {
