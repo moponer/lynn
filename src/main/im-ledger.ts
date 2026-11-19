@@ -124,11 +124,31 @@ export function recordEvent(ev: KernelEvent, sessionId: string): boolean {
   switch (ev.type) {
     case "delta": {
       const d = ev as { text?: string; thinking?: string };
+      /**
+       * **覆盖，不累加**（2026-11-19 修：手机飞书同一条消息内片段重复）。
+       *
+       * `KernelEvent.delta.text` 的契约是「本轮到目前为止的**完整正文**」，
+       * 不是新增片段——内核每帧都发 `liveCard.text`（`kernel.ts` 的
+       * `onAgentEvent` / `patchLive` / `guardRepetition` 四处全是全文，
+       * 且节流到 ~80ms 一帧）。
+       *
+       * 第一版这里写的是 `rec.answer += d.text`，于是：
+       *   帧1 文本「已停掉」        → rec.answer =「已停掉」
+       *   帧2 文本「已停掉，已关单」  → rec.answer =「已停掉」+「已停掉，已关单」
+       *   帧3 …… 再把从头到尾的全文拼一遍
+       * 几千字回复 ≈ 几十帧 → 同一段被拼几十遍，用户看到正文在一条消息里
+       * 反复出现、甚至插进句子中间（最新全文接到旧全文的尾部）。
+       *
+       * 覆盖同时正确处理「重复拦截后裁剪」：`guardRepetition` 发出的是
+       * 裁剪后的全文（可能比上一帧短），覆盖能让账本跟着回退；累加做不到。
+       */
       if (typeof d.text === "string" && d.text) {
-        rec.answer += d.text;
+        rec.answer = d.text;
         rec.hasText = true;
       }
-      if (typeof d.thinking === "string" && d.thinking) rec.thinking += d.thinking;
+      // thinking 同为全文语义（`liveCard.thinking`），同样覆盖；
+      // 虽然 historyEvents 不发思考，但保持一致，避免将来开放时重蹈覆辙。
+      if (typeof d.thinking === "string" && d.thinking) rec.thinking = d.thinking;
       return true;
     }
     case "turn": {

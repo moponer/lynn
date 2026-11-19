@@ -282,7 +282,7 @@ test("详细档：过程卡改写成中文短句，命令 / 路径 / 工单号 /
     [{ kind: "tool", badge: "工具", title: "技能激活 · 订单核对" }, "技能激活，订单核对。"],
     [{ kind: "tool", badge: "出站", title: "阿明 · WO-2418", body: "出站命令已审计：curl https://x" }, "有一次外部请求已审计。"],
     [{ kind: "tool", badge: "放行", title: "阿明 · WO-2418", body: "删除类命令自动放行：rm -rf /tmp/x" }, "低风险操作已自动放行。"],
-    [{ kind: "tool", badge: "已拦截", title: "阿明 · WO-2418", body: "命令被纵深防御规则拦下：rm -rf /" }, "有一条命令被拦下，详情看卡片。"],
+    [{ kind: "tool", badge: "已拦截", title: "阿明 · WO-2418", body: "命令被纵深防御规则拦下：rm -rf /\nrm -rf /" }, "阿明 想跑「rm -rf /」，被边界拦下了，我没放行。"],
     [{ kind: "tool", badge: "记忆", title: "已沉淀记忆", text: "已沉淀到助理记忆：用户偏好喝咖啡" }, "我记下了一件事。"],
     [{ kind: "tool", badge: "已停止", title: "阿明 已停止 · WO-2418", body: "用户中止" }, "阿明已停止。"],
     [{ kind: "system", badge: "心跳", text: "有 8 张单堆着（待审 3 / 停滞 5）。WO-2418、WO-2419" }, "巡检发现 8 张单待处理，我已开始跟进。"],
@@ -292,7 +292,9 @@ test("详细档：过程卡改写成中文短句，命令 / 路径 / 工单号 /
     assert.ok(got, `详细档要播 ${card.badge}`);
     assert.equal(got.text, expected);
     assert.notEqual(got.priority, "high", "过程卡不打断汇报");
-    assert.ok(!got.text.includes("WO-2418") && !got.text.includes("rm -rf") && !got.text.includes("C:\\"), "不能念 ID / 命令 / 路径");
+    assert.ok(!got.text.includes("WO-2418") && !got.text.includes("C:\\"), "不能念 ID / 路径");
+      // "已拦截" 例外：念命令是用户明确要求的（说清"谁的命令、干什么"），不再一刀切禁念
+      if (card.badge !== "已拦截") assert.ok(!got.text.includes("rm -rf"), "不能念命令");
     // 简洁档仍不念过程明细；只有「派单」因为是任务进度的起点被放行（见下一条用例）
     if (card.badge !== "派单") assert.equal(pickCardSpeech(card, brief), null, `简洁档不念 ${card.badge}`);
   }

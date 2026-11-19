@@ -103,6 +103,33 @@ test("群公告由风铃起草：工具能写、能落盘、群里看得见", as
   }
 });
 
+test("群公告重复写同一内容：不重复发卡（治'群公告重复消息'）", async () => {
+  const { kernel } = setup();
+  try {
+    await kernel.init();
+    const text = "整体：核 Q3 订单\n林工：清洗源表";
+    const r1 = kernel.runTool("set_group_notice", { text });
+    assert.match(String(r1), /写好/);
+    // 再写一次完全相同的内容
+    const r2 = kernel.runTool("set_group_notice", { text });
+    assert.match(String(r2), /没变|不需要重写/, "同内容不应重复落卡");
+    const noticeCards = kernel
+      .handle("session.snapshot")
+      .feed.filter((c) => (c.text ?? "").includes("群公告写好了"));
+    assert.equal(noticeCards.length, 1, `同内容只该有 1 张公告卡，实际 ${noticeCards.length}`);
+
+    // 内容真变了，才允许再落一张
+    const r3 = kernel.runTool("set_group_notice", { text: "整体：改做 Q4 复盘" });
+    assert.match(String(r3), /写好/);
+    const after = kernel
+      .handle("session.snapshot")
+      .feed.filter((c) => (c.text ?? "").includes("群公告写好了"));
+    assert.equal(after.length, 2, "内容变了应更新公告卡");
+  } finally {
+    await kernel.dispose();
+  }
+});
+
 // 2026-11-16 用户裁定：公告本来就是她写，「让风铃起草」按钮多余 → 连同 RPC 一起删掉。
 // 锁住这条：按钮删了但 RPC 留着，只会让人再把按钮加回来。
 test("没有「让风铃起草」这条 RPC：公告只由她自己写（set_group_notice）", async () => {

@@ -274,8 +274,17 @@ function detailSpeech(card: SpeechCard, badge: string): SpeechCandidate | null {
       return candidate("有一次外部请求已审计。", "low", "outbound");
     case "放行":
       return candidate("低风险操作已自动放行。", "low", "allow");
-    case "已拦截":
-      return candidate("有一条命令被拦下，详情看卡片。", "normal", "block");
+    case "已拦截": {
+      const cmd = String(card.body ?? "").split("\n")[1]?.trim() ?? "";
+      const cmdShort = cmd.slice(0, 40);
+      return candidate(
+        who
+          ? `${who} 想跑「${cmdShort || "某条命令"}」，被边界拦下了，我没放行。`
+          : "有一条命令被边界拦下了，我没放行。",
+        "normal",
+        "block",
+      );
+    }
     case "记忆":
       return candidate(`${SELF}记下了一件事。`, "low", "memory");
     case "已停止":

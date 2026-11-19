@@ -294,6 +294,8 @@ export function heartbeatPrompt(facts: HeartbeatFacts): string {
     "- 状态在跑但没人跟：先 check_progress 看有没有回报；有就验收，没有就 assign_task 带 reworkTaskId 在原单重做，做不了就 stop_task 带 dismiss=true 关单；",
     "- 定时任务异常：如实转告用户（missed=错过的补跑说明、stale=在途被清理），让它下次正常跑；",
     "- 只有花钱、删用户数据、对外发送、口径无法判断时才 ask_user；其余自己定。没有需要干预的就一句话说明现状，不要编造工作、不要为走流程起任务，也不要反复复述上下文摘要。",
+    // 治"兜圈子"（2026-11-19 今日复盘）：反复 check / nudge 却不改变结果，是无用功
+    "- 【重要·别兜圈子】同一张单你已跟进过、又没有新机器事实，就不要再 check_progress、不要重复 nudge；直接基于现有信息做决定（验收 / 原单重做 / 关单），或如实说「这张单在等 X，暂时不用我介入」。宁可少做，也不要为了显得在处理而重复动作。",
   );
   return lines.join("\n");
 }

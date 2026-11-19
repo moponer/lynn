@@ -1009,6 +1009,8 @@ interface QueuedInput extends QueueItem {
   attachments?: TurnAttachments;
   /** 群内 @（排队的这条消息点了谁） */
   mentions?: FeedMention[];
+  /** 巡检等内部轮的标记：随队透传，drainQueue 时据此决定是否落历史 */
+  opts?: { internal?: boolean; ephemeral?: boolean };
 }
 
 /**
@@ -1053,6 +1055,9 @@ export function countTasksByThread(tasks: { threadId?: string; status: TaskStatu
   }
   return out;
 }
+
+/** 每张单最多自动巡检跟进几次；超过就停手交还用户（治"兜圈子"） */
+const SUPERVISOR_MAX_PER_TASK = 3;
 
 /**
  * 指挥者巡检判定（纯函数，便于单测）：哪张单该让风铃主动跟进、为什么。
@@ -1141,6 +1146,14 @@ export class Kernel {
   private supervisorTimer: NodeJS.Timeout | null = null;
   private lastSupervisorAt = 0;
   private supervisorNoted = new Map<string, number>();
+  /**
+   * 每张单被自动巡检跟进了几次（2026-11-19 今日复盘）。
+   *
+   * 治"兜圈子"：一张单迟迟不收敛时，巡检会每 10 分钟叫醒她一次，
+   * 她反复 check_progress / nudge 却改变不了结果。超过
+   * {@link SUPERVISOR_MAX_PER_TASK} 次就停手、交还用户拍板。
+   */
+  private supervisorCount = new Map<string, number>();
   /** 本轮技能注入文本（当轮消息尾部拼接；不进 system prompt —— 保前缀缓存稳定） */
   private pendingSkillText = "";
   /**
@@ -1906,6 +1919,13 @@ export class Kernel {
         title: `${member} · ${taskId}`,
         // 越界被拦不是"成员出错"，是边界在生效：说清它能动哪儿，别让用户以为卡死了
         body: `命令被纵深防御规则拦下：${ev.why}\n${ev.command}\n\n成员只能在自己的工作区（派单时钉住的目录）里读写。要查别处，把材料复制进工作区，或右键这张单「授权只读访问某个目录」。`,
+        /**
+         * 语音播报：说清"谁、干了啥、我拦没拦"。
+         * 之前没写 speak → 走 voice-policy 的 "已拦截" 兜底
+         * "有一条命令被拦下，详情看卡片"——但卡片在对话流里不显眼，
+         * 用户找不到。现在把关键信息直接念出来。
+         */
+        speak: `${member} 想跑「${ev.command.slice(0, 40)}」，被边界拦下了（${ev.why}），我没放行。`,
       });
     } else if (ev.kind === "cmd_net") {
       this.cardTo(threadId, { kind: "tool", badge: "出站", jobId: taskId, title: `${member} · ${taskId}`, body: `出站命令已审计：${ev.command}` });
@@ -4157,13 +4177,26 @@ export class Kernel {
   }
 
   /** 没在跑就立刻提交，在跑就进队列（用户确认计划/回答问题时用） */
-  private submitTurnIfIdle(text: string): void {
+  private submitTurnIfIdle(text: string, opts?: { internal?: boolean; ephemeral?: boolean }): void {
     if (this.busy) {
-      this.queue.push({ id: `q-${++this.queueSeq}`, text, at: new Date().toISOString(), mode: "queue" });
+      /**
+       * 忙时排队，**并把 opts 一起带上**。
+       *
+       * 巡检轮是 ephemeral（不落历史的机器事实），排队时若丢了 opts，
+       * drainQueue 之后会当成普通用户发言写进历史——上下文里就多出
+       * 一段"[自动巡检]…"，越攒越多。所以这里必须透传。
+       */
+      this.queue.push({
+        id: `q-${++this.queueSeq}`,
+        text,
+        at: new Date().toISOString(),
+        mode: "queue",
+        opts,
+      });
       this.setTurn({});
       return;
     }
-    this.submitTurn(text);
+    this.submitTurn(text, undefined, opts);
   }
 
   /**
@@ -5704,6 +5737,7 @@ export class Kernel {
     if (!this.settings.getPrefs().supervisor) return;
     // 本群被用户终止：自动跟进也停手（2026-11-15）
     if (this.isThreadHalted()) return;
+    // 她自己在跑（用户任务）时绝不插话——闲时再巡检，避免"巡检和正在执行的任务打架"。
     if (this.busy || this.memberRuns.size === 0) return;
     const now = Date.now();
     if (now - this.lastSupervisorAt < 5 * 60_000) return;
@@ -5721,13 +5755,33 @@ export class Kernel {
     });
     const hit = supervisorCase(runs, now, this.supervisorNoted);
     if (!hit) return;
-    this.lastSupervisorAt = now;
+    /**
+     * 收敛护栏（2026-11-19 今日复盘实机）：一张单被反复"跟进"却不收敛，
+     * 就是用户说的"兜圈子、不停做不需要做的事"。同一张单最多自动跟进
+     * {@link SUPERVISOR_MAX_PER_TASK} 次；超过就停手，把决定交还用户。
+     */
+    const times = (this.supervisorCount.get(hit.taskId) ?? 0) + 1;
     this.supervisorNoted.set(hit.taskId, now);
+    this.supervisorCount.set(hit.taskId, times);
     const owner = this.taskStore.get(hit.taskId)?.threadId ?? this.currentThreadId;
+    if (times > SUPERVISOR_MAX_PER_TASK) {
+      this.cardTo(owner, {
+        kind: "system",
+        jobId: hit.taskId,
+        text: `这张单我已自动跟进 ${SUPERVISOR_MAX_PER_TASK} 次仍没收敛（${hit.text}），先停手，等你拍板：继续、改需求、还是取消。`,
+      });
+      return;
+    }
+    this.lastSupervisorAt = now;
     this.cardTo(owner, { kind: "system", jobId: hit.taskId, text: `阿黎开始跟进 ${hit.taskId}：${hit.text}` });
-    this.submitTurn(
+    /**
+     * 巡检轮**走队列**（submitTurnIfIdle），不直接 submitTurn。
+     * 直接 submitTurn 会在她忙时硬插、抢当前会话上下文——那就是"巡检和正在
+     * 执行的任务打架"。排队后：她此刻有空就跑，没空就等她这一轮收尾由
+     * drainQueue 自动接上，绝不打断用户任务。
+     */
+    this.submitTurnIfIdle(
       `[自动巡检] ${hit.text}\n\n请作为指挥者处理这张单：①check_progress 看细节；②能用一句话纠正就 nudge_member（下一轮生效，不用重派、不丢已写文件）；③明显做不到（例如要访问工作区外的目录）就 stop_task 停掉，并告诉我原因和替代方案；④只是慢就回一句「继续等」。不要重复派单。`,
-      undefined,
       { internal: true, ephemeral: true },
     );
   }
@@ -5793,11 +5847,10 @@ export class Kernel {
         text: `${aged.length} 张单卡住超过 ${mins} 分钟没有处置：${aged.map((t) => t.id).join("、")}。已让她重新判断下一步。`,
       });
       this.heartbeatRuns += 1;
-      this.submitTurn(
+      this.submitTurnIfIdle(
         `【卡住久未处置】${aged.map((t) => `${t.id}「${t.title}」`).join("、")} 卡住超过 ${mins} 分钟且没人跟进。` +
           `判断与处置由你做主，不要问用户要不要取消：方向仍成立就 assign_task 带 reworkTaskId 在原单重做；` +
           `做不了就 stop_task 带 dismiss=true 关单并如实汇报；已有回报就 review_result 验收。`,
-        undefined,
         { internal: true, ephemeral: true },
       );
       return;
@@ -5852,9 +5905,8 @@ export class Kernel {
         });
       }
       this.heartbeatRuns += 1;
-      this.submitTurn(
+      this.submitTurnIfIdle(
         heartbeatPrompt(capped.facts) + BACKLOG_ORDER,
-        undefined,
         { internal: true, ephemeral: true },
       );
       this.log("heartbeat_backlog", { backlog, batch: batch.length, dropped: capped.dropped });
@@ -5882,7 +5934,8 @@ export class Kernel {
       text: `心跳巡检（${brief}）。机器事实已摆到桌面上，由风铃判断处置：停/催/捡/问/汇报。`,
     });
     this.heartbeatRuns += 1;
-    this.submitTurn(heartbeatPrompt(facts), undefined, { internal: true, ephemeral: true });
+    // 走队列而非硬插：她此刻若有任务在跑，巡检轮等这轮收尾再接，不抢会话。
+    this.submitTurnIfIdle(heartbeatPrompt(facts), { internal: true, ephemeral: true });
     this.log("heartbeat_fired", {
       awaitingReview: facts.awaitingReview.length,
       stalled: facts.stalledTasks.length,
@@ -6878,11 +6931,16 @@ export class Kernel {
         return stageTail ? `${reply}\n阶段：${stageTail}` : reply;
       }
       case "set_group_notice": {
-        // 群公告（全局段）：只有风铃能写。落一张她的话的卡，让群里看得见是谁写的。
+        // 群公告（全局段）：只有风铃能写。
+        // 已有公告且内容相同 → 不重复发卡（防止模型反复调同一个值刷出多张）。
         const text = String(args.text ?? "").trim();
         if (!text) return "群公告不能空：写清整体干什么、谁管哪段、接缝在哪。";
         if (!this.currentThreadId) return "现在没有群（会话）：先开一个群再写公告。";
+        const existing = this.threads.get(this.currentThreadId)?.announcement?.trim() ?? "";
         this.threads.setAnnouncement(this.currentThreadId, text);
+        if (existing && existing === text) {
+          return "群公告没变（内容相同），不需要重写。";
+        }
         this.card({
           kind: "lynn",
           text: `群公告写好了：\n${text}`,
@@ -8358,7 +8416,10 @@ export class Kernel {
       return;
     }
     this.setTurn({ pending: this.queue.length, phase: "accepted" });
-    this.submitTurn(next.text, next.attachments, { mentions: next.mentions });
+    this.submitTurn(next.text, next.attachments, {
+      mentions: next.mentions,
+      ...(next.opts ?? {}),
+    });
   }
 
   /** 插话：只对当前回合生效，不另起回合 */

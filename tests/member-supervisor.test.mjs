@@ -127,10 +127,10 @@ test("巡检接线：命中就落「阿黎开始跟进」卡并起内部回合�
     kernel.memberChatFn = chat;
     start(kernel);
 
-    // 只验接线：替换 submitTurn，免得真去调模型；把"最近一步"推到 4 分钟前
+    // 只验接线：替换 submitTurnIfIdle（巡检改为走队列），免得真去调模型
     const turns = [];
-    kernel.submitTurn = (text, _att, opts) => {
-      turns.push({ text, internal: !!opts?.internal });
+    kernel.submitTurnIfIdle = (text, opts) => {
+      turns.push({ text, internal: !!opts?.internal, ephemeral: !!opts?.ephemeral });
       kernel.busy = true; // 模拟正在跑，防止第二个 tick 抢先
     };
     kernel.memberStepAt.set("task-1", Date.now() - 240_000);
@@ -138,6 +138,7 @@ test("巡检接线：命中就落「阿黎开始跟进」卡并起内部回合�
 
     assert.equal(turns.length, 1, "应当起一轮跟进");
     assert.equal(turns[0].internal, true, "巡检回合不冒充用户发言");
+    assert.equal(turns[0].ephemeral, true, "巡检轮不落历史");
     assert.match(turns[0].text, /自动巡检|没有任何动作/);
     assert.ok(
       kernel.handle("session.snapshot").feed.some((c) => (c.text ?? "").includes("阿黎开始跟进")),
@@ -147,6 +148,44 @@ test("巡检接线：命中就落「阿黎开始跟进」卡并起内部回合�
     kernel.busy = false;
     kernel.supervisorTick();
     assert.equal(turns.length, 1, "5 分钟节流：不允许连续起回合");
+    kernel.handle("task.cancel", { taskId: "task-1" });
+  } finally {
+    await kernel.dispose();
+  }
+});
+
+test("巡检收敛：同一张单超过上限次数就停手、交还用户（治兜圈子）", async () => {
+  const { kernel } = setup();
+  try {
+    await kernel.init();
+    const { chat } = scripted(400);
+    kernel.memberChatFn = chat;
+    start(kernel);
+
+    const turns = [];
+    kernel.submitTurnIfIdle = (text) => {
+      turns.push(text);
+      kernel.busy = false; // 每次都让它空闲，便于连续触发
+    };
+    // 每次都把这张单推到"静默超时"，并清掉 5 分钟节流与 10 分钟冷却，
+    // 模拟"过了很久、这张单又没动静了，巡检再次命中"的场景
+    const fire = (n) => {
+      for (let i = 0; i < n; i += 1) {
+        kernel.memberStepAt.set("task-1", Date.now() - 240_000);
+        kernel.lastSupervisorAt = 0;
+        kernel.supervisorNoted.clear();
+        kernel.supervisorTick();
+      }
+    };
+
+    // 上限是 3：前 3 次真正起回合，第 4 次起只落"停手"卡、不起回合
+    fire(4);
+    assert.equal(turns.length, 3, `最多自动跟进 3 次，实际 ${turns.length}`);
+    const feed = kernel.handle("session.snapshot").feed;
+    assert.ok(
+      feed.some((c) => (c.text ?? "").includes("先停手") && (c.text ?? "").includes("等你拍板")),
+      "超过上限要如实停手并交还用户，而不是无限叫醒",
+    );
     kernel.handle("task.cancel", { taskId: "task-1" });
   } finally {
     await kernel.dispose();
