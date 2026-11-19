@@ -103,7 +103,12 @@ export function mapKernelEvent(ev: KernelEvent, sessionId: string, rpcId = "lynn
     }
 
     case "turn": {
-      const t = (ev as { turn?: { busy?: boolean } }).turn;
+      const t = (ev as { turn?: { busy?: boolean; silent?: boolean } }).turn;
+      /**
+       * 切群的 idle 带 silent=true（2026-11-19）：只是切了显示，不是本轮结束。
+       * 不发 turn/end，否则飞书渠道据此收卡、正文定格在切群那一刻。
+       */
+      if (t?.silent === true) break;
       const busy = t?.busy === true;
       if (busy && !currentTurn) {
         turnSeq += 1;

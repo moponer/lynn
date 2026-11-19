@@ -76,6 +76,34 @@ const nextSeq = (): number => (seqCounter += 1);
 /** sessionId → 该会话的轮次（时间序） */
 const ledger = new Map<string, TurnRecord[]>();
 
+/**
+ * 当前 IM 轮次归属的会话（2026-11-19 修：切群打断飞书轮次）。
+ *
+ * ## 为什么需要它
+ * 内核是单例：history/liveCard/turn/host 全挂在 Kernel 上，一次只服务一个会话。
+ * 飞书轮次跑的时候，桌面用户切到别的群，main.ts 的事件接线原本用
+ * `currentThreadId()` 记账——切群后就记到新群去了，飞书只拿到半截正文。
+ *
+ * 修法：IM 轮次通过 `session.prompt` 发起时调用 `setImTurnSession()` 锁定归属，
+ * `recordEvent`/`endTurn` 优先记到这个归属会话，而不是"当前显示的群"。
+ * 这样桌面切群不影响在跑的飞书轮次——对齐 AstrBot/LangBot/LangGraph 的
+ * "切会话只换指针、不动在跑轮次"做法。
+ *
+ * 桌面本地轮次（非 IM）不设这个值，行为不变。
+ */
+let imTurnSessionId: string | null = null;
+
+/** IM 轮次发起时锁定归属会话（由 session.prompt handler 调用） */
+export function setImTurnSession(sessionId: string): void {
+  imTurnSessionId = sessionId;
+}
+
+/** IM 轮次结束后解锁 */
+export function clearImTurnSession(sessionId?: string): void {
+  // 带 sessionId 时只清自己的，避免并发 IM 轮次互相清（虽然当前串行，但防御性写法）
+  if (sessionId === undefined || imTurnSessionId === sessionId) imTurnSessionId = null;
+}
+
 /** 开一轮，返回 turnId */
 export function beginTurn(sessionId: string, promptRpcId: string, text: string): string {
   const seqBase = nextSeq() * 10;
@@ -118,7 +146,12 @@ export function openTurn(sessionId: string): TurnRecord | undefined {
  * 返回是否消费了它——调用方据此决定要不要再走 WebSocket 广播。
  */
 export function recordEvent(ev: KernelEvent, sessionId: string): boolean {
-  const rec = openTurn(sessionId);
+  /**
+   * 归属会话优先：IM 轮次在跑时，即使桌面切了群，正文仍记到发起轮次的会话。
+   * `sessionId` 参数是"当前显示的群"，切群后它会变——不能用它记账。
+   */
+  const target = imTurnSessionId ?? sessionId;
+  const rec = openTurn(target);
   if (!rec) return false;
 
   switch (ev.type) {
@@ -152,7 +185,12 @@ export function recordEvent(ev: KernelEvent, sessionId: string): boolean {
       return true;
     }
     case "turn": {
-      const t = (ev as { turn?: { busy?: boolean } }).turn;
+      const t = (ev as { turn?: { busy?: boolean; silent?: boolean } }).turn;
+      /**
+       * 切群的 idle 带 silent=true（2026-11-19）：只是切了显示，不是本轮结束。
+       * 忽略它，否则账本轮次被提前标 done，飞书拿到的正文定格在切群那一刻。
+       */
+      if (t?.silent === true) return false;
       if (t?.busy === false && !rec.done) {
         rec.done = true;
         rec.endSeq = rec.seqBase + 9;

@@ -297,6 +297,12 @@ export interface TurnState {
   /** 本轮写过哪些文件；canUndo=true 表示可以整体撤销 */
   canUndo?: boolean;
   changedFiles?: string[];
+  /**
+   * 静默 idle（2026-11-19）：切群时的 busy=false 带此标记，
+   * 表示"只是切显示、不是本轮真的结束"。IM 的 waitTurn 与账本据此忽略，
+   * 避免桌面切群被当成飞书轮次结束、提前收轮拿到半截正文。
+   */
+  silent?: boolean;
 }
 
 /** 用量读数：轮/会话两层 + 上下文占比（都由后端算，前端不估） */

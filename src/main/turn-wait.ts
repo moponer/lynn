@@ -33,7 +33,7 @@
 /** 内核事件里与本模块相关的形状（窄接口，不依赖完整 KernelEvent） */
 export interface TurnEventLike {
   type: string;
-  turn?: { busy?: boolean; phase?: string };
+  turn?: { busy?: boolean; phase?: string; silent?: boolean };
 }
 
 export interface WaitOptions {
@@ -92,6 +92,11 @@ export function runTurnAndWait(opts: WaitOptions): Promise<void> {
 
     unsubscribe = opts.subscribe((ev) => {
       if (ev.type !== "turn" || !ev.turn) return;
+      /**
+       * 切群的 idle 带 silent=true（2026-11-19）：只是切了显示，不是本轮结束。
+       * 忽略它，否则桌面切群会让 IM 轮次被误判完成、提前拿走半截正文。
+       */
+      if (ev.turn.silent === true) return;
       const busy = ev.turn.busy === true;
       if (busy) {
         sawBusy = true;

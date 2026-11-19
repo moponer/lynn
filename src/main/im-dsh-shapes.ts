@@ -85,7 +85,7 @@ export interface ImHostDeps {
   /** 版本号（握手用） */
   version(): string;
 }
-import { beginTurn, endTurn, historyEvents } from "./im-ledger";
+import { beginTurn, clearImTurnSession, endTurn, historyEvents, setImTurnSession } from "./im-ledger";
 
 /**
  * 一个工作区在 DSH 眼里的样子。
@@ -303,12 +303,18 @@ export function buildChannelHandlers(deps: ImHostDeps): Record<string, RpcHandle
        */
       const promptRpcId = String(meta?.rpcId ?? "");
       const turnId = beginTurn(sessionId, promptRpcId, text);
+      /**
+       * 锁定 IM 轮次归属（2026-11-19）：这期间即使桌面切群，正文事件也记到
+       * 本会话的账本，不跟 currentThreadId 跑。见 im-ledger.setImTurnSession。
+       */
+      setImTurnSession(sessionId);
       try {
         deps.submitTurn(text, sessionId, channelLabel(meta?.channel));
         await deps.waitTurn();
       } finally {
         // 无论成功失败都要收轮，否则渠道会一直停在"正在生成"
         endTurn(sessionId, "completed");
+        clearImTurnSession(sessionId);
       }
       /**
        * 回答正文从账本读——`waitTurn` 期间内核的 delta 事件
