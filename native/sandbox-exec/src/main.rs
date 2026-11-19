@@ -50,7 +50,80 @@ extern "system" {
         len: u32,
         ret_len: *mut u32,
     ) -> Bool;
+    // ---- 受限令牌（第二阶段）：CreateRestrictedToken + CreateProcessAsUserW ----
+    fn CreateRestrictedToken(
+        existing_token: Handle,
+        flags: u32,
+        disable_sid_count: u32,
+        disable_sids: *const SidAndAttributes,
+        delete_privilege_count: u32,
+        delete_privileges: *const c_void,
+        restrict_sid_count: u32,
+        restrict_sids: *const SidAndAttributes,
+        new_token: *mut Handle,
+    ) -> Bool;
+    fn CreateProcessAsUserW(
+        token: Handle,
+        app: *const u16,
+        cmdline: *mut u16,
+        pa: *mut c_void,
+        ta: *mut c_void,
+        inherit: Bool,
+        flags: u32,
+        env: *mut c_void,
+        cwd: *const u16,
+        si: *mut c_void,
+        pi: *mut ProcessInformation,
+    ) -> Bool;
+    fn ConvertStringSidToSidW(string_sid: *const u16, sid: *mut Psid) -> Bool;
+    fn AdjustTokenPrivileges(
+        token: Handle,
+        disable_all: Bool,
+        new_state: *const c_void,
+        buffer_len: u32,
+        prev_state: *mut c_void,
+        ret_len: *mut u32,
+    ) -> Bool;
+    fn LookupPrivilegeValueW(system: *const u16, name: *const u16, luid: *mut Luid) -> Bool;
+    fn CreateWellKnownSid(
+        well_known_sid_type: i32,
+        domain_sid: Psid,
+        sid: Psid,
+        size: *mut u32,
+    ) -> Bool;
+    fn CopySid(length: u32, dest: Psid, src: Psid) -> Bool;
+    fn IsValidSid(sid: Psid) -> Bool;
 }
+
+#[repr(C)]
+#[derive(Default, Clone, Copy)]
+struct Luid {
+    low: u32,
+    high: i32,
+}
+
+#[repr(C)]
+#[derive(Default, Clone, Copy)]
+struct TokenPrivileges {
+    count: u32,
+    luid: Luid,
+    attributes: u32,
+}
+
+const SE_PRIVILEGE_ENABLED: u32 = 0x0000_0002;
+const TOKEN_DUPLICATE: u32 = 0x0002;
+const TOKEN_QUERY: u32 = 0x0008;
+const TOKEN_ASSIGN_PRIMARY: u32 = 0x0001;
+const TOKEN_ADJUST_DEFAULT: u32 = 0x0080;
+const TOKEN_ADJUST_SESSIONID: u32 = 0x0100;
+const TOKEN_ADJUST_PRIVILEGES: u32 = 0x0020;
+const MAXIMUM_ALLOWED: u32 = 0x0200_0000;
+const DISABLE_MAX_PRIVILEGE: u32 = 0x01;
+const LUA_TOKEN: u32 = 0x04;
+const WRITE_RESTRICTED: u32 = 0x08;
+/// Everyone 的知名 SID（2 = WinWorldSid）便于给受限令牌加"除显式允许外一律拒绝"的 restrict
+const WIN_WORLD_SID: i32 = 1;
+const SE_GROUP_LOGON_ID: u32 = 0xC000_0000;
 
 #[link(name = "kernel32")]
 extern "system" {
@@ -163,7 +236,7 @@ const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x2000;
 const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION: u32 = 9;
 const CREATE_SUSPENDED: u32 = 0x0000_0004;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-const TOKEN_QUERY: u32 = 0x0008;
+
 const TOKEN_GROUPS_CLASS: u32 = 2;
 const TOKEN_USER_CLASS: u32 = 1;
 
@@ -327,6 +400,26 @@ fn main() {
             };
             let (mem, procs) = parse_limits(&rest[..opt_end]);
             launch(&format!("cmd.exe /d /s /c \"{}\"", cmd), mem, procs);
+        }
+        "--probe-restricted" => probe_restricted(),
+        /**
+         * `--restricted-shell [--memory-mb N] [--processes N] -- <命令原文>`：
+         * 受限令牌 + Job Object 执行（写受限；读仍全盘）。语法同 --shell。
+         */
+        "--restricted-shell" => {
+            let rest = &args[1..];
+            let sep = rest.iter().position(|a| a == "--").unwrap_or(rest.len());
+            let opt_end = sep;
+            let cmd = if sep < rest.len() { rest.get(sep + 1) } else { None };
+            let cmd = match cmd {
+                Some(c) => c.clone(),
+                None => {
+                    eprintln!("--restricted-shell 需要 `-- <命令原文>`");
+                    std::process::exit(2);
+                }
+            };
+            let (mem, procs) = parse_limits(&rest[..opt_end]);
+            launch_restricted(&format!("cmd.exe /d /s /c \"{}\"", cmd), mem, procs);
         }
         other => {
             eprintln!("未知参数：{other}");
@@ -535,3 +628,370 @@ fn run(args: &[String]) {
     let cmdline = cmd.iter().map(|a| quote_arg(a)).collect::<Vec<_>>().join(" ");
     launch(&cmdline, memory_mb, processes);
 }
+
+// ============================================================================
+// 受限令牌沙箱（第二阶段 2026-11-19）
+//
+// 目标：在工作区外的写操作被系统拒绝，而**内置管理员账户也能用**
+// （AppContainer 用不了内置管理员，受限令牌可以）。
+//
+// 机制（参照 OpenAI Codex windows-sandbox-rs/src/token.rs 的真实做法，精简版）：
+//  1. 打开当前进程主令牌（OpenProcessToken）
+//  2. CreateRestrictedToken(flags = WRITE_RESTRICTED|LUA_TOKEN|DISABLE_MAX_PRIVILEGE,
+//       restricting SIDs = [当前用户 SID, Everyone])
+//     —— WRITE_RESTRICTED 让**写**操作只对照 restricting SIDs 检查；
+//        restricting 里有 Everyone，相当于"写一律只认显式授予的路径"
+//  3. CreateProcessAsUserW 用这个受限令牌启动子进程
+//
+// 诚实边界：这一版只做 **WRITE_RESTRICTED**（写受限），读仍全盘可读；
+// 断网需要 WFP（第三阶段）。探针只有在**真能启动受限进程**时才报 restricted。
+// ============================================================================
+
+/// 取当前进程用户 SID 的字节副本（自带 SID 结构，8 + 4*count）
+fn current_user_sid() -> Option<Vec<u8>> {
+    unsafe {
+        let mut token: Handle = std::ptr::null_mut();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+            return None;
+        }
+        let mut len: u32 = 0;
+        GetTokenInformation(token, TOKEN_USER_CLASS, std::ptr::null_mut(), 0, &mut len);
+        if len == 0 {
+            CloseHandle(token);
+            return None;
+        }
+        let mut buf = vec![0u8; len as usize];
+        let ok = GetTokenInformation(
+            token,
+            TOKEN_USER_CLASS,
+            buf.as_mut_ptr() as *mut c_void,
+            len,
+            &mut len,
+        );
+        CloseHandle(token);
+        if ok == 0 {
+            return None;
+        }
+        // TOKEN_USER { SID_AND_ATTRIBUTES User; } —— 第一个字段是 SID 指针
+        let sid_ptr = std::ptr::read_unaligned(buf.as_ptr() as *const SidAndAttributes).sid;
+        sid_bytes(sid_ptr)
+    }
+}
+
+/// 把一个 SID 指针拷成自包含字节（首字节 revision，第二字节 subauthority 数，后跟 4*count）
+fn sid_bytes(sid_ptr: Psid) -> Option<Vec<u8>> {
+    if sid_ptr.is_null() {
+        return None;
+    }
+    unsafe {
+        let p = sid_ptr as *const u8;
+        let count = *p.add(1) as usize;
+        let len = 8 + count * 4;
+        let mut out = vec![0u8; len];
+        if CopySid(len as u32, out.as_mut_ptr() as Psid, sid_ptr) == 0 {
+            return None;
+        }
+        Some(out)
+    }
+}
+
+/// Everyone 的 SID 字节
+fn everyone_sid() -> Option<Vec<u8>> {
+    unsafe {
+        let mut size: u32 = 0;
+        CreateWellKnownSid(WIN_WORLD_SID, std::ptr::null_mut(), std::ptr::null_mut(), &mut size);
+        if size == 0 {
+            return None;
+        }
+        let mut buf = vec![0u8; size as usize];
+        if CreateWellKnownSid(
+            WIN_WORLD_SID,
+            std::ptr::null_mut(),
+            buf.as_mut_ptr() as Psid,
+            &mut size,
+        ) == 0
+        {
+            return None;
+        }
+        Some(buf)
+    }
+}
+
+/// 把字符串 SID（如 "S-1-5-32-545"）转成 psid；调用方负责 LocalFree
+fn sid_from_string(s: &str) -> Option<Psid> {
+    let w = wide(s);
+    unsafe {
+        let mut psid: Psid = std::ptr::null_mut();
+        if ConvertStringSidToSidW(w.as_ptr(), &mut psid) == 0 {
+            None
+        } else {
+            Some(psid)
+        }
+    }
+}
+
+/// 构造受限令牌。成功返回令牌句柄（调用方负责 CloseHandle）。
+fn make_restricted_token() -> Option<Handle> {
+    unsafe {
+        let mut base: Handle = std::ptr::null_mut();
+        // 需要 DUPLICATE 才能从主令牌派生
+        if OpenProcessToken(GetCurrentProcess(), MAXIMUM_ALLOWED, &mut base) == 0 {
+            // 退一步只请求必要权限
+            if OpenProcessToken(
+                GetCurrentProcess(),
+                TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ASSIGN_PRIMARY,
+                &mut base,
+            ) == 0
+            {
+                return None;
+            }
+        }
+        let user = match current_user_sid() {
+            Some(v) => v,
+            None => {
+                CloseHandle(base);
+                return None;
+            }
+        };
+        // restricting SIDs：当前用户 + Users 组 + Authenticated Users。
+        //
+        // 为什么用「Users / Authenticated Users」而不是 Everyone（2026-11-19 实测）：
+        // 受令牌 restrict 后，进程只能访问"restricting SID 被 ACL 允许"的资源。
+        // System32 的 DLL、Program Files\nodejs 都是 ACL 给 BUILTIN\Users /
+        // Authenticated Users 的，**没给 Everyone 全权**——restrict 到 Everyone 时
+        // node / powershell 全都 0xC0000142（DLL 初始化失败）。换成 Users +
+        // Authenticated Users 后它们能正常加载 DLL，而写操作仍受 WRITE_RESTRICTED 约束
+        // （写只对照这些 SID 的允许 ACE：用户能写的地方可写、系统盘仍拒）。
+        let world = match everyone_sid() {
+            Some(v) => v,
+            None => {
+                CloseHandle(base);
+                return None;
+            }
+        };
+        // 用字符串 SID 换成 psid：Users(S-1-5-32-545)、Authenticated Users(S-1-5-11)
+        let users_sid = sid_from_string("S-1-5-32-545");
+        let authed_sid = sid_from_string("S-1-5-11");
+        let mut restrict: Vec<SidAndAttributes> = vec![SidAndAttributes {
+            sid: user.as_ptr() as Psid,
+            attributes: 0,
+        }];
+        if let Some(p) = users_sid {
+            restrict.push(SidAndAttributes { sid: p, attributes: 0 });
+        }
+        if let Some(p) = authed_sid {
+            restrict.push(SidAndAttributes { sid: p, attributes: 0 });
+        }
+        // Everyone 兜底（若上面两个都取不到，至少不空）
+        if users_sid.is_none() && authed_sid.is_none() {
+            restrict.push(SidAndAttributes {
+                sid: world.as_ptr() as Psid,
+                attributes: 0,
+            });
+        }
+        let mut new_token: Handle = std::ptr::null_mut();
+        let flags = DISABLE_MAX_PRIVILEGE | WRITE_RESTRICTED;
+        let ok = CreateRestrictedToken(
+            base,
+            flags,
+            0,
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            restrict.len() as u32,
+            restrict.as_mut_ptr(),
+            &mut new_token,
+        );
+        CloseHandle(base);
+        if let Some(p) = users_sid {
+            unsafe {
+                LocalFree(p as *mut c_void);
+            }
+        }
+        if let Some(p) = authed_sid {
+            unsafe {
+                LocalFree(p as *mut c_void);
+            }
+        }
+        if ok == 0 {
+            return None;
+        }
+        /**
+         * 启用 SeChangeNotifyPrivilege（遍历目录 / 绕过遍历检查）。
+         *
+         * 为什么不启就废：受限令牌默认 DISABLE_MAX_PRIVILEGE 会把所有特权关掉，
+         * 少了"遍历目录"，node / 大量程序在 CreateProcessAsUser 后立刻 0xC0000142
+         * （DLL 初始化失败）——实测 node 必挂、cmd 侥幸能跑。Codex token.rs 里
+         * 也是建完令牌立刻 enable_single_privilege(new_token, "SeChangeNotifyPrivilege")。
+         */
+        enable_privilege(new_token, "SeChangeNotifyPrivilege");
+        Some(new_token)
+    }
+}
+
+/// 在令牌上启用一个特权（失败不致命，但会打印出来便于排查）
+fn enable_privilege(token: Handle, name: &str) {
+    let name_w = wide(name);
+    unsafe {
+        let mut luid = Luid::default();
+        if LookupPrivilegeValueW(std::ptr::null(), name_w.as_ptr(), &mut luid) == 0 {
+            eprintln!("LookupPrivilegeValueW({}) 失败 err={}", name, GetLastError());
+            return;
+        }
+        let tp = TokenPrivileges {
+            count: 1,
+            luid,
+            attributes: SE_PRIVILEGE_ENABLED,
+        };
+        let ok = AdjustTokenPrivileges(
+            token,
+            0,
+            &tp as *const _ as *const c_void,
+            0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        );
+        // AdjustTokenPrivileges 即使成功也可能 GetLastError=ERROR_NOT_ALL_ASSIGNED
+        if ok == 0 {
+            eprintln!("AdjustTokenPrivileges({}) 失败 err={}", name, GetLastError());
+        }
+    }
+}
+
+/// 用受限令牌在 Job Object 里启动 cmdline（语法与 launch 一致）
+fn launch_restricted(cmdline: &str, memory_mb: usize, processes: u32) -> ! {
+    let token = match make_restricted_token() {
+        Some(t) => t,
+        None => {
+            eprintln!("RESTRICTED_TOKEN_UNAVAILABLE");
+            std::process::exit(4);
+        }
+    };
+    let mut cmd_w = wide(cmdline);
+    unsafe {
+        let job: Handle = CreateJobObjectW(std::ptr::null_mut(), std::ptr::null());
+        if job.is_null() {
+            eprintln!("CreateJobObjectW 失败 err={}", GetLastError());
+            std::process::exit(3);
+        }
+        let mut lim: ExtendedLimit = Default::default();
+        lim.basic.limit_flags = JOB_OBJECT_LIMIT_PROCESS_MEMORY
+            | JOB_OBJECT_LIMIT_JOB_MEMORY
+            | JOB_OBJECT_LIMIT_ACTIVE_PROCESS
+            | JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        lim.process_memory_limit = memory_mb * 1024 * 1024;
+        lim.job_memory_limit = memory_mb * 1024 * 1024;
+        lim.basic.active_process_limit = processes;
+        let _ = SetInformationJobObject(
+            job,
+            JOB_OBJECT_LIMIT_JOB_MEMORY * 0 + JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+            &mut lim as *mut _ as *mut c_void,
+            std::mem::size_of::<ExtendedLimit>() as u32,
+        );
+
+        let mut si = StartupInfo::default();
+        si.cb = std::mem::size_of::<StartupInfo>() as u32;
+        si.dw_flags = STARTF_USESTDHANDLES;
+        si.h_std_input = GetStdHandle(STD_INPUT_HANDLE);
+        si.h_std_output = GetStdHandle(STD_OUTPUT_HANDLE);
+        si.h_std_error = GetStdHandle(STD_ERROR_HANDLE);
+        for h in [si.h_std_input, si.h_std_output, si.h_std_error] {
+            if !h.is_null() && h != INVALID_HANDLE_VALUE {
+                SetHandleInformation(h, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
+            }
+        }
+
+        let mut pi = ProcessInformation::default();
+        // CreateProcessAsUserW：用受限令牌启动，应用 CREATE_SUSPENDED 便于先入 Job
+        let started = CreateProcessAsUserW(
+            token,
+            std::ptr::null(),
+            cmd_w.as_mut_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            1,
+            CREATE_SUSPENDED | CREATE_NO_WINDOW,
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            &mut si as *mut _ as *mut c_void,
+            &mut pi,
+        );
+        if started == 0 {
+            let err = GetLastError();
+            CloseHandle(token);
+            CloseHandle(job);
+            eprintln!("RESTRICTED_TOKEN_SPAWN_FAILED err={}", err);
+            std::process::exit(5);
+        }
+        let _ = AssignProcessToJobObject(job, pi.process);
+        ResumeThread(pi.thread);
+        WaitForSingleObject(pi.process, 0xFFFF_FFFF);
+        let mut code: u32 = 0;
+        GetExitCodeProcess(pi.process, &mut code);
+        CloseHandle(pi.thread);
+        CloseHandle(pi.process);
+        CloseHandle(job);
+        CloseHandle(token);
+        std::process::exit(code as i32);
+    }
+}
+
+/// `--probe-restricted`：真刀真枪地用受限令牌跑一次 `cmd /c exit 0`，
+/// 成功才说 restricted 可用（launchVerified=true 的唯一依据）。
+fn probe_restricted() -> ! {
+    let token = match make_restricted_token() {
+        Some(t) => t,
+        None => {
+            println!("{{\"restricted\":false,\"reason\":\"CreateRestrictedToken 失败\"}}");
+            std::process::exit(0);
+        }
+    };
+    /**
+     * 真刀真枪跑 **powershell**（不是 cmd exit 0）。
+     *
+     * 为什么用 powershell 而非 cmd：cmd 内建命令不加载复杂 DLL，受限令牌下
+     * 侥幸能跑；但成员的真实任务大量用 node / powershell 脚本。若受限令牌连
+     * powershell 都起不来（0xC0000142），那这个档对成员毫无用处——必须报 false，
+     * 退回 jobonly，绝不谎报 restricted 让成员全挂。
+     */
+    let mut cmd_w = wide("powershell -NoProfile -NonInteractive -Command \"exit 0\"");
+    unsafe {
+        let mut si = StartupInfo::default();
+        si.cb = std::mem::size_of::<StartupInfo>() as u32;
+        let mut pi = ProcessInformation::default();
+        let started = CreateProcessAsUserW(
+            token,
+            std::ptr::null(),
+            cmd_w.as_mut_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            0,
+            CREATE_NO_WINDOW,
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            &mut si as *mut _ as *mut c_void,
+            &mut pi,
+        );
+        if started == 0 {
+            let err = GetLastError();
+            println!("{{\"restricted\":false,\"reason\":\"CreateProcessAsUserW 失败 err={}\"}}", err);
+            CloseHandle(token);
+            std::process::exit(0);
+        }
+        WaitForSingleObject(pi.process, 15_000);
+        let mut code: u32 = 1;
+        GetExitCodeProcess(pi.process, &mut code);
+        CloseHandle(pi.thread);
+        CloseHandle(pi.process);
+        CloseHandle(token);
+        // 只有 powershell 真正退出码 0（正常起来）才算 restricted 可用
+        let ok = code == 0;
+        println!(
+            "{{\"restricted\":{},\"launchVerified\":{},\"exit\":{}}}",
+            ok, ok, code
+        );
+        std::process::exit(0);
+    }
+}
+
+

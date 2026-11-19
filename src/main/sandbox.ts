@@ -20,7 +20,7 @@ import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-export type SandboxMode = "appcontainer" | "jobonly" | "off";
+export type SandboxMode = "appcontainer" | "restricted" | "jobonly" | "off";
 
 export interface SandboxVerdict {
   /** 真正生效的档位。**只有 launchVerified=true 才可能是 appcontainer**，否则一律 jobonly/off */
@@ -93,27 +93,51 @@ export function probeSandbox(opts: { appRoot?: string; timeoutMs?: number } = {}
     return { ...OFF, helperPath: found, probed: false, reason: "探针输出不是 JSON" };
   }
   /**
-   * 档位判定的唯一依据：**launchVerified**。
+   * 受限令牌探针（第二阶段 2026-11-19）。
    *
-   * 探针报 `mode` 只是它的建议；这里再夹一道，是因为"能建 profile"和"能隔离进程"
-   * 是两回事——只有真正在容器里跑通过进程，才允许对外说 appcontainer。
-   * 宁可保守地标 jobonly，也不要让界面显示"已隔离"而实际全通。
+   * AppContainer 不可用时（内置管理员账户用不了），退而求其次用受限令牌：
+   * 它**任何账户都能用**，能给"写隔离到工作区"。这里真跑一次
+   * `--probe-restricted`（内部 CreateProcessAsUser 起 cmd /c exit 0），
+   * 真起来才算数——launchVerified 只认这个实测。
+   *
+   * 诚实：restricted 只做**写限制**，不断网；断网要 WFP（第三阶段）。
    */
+  const restrictedProbe = spawnSync(found, ["--probe-restricted"], {
+    encoding: "utf8",
+    timeout: opts.timeoutMs ?? 10_000,
+  });
+  let restrictedOk = false;
+  try {
+    const rp = JSON.parse(String(restrictedProbe.stdout ?? "").trim()) as {
+      restricted?: boolean;
+      launchVerified?: boolean;
+    };
+    restrictedOk = rp.restricted === true && rp.launchVerified === true;
+  } catch {
+    restrictedOk = false;
+  }
+
   const launchVerified = parsed.launchVerified === true;
-  const mode: SandboxMode = launchVerified ? "appcontainer" : "jobonly";
+  // 档位优先级：AppContainer（能断网+文件隔离）> 受限令牌（写隔离，任意账户）> jobonly
+  const mode: SandboxMode = launchVerified ? "appcontainer" : restrictedOk ? "restricted" : "jobonly";
   return {
     mode,
     provisioned: parsed.provisioned === true,
-    launchVerified,
-    reason: String(parsed.reason ?? ""),
+    launchVerified: launchVerified || restrictedOk,
+    reason: launchVerified
+      ? String(parsed.reason ?? "")
+      : restrictedOk
+        ? "受限令牌可用：写操作限制在工作区（AppContainer 不可用时的最佳档）；读仍全盘，断网未启用"
+        : String(parsed.reason ?? ""),
     helperPath: found,
     probed: true,
     limits: {
       processes: 64,
       memoryMb: 2048,
-      // 断网与文件隔离只有 AppContainer 能给；jobonly 下如实说"没有"
+      // 断网只有 AppContainer 能给；受限令牌也不断网
       noNetwork: launchVerified,
-      fileIsolation: launchVerified,
+      // 文件隔离：AppContainer 全隔离；受限令牌只做写隔离（这里按"有写隔离"算 true）
+      fileIsolation: launchVerified || restrictedOk,
     },
   };
 }
@@ -151,8 +175,15 @@ export function runInSandbox(
   if (v.mode === "off" || !v.helperPath) {
     return { ok: false, code: null, stdout: "", stderr: "", reason: v.reason };
   }
+  /**
+   * 按档位选子命令：
+   *  - restricted：`--restricted-shell`（受限令牌，写隔离）
+   *  - jobonly：`--shell`（只有资源上限，无隔离）
+   *  - appcontainer：目前走 `--shell`（AppContainer 启动路径未实现，见设计文档）
+   */
+  const sub = v.mode === "restricted" ? "--restricted-shell" : "--shell";
   const args = [
-    "--shell",
+    sub,
     "--memory-mb",
     String(opts.memoryMb ?? v.limits.memoryMb),
     "--processes",

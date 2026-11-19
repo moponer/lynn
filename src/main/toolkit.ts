@@ -43,7 +43,7 @@ export interface ToolkitOptions {
    */
   sandbox?: {
     /** 当前可用档位（由内核启动时探一次后注入；off 时不走沙箱） */
-    verdict: () => { mode: "appcontainer" | "jobonly" | "off"; helperPath: string | null };
+    verdict: () => { mode: "appcontainer" | "restricted" | "jobonly" | "off"; helperPath: string | null };
     /** 沙箱内执行；不可用时返回 ok:false + reason，由本层降级。env 由本层按 cmd-env 规则生成后传入 */
     run: (
       command: string,

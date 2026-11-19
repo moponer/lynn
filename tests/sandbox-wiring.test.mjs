@@ -112,9 +112,45 @@ test("不提供 sandbox：保持旧行为（直接 execa）", async () => {
 test("真实沙箱探针：本机档位如实现（有 helper 就不是 off）", () => {
   const v = probeSandbox({ appRoot: process.cwd() });
   // 不断言一定 jobonly（不同机器不同），只断言字段自洽
-  assert.ok(["appcontainer", "jobonly", "off"].includes(v.mode));
+  assert.ok(["appcontainer", "restricted", "jobonly", "off"].includes(v.mode));
   if (v.mode !== "off") {
     assert.ok(v.helperPath, "非 off 档必须有 helper 路径");
     assert.equal(typeof v.probed, "boolean");
   }
+});
+
+test("受限令牌档：fileIsolation=true 但 noNetwork=false（诚实：写隔离有、断网无）", () => {
+  const v = probeSandbox({ appRoot: process.cwd() });
+  if (v.mode === "restricted") {
+    assert.equal(v.limits.fileIsolation, true, "受限令牌应有写隔离");
+    assert.equal(v.limits.noNetwork, false, "受限令牌不断网，必须如实报 false");
+  }
+  // 非 restricted 机器跳过（不同机器档位不同）
+});
+
+test("受限令牌档实测：工作区内能写、系统盘被拒（本机 restricted 时才有意义）", async () => {
+  const v = probeSandbox({ appRoot: process.cwd() });
+  if (v.mode !== "restricted") return; // 跳过非 restricted 机器
+  const root = tmp();
+  const { Toolkit } = await import("../dist/main/toolkit.js");
+  const { sandboxVerdict, runInSandbox } = await import("../dist/main/sandbox.js");
+  const tk = new Toolkit(root, {
+    sandbox: {
+      verdict: () => {
+        const s = sandboxVerdict();
+        return { mode: s.mode, helperPath: s.helperPath };
+      },
+      run: (cmd, o) => runInSandbox(cmd, { timeoutMs: o.timeoutMs, cwd: o.cwd, env: o.env }),
+    },
+  });
+  // 工作区内写：应成功且真落盘
+  const out1 = await tk.runCommand({ command: "echo INSIDE > inside.txt" });
+  assert.ok(fs.existsSync(path.join(root, "inside.txt")), `工作区内应能写：${out1.slice(0, 80)}`);
+  // 系统盘写：应被拒（文件不该出现）
+  const sysPath = "C:\\Windows\\lynn-sbx-e2e-probe.txt";
+  try {
+    if (fs.existsSync(sysPath)) fs.rmSync(sysPath);
+  } catch {}
+  await tk.runCommand({ command: `echo x > "${sysPath}"` });
+  assert.equal(fs.existsSync(sysPath), false, "受限令牌下系统盘写必须被拒");
 });
