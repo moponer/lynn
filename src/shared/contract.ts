@@ -335,6 +335,50 @@ export function cacheHitRate(v: UsageView): number | undefined {
   return prompt > 0 ? (v.cacheRead / prompt) * 100 : undefined;
 }
 
+/**
+ * 输入合计（含缓存）：这才是"喂进模型多少 token"的正确答案。
+ *
+ * 2026-11-19 修正：原来界面把 `sessionIn` 直接标成「输入·计费」，而它只统计
+ * **未命中缓存**的那部分。实机一例：sessionIn 160.1K + cacheRead 711.0K，
+ * 真实输入是 871.1K，界面却只说 160.1K —— 少报 5.4 倍，拿去估成本会严重偏低。
+ */
+export function totalPromptInput(v: UsageView): number {
+  return v.sessionIn + v.cacheRead + v.cacheWrite;
+}
+
+/**
+ * 缓存写入是否"未知"而不是"确定为零"。
+ *
+ * DeepSeek 这类渠道不回报 cache_write，我们照抄成 0，界面就写「0」——
+ * 那是"确定没写"的语义，而事实是"对方没告诉我们"。这种情况一律显示「—」。
+ */
+export function cacheWriteUnknown(v: UsageView): boolean {
+  return v.cacheWrite === 0 && v.cacheRead > 0;
+}
+
+/**
+ * 上下文占用：**只认上游给的 percent**，并用它反推 token，两个数字必须同源。
+ *
+ * 2026-11-19 修正：原实现里 `contextTokens` 是我们自己累加的
+ * （promptTokens + completionTokens，那是"本轮吞吐"不是"上下文占用"），
+ * 而 `contextPercent` 是 Pi SDK 自己算的。两个数放同一行 → 实机出现
+ * 「4% · 44.7K」这种 44.7K/128K 其实该是 35% 的自相矛盾。
+ *
+ * 规则：有 percent 就以 percent 为准，token 用 percent × window 反推；
+ * 没有 percent 时退回我们自己的累加值，但明确标出来（estimated）。
+ */
+export function contextUsage(v: UsageView): { percent: number | null; tokens: number | null; estimated: boolean } {
+  const win = v.contextWindow > 0 ? v.contextWindow : 0;
+  if (typeof v.contextPercent === "number" && win > 0) {
+    return { percent: v.contextPercent, tokens: Math.round((v.contextPercent / 100) * win), estimated: false };
+  }
+  // 没有上游百分比：退回自累加值，并标 estimated（界面加「≈」）
+  if (v.contextTokens > 0 && win > 0) {
+    return { percent: (v.contextTokens / win) * 100, tokens: v.contextTokens, estimated: true };
+  }
+  return { percent: null, tokens: null, estimated: false };
+}
+
 export interface QueueItem {
   id: string;
   text: string;
