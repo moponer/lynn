@@ -12,7 +12,7 @@ import { ToolRegistry } from "./tool-registry";
  *
  * 派单不再只是写 jsonl：assign_task 之后这里用成员档案 + 简报包起一个
  * 真实的工具循环。硬约束在代码里，不靠提示词自律（§4.10.3）：
- *  - 成员可用的执行工具 = 本次分配 ∩ 内置执行工具（管理型 8 件套永远进不来）
+ *  - 成员可用的执行工具 = 本次分配 ∩ 内置执行工具（管理型工具永远进不来，见 MANAGEMENT_ONLY_TOOLS）
  *  - 文件读写被钉死在任务工作区（workspace 逃逸在工具层直接拒绝）
  *  - submit_report 证据可选；提供了就必须真实存在（关键任务的强制点在任务层 evidencePolicy）
  *  - 轮次上限来自档案 limits.maxTurns，超限如实报「未完成」

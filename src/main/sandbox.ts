@@ -23,19 +23,38 @@ import * as path from "node:path";
 export type SandboxMode = "appcontainer" | "restricted" | "jobonly" | "off";
 
 export interface SandboxVerdict {
-  /** 真正生效的档位。**只有 launchVerified=true 才可能是 appcontainer**，否则一律 jobonly/off */
+  /**
+   * 真正生效的档位。判据见 {@link launchVerified} 与 {@link restrictedVerified}：
+   *  - appcontainer：AppContainer 里启动进程**实测通过**（能断网+文件隔离）
+   *  - restricted：受限令牌/标准用户降权实测通过（有写隔离，不断网）
+   *  - jobonly：只有 Job Object 资源上限（无隔离）
+   *  - off：没有 helper 或探针失败
+   */
   mode: SandboxMode;
   /** profile 与 SID 能拿到（≠ 能隔离！） */
   provisioned: boolean;
-  /** 容器内启动进程验证过没有。没验证过就不许宣称隔离 */
+  /**
+   * **当前档位的启动路径实测通过**（2026-11-19 修 沙箱#15：语义澄清）。
+   *
+   * 原来注释写"只有 launchVerified=true 才可能是 appcontainer"，但代码里
+   * restricted 通过时也会把它置 true —— 两处冲突，上层若拿它判"是不是 appcontainer"
+   * 会把 restricted 误判成 appcontainer。
+   *
+   * 现在的准确含义：**这次真起过进程、不是只看能力探测**。
+   * 要判是不是 AppContainer，看 `mode`（或 {@link appContainerVerified}）。
+   */
   launchVerified: boolean;
+  /** AppContainer 这一档是否实测通过（严格含义；restricted 不算） */
+  appContainerVerified?: boolean;
+  /** restricted 这一档（降权写隔离）是否实测通过 */
+  restrictedVerified?: boolean;
   /** 人话原因（写进日志与设置页） */
   reason: string;
   /** helper 路径与可用性 */
   helperPath: string | null;
   /** 探针是否真的跑成功（没跑成功 ≠ 不支持，要说清） */
   probed: boolean;
-  /** jobonly 能挡什么、挡不住什么 —— 界面上要照这个说 */
+  /** 各档能挡什么、挡不住什么 —— 界面上要照这个说 */
   limits: { processes: number; memoryMb: number; noNetwork: boolean; fileIsolation: boolean };
 }
 
@@ -61,7 +80,11 @@ function candidatePaths(appRoot?: string): string[] {
 }
 
 /**
- * 跑一次能力探针。纯本地、同步（一次 ~10ms，可在启动时调一次并缓存）。
+ * 跑一次能力探针。**同步、可能很慢**（2026-11-19 修 沙箱#14）。
+ *
+ * 这里的注释曾写「一次 ~10ms」，与实现严重不符：现在实际串行起 3 个子进程
+ *（`--probe` 5s 上限、`--probe-restricted` 10s 真起 node、`--appcontainer-probe` 15s 真起 node），
+ * 最坏可到 30s。所以**绝不能在渲染路径调用**——见 sandboxVerdictCached / warmSandboxProbe。
  *
  * 探针本身失败（文件不在 / 执行报错）时返回 mode=off 且 probed=false——
  * 「不知道」和「不支持」是两件事，混在一起会让人误判要不要去查。
@@ -154,6 +177,9 @@ export function probeSandbox(opts: { appRoot?: string; timeoutMs?: number } = {}
     mode,
     provisioned: parsed.provisioned === true,
     launchVerified: launchVerified || restrictedOk,
+    // 严格字段（修 沙箱#15）：要判「是不是 AppContainer」只能看这两个，别看 launchVerified
+    appContainerVerified: launchVerified,
+    restrictedVerified: restrictedOk,
     reason: launchVerified
       ? String(parsed.reason ?? "")
       : restrictedOk

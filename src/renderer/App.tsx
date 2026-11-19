@@ -8,6 +8,7 @@ import type {
   RpcMethod,
   SessionSnapshot,
 } from "../shared/contract";
+import { DELTA_FRAME_MIN_GAP_MS } from "../shared/stream";
 import { SettingsModal } from "./components/SettingsModal";
 import { Icon } from "./components/Icon";
 import { DeskView } from "./desk/Desk";
@@ -374,7 +375,8 @@ export default function App() {
   // 重渲染次数降到 1/3 左右。
   const pendingDelta = useRef<{ id: string; text?: string; thinking?: string } | null>(null);
   const deltaTimer = useRef<number | null>(null);
-  const DELTA_MIN_GAP_MS = 80;
+  // 合并间隔用契约里的单一来源（2026-11-19 修 消息#11）：原来主进程 16ms / RPC 80ms /
+  // 前端 80ms 三个魔数，两条模型路径行为差 5 倍，多推的帧全在这里被丢掉。
 
   useEffect(() => {
     // 终态（card / done / error）到达时，先丢弃还没跑的合并帧：
@@ -418,7 +420,7 @@ export default function App() {
                   }
                 : s,
             );
-          }, DELTA_MIN_GAP_MS);
+          }, DELTA_FRAME_MIN_GAP_MS);
         }
         return;
       }
@@ -1376,7 +1378,8 @@ export default function App() {
           voiceWhenHidden={snap.prefs.voiceWhenHidden ?? false}
           voiceProxy={snap.prefs.voiceProxy ?? ""}
           wallpaper={snap.prefs.wallpaper ?? ""}
-          wallpaperStrength={snap.prefs.wallpaperStrength ?? 40}
+          wallpaperStrength={snap.prefs.wallpaperStrength ?? 60}
+          wallpaperLayers={snap.prefs.wallpaperLayers}
           project={snap.project}
           usage={snap.usage}
           onTheme={changeTheme}

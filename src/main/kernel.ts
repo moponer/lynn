@@ -19,6 +19,7 @@ import type {
   TurnState,
   UsageView,
 } from "../shared/contract";
+import { DELTA_FRAME_MIN_GAP_MS } from "../shared/stream";
 import type { VoicePort } from "./voice-policy";
 import { ManagementTools, MANAGEMENT_ONLY_TOOLS } from "./management-tools";
 import {
@@ -277,7 +278,7 @@ interface RuntimeHost {
 /**
  * 内核：**Pi 为底座**（§1.3）。
  * - Agent 循环 / 模型协议：@earendil-works/pi-agent-core + pi-ai（ESM，动态加载）
- * - 我方产品层：管理工具 8 件套（execute 桥接 Pi 的 AgentTool）、权限、审计、指挥板
+ * - 我方产品层：管理工具面（见 AGENT_TOOL_NAMES，execute 桥接 Pi 的 AgentTool）、权限、审计、指挥板
  * - 直连 OpenAI 兼容实现（llm.ts）保留为 Pi 不可用时的降级路径
  * 渲染层契约（contract.ts）不感知以上差别。
  */
@@ -310,8 +311,11 @@ export function cleanTaskTitle(raw: string, fallback: string): string {
   return base.length > 36 ? `${base.slice(0, 36)}…` : base;
 }
 
-/** 流式 delta 的发送去抖：一帧一次。渲染层再按 rAF 合帧，两处都不许降到"肉眼看得出卡"的档位 */
-const DELTA_FRAME_MS = 16;
+/**
+ * 流式 delta 的发送去抖已统一到契约常量 `DELTA_FRAME_MIN_GAP_MS`（2026-11-19 修 消息#11）：
+ * 此前这里有个本地 16ms 常量，与 RPC 路径的 80ms、前端的 80ms 三处不一致——
+ * 直连路径推得比前端能显示的快 5 倍，多出来的帧全被前端丢掉，纯浪费主进程 CPU。
+ */
 
 /**
  * 默认同时最多几个成员在跑：三个任务并行是常态（ABC 各一个团队），
@@ -930,6 +934,19 @@ const COMPACT_TOOL_DESC: Record<string, string> = {
   forget_memory: "按关键词删一条记忆（多条会拒绝并给候选）。记忆归你管，别派成员去删文件。",
   create_plugin_draft: "把稳定流程写成插件草稿（不会自动启用）。",
   ship_plugin: "仅启用通过准入的 L0 技能草稿；L1/L2 必须由用户启用。",
+  /**
+   * 下面六条 2026-11-19 补齐（工具#5）。
+   *
+   * 此前这 6 个插件管理工具没有紧凑描述，`COMPACT_TOOL_JSON` 会回落到
+   * `t.function.description` 的长文案——它们**每轮都要发**，而「压缩工具面」
+   * 的既定目标是省 token。低频工具没必要每轮带一整段解释。
+   */
+  list_plugins: "列出已装插件：id / 档位 / 是否启用 / 提供了哪些工具（含加载错误）。",
+  set_plugin_enabled: "启用或停用已装插件。停用永远安全；启用 L1 会重新加载它的代码，先确认可信。",
+  uninstall_plugin: "卸载插件，文件移到 plugins-trash/（可手工恢复），不是永久删除。",
+  list_plugin_versions: "列某插件的历史版本（新的在前）：改之前先看有没有旧版可直接回滚。",
+  rollback_plugin: "回滚到某个历史版本；当前版会先归档，回滚本身也能再回滚。",
+  install_plugin: "从 .zip 包或插件目录安装；校验失败会给出具体到字段的原因。",
 };
 
 const KEEP_PARAM_DESC = new Set(["brief", "tools", "network", "networkReason"]);
@@ -2084,6 +2101,34 @@ export class Kernel {
     else this.ephemeralFrom = n;
   }
 
+  /**
+   * 持久化前的 feed 截断（2026-11-19 修 消息#12）。
+   *
+   * 原来一律 `slice(-200)`，但截断点可能正好切掉：
+   *  - 正在流式的 live 卡（她的话）→ 切回会话就没了；
+   *  - 可行动的错误卡（`action` 非空，界面钉在顶部让你重试）→ 消失了，你没法重试；
+   *  - 进度卡（`progressCards` 里记着 id）→ 丢了之后 appendProgress 会新建一张，
+   *    表现为"每次切群多一张进度卡"。
+   *
+   * 现在保留：末尾 200 条 ∪ 这些"必须活着"的卡（按原顺序），超过上限也只多留这几张。
+   */
+  private trimFeedForPersist(feed: readonly FeedCard[]): FeedCard[] {
+    const KEEP = 200;
+    if (feed.length <= KEEP) return [...feed];
+    const keep = new Set<string>();
+    for (const id of this.progressCards.values()) keep.add(id);
+    for (const c of feed) {
+      if (c.streaming) keep.add(c.id);
+      // 可行动错误卡（retry/settings/logs…）：用户要能点到它
+      if (c.action && c.action !== "none") keep.add(c.id);
+    }
+    const tail = feed.slice(-KEEP);
+    const tailIds = new Set(tail.map((c) => c.id));
+    // 必须留下的卡若不在尾部，按它们在原 feed 里的顺序补到前面
+    const extra = feed.filter((c) => keep.has(c.id) && !tailIds.has(c.id));
+    return [...extra, ...tail];
+  }
+
   private card(c: Omit<FeedCard, "id" | "createdAt">): FeedCard {
     /**
      * 写作规则（2026-11-15 重做）：**这里一个字都不改**。
@@ -2312,7 +2357,7 @@ export class Kernel {
         last.count = (last.count ?? 1) + 1;
         last.body = c.body;
         last.createdAt = new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
-        this.threads.saveState(threadId, { feed: st.feed.slice(-200), history: st.history });
+        this.threads.saveState(threadId, { feed: this.trimFeedForPersist(st.feed), history: st.history });
         this.threads.bumpUnread(threadId);
         this.notify({ type: "thread", threadId });
         return last;
@@ -2326,7 +2371,7 @@ export class Kernel {
       createdAt: new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }),
     };
     st.feed.push(full);
-    this.threads.saveState(threadId, { feed: st.feed.slice(-200), history: st.history });
+    this.threads.saveState(threadId, { feed: this.trimFeedForPersist(st.feed), history: st.history });
     // 这个群你没在看 → 未读 +1（微信式群列表的红点）
     this.threads.bumpUnread(threadId);
     this.notify({ type: "thread", threadId });
@@ -2352,7 +2397,7 @@ export class Kernel {
       return;
     }
     Object.assign(hit, patch);
-    this.threads.saveState(threadId, { feed: st.feed.slice(-200), history: st.history });
+    this.threads.saveState(threadId, { feed: this.trimFeedForPersist(st.feed), history: st.history });
     this.notify({ type: "thread", threadId });
   }
 
@@ -3088,7 +3133,7 @@ export class Kernel {
     if (!this.currentThreadId) return;
     try {
       this.threads.saveState(this.currentThreadId, {
-        feed: this.feed.slice(-200),
+        feed: this.trimFeedForPersist(this.feed),
         history: this.history
           .filter((m) => (m.role === "user" || m.role === "assistant") && typeof m.content === "string")
           .map((m) => ({ role: m.role as "user" | "assistant", content: m.content as string }))
@@ -7904,7 +7949,7 @@ export class Kernel {
       live.text = (live.text ?? "") + delta;
       // 节流到 ~80ms：渲染层按 cardId 就地更新，不拉全量快照
       const now = Date.now();
-      if (now - this.lastDeltaEmit >= 80) {
+      if (now - this.lastDeltaEmit >= DELTA_FRAME_MIN_GAP_MS) {
         this.lastDeltaEmit = now;
         this.notify({
           type: "delta",
@@ -7926,7 +7971,7 @@ export class Kernel {
         live.thinking = `${t.slice(0, 3000)}\n…（中间 ${t.length - 9000} 字已折叠）…\n${t.slice(-8000)}`;
       }
       const now = Date.now();
-      if (now - this.lastDeltaEmit >= 80) {
+      if (now - this.lastDeltaEmit >= DELTA_FRAME_MIN_GAP_MS) {
         this.lastDeltaEmit = now;
         this.notify({
           type: "delta",
@@ -7979,7 +8024,7 @@ export class Kernel {
 
   /**
    * 工具执行唯一入口（RPC 回壳与直连降级共用）：
-   * 权限门禁 → L1 → 管理型 8 件套；失败转成可读文本，不把异常抛回模型循环。
+   * 权限门禁 → L1 → 管理工具面（AGENT_TOOL_NAMES）；失败转成可读文本，不把异常抛回模型循环。
    */
   /**
    * 完整工具面：管理型 8 件 + L1 插件 + L2 MCP（同一道门禁，只是来源不同）。
@@ -8528,7 +8573,7 @@ export class Kernel {
       live.text = text;
       live.streaming = streaming;
       const now = Date.now();
-      if (streaming && now - this.lastDeltaEmit >= DELTA_FRAME_MS) {
+      if (streaming && now - this.lastDeltaEmit >= DELTA_FRAME_MIN_GAP_MS) {
         this.lastDeltaEmit = now;
         // cardId 必须带：渲染层只认带 cardId 的 delta，否则降级路径等于没有流式
         this.notify({ type: "delta", text, cardId: live.id });
@@ -8844,7 +8889,7 @@ export class Kernel {
           // 切群了：把这一轮的 feed/history 写回原会话（不碰当前视图）
           try {
             this.threads.saveState(turnCtx.sessionId, {
-              feed: turnCtx.feed.slice(-200),
+              feed: this.trimFeedForPersist(turnCtx.feed),
               history: turnCtx.history
                 .filter((m) => (m.role === "user" || m.role === "assistant") && typeof m.content === "string")
                 .map((m) => ({ role: m.role as "user" | "assistant", content: m.content as string }))
@@ -10002,7 +10047,7 @@ export class Kernel {
    * 这里把动作收敛到 4 个只读/需确认的操作，并**每次都重新确认插件已启用**，
    * 这样停用插件后残留的 iframe 也动不了内核。
    */
-  private async uiPanelAction(params: RpcContracts["ui.panelAction"]["params"]): Promise<RpcContracts["ui.panelAction"]["result"]> {
+  private uiPanelAction(params: RpcContracts["ui.panelAction"]["params"]): RpcContracts["ui.panelAction"]["result"] {
     const rid = params.requestId;
     const bad = (error: string): RpcContracts["ui.panelAction"]["result"] => ({ ok: false, error, requestId: rid });
     const CLEANER = "lynn.core.junk-cleaner.ui";
@@ -10021,8 +10066,8 @@ export class Kernel {
       : params.action === "clean" ? { dryRun: false }
       : {};
     try {
-      // l1.execute 的 fullName 形如 lynn.<plugin>.<tool>；由它统一走执行闸/日志/审计
-      const raw = await this.l1.execute("lynn.core.junk-cleaner." + toolName, args);
+      // 工作台是同步 RPC：用进程内同步执行入口（官方受信插件，动作已白名单）
+      const raw = this.l1.executeSync("lynn.core.junk-cleaner." + toolName, args);
       const value = typeof raw === "string" ? JSON.parse(raw) : raw;
       return { ok: true, requestId: rid, value };
     } catch (e) {

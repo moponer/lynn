@@ -1135,6 +1135,26 @@ export interface RpcContracts {
     result: { ok: boolean; stopped: number };
   };
   /** 内核构建信息（版本握手：前端据此判断"后台是不是旧版本"） */
+  /**
+   * 选一张桌面壁纸（2026-11-19）。
+   *
+   * 返回 dataURL 而不是只给路径：渲染层是 http/file 混合环境，直接用 file:// 会被安全策略挡；
+   * 同时返回路径，prefs 只存路径（几 MB 的 base64 不该进 prefs），重开时用 app.readWallpaper 再读一次。
+   */
+  "app.pickWallpaper": {
+    params: { title?: string } | undefined;
+    result:
+      | { canceled: true }
+      | { ok: true; path: string; dataUrl: string }
+      | { ok: false; error: string };
+  };
+
+  /** 按 prefs 里存的路径重新读一次壁纸（重启后恢复用）；失败只回 ok:false，不抛 */
+  "app.readWallpaper": {
+    params: { path?: string };
+    result: { ok: true; dataUrl: string } | { ok: false };
+  };
+
   "app.info": {
     params: void;
     result: {
@@ -1652,6 +1672,12 @@ export interface RpcContracts {
       modelRoles?: Partial<Record<"worker" | "smol" | "advisor" | "tiny", string>>;
       /** 风铃单轮工具轮次上限（4–80；触顶只总结不硬停） */
       maxAgentRounds?: number;
+      /** 桌面壁纸路径（空 = 不用）；只存路径，图片内容走 app.readWallpaper */
+      wallpaper?: string;
+      /** 壁纸整体强度（50–100，下限锁死防止文字压不住对比度） */
+      wallpaperStrength?: number;
+      /** 壁纸分层配置：各表面不透明度百分比与模糊像素 */
+      wallpaperLayers?: { rail?: number; center?: number; card?: number; blur?: number };
     };
     result: {
       ok: true;
@@ -2076,6 +2102,25 @@ export interface RpcContracts {
       }[];
       errors: string[];
     };
+  };
+
+  /**
+   * 工作台动作（U 档插件 iframe → 内核的白名单动作闸口）。
+   *
+   * iframe 拿不到 L1 工具，只能经这里申请：内核把动作收敛到白名单，并每次都重新确认
+   * 相关插件仍处于启用态——停用后残留的 iframe 也动不了内核。
+   */
+  "ui.panelAction": {
+    params: {
+      requestId?: string;
+      /** 发起动作的 U 档插件 id（当前只有官方清理面板） */
+      plugin: string;
+      /** 白名单动作：只读扫描 / 干跑 / 真清 / 资源报告 */
+      action: "scan" | "dryRun" | "clean" | "resourceReport";
+    };
+    result:
+      | { ok: true; requestId?: string; value: unknown }
+      | { ok: false; error: string; requestId?: string };
   };
 }
 

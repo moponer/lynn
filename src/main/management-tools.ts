@@ -8,7 +8,8 @@ import { resolveRole, mixedRoleRejection, roleSpec } from "./role-registry";
 import { MemberPool } from "./member-pool";
 
 /**
- * 风铃的管理型工具 8 件套（§3.1 / §4.10.3）。
+ * 风铃的管理型工具面（§3.1 / §4.10.3）。具体清单是 MANAGEMENT_ONLY_TOOLS——
+ * 不要再写死数量：加了工具忘了改注释，会让后来的人按错的规模理解工具面。
  *
  * 「她不会自己去做」的硬实现：这个文件里**只有管理动作**，
  * 没有 bash / write / browser / office —— 执行类工具只发给成员。
