@@ -4849,6 +4849,8 @@ export class Kernel {
             cwd: o.cwd,
             env: o.env,
             dataRoot: this.dataRoot,
+            // 「停」信号（2026-11-19 C3）：异步执行才能真杀沙箱子进程
+            signal: o.signal,
           }),
       },
       onSandboxDegraded: (reason) => this.log("sandbox_degraded", { taskId, reason }),

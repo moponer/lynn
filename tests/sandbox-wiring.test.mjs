@@ -212,3 +212,37 @@ test("S1：探测结果落磁盘，重启（清内存）后读缓存秒回同一
   assert.equal(warm.mode, cold.mode, "热启档位应与冷探一致");
   assert.ok(ms < 200, `热启应读磁盘缓存秒回（实际 ${ms}ms）`);
 });
+
+// ---------- C3：点「停」真的杀进程 ----------
+
+test("C3：abort 信号能真的中止沙箱命令（不是等超时）", async () => {
+  const { sandboxVerdict, runInSandbox } = await import("../dist/main/sandbox.js");
+  const v = sandboxVerdict(process.cwd());
+  if (v.mode === "off") return; // 没 helper 的机器跳过
+  const ac = new AbortController();
+  setTimeout(() => ac.abort(), 400);
+  const startedAt = Date.now();
+  // ping 30 次约 30s；如果 abort 无效会一直等到超时
+  const r = await runInSandbox("ping -n 30 127.0.0.1 > nul", { timeoutMs: 60000, signal: ac.signal, dataRoot: tmp() });
+  const ms = Date.now() - startedAt;
+  assert.equal(r.aborted, true, "应标记为被用户中止");
+  assert.ok(ms < 5000, `点停后应立刻中止（实际 ${ms}ms）——不能等到超时`);
+});
+
+test("C3：runCommand 收到 stop 后返回「已停止」，不降级重跑", async () => {
+  const root = tmp();
+  const ac = new AbortController();
+  setImmediate(() => ac.abort());
+  const sb = {
+    verdict: () => ({ mode: "jobonly", helperPath: "fake" }),
+    run: (_c, o) => {
+      // 模拟：命令跑到一半被 abort
+      return Promise.resolve({ ok: false, code: null, stdout: "", stderr: "", started: true, aborted: true, signal: o.signal });
+    },
+  };
+  let degraded = null;
+  const tk = new Toolkit(root, { sandbox: sb, onSandboxDegraded: (r) => { degraded = r; } });
+  const out = await tk.runCommand({ command: "ping -n 30 127.0.0.1" });
+  assert.match(out, /已停止|已被用户停止/, "应如实说被停止");
+  assert.equal(degraded, null, "被停不是降级，不能重跑");
+});

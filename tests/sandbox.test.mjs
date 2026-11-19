@@ -61,35 +61,35 @@ test("探针结论要能解释原因（不是只给个布尔或错误码）", ()
   }
 });
 
-test("mode=off 时 runInSandbox 明确拒绝，不悄悄照跑", () => {
+test("mode=off 时 runInSandbox 明确拒绝，不悄悄照跑", async () => {
   // 构造一个必然 off 的判定：非 win32 平台天然 off；win32 上找不到 helper 时也 off
   const v = sandboxVerdict();
   if (v.mode !== "off") return; // 本机有 helper 时这条不适用
-  const r = runInSandbox("echo hi");
+  const r = await runInSandbox("echo hi");
   assert.equal(r.ok, false);
   assert.equal(r.code, null);
   assert.match(r.reason ?? "", /工具层边界|没有原生沙箱|探针/);
 });
 
-test("沙箱里跑命令：输出与退出码都要透传（本机有 helper 时）", () => {
+test("沙箱里跑命令：输出与退出码都要透传（本机有 helper 时）", async () => {
   const v = sandboxVerdict();
   if (v.mode === "off") return;
-  const ok = runInSandbox('node -e "console.log(12345)"');
+  const ok = await runInSandbox('node -e "console.log(12345)"');
   assert.equal(ok.ok, true, `命令应当成功：${ok.stderr || ok.reason || ""}`);
   assert.match(ok.stdout, /12345/, "子进程的 stdout 必须传回来——不透传的话成员看不到任何结果");
 
-  const bad = runInSandbox('node -e "process.exit(7)"');
+  const bad = await runInSandbox('node -e "process.exit(7)"');
   assert.equal(bad.code, 7, "退出码必须透传，否则失败会被当成成功");
 });
 
-test("沙箱里内存上限真的生效（限制 128MB 时分配 1GB 应失败）", () => {
+test("沙箱里内存上限真的生效（限制 128MB 时分配 1GB 应失败）", async () => {
   const v = sandboxVerdict();
   if (v.mode === "off") return;
-  const limited = runInSandbox('node -e "Buffer.alloc(1024*1024*1024);console.log(777)"', { memoryMb: 128 });
+  const limited = await runInSandbox('node -e "Buffer.alloc(1024*1024*1024);console.log(777)"', { memoryMb: 128 });
   assert.notEqual(limited.code, 0, "限制 128MB 时 1GB 分配不该成功");
   assert.ok(!limited.stdout.includes("777"), "分配没成功就不该打印成功标记");
 
-  const free = runInSandbox('node -e "Buffer.alloc(1024*1024*1024);console.log(777)"', { memoryMb: 2048 });
+  const free = await runInSandbox('node -e "Buffer.alloc(1024*1024*1024);console.log(777)"', { memoryMb: 2048 });
   assert.equal(free.code, 0, "同样的分配在 2GB 限制下应当成功（说明挡的是限额不是代码）");
 });
 

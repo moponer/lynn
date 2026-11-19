@@ -16,7 +16,7 @@
  *   ❌ 断网、文件 ACL 隔离 —— 这两项只有 AppContainer 能给
  */
 
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -317,7 +317,7 @@ export function sandboxProbed(): boolean {
  * `mode=off` 时**不**假装：直接告诉调用方没沙箱可用，让它走原来的执行路径。
  * 这一条很关键——沙箱缺席时静默地"照跑"，等于把安全承诺悄悄作废。
  */
-export function runInSandbox(
+export async function runInSandbox(
   command: string,
   opts: {
     appRoot?: string;
@@ -329,8 +329,15 @@ export function runInSandbox(
     env?: Record<string, string>;
     /** 数据目录：给磁盘缓存用（省掉重复探测） */
     dataRoot?: string;
+    /**
+     * 用户点「停」的信号（2026-11-19 修 C3）。
+     *
+     * 之前是 spawnSync：同步阻塞整条线程，abort 监听根本没机会执行——用户点停
+     * 界面显示已停，命令还在跑，最长等到 timeout。改成 spawn + 这里真杀进程。
+     */
+    signal?: AbortSignal;
   } = {},
-): {
+): Promise<{
   ok: boolean;
   code: number | null;
   stdout: string;
@@ -347,7 +354,9 @@ export function runInSandbox(
    */
   started: boolean;
   timedOut?: boolean;
-} {
+  /** 被用户「停」中止（2026-11-19 C3）：调用方应直接返回"已停止"，不要降级重跑 */
+  aborted?: boolean;
+}> {
   const v = sandboxVerdict(opts.appRoot, opts.dataRoot);
   if (v.mode === "off" || !v.helperPath) {
     return { ok: false, code: null, stdout: "", stderr: "", reason: v.reason, started: false };
@@ -368,44 +377,86 @@ export function runInSandbox(
     "--",
     command,
   ];
-  const res = spawnSync(v.helperPath, args, {
-    encoding: "utf8",
-    timeout: opts.timeoutMs ?? 120_000,
-    maxBuffer: 12 * 1024 * 1024,
-    /**
-     * helper 自己就是 `CreateProcessW(..., cwd=null, ...)`，子进程继承 helper 的 cwd——
-     * 所以把 helper 的 cwd 设成成员工作区，子进程就在正确目录里跑。
-     */
-    cwd: opts.cwd,
-    // 用调用方传的（已剔除密钥的）env；没传则继承当前进程（旧行为）
-    ...(opts.env ? { env: opts.env } : {}),
-    windowsHide: true,
+  const timeoutMs = opts.timeoutMs ?? 120_000;
+  const MAX_BUF = 12 * 1024 * 1024;
+  return await new Promise((resolve) => {
+    let stdout = "";
+    let stderr = "";
+    let overflow = false;
+    let timedOut = false;
+    let aborted = false;
+    let settled = false;
+    const child = spawn(v.helperPath!, args, {
+      cwd: opts.cwd,
+      ...(opts.env ? { env: opts.env } : {}),
+      windowsHide: true,
+    });
+    /** 收尾：只 resolve 一次，清掉定时器与 abort 监听 */
+    const finish = (code: number | null, reason?: string) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (opts.signal) opts.signal.removeEventListener("abort", onAbort);
+      const started = !!stdout || !!stderr || code !== null || aborted || timedOut || overflow;
+      resolve({
+        ok: code === 0,
+        code,
+        stdout,
+        stderr,
+        ...(reason ? { reason: reason.slice(0, 200) } : {}),
+        started,
+        timedOut,
+        aborted,
+      });
+    };
+    const kill = () => {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        /* 已退出 */
+      }
+    };
+    const onAbort = () => {
+      aborted = true;
+      kill();
+    };
+    const timer = setTimeout(() => {
+      timedOut = true;
+      kill();
+    }, timeoutMs);
+    (timer as { unref?: () => void }).unref?.();
+    if (opts.signal) {
+      if (opts.signal.aborted) {
+        aborted = true;
+        kill();
+      } else {
+        opts.signal.addEventListener("abort", onAbort, { once: true });
+      }
+    }
+    child.stdout?.on("data", (b: Buffer) => {
+      if (stdout.length + b.length > MAX_BUF) {
+        overflow = true;
+        stdout += b.toString("utf8").slice(0, Math.max(0, MAX_BUF - stdout.length));
+        kill();
+        return;
+      }
+      stdout += b.toString("utf8");
+    });
+    child.stderr?.on("data", (b: Buffer) => {
+      if (stderr.length + b.length > MAX_BUF) {
+        overflow = true;
+        stderr += b.toString("utf8").slice(0, Math.max(0, MAX_BUF - stderr.length));
+        kill();
+        return;
+      }
+      stderr += b.toString("utf8");
+    });
+    child.on("error", (err) => {
+      // helper 起不来（ENOENT 等）：命令没执行过，可安全降级
+      finish(null, `沙箱 helper 启动失败：${String((err as Error).message ?? err)}`);
+    });
+    child.on("close", (code) => {
+      finish(code ?? null, overflow ? "输出超过上限，已截断" : undefined);
+    });
   });
-  /**
-   * 判定命令是否真的执行过（2026-11-19 C4）：
-   *  - 有 stdout/stderr 输出 → 一定跑过
-   *  - res.error 是 ETIMEDOUT（spawnSync 超时杀了 helper）→ 很可能跑过（helper 已把命令交给 Job），
-   *    保守算 started=true、timedOut=true（绝不重跑）
-   *  - res.error 是 ENOBUFS（超 maxBuffer）→ 跑过，输出太大，started=true（绝不重跑）
-   *  - 其它（ENOENT：helper 文件不在 → 没执行）→ started=false（可降级）
-   *  - 正常退出（status 非 null）→ 跑过
-   */
-  const errCode = (res.error as NodeJS.ErrnoException | undefined)?.code;
-  const started =
-    !!res.stdout ||
-    !!res.stderr ||
-    res.status !== null ||
-    errCode === "ETIMEDOUT" ||
-    res.signal != null ||
-    errCode === "ENOBUFS";
-  const timedOut = errCode === "ETIMEDOUT" || res.signal === "SIGTERM" || res.signal === "SIGKILL";
-  return {
-    ok: res.status === 0,
-    code: res.status,
-    stdout: String(res.stdout ?? ""),
-    stderr: String(res.stderr ?? ""),
-    ...(res.error ? { reason: String(res.error.message ?? res.error).slice(0, 200) } : {}),
-    started,
-    timedOut,
-  };
 }

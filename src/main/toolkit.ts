@@ -47,8 +47,8 @@ export interface ToolkitOptions {
     /** 沙箱内执行；不可用时返回 ok:false + reason，由本层降级。env 由本层按 cmd-env 规则生成后传入 */
     run: (
       command: string,
-      opts: { cwd: string; timeoutMs: number; env: Record<string, string> },
-    ) => {
+      opts: { cwd: string; timeoutMs: number; env: Record<string, string>; signal?: AbortSignal },
+    ) => Promise<{
       ok: boolean;
       code: number | null;
       stdout: string;
@@ -57,7 +57,9 @@ export interface ToolkitOptions {
       /** 命令是否真的执行过（区分"helper 没起来可降级"vs"跑过但超时/超buffer 不可重跑"） */
       started: boolean;
       timedOut?: boolean;
-    };
+      /** 被用户「停」中止：调用方直接返回已停止，不降级重跑 */
+      aborted?: boolean;
+    }>;
   };
   /** 沙箱降级回调：本层因沙箱不可用而退回直接执行时通知壳（写日志，界面上要说清） */
   onSandboxDegraded?: (reason: string) => void;
@@ -1135,17 +1137,20 @@ export class Toolkit {
        */
       const sb = this.sandbox?.verdict();
       if (this.sandbox && sb && sb.mode !== "off" && sb.helperPath) {
-        const r = this.sandbox.run(command, {
+        const r = await this.sandbox.run(command, {
           cwd,
           timeoutMs: this.commandTimeoutMs,
           // 与 execa 分支完全一致的环境：剔密钥 + 补 toolDirs（见 cmd-env.ts）
           env: buildCommandEnv(process.env, { toolDirs: posixToolDirsCached() }) as Record<string, string>,
+          // 「停」信号透传（2026-11-19 C3）：异步执行才能真的杀掉沙箱子进程
+          signal,
         });
         /**
          * 判定：只有**命令确实没执行过**（started=false，helper 没起来）才降级 execa 重跑。
          * started=true 但超时/超 buffer 时**绝不能重跑**（2026-11-19 修 C4）——
          * 否则一条有副作用的命令（git commit / npm publish / 写文件）会被执行两遍。
          */
+        if (r.aborted) return `命令已被用户停止（点「停」）：${command}`;
         if (r.started) {
           if (signal?.aborted) return `命令已被用户停止（点「停」）：${command}`;
           if (r.timedOut) {
