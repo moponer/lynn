@@ -717,6 +717,8 @@ export async function runMemberTask(input: MemberRunInput): Promise<MemberRunRes
    */
   const tokenBudget = Math.max(0, input.profile.limits?.budgetTokens ?? 0);
   let budgetStop = false;
+  /** 预算到额进入"最后一轮收尾"（2026-11-19 C5）：本轮跑完仍未交回报才判停 */
+  let budgetClosing = false;
   /** 折叠提示只报一次：每轮都报会把「进度」卡刷满 */
   let foldedNoticed = false;
   const runStartedAt = input.runStartedAt ?? Date.now();
@@ -925,10 +927,17 @@ export async function runMemberTask(input: MemberRunInput): Promise<MemberRunRes
   };
 
   try {
+    /**
+     * 预算收尾语义修正（2026-11-19 修 P1 C5）：
+     * 旧实现：预算到额设 budgetStop=true，而 while 条件含 `!budgetStop` → 立刻退出，
+     * 那句"别再调工具、立刻 submit_report"的收尾指令根本没被处理，直接把成果判成 turn_limit 丢掉。
+     * 现在：budgetClosing 表示"本轮已进入收尾（已下达交回报指令）"，本轮照常跑（模型据此交回报），
+     * 跑完若仍没交回报才判停。这样"预算到额给一轮收口机会"才真正成立。
+     */
     while (finalReport === null && turns < maxTurns && !budgetStop && !input.signal?.aborted) {
-      // token 预算闸：到额就只给一轮收尾机会（不是硬断，避免把已读到的成果一起扔掉）
-      if (tokenBudget > 0 && promptTokens + completionTokens >= tokenBudget) {
-        budgetStop = true;
+      // token 预算闸：到额就进入最后一轮收尾（下达交回报指令，本轮照跑）
+      if (tokenBudget > 0 && promptTokens + completionTokens >= tokenBudget && !budgetClosing) {
+        budgetClosing = true;
         messages.push({
           role: "user",
           content:
@@ -1105,6 +1114,18 @@ export async function runMemberTask(input: MemberRunInput): Promise<MemberRunRes
           finalReport = result.content.trim();
           break;
         }
+        /**
+         * 预算收尾轮仍只说话不交回报（2026-11-19 C5）：不再喂回继续（那样会拿预算外轮次空转），
+         * 直接把这段口述当回报收下——总比丢成 turn_limit 强。没有内容就判停。
+         */
+        if (budgetClosing) {
+          if (result.content.trim()) {
+            finalReport = result.content.trim();
+            break;
+          }
+          budgetStop = true;
+          break;
+        }
         // 模型直接说话不调工具：把话喂回去，要求走 submit_report
         messages.push({ role: "assistant", content: result.content });
         messages.push({
@@ -1157,6 +1178,14 @@ export async function runMemberTask(input: MemberRunInput): Promise<MemberRunRes
           };
         }
         messages.push({ role: "tool", tool_call_id: tc.id, name: tc.name, content: outcome });
+      }
+      /**
+       * 预算收尾兜底（2026-11-19 C5）：已进入 budgetClosing 本轮仍未交回报 →
+       * 不再给它下一轮（否则喂回循环会拿预算外的轮次空转）。置 budgetStop 让 while 退出，
+       * 由下面 turn_limit 分支收尾（该分支已保留 writtenFiles 兜底作品）。
+       */
+      if (budgetClosing && finalReport === null) {
+        budgetStop = true;
       }
     }
     if (finalReport !== null) {

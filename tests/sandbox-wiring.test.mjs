@@ -30,7 +30,7 @@ function fakeSandbox({ mode = "jobonly", result } = {}) {
       verdict: () => ({ mode, helperPath: mode === "off" ? null : "fake-helper.exe" }),
       run: (command, o) => {
         calls.push({ command, ...o });
-        return result ?? { ok: true, code: 0, stdout: "FAKE_SANDBOX_OUT", stderr: "" };
+        return result ?? { ok: true, code: 0, stdout: "FAKE_SANDBOX_OUT", stderr: "", started: true };
       },
     },
   };
@@ -69,7 +69,7 @@ test("沙箱档位 off：不调 sandbox.run，如实降级到 execa 并回调 on
 
 test("沙箱 run 返回 ok:false + code:null（helper 坏了）：降级到 execa 并记原因", async () => {
   const root = tmp();
-  const sb = fakeSandbox({ result: { ok: false, code: null, stdout: "", stderr: "", reason: "helper 启动失败" } });
+  const sb = fakeSandbox({ result: { ok: false, code: null, stdout: "", stderr: "", reason: "helper 启动失败", started: false } });
   let degraded = null;
   const tk = new Toolkit(root, {
     sandbox: sb.opts,
@@ -85,7 +85,7 @@ test("沙箱 run 返回 ok:false + code:null（helper 坏了）：降级到 exec
 
 test("沙箱跑出非零退出：如实透传退出码，不降级", async () => {
   const root = tmp();
-  const sb = fakeSandbox({ result: { ok: false, code: 3, stdout: "partial", stderr: "boom", } });
+  const sb = fakeSandbox({ result: { ok: false, code: 3, stdout: "partial", stderr: "boom", started: true } });
   let degraded = null;
   const tk = new Toolkit(root, {
     sandbox: sb.opts,
@@ -158,4 +158,28 @@ test("受限令牌档实测：node 能跑 + 系统盘写被拒 + 用户目录能
   } catch {}
   await tk.runCommand({ command: `echo x > "${sysPath}"` });
   assert.equal(fs.existsSync(sysPath), false, "标准用户下系统盘写必须被拒");
+});
+
+test("C4：命令超时（started=true）绝不重跑，返回超时结果而不是降级", async () => {
+  const root = tmp();
+  let execaRan = false;
+  // started=true 但 code=null（超时）——不该降级 execa
+  const sb = fakeSandbox({ result: { ok: false, code: null, stdout: "partial-out", stderr: "", started: true, timedOut: true } });
+  let degraded = null;
+  const tk = new Toolkit(root, { sandbox: sb.opts, onSandboxDegraded: (r) => { degraded = r; } });
+  const out = await tk.runCommand({ command: "sleep 999" });
+  assert.equal(sb.calls.length, 1, "沙箱应被调用一次");
+  assert.equal(degraded, null, "超时不是降级（不能重跑）");
+  assert.match(out, /超时/, "结果要如实说超时");
+  assert.match(out, /partial-out/, "已产出的部分输出要保留");
+});
+
+test("C4：超 buffer（started=true）也不重跑", async () => {
+  const root = tmp();
+  const sb = fakeSandbox({ result: { ok: false, code: null, stdout: "big", stderr: "", started: true } });
+  let degraded = null;
+  const tk = new Toolkit(root, { sandbox: sb.opts, onSandboxDegraded: (r) => { degraded = r; } });
+  await tk.runCommand({ command: "cat hugefile" });
+  assert.equal(degraded, null, "跑了但输出大，不是降级，不能重跑");
+  assert.equal(sb.calls.length, 1, "只调用一次，不重跑");
 });

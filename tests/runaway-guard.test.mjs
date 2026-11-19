@@ -194,7 +194,7 @@ test("额度用尽不再续跑：直接如实结束（续跑也只会再撞 429�
   assert.equal(calls, 1);
 });
 
-test("token 预算到额：强制收尾，不再给继续勘察的机会", async () => {
+test("token 预算到额：强制收尾，不丢成果（口述也收下，不再空转勘察）", async () => {
   const wd = tmp();
   fs.writeFileSync(path.join(wd, "memo.md"), "材料\n", "utf-8");
   let calls = 0;
@@ -206,14 +206,16 @@ test("token 预算到额：强制收尾，不再给继续勘察的机会", async
     if (calls === 1) {
       return { content: "", toolCalls: [tc("read_file", { path: "memo.md" })], promptTokens: 500, completionTokens: 100 };
     }
-    return { content: "读完了但没交", toolCalls: [], promptTokens: 500, completionTokens: 100 };
+    // 收尾轮：模型直接口述结论（不调工具）——2026-11-19 C5 后应把它当回报收下，不丢
+    return { content: "已看完材料，结论是 X", toolCalls: [], promptTokens: 500, completionTokens: 100 };
   };
   const p = profile();
   p.limits.budgetTokens = 100; // 第一轮就超
   const res = await runMemberTask(memberInput(wd, { chatFn, profile: p }));
   assert.equal(sawBudgetNote, true, "到额必须明确要求收尾");
-  assert.equal(res.status, "turn_limit");
-  assert.match(res.report, /token 预算/);
+  // C5：收尾轮的口述结论要收下（不丢成 turn_limit）
+  assert.equal(res.status, "reported", "到额收尾轮的口述应当作回报收下，不再判 turn_limit 丢掉");
+  assert.match(res.report, /结论是 X/, "口述内容要保留");
 });
 
 // ---------- 4. 重复读抑制 ----------

@@ -1263,7 +1263,7 @@ export class Kernel {
   /** busy 时被挡下的心跳事件：收尾后补评估一次，别让「成员退出」白白蒸发 */
   private heartbeatPending: string | null = null;
   /** 成员交回报后待风铃验收的队列（2026-11-12）：忙时先挂着，收尾再叫 */
-  private reviewPending: { taskId: string; member: string; text: string }[] = [];
+  private reviewPending: { taskId: string; member: string; text: string; threadId?: string }[] = [];
   /**
    * 成员在群里问的话（2026-11-16）：只有 question / risk 会进这里。
    * 按 taskId 合并，同一单在一轮里说三件事只叫醒她一次。
@@ -3183,6 +3183,14 @@ export class Kernel {
     }
     this.history = st.history;
     this.liveCard = null;
+    /**
+     * 切群必须清 progressCards（2026-11-19 修 P0）：
+     * progressCards 存的是「某个 feed 里的卡 id」。switchThread 把 this.feed 整个换掉、
+     * cardSeq 归零后，旧 id 在新 feed 里找不到 → appendProgress 的 find(prevId) 落空
+     * → 每次都新建一张进度卡（长任务/切群后一刷一张，重复进度卡的回归源）。
+     * 换会话就清空，让新会话从干净状态重新记。
+     */
+    this.progressCards.clear();
     // 会话各带一套根：切回来要回到它自己的目录（不同项目的 @ 检索与 Pi cwd 不能串）。
     // 没有显式根的旧会话走默认工作区，绝不"沿用上一个会话"。
     const prevRoot = this.projectRoot;
@@ -3225,6 +3233,13 @@ export class Kernel {
      * 轮次被误判结束、提前拿走半截正文。
      */
     this.setTurn({ phase: "idle", busy: false, pending: 0, taskId: undefined, startedAt: undefined, canUndo: false, changedFiles: [], silent: true });
+    /**
+     * 切到本群后补一次 pending 处理（2026-11-19 修 P0#1）：
+     * review/question pending 可能因"属于别的群"被压着（跨群守卫）。切回来后 drain 一次，
+     * 让属于当前群的验收/提问及时处置，不必等到下次成员事件。
+     */
+    this.drainReviewPending();
+    this.drainQuestionPending();
   }
 
   /**
@@ -4025,9 +4040,10 @@ export class Kernel {
    * 忙的时候先挂着，别打断正在跑的活。
    */
   private wakeLynnForReview(taskId: string, member: string, text: string): void {
+    const tid = this.taskStore.get(taskId)?.threadId;
     // 本群被用户终止：不叫醒（成员都已停机，这条只是迟到的事件）
-    if (this.isThreadHalted(this.taskStore.get(taskId)?.threadId)) return;
-    this.reviewPending.push({ taskId, member, text: text.slice(0, 300) });
+    if (this.isThreadHalted(tid)) return;
+    this.reviewPending.push({ taskId, member, text: text.slice(0, 300), threadId: tid });
     this.drainReviewPending();
   }
 
@@ -4037,7 +4053,17 @@ export class Kernel {
     if (this.isThreadHalted()) return; // 本群已终止：叫醒也不叫（发新消息才恢复）
     if (this.busy) return; // 别打断正在跑的活
     if (this.turn.phase === "awaiting_plan") return; // 用户正在拍板，别插队
-    const item = this.reviewPending.shift();
+    /**
+     * 跨群守卫（2026-11-19 修 P0）：
+     * reviewPending 项可能来自别的群（成员在 B 群交活，用户正看 A 群）。
+     * 之前一律用 currentThreadId 注入，会把 B 群的验收轮塞进 A 群上下文/卡片流（串群）。
+     * 现在：只处理属于当前群的项；别的群留着，等用户切回该群（switchThread 后会再 drain）。
+     */
+    const idx = this.reviewPending.findIndex(
+      (it) => !it.threadId || it.threadId === this.currentThreadId,
+    );
+    if (idx < 0) return; // 剩下的都属于别的群，等切过去再处理
+    const [item] = this.reviewPending.splice(idx, 1);
     if (!item) return;
     const stageNow = this.stageSummaryOf(item.taskId);
     this.submitTurn(
@@ -4907,6 +4933,19 @@ export class Kernel {
         // 已经写出的文件（2026-11-16）：轮次用尽/中止也算产出，别让它们随失败一起消失
         const produced = (result.producedFiles ?? []).slice();
         if (produced.length) this.memberProduced.set(taskId, produced);
+        /**
+         * 取消后收尾守卫（2026-11-19 修 P0）：
+         * 用户点了取消（dismissTask → canceled + abort），但成员进程要等当前模型调用/工具
+         * 跑完才走到这里。若不判终态，成员恰好此刻交了回报就仍会 registerReport + 落回报卡 +
+         * 从 canceled 迁 in_review（迁错被 catch 吞掉），用户看到"已取消却仍在跑/交了回报"。
+         * 所以：工单已 canceled，收尾只记用量（下面 appendUsage 等记账照做），但跳过所有
+         * "报成功/落卡/迁状态"，直接结束。
+         */
+        const canceledNow = this.taskStore.get(taskId)?.status === "canceled";
+        if (canceledNow) {
+          this.log("member_exit_canceled", { taskId, member, status: result.status });
+          return;
+        }
         // 预算读数：按真实 token 累计（此前编制表恒显示 0）
         this.memberUsage.set(memberKey, (this.memberUsage.get(memberKey) ?? 0) + result.promptTokens + result.completionTokens);
         // 看板：成员缓存命中率（2026-11-13）——cacheRead / 输入总量，多单累计
@@ -6516,6 +6555,13 @@ export class Kernel {
           this.blockedAgedNoted.delete(taskId);
           this.progressPolls.delete(taskId);
           this.artifactsInspected.delete(taskId); // 重做后产物会换，旧的"已读"不算数
+          /**
+           * 重做要重置巡检跟进计数（2026-11-19 修 P1）。
+           * 否则同一 taskId 重做 3 轮以上后，supervisorCount 已达上限 → 巡检直接发
+           * 「已自动跟进 3 次没收敛，先停手」，这张单再也不会被自动跟进——新返工没人管。
+           */
+          this.supervisorCount.delete(taskId);
+          this.supervisorNoted.delete(taskId);
           // 旧契约作废：同一张单不该叠两张「等你拍板」卡
           for (const [id, p] of this.pendingPlans) if (p.taskId === taskId) this.pendingPlans.delete(id);
           this.decisions = this.decisions.filter((d) => !(d.kind === "plan" && d.jobId === taskId));

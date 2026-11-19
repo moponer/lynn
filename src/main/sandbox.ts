@@ -200,10 +200,27 @@ export function runInSandbox(
     /** 子进程环境（调用方传剔除密钥 + 补 toolDirs 后的 env）；不传则继承当前进程 */
     env?: Record<string, string>;
   } = {},
-): { ok: boolean; code: number | null; stdout: string; stderr: string; reason?: string } {
+): {
+  ok: boolean;
+  code: number | null;
+  stdout: string;
+  stderr: string;
+  reason?: string;
+  /**
+   * 命令是否**真的被执行过**（2026-11-19 修 C4）。
+   *
+   * 区分三种失败，避免"有副作用命令被重跑"：
+   *  - started=false：helper 根本没起来（档位 off / 缺 helper / CreateProcess 失败）
+   *    → 调用方可安全降级到 execa 重跑（命令没执行过，不会重复副作用）。
+   *  - started=true + timedOut=true：命令跑了但超时被杀 → **绝不能重跑**，返回超时结果。
+   *  - started=true + 超 buffer：命令跑了、输出太大 → 也不能重跑，截断返回。
+   */
+  started: boolean;
+  timedOut?: boolean;
+} {
   const v = sandboxVerdict(opts.appRoot);
   if (v.mode === "off" || !v.helperPath) {
-    return { ok: false, code: null, stdout: "", stderr: "", reason: v.reason };
+    return { ok: false, code: null, stdout: "", stderr: "", reason: v.reason, started: false };
   }
   /**
    * 按档位选子命令：
@@ -234,11 +251,31 @@ export function runInSandbox(
     ...(opts.env ? { env: opts.env } : {}),
     windowsHide: true,
   });
+  /**
+   * 判定命令是否真的执行过（2026-11-19 C4）：
+   *  - 有 stdout/stderr 输出 → 一定跑过
+   *  - res.error 是 ETIMEDOUT（spawnSync 超时杀了 helper）→ 很可能跑过（helper 已把命令交给 Job），
+   *    保守算 started=true、timedOut=true（绝不重跑）
+   *  - res.error 是 ENOBUFS（超 maxBuffer）→ 跑过，输出太大，started=true（绝不重跑）
+   *  - 其它（ENOENT：helper 文件不在 → 没执行）→ started=false（可降级）
+   *  - 正常退出（status 非 null）→ 跑过
+   */
+  const errCode = (res.error as NodeJS.ErrnoException | undefined)?.code;
+  const started =
+    !!res.stdout ||
+    !!res.stderr ||
+    res.status !== null ||
+    errCode === "ETIMEDOUT" ||
+    res.signal != null ||
+    errCode === "ENOBUFS";
+  const timedOut = errCode === "ETIMEDOUT" || res.signal === "SIGTERM" || res.signal === "SIGKILL";
   return {
     ok: res.status === 0,
     code: res.status,
     stdout: String(res.stdout ?? ""),
     stderr: String(res.stderr ?? ""),
-    ...(res.error ? { reason: String(res.error).slice(0, 200) } : {}),
+    ...(res.error ? { reason: String(res.error.message ?? res.error).slice(0, 200) } : {}),
+    started,
+    timedOut,
   };
 }

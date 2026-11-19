@@ -48,7 +48,16 @@ export interface ToolkitOptions {
     run: (
       command: string,
       opts: { cwd: string; timeoutMs: number; env: Record<string, string> },
-    ) => { ok: boolean; code: number | null; stdout: string; stderr: string; reason?: string };
+    ) => {
+      ok: boolean;
+      code: number | null;
+      stdout: string;
+      stderr: string;
+      reason?: string;
+      /** 命令是否真的执行过（区分"helper 没起来可降级"vs"跑过但超时/超buffer 不可重跑"） */
+      started: boolean;
+      timedOut?: boolean;
+    };
   };
   /** 沙箱降级回调：本层因沙箱不可用而退回直接执行时通知壳（写日志，界面上要说清） */
   onSandboxDegraded?: (reason: string) => void;
@@ -1132,9 +1141,22 @@ export class Toolkit {
           // 与 execa 分支完全一致的环境：剔密钥 + 补 toolDirs（见 cmd-env.ts）
           env: buildCommandEnv(process.env, { toolDirs: posixToolDirsCached() }) as Record<string, string>,
         });
-        if (r.ok || r.code !== null) {
-          // 成功执行（含非零退出）——沙箱跑通了
+        /**
+         * 判定：只有**命令确实没执行过**（started=false，helper 没起来）才降级 execa 重跑。
+         * started=true 但超时/超 buffer 时**绝不能重跑**（2026-11-19 修 C4）——
+         * 否则一条有副作用的命令（git commit / npm publish / 写文件）会被执行两遍。
+         */
+        if (r.started) {
           if (signal?.aborted) return `命令已被用户停止（点「停」）：${command}`;
+          if (r.timedOut) {
+            return formatCommandResult({
+              stdout: Buffer.from(r.stdout ?? "", "utf-8"),
+              stderr: Buffer.from(`${r.stderr ?? ""}\n[命令超时（${this.commandTimeoutMs / 1000}s）被终止；不再重试]`, "utf-8"),
+              exitCode: r.code ?? 124,
+              budget: this.outputCap,
+              spill: this.commandSpill(),
+            });
+          }
           return formatCommandResult({
             stdout: Buffer.from(r.stdout ?? "", "utf-8"),
             stderr: Buffer.from(r.stderr ?? "", "utf-8"),
@@ -1143,7 +1165,7 @@ export class Toolkit {
             spill: this.commandSpill(),
           });
         }
-        // r.ok=false 且 code=null → 沙箱没能启动，降级
+        // started=false：helper 没起来（档位/缺文件/CreateProcess 失败），可安全降级
         this.onSandboxDegraded?.(r.reason ?? "沙箱启动失败");
       }
       const sub = execa(command, {
