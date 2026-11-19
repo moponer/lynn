@@ -203,7 +203,7 @@ export async function createFeishuVendorChannel(deps: FeishuVendorDeps): Promise
       info: (...a: unknown[]) => deps.log("feishu_info", { msg: a.map(String).join(" ").slice(0, 200) }),
       warn: (...a: unknown[]) => deps.log("feishu_warn", { msg: a.map(String).join(" ").slice(0, 200) }),
       error: (...a: unknown[]) => deps.log("feishu_error", { msg: a.map(String).join(" ").slice(0, 200) }),
-      debug: () => {},
+      debug: (...a: unknown[]) => deps.log("feishu_debug", { msg: a.map(String).join(" ").slice(0, 300) }),
     } as unknown as Console,
   }) as unknown as FeishuRuntimeLike;
 

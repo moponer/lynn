@@ -3385,6 +3385,9 @@ export class FeishuHarnessBridge {
   async #sendCard(chatId, cardJson, options = {}) {
     const updateMessageId = nonEmptyString(options.updateMessageId);
     const replyTo = nonEmptyString(options.replyTo);
+    this.#logger.debug?.(
+      `[dsh-feishu] sendCard: chatId=${chatId} update=${updateMessageId ?? '-'} replyTo=${replyTo ?? '-'} len=${String(cardJson).length}`,
+    );
 
     // Session-sync cards target the user's openId (the synced DM is a user,
     // not a chat), delivered fresh without topic/thread handling.
@@ -7004,6 +7007,9 @@ export class FeishuHarnessBridge {
 
   async #send(chatId, text, { replyTo, receiveIdType = 'chat_id' } = {}) {
     const content = JSON.stringify({ text });
+    this.#logger.debug?.(
+      `[dsh-feishu] send: chatId=${chatId} replyTo=${replyTo ?? '-'} len=${text?.length ?? 0} text=${(text ?? '').slice(0, 60)}`,
+    );
     if (replyTo) {
       try {
         const response = await this.#client.im.v1.message.reply({
@@ -7017,8 +7023,10 @@ export class FeishuHarnessBridge {
         if (response?.code && response.code !== 0) {
           throw new Error(`Feishu reply failed: ${response.msg || response.code}`);
         }
+        const sentId = nonEmptyString(response?.data?.message_id);
+        this.#logger.debug?.(`[dsh-feishu] send: reply OK ${sentId}`);
         await this.#registerTopicFromReply(replyTo, chatId, response);
-        return nonEmptyString(response?.data?.message_id);
+        return sentId;
       } catch (error) {
         // The referenced message may be gone (recalled/deleted); keep the
         // delivery promise by falling back to a plain chat message.
@@ -7041,6 +7049,8 @@ export class FeishuHarnessBridge {
     if (response?.code && response.code !== 0) {
       throw new Error(`Feishu send failed: ${response.msg || response.code}`);
     }
-    return nonEmptyString(response?.data?.message_id);
+    const sentId = nonEmptyString(response?.data?.message_id);
+    this.#logger.debug?.(`[dsh-feishu] send: create OK ${sentId}`);
+    return sentId;
   }
 }
