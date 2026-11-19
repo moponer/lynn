@@ -141,13 +141,13 @@ test("适配层真的会带这个头（源码级断言，防止将来漏传）",
   const feishu = read("src/main/im-feishu-vendor.ts");
   assert.match(
     feishu,
-    /createVendorHarness\(bridgeBaseUrl,\s*bridgeToken,\s*"feishu"\)/,
+    /createVendorHarness\(bridgeBaseUrl,\s*bridgeToken,\s*"feishu",\s*workspace\)/,
     "飞书适配层必须把渠道标识传给 Harness",
   );
   const simple = read("src/main/im-channels.ts");
   assert.match(
     simple,
-    /createVendorHarness\(bridgeBaseUrl,\s*bridgeToken,\s*config\.channel\)/,
+    /createVendorHarness\(bridgeBaseUrl,\s*bridgeToken,\s*config\.channel,\s*workspace\)/,
     "四渠道工厂必须把 config.channel 传给 Harness",
   );
   const bridge = read("src/main/im-bridge.ts");

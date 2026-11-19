@@ -1811,7 +1811,27 @@ export class Kernel {
       selectModel: (modelId: string) => {
         this.settings.setDefaultModel(modelId);
       },
-      listWorkspaces: () => (this.projectRoot ? [{ path: this.projectRoot }] : []),
+      /**
+       * 可用工作区。
+       *
+       * **不能返回空数组**：vendored `HarnessClient` 的 `workspaceId()` 会先查
+       * `workspace.list`，找不到就调 `workspace.create({ path: <workspace> })`。
+       * 而 `workspace` 来自我们传给它的参数——如果这里空、那里也空，
+       * 就会以 `path: undefined` 去创建，我们的 handler 抛普通 Error，
+       * 最终被 vendor 映射成 `INTERNAL_UNKNOWN`（用户看到的就是这个）。
+       *
+       * 所以没有项目目录时给一个兜底目录（`<dataRoot>/workspace`），并确保存在。
+       */
+      listWorkspaces: () => {
+        if (this.projectRoot) return [{ path: this.projectRoot }];
+        const fallback = path.join(this.dataRoot, "workspace");
+        try {
+          fs.mkdirSync(fallback, { recursive: true });
+        } catch {
+          /* 建不出来也不该让整个调用失败——上层还有 workspace.create 兜底 */
+        }
+        return [{ path: fallback }];
+      },
       createWorkspace: () => {
         /* Lynn 的工作区由用户选目录，不支持从 IM 侧创建——保持空实现，由 host.describe 声明 */
       },

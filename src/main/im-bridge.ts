@@ -79,6 +79,12 @@ export interface BridgeOptions {
    * 已连接的 socket 广播一帧。
    */
   subscribeEvents?(push: (envelope: unknown) => void): () => void;
+  /**
+   * 每次 RPC 记一行（P21-2）。不提供就不记。
+   *
+   * 用来回答「渠道报失败时，桥到底有没有被调用、返回了什么」。
+   */
+  trace?(event: string, detail?: Record<string, unknown>): void;
 }
 
 export interface BridgeHandle {
@@ -222,10 +228,27 @@ export async function startBridge(opts: BridgeOptions): Promise<BridgeHandle> {
          * `result.ok` 是布尔。任何一项不对都报 `harness-response-invalid`——
          * 那就是"发消息没反应"的来源。
          */
+        /**
+         * 记一次 RPC（P21-2）。
+         *
+         * 为什么必须记：渠道报「处理失败」时，光看渠道日志分不清
+         * **桥有没有被调用**、返回的是 ok 还是 error。用户遇到的
+         * `INTERNAL_UNKNOWN` 就卡在这——没有这条日志只能靠猜。
+         */
+        const startedAt = Date.now();
+        const channel = channelOf(req);
         try {
-          const value = await opts.handlers[method]!(msg.payload, { rpcId: msg.rpcId, channel: channelOf(req) });
+          const value = await opts.handlers[method]!(msg.payload, { rpcId: msg.rpcId, channel });
+          opts.trace?.("rpc_ok", { method, ms: Date.now() - startedAt, channel });
           reply(200, { type: "server-response", rpcId: msg.rpcId, result: { ok: true, value } });
         } catch (err) {
+          opts.trace?.("rpc_error", {
+            method,
+            ms: Date.now() - startedAt,
+            channel,
+            name: err instanceof Error ? err.name : typeof err,
+            message: err instanceof Error ? err.message : String(err),
+          });
           reply(200, {
             type: "server-response",
             rpcId: msg.rpcId,

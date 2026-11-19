@@ -57,6 +57,8 @@ export interface FeishuVendorDeps {
   bridgeToken: string;
   /** 数据目录（StateStore 落盘用） */
   dataRoot: string;
+  /** 工作区路径（必须给，见 createVendorHarness 的说明） */
+  workspace: string;
   log(event: string, detail?: Record<string, unknown>): void;
   onState?(state: string, detail?: string): void;
   /**
@@ -91,7 +93,7 @@ export interface FeishuVendorHandle {
  * 抛错的情形都是**配置问题**，错误信息要能直接指导用户改什么。
  */
 export async function createFeishuVendorChannel(deps: FeishuVendorDeps): Promise<FeishuVendorHandle> {
-  const { config, bridgeBaseUrl, bridgeToken, dataRoot } = deps;
+  const { config, bridgeBaseUrl, bridgeToken, dataRoot, workspace } = deps;
 
   // ---------- 前置校验（早失败，说得清） ----------
   if (!config.appId || !config.appSecret) {
@@ -178,7 +180,7 @@ export async function createFeishuVendorChannel(deps: FeishuVendorDeps): Promise
    * 第三个参数是**渠道标识**——它会作为 `x-lynn-channel` 头随每个 RPC 发出，
    * 桥据此把消息卡标成「你（飞书）」。六个渠道共用一个桥，只能走传输层传。
    */
-  const harness = await createVendorHarness(bridgeBaseUrl, bridgeToken, "feishu");
+  const harness = await createVendorHarness(bridgeBaseUrl, bridgeToken, "feishu", workspace);
 
   // ---------- 组装 runtime ----------
   const runtime = new FeishuRuntime({

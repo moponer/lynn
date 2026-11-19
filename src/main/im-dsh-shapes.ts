@@ -227,10 +227,28 @@ export function buildChannelHandlers(deps: ImHostDeps): Record<string, RpcHandle
       archivedSessionIds: [],
     }),
 
+    /**
+     * `workspace.create`。
+     *
+     * `path` 缺失时**不再抛错**——退回第一个已知工作区。
+     *
+     * 原因（真实事故）：vendor 的 `workspaceId()` 在 `workspace.list` 里
+     * 找不到匹配时，会用我们传给 `HarnessClient` 的 `workspace` 去创建。
+     * 那个参数一旦是 undefined，这里就会以空 path 进来；抛普通 Error 会
+     * 被 vendor 映射成 `INTERNAL_UNKNOWN`，用户只看到一句"任务未完成"。
+     *
+     * 有兜底比抛错好：至少能跑起来，而且日志里能看到用了哪个目录。
+     */
     "workspace.create": (payload) => {
       const p = (payload ?? {}) as { path?: string; cwd?: string };
-      const path = String(p.path ?? p.cwd ?? "");
-      if (!path) throw new Error("需要 path");
+      const requested = String(p.path ?? p.cwd ?? "").trim();
+      const fallback = workspaces()[0]?.path ?? "";
+      const path = requested || fallback;
+      if (!path) {
+        const e = new Error("没有可用工作区：先在应用里选一个项目目录");
+        e.name = "WorkspaceUnavailable";
+        throw e;
+      }
       deps.createWorkspace(path);
       // :1395 —— 调用方读 `created.workspace.workspaceId`
       return { workspace: { workspaceId: path, path } };

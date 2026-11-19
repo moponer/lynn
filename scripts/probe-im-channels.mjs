@@ -59,6 +59,8 @@ try {
         bridgeBaseUrl: bridge.baseUrl,
         bridgeToken: bridge.token,
         dataRoot: root,
+      workspace: root,
+        workspace: root,
         log: () => {},
       });
       const st = h.status();
@@ -82,6 +84,8 @@ try {
         bridgeBaseUrl: bridge.baseUrl,
         bridgeToken: bridge.token,
         dataRoot: root,
+      workspace: root,
+        workspace: root,
         log: () => {},
       });
       check(`${label} 被拒`, false, "竟然通过了");

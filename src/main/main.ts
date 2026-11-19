@@ -607,6 +607,8 @@ app.whenReady().then(async () => {
           });
           imBridge = await startBridge({
             handlers: buildChannelHandlers(kernel.imHost()),
+            /** 每次 RPC 记一行（P21-2）：渠道报失败时能看出桥有没有被调用 */
+            trace: (event, detail) => kernel.logFromShell(event, detail),
             subscribeEvents: (push) => {
               pushEvents = push as (env: unknown) => void;
               return () => {
@@ -634,6 +636,14 @@ app.whenReady().then(async () => {
            * 这里只做三件事：解密 secret、把本地桥的地址与 token 传下去、
            * 把状态打到日志。渠道逻辑全在 vendor 里。
            */
+          /**
+           * 渠道用的工作区（P21-3）。
+           *
+           * **必须有值**：vendored `HarnessClient` 拿它去 `workspace.create`，
+           * 空值会一路变成 `INTERNAL_UNKNOWN`（真实事故）。
+           * 优先当前项目目录，没有就用 `<dataRoot>/workspace` 兜底。
+           */
+          const channelWorkspace = kernel.imHost().listWorkspaces()[0]?.path ?? "";
           const fs2 = kernel.imChannels().feishu;
           if (fs2?.enabled) {
             try {
@@ -647,6 +657,7 @@ app.whenReady().then(async () => {
                 bridgeBaseUrl: imBridge.baseUrl,
                 bridgeToken: imBridge.token,
                 dataRoot: kernel.dataRoot,
+                workspace: channelWorkspace,
                 log: (event, detail) => kernel.logFromShell(event, detail),
                 onState: (state, detail) => console.log(`[im] 飞书：${state}${detail ? `（${detail}）` : ""}`),
                 /**
@@ -678,6 +689,7 @@ app.whenReady().then(async () => {
                 bridgeBaseUrl: imBridge.baseUrl,
                 bridgeToken: imBridge.token,
                 dataRoot: kernel.dataRoot,
+                workspace: channelWorkspace,
                 log: (event, detail) => kernel.logFromShell(event, detail),
                 onState: (state, detail) =>
                   console.log(`[im] ${cfg.channel}：${state}${detail ? `（${detail}）` : ""}`),

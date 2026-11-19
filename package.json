@@ -61,7 +61,8 @@
     "probe:im": "node scripts/probe-im-bridge.mjs",
     "check:feishu": "node scripts/check-feishu.mjs",
     "feishu:admin": "node scripts/run-electron.cjs scripts/feishu-admin.cjs",
-    "feishu:watch": "node scripts/run-electron.cjs scripts/feishu-watch-identity.cjs"
+    "feishu:watch": "node scripts/run-electron.cjs scripts/feishu-watch-identity.cjs",
+    "feishu:diag": "node scripts/run-electron.cjs scripts/feishu-diag.cjs"
   },
   "dependencies": {
     "@earendil-works/pi-agent-core": "1.4.0",

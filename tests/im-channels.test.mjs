@@ -60,6 +60,8 @@ for (const c of CASES) {
         bridgeBaseUrl: bridge.baseUrl,
         bridgeToken: bridge.token,
         dataRoot: root,
+      workspace: root,
+        workspace: root,
         log: () => {},
       });
       assert.equal(typeof h.start, "function");
@@ -86,6 +88,8 @@ test("缺 secret → 早失败并说清是哪个渠道", async () => {
             bridgeBaseUrl: bridge.baseUrl,
             bridgeToken: bridge.token,
             dataRoot: root,
+      workspace: root,
+        workspace: root,
             log: () => {},
           }),
         (err) => {
@@ -110,6 +114,8 @@ test("缺主标识 → 早失败", async () => {
           bridgeBaseUrl: bridge.baseUrl,
           bridgeToken: bridge.token,
           dataRoot: root,
+      workspace: root,
+        workspace: root,
           log: () => {},
         }),
       /主标识/,
@@ -130,6 +136,8 @@ test("微信缺 ownerUserId → 拒绝（不给就等于谁都能驱动 Agent）
           bridgeBaseUrl: bridge.baseUrl,
           bridgeToken: bridge.token,
           dataRoot: root,
+      workspace: root,
+        workspace: root,
           log: () => {},
         }),
       (err) => {
@@ -154,6 +162,8 @@ test("未知渠道 → 拒绝并报出名字", async () => {
           bridgeBaseUrl: bridge.baseUrl,
           bridgeToken: bridge.token,
           dataRoot: root,
+      workspace: root,
+        workspace: root,
           log: () => {},
         }),
       /未知渠道/,
@@ -195,6 +205,7 @@ test("状态落盘：load 后能读回上一次写的会话映射（跨重启保
       bridgeBaseUrl: bridge.baseUrl,
       bridgeToken: bridge.token,
       dataRoot: root,
+      workspace: root,
       log: () => {},
     });
 

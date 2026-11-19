@@ -52,6 +52,11 @@ export async function createVendorHarness(
    * 所以能在传输层加一个头——vendor 一行不改，桥也能知道是谁在调。
    */
   channel = "",
+  /**
+   * 工作区路径（P21-3）。**必须给**，否则 vendor 的 `workspaceId()` 会以
+   * `path: undefined` 去创建，触发 `INTERNAL_UNKNOWN`（真实事故）。
+   */
+  workspace?: string,
 ): Promise<unknown> {
   const { HarnessClient } = (await loadVendor("shared/harness-client.mjs")) as {
     HarnessClient: new (opts: Record<string, unknown>) => unknown;
@@ -59,6 +64,7 @@ export async function createVendorHarness(
   return new HarnessClient({
     baseUrl: bridgeBaseUrl,
     autostart: false,
+    ...(workspace ? { workspace } : {}),
     fetchImpl: (url: string, init?: RequestInit) =>
       fetch(url, {
         ...init,
@@ -102,8 +108,43 @@ export async function loadStateStore(state: unknown): Promise<void> {
  * 渠道的 debug 太吵，而且不提供诊断价值。
  */
 export function vendorLogger(log: (event: string, detail?: Record<string, unknown>) => void, prefix: string): Console {
+  /**
+   * 把日志参数变成**有信息量的一行**。
+   *
+   * 第一版用 `String(a)`，于是 vendor 传进来的错误对象变成 `[object Object]`。
+   * 真实事故：飞书报 `INTERNAL_UNKNOWN`，而那一行日志只剩 `[object Object]`，
+   * 完全查不出原因 —— `INTERNAL_UNKNOWN` 本身只是"未匹配错误"的兜底码
+   * （见 vendor/shared/message-failure.mjs:189 的 default 分支）。
+   *
+   * 这里把错误的 name/message/code/details/stack 全摊开，对象则 JSON 化。
+   * 仍然压成一行 —— vendor 的失败日志特意设计成单行，方便按参考号 grep。
+   */
+  const safeJson = (v: unknown): string => {
+    try {
+      return JSON.stringify(v);
+    } catch {
+      return String(v);
+    }
+  };
+  const describe = (a: unknown): string => {
+    if (a === null || a === undefined) return String(a);
+    if (a instanceof Error) {
+      const e = a as Error & { code?: unknown; details?: unknown; providerCode?: unknown };
+      return [
+        `${e.name}: ${e.message}`,
+        e.code !== undefined ? `code=${String(e.code)}` : "",
+        e.providerCode !== undefined ? `providerCode=${String(e.providerCode)}` : "",
+        e.details !== undefined ? `details=${safeJson(e.details)}` : "",
+        e.stack ? `stack=${e.stack.split("\n").slice(0, 4).join(" | ")}` : "",
+      ]
+        .filter(Boolean)
+        .join(" ");
+    }
+    if (typeof a === "object") return safeJson(a);
+    return String(a);
+  };
   const to = (level: string) => (...args: unknown[]) =>
-    log(`${prefix}_${level}`, { msg: args.map((a) => String(a ?? "")).join(" ").slice(0, 240) });
+    log(`${prefix}_${level}`, { msg: args.map(describe).join(" ").slice(0, 1200) });
   return {
     info: to("info"),
     warn: to("warn"),

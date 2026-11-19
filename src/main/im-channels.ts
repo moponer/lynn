@@ -54,6 +54,8 @@ export interface SimpleChannelDeps {
   bridgeBaseUrl: string;
   bridgeToken: string;
   dataRoot: string;
+  /** 工作区路径（必须给，见 createVendorHarness 的说明） */
+  workspace: string;
   log(event: string, detail?: Record<string, unknown>): void;
   onState?(state: string, detail?: string): void;
 }
@@ -151,7 +153,7 @@ const RECIPES: Record<SimpleChannelId, ChannelRecipe> = {
  * 配置不全时**早失败并说清缺什么**——比"启动了但收不到消息"好排查。
  */
 export async function createSimpleChannel(deps: SimpleChannelDeps): Promise<ChannelHandle> {
-  const { config, bridgeBaseUrl, bridgeToken, dataRoot } = deps;
+  const { config, bridgeBaseUrl, bridgeToken, dataRoot, workspace } = deps;
   const recipe = RECIPES[config.channel];
   if (!recipe) throw new Error(`未知渠道：${String(config.channel)}`);
   const label = recipe.label;
@@ -188,7 +190,7 @@ export async function createSimpleChannel(deps: SimpleChannelDeps): Promise<Chan
 
   // ---------- Harness ----------
   /** 第三个参数是渠道标识：桥据此把消息卡标成「你（渠道名）」（P20-1） */
-  const harness = await createVendorHarness(bridgeBaseUrl, bridgeToken, config.channel);
+  const harness = await createVendorHarness(bridgeBaseUrl, bridgeToken, config.channel, workspace);
 
   // ---------- 组装 ----------
   const extra = recipe.extra ? await recipe.extra() : {};
