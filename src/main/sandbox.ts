@@ -172,15 +172,143 @@ export function probeSandbox(opts: { appRoot?: string; timeoutMs?: number } = {}
   };
 }
 
-/** 探针结果缓存：一次进程生命周期内不变（AppContainer 能力不会中途变） */
+/**
+ * 探针结果缓存（2026-11-19 修 S1：首次最长 30s 卡主线程）。
+ *
+ * ## 为什么必须改
+ *
+ * `probeSandbox` 串行 `spawnSync` 三次（--probe 5s、--probe-restricted 10s 真起 node、
+ * --appcontainer-probe 15s 真起 node），最坏 30s 同步阻塞主线程。而 `sandboxVerdict()`
+ * 被 `appendProgress`（刷进度卡）等渲染路径调用 → 首次派单/首条命令时应用假死半分钟。
+ *
+ * ## 现在三层
+ *
+ *  1. **内存缓存**：一次进程生命周期内只算一次。
+ *  2. **磁盘缓存**：按 helper 指纹（路径+mtime+size）落 `dataRoot/sandbox-verdict.json`，
+ *     下次启动直接读——正常启动 0 探测、0 阻塞。
+ *  3. **`sandboxVerdictCached()`**：渲染路径专用。**绝不探测**：内存/磁盘有就用，
+ *     没有就返回保守的 "还没探测"（mode=jobonly 语义但不谎报 fileIsolation），
+ *     真正的探测交给启动时的 `warmSandboxProbe()` 在空闲期做。
+ *
+ * 诚实边界：`sandboxVerdictCached()` 在未探测时返回的 jobonly 是**保守值**（不是谎报——
+ * jobonly 承诺最低，未探测时按最低承诺对用户最安全），探测完成后自动升级档位。
+ */
 let cached: SandboxVerdict | null = null;
-export function sandboxVerdict(appRoot?: string): SandboxVerdict {
-  if (!cached) cached = probeSandbox({ appRoot });
+/** 是否已经真正探测过（区分"保守默认"与"探针结论"） */
+let probedOnce = false;
+
+const CACHE_FILE = "sandbox-verdict.json";
+
+/** helper 指纹：路径+size+mtime，换了 helper（重编译/升级）就重新探测 */
+function helperFingerprint(helperPath: string | null): string {
+  if (!helperPath) return "none";
+  try {
+    const st = fs.statSync(helperPath);
+    return `${helperPath}|${st.size}|${Math.round(st.mtimeMs)}`;
+  } catch {
+    return `${helperPath}|missing`;
+  }
+}
+
+interface DiskCache {
+  fingerprint: string;
+  verdict: SandboxVerdict;
+}
+
+function cachePath(dataRoot: string): string {
+  return path.join(dataRoot, CACHE_FILE);
+}
+
+/** 读磁盘缓存；指纹不符/文件坏/不存在都返回 null（不抛） */
+function readDiskCache(dataRoot: string, fingerprint: string): SandboxVerdict | null {
+  try {
+    const raw = fs.readFileSync(cachePath(dataRoot), "utf-8");
+    const parsed = JSON.parse(raw) as DiskCache;
+    if (parsed?.fingerprint !== fingerprint) return null;
+    const v = parsed.verdict;
+    if (!v || typeof v.mode !== "string") return null;
+    return v;
+  } catch {
+    return null;
+  }
+}
+
+function writeDiskCache(dataRoot: string, fingerprint: string, verdict: SandboxVerdict): void {
+  try {
+    fs.mkdirSync(dataRoot, { recursive: true });
+    const payload: DiskCache = { fingerprint, verdict };
+    fs.writeFileSync(cachePath(dataRoot), JSON.stringify(payload), "utf-8");
+  } catch {
+    /* 缓存写不进去不影响判定，只是下次还要再探 */
+  }
+}
+
+/**
+ * 取档位（**可能会探测**，最坏 30s）。只在明确可以阻塞的地方调
+ * （启动预热、`runInSandbox` 真要用沙箱时）。渲染路径请用 `sandboxVerdictCached`。
+ */
+export function sandboxVerdict(appRoot?: string, dataRoot?: string): SandboxVerdict {
+  if (cached) return cached;
+  const found = candidatePaths(appRoot).find((p) => fs.existsSync(p)) ?? null;
+  const fp = helperFingerprint(found);
+  if (dataRoot) {
+    const disk = readDiskCache(dataRoot, fp);
+    if (disk) {
+      cached = disk;
+      probedOnce = true;
+      return cached;
+    }
+  }
+  cached = probeSandbox({ appRoot });
+  probedOnce = true;
+  if (dataRoot) writeDiskCache(dataRoot, helperFingerprint(cached.helperPath), cached);
   return cached;
 }
-/** 测试用：清掉缓存 */
+
+/**
+ * 渲染路径专用：**绝不探测**。
+ *
+ * 有内存/磁盘缓存就用；都没有时返回保守值（jobonly，且谎报项一律 false），
+ * 让界面先正常渲染，等启动预热把真档位探出来后再升级。这样首单不再假死。
+ */
+export function sandboxVerdictCached(appRoot?: string, dataRoot?: string): SandboxVerdict {
+  if (cached) return cached;
+  const found = candidatePaths(appRoot).find((p) => fs.existsSync(p)) ?? null;
+  const fp = helperFingerprint(found);
+  if (dataRoot) {
+    const disk = readDiskCache(dataRoot, fp);
+    if (disk) {
+      cached = disk;
+      probedOnce = true;
+      return cached;
+    }
+  }
+  // 还没探测过：给保守值，不阻塞。注意 fileIsolation/noNetwork 一律 false（不谎报）。
+  return {
+    mode: found ? "jobonly" : "off",
+    provisioned: false,
+    launchVerified: false,
+    reason: "沙箱档位还没探测（启动预热中）：先按最低档运行，探测完会自动升级",
+    helperPath: found,
+    probed: false,
+    limits: { processes: 0, memoryMb: 0, noNetwork: false, fileIsolation: false },
+  };
+}
+
+/** 启动空闲期预热：把最坏 30s 的探测从"用户派单时"挪到"应用刚起来时" */
+export function warmSandboxProbe(appRoot?: string, dataRoot?: string): SandboxVerdict {
+  return sandboxVerdict(appRoot, dataRoot);
+}
+
+/** 测试用：清掉内存缓存（磁盘缓存保留，测试可自行清 dataRoot） */
 export function resetSandboxProbe(): void {
   cached = null;
+  probedOnce = false;
+}
+
+/** 是否真的探测过（诊断/测试用） */
+export function sandboxProbed(): boolean {
+  return probedOnce;
 }
 
 /**
@@ -199,6 +327,8 @@ export function runInSandbox(
     cwd?: string;
     /** 子进程环境（调用方传剔除密钥 + 补 toolDirs 后的 env）；不传则继承当前进程 */
     env?: Record<string, string>;
+    /** 数据目录：给磁盘缓存用（省掉重复探测） */
+    dataRoot?: string;
   } = {},
 ): {
   ok: boolean;
@@ -218,7 +348,7 @@ export function runInSandbox(
   started: boolean;
   timedOut?: boolean;
 } {
-  const v = sandboxVerdict(opts.appRoot);
+  const v = sandboxVerdict(opts.appRoot, opts.dataRoot);
   if (v.mode === "off" || !v.helperPath) {
     return { ok: false, code: null, stdout: "", stderr: "", reason: v.reason, started: false };
   }

@@ -1139,8 +1139,20 @@ export async function runMemberTask(input: MemberRunInput): Promise<MemberRunRes
         const outcome = await execTool(tc.name, tc.arguments);
         if (input.onToolCall) {
           const text = String(outcome ?? "");
-          // 返回值以这些开头就算被拒/失败；其余按成功记。日志只做定位，不承担判定。
-          const ok = !/^(?:已拒绝|失败|错误|工具执行失败|路径越界|未知工具)/.test(text.trim());
+          /**
+           * 工具结果的成功/失败判定（2026-11-19 修 C6）。
+           *
+           * 现实约束：工具返回的是**字符串**，没有结构化 ok 字段，只能看开头。
+           * 之前的名单漏了真实存在的失败前缀（命令超时 / 命令执行失败 / 命令已被停止 /
+           * 用户拒绝），这些会被误记成"成功"，而巡检的"撞墙"判断依赖这个计数。
+           * 这里把 toolkit / member-runner 里真实会出现的失败开头全列上（含 English 兜底）。
+           *
+           * 已知局限（诚实）：内容恰好以"失败"开头的**正常产出**会被误判失败。
+           * 要彻底解决得让工具返回 `{ok, text}` 结构化结果，属后续重构。
+           */
+          const ok = !/^(?:已拒绝|用户拒绝|失败|错误|工具执行失败|工具超时|路径越界|未知工具|命令超时|命令执行失败|命令已被用户停止|命令已被用户终止|无法|不存在)/.test(
+            text.trim(),
+          );
           try {
             input.onToolCall({
               name: tc.name,

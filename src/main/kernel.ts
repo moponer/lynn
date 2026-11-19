@@ -160,7 +160,7 @@ import { runTurnAndWait } from "./turn-wait";
 import { isValidOpenId } from "./im-openid";
 import { probeFeishuIdentities } from "./im-feishu-probe";
 import type { ImHostDeps } from "./im-dsh-shapes";
-import { sandboxVerdict, runInSandbox } from "./sandbox";
+import { sandboxVerdict, sandboxVerdictCached, warmSandboxProbe, runInSandbox } from "./sandbox";
 import { listVersions, rollbackToVersion, KEEP_VERSIONS } from "./plugin-versions";
 import { PluginHost } from "./plugin-host";
 import { PluginSetStore } from "./plugin-set";
@@ -2415,7 +2415,8 @@ export class Kernel {
        */
       ...(badge === "进度"
         ? (() => {
-            const v = sandboxVerdict();
+            // 渲染路径**不探测**（2026-11-19 S1）：整卡本该秒出，探测留到启动预热
+            const v = sandboxVerdictCached(undefined, this.dataRoot);
             return v.mode !== "off"
               ? { sandbox: { mode: v.mode, cwd: this.memberWorkdir(taskId) } }
               : {};
@@ -3548,6 +3549,19 @@ export class Kernel {
    * 失败只记日志——工具调用侧本来就有"未就绪如实降级"的分支，不该因此启动失败。
    */
   private async lateInit(): Promise<void> {
+    /**
+     * 沙箱探针预热（2026-11-19 修 S1）。
+     *
+     * probeSandbox 最坏要串行起 3 个子进程（含两次真起 node）约 30s。放在这里
+     * （lateInit 已在 setImmediate 里，不挡"界面能用"）比放在用户派单时好得多：
+     * 有磁盘缓存时这里是 0 开销（读一个 json），没缓存时也只在启动空闲期卡一次。
+     */
+    try {
+      const v = warmSandboxProbe(undefined, this.dataRoot);
+      this.log("sandbox_probed", { mode: v.mode, probed: v.probed, helper: v.helperPath ?? "" });
+    } catch {
+      /* 探针失败不影响启动；运行时会用保守值 */
+    }
     try {
       this.officeHealth = await probeSoffice();
     } catch {
@@ -4820,11 +4834,11 @@ export class Kernel {
       outboundAllowed: () => this.taskStore.get(taskId)?.network?.granted === true,
       /**
        * 命令沙箱（2026-11-19 第一阶段）：成员命令走 sandbox-exec（Job Object）。
-       * 档位由启动时探一次（sandboxVerdict 有缓存），off 时本层如实降级并记日志。
+       * 档位优先读缓存（启动预热已探过则 0 开销）；这里允许探测（真要跑命令了）。
        */
       sandbox: {
         verdict: () => {
-          const v = sandboxVerdict();
+          const v = sandboxVerdict(undefined, this.dataRoot);
           return { mode: v.mode, helperPath: v.helperPath };
         },
         run: (command, o) =>
@@ -4834,6 +4848,7 @@ export class Kernel {
             processes: 64,
             cwd: o.cwd,
             env: o.env,
+            dataRoot: this.dataRoot,
           }),
       },
       onSandboxDegraded: (reason) => this.log("sandbox_degraded", { taskId, reason }),
@@ -6052,23 +6067,20 @@ export class Kernel {
       if (!Number.isFinite(since) || now - since < BLOCKED_AGE_MS) return false;
       return now - (this.blockedAgedNoted.get(t.id) ?? 0) >= BLOCKED_AGE_MS;
     });
+    /** 老化单文案（2026-11-19 修 T1）：不再提前 return，改为与常规事实合并注入 */
+    let agedText = "";
     if (aged.length > 0) {
       for (const t of aged) this.blockedAgedNoted.set(t.id, now);
       const mins = Math.round(BLOCKED_AGE_MS / 60_000);
-      this.lastHeartbeatAt = now;
       this.card({
         kind: "system",
         badge: "进度",
         text: `${aged.length} 张单卡住超过 ${mins} 分钟没有处置：${aged.map((t) => t.id).join("、")}。已让她重新判断下一步。`,
       });
-      this.heartbeatRuns += 1;
-      this.submitTurnIfIdle(
+      agedText =
         `【卡住久未处置】${aged.map((t) => `${t.id}「${t.title}」`).join("、")} 卡住超过 ${mins} 分钟且没人跟进。` +
-          `判断与处置由你做主，不要问用户要不要取消：方向仍成立就 assign_task 带 reworkTaskId 在原单重做；` +
-          `做不了就 stop_task 带 dismiss=true 关单并如实汇报；已有回报就 review_result 验收。`,
-        { internal: true, ephemeral: true },
-      );
-      return;
+        `判断与处置由你做主，不要问用户要不要取消：方向仍成立就 assign_task 带 reworkTaskId 在原单重做；` +
+        `做不了就 stop_task 带 dismiss=true 关单并如实汇报；已有回报就 review_result 验收。`;
     }
     const tickTasks = this.taskStore.list();
     const tickById = new Map(tickTasks.map((t) => [t.id, t]));
@@ -6080,7 +6092,11 @@ export class Kernel {
       pendingMentions: this.pendingMentions(),
       detailOf: (id) => this.taskFactNote(id, tickById.get(id) ?? null),
     });
-    if (heartbeatIsEmpty(facts)) return;
+    /**
+     * T1（2026-11-19）：以前老化分支在这里 return，把同 tick 的待审/停滞/成员提问全饿死，
+     * 长期有卡死单时验收闭环就停摆了。现在两者合并成**一轮**注入，不再互相挤掉。
+     */
+    if (!agedText && heartbeatIsEmpty(facts)) return;
     // 堆积闸：堆到 7 张以上说明她已经处理不过来了。整轮跳过会把堆积冻在原处——没人清就
     // 永远堆着，界面上只剩每 5 分钟一条一模一样的提示（用户视角就是白烧时间）；全量注入又
     // 会把 15+ 张塞进上下文（实测模型随后在思考里复读 237 次）。折中：一轮只交最靠前的几张
@@ -6121,13 +6137,14 @@ export class Kernel {
       }
       this.heartbeatRuns += 1;
       this.submitTurnIfIdle(
-        heartbeatPrompt(capped.facts) + BACKLOG_ORDER,
+        [agedText, heartbeatPrompt(capped.facts) + BACKLOG_ORDER].filter(Boolean).join("\n\n"),
         { internal: true, ephemeral: true },
       );
-      this.log("heartbeat_backlog", { backlog, batch: batch.length, dropped: capped.dropped });
+      this.log("heartbeat_backlog", { backlog, batch: batch.length, dropped: capped.dropped, aged: aged.length });
       return;
     }
-    const sig = heartbeatSignature(facts);
+    // 老化信息并入去重签名：否则"同一批待审 + 新出现的卡死单"会被当成同一批静默跳过
+    const sig = agedText ? `aged:${aged.map((t) => t.id).join(",")}|${heartbeatSignature(facts)}` : heartbeatSignature(facts);
     const notedAt = this.heartbeatNoted.get(sig);
     if (notedAt !== undefined && now - notedAt < 30 * 60_000) return;
     // 去重表瘦身：2 小时前的记录清掉，防长驻增长
@@ -6150,11 +6167,16 @@ export class Kernel {
     });
     this.heartbeatRuns += 1;
     // 走队列而非硬插：她此刻若有任务在跑，巡检轮等这轮收尾再接，不抢会话。
-    this.submitTurnIfIdle(heartbeatPrompt(facts), { internal: true, ephemeral: true });
+    // 老化（卡住久未处置）与常规事实合并成一轮，不再互相饿死（2026-11-19 T1）。
+    this.submitTurnIfIdle([agedText, heartbeatPrompt(facts)].filter(Boolean).join("\n\n"), {
+      internal: true,
+      ephemeral: true,
+    });
     this.log("heartbeat_fired", {
       awaitingReview: facts.awaitingReview.length,
       stalled: facts.stalledTasks.length,
       schedules: facts.scheduleIssues.length,
+      aged: aged.length,
     });
   }
 
@@ -6815,14 +6837,8 @@ export class Kernel {
           // 已取消的单不该再出现在"要跟进"的清单里（2026-11-13：用户已拍板的事别再问第二遍）
           sig = `${taskId} 已取消（关单时留的记录在卷宗里），不要再跟进、不要再汇报它，除非用户问起。`;
         } else {
-          // 团队归属优先按工单认：resolveTeamId 是「按当前任务线猜」，同时有别的任务线的队时
-          // 会返回 undefined——2026-11-12 实机因此连报三次「本机还没有任何团队」，
-          // 风铃据此误判"成员没在跑"，同一张单被重派了 3 次。
-          let teamId = this.resolveTeamId(args.teamId ? String(args.teamId) : undefined);
-          if (!teamId) {
-            const owner = rec.teamId;
-            if (owner && this.teamStore.teamExists(owner)) teamId = owner;
-          }
+          // 团队归属优先按工单认（2026-11-19 统一走 teamForTask，三个入口同一口径）
+          const teamId = this.teamForTask(taskId, args.teamId ? String(args.teamId) : undefined);
           if (!teamId) {
             sig = `找不到 ${taskId} 归属的团队（工单记录在，团队可能已被解散）：带上 teamId 再查，或直接 accept_or_reject 结案。`;
           } else {
@@ -7080,7 +7096,7 @@ export class Kernel {
           return `${taskId} 的回报已经由成员自己交上来了（群里那张「回报」卡就是），不要重复登记。直接 read_artifact 读正文后 accept_or_reject 验收。`;
         }
         if (!text) return "回报正文不能为空：写清成员交回了什么、证据是什么。";
-        const teamId = this.resolveTeamId(args.teamId ? String(args.teamId) : undefined);
+        const teamId = this.teamForTask(String(args.taskId ?? ""), args.teamId ? String(args.teamId) : undefined);
         if (!teamId) return "本机还没有任何团队，无从登记回报。先 create_team（ID 由系统生成）。";
         return this.registerReport(teamId, taskId, member, text, (args.evidence as string[]) ?? []);
       }
@@ -7099,7 +7115,7 @@ export class Kernel {
             );
           }
         }
-        const teamId = this.resolveTeamId(args.teamId ? String(args.teamId) : undefined);
+        const teamId = this.teamForTask(String(args.taskId ?? ""), args.teamId ? String(args.teamId) : undefined);
         if (!teamId) return "本机还没有任何团队，无从验收。先 create_team（ID 由系统生成）。";
         /**
          * 打回轮次以**工单为唯一真相**（2026-11-16 修「任务被异常打回」）：
@@ -7996,6 +8012,24 @@ export class Kernel {
    * 团队主键解析（§4.10.3 修正：主键由系统管，不是用户输入项）。
    * 显式给了且存在 → 用它；否则只有一支在职队 → 隐式绑它；都没有 → undefined（交给自动建队）。
    */
+  /**
+   * 一张单归属的团队（2026-11-19 修 T3：统一口径）。
+   *
+   * 三个入口（check_progress / review_result / accept_or_reject）都曾各自用
+   * `resolveTeamId` 猜队——那是"按当前任务线猜"，同时有别的任务线的队时返回 undefined，
+   * 于是验收/登记回报会报「本机还没有任何团队，无从验收」，同一张单被反复卡住
+   * （check_progress 2026-11-12 已修，另外两个入口没跟上 = 口径漂移）。
+   *
+   * 正确顺序：**先按工单认**（rec.teamId，权威）→ 再退回 resolveTeamId 猜。
+   */
+  private teamForTask(taskId: string, explicit?: string): string | undefined {
+    const wanted = (explicit ?? "").trim();
+    if (wanted && this.teamStore.teamExists(wanted)) return wanted;
+    const owner = this.taskStore.get(taskId)?.teamId;
+    if (owner && this.teamStore.teamExists(owner)) return owner;
+    return this.resolveTeamId(explicit);
+  }
+
   private resolveTeamId(explicit?: string): string | undefined {
     const wanted = (explicit ?? "").trim();
     if (wanted && this.teamStore.teamExists(wanted)) return wanted;

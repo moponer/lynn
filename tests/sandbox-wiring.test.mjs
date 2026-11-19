@@ -183,3 +183,32 @@ test("C4：超 buffer（started=true）也不重跑", async () => {
   assert.equal(degraded, null, "跑了但输出大，不是降级，不能重跑");
   assert.equal(sb.calls.length, 1, "只调用一次，不重跑");
 });
+
+// ---------- S1：探针不再卡主线程 ----------
+
+test("S1：sandboxVerdictCached 未探测时秒回保守值，绝不阻塞探测", async () => {
+  const { sandboxVerdictCached, resetSandboxProbe } = await import("../dist/main/sandbox.js");
+  resetSandboxProbe();
+  const root = tmp();
+  const started = Date.now();
+  const v = sandboxVerdictCached(process.cwd(), root);
+  const ms = Date.now() - started;
+  assert.ok(ms < 200, `渲染路径取值必须快（实际 ${ms}ms）——不能在这里跑探针`);
+  assert.equal(v.probed, false, "未探测时要如实标 probed=false");
+  assert.equal(v.limits.fileIsolation, false, "保守值不许谎报有写隔离");
+  assert.equal(v.limits.noNetwork, false, "保守值不许谎报断网");
+});
+
+test("S1：探测结果落磁盘，重启（清内存）后读缓存秒回同一档位", async () => {
+  const { sandboxVerdict, resetSandboxProbe } = await import("../dist/main/sandbox.js");
+  const root = tmp();
+  resetSandboxProbe();
+  const cold = sandboxVerdict(process.cwd(), root);
+  assert.ok(fs.existsSync(path.join(root, "sandbox-verdict.json")), "探测后应写磁盘缓存");
+  resetSandboxProbe(); // 模拟重启
+  const started = Date.now();
+  const warm = sandboxVerdict(process.cwd(), root);
+  const ms = Date.now() - started;
+  assert.equal(warm.mode, cold.mode, "热启档位应与冷探一致");
+  assert.ok(ms < 200, `热启应读磁盘缓存秒回（实际 ${ms}ms）`);
+});
