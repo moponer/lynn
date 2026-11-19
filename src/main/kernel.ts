@@ -2408,8 +2408,27 @@ export class Kernel {
       title: `${member} · ${taskId}`,
       meta,
       body: mode === "append" ? text : "",
+      /**
+       * 沙箱执行信息（2026-11-19）：成员命令在哪个档跑、工作目录在哪。
+       * 前端在进度卡上显示徽章，用户一眼看到"这条命令是被隔离执行的吗"。
+       * 只对真跑命令的进度卡（badge 为"进度"）带，其余（回报/审查）不带。
+       */
+      ...(badge === "进度"
+        ? (() => {
+            const v = sandboxVerdict();
+            return v.mode !== "off"
+              ? { sandbox: { mode: v.mode, cwd: this.memberWorkdir(taskId) } }
+              : {};
+          })()
+        : {}),
     });
     if (created) this.progressCards.set(key, created.id);
+  }
+
+  /** 成员的工作目录（进度卡展示沙箱 cwd 用）：工单工作区 → 项目根 → 数据目录兜底 */
+  private memberWorkdir(taskId: string): string | undefined {
+    const rec = this.taskStore.get(taskId);
+    return rec?.workspaceRoot ?? this.projectRoot ?? undefined;
   }
 
   /** 把一张卡挪到"她的实时输出卡"之前（流式期间最新进展永远贴底） */
@@ -8079,7 +8098,16 @@ export class Kernel {
         cacheRead: this.usage.cacheRead + hit,
         cacheWrite: this.usage.cacheWrite + write,
         turnHitRate,
-        contextTokens: this.usage.contextTokens + result.promptTokens + result.completionTokens,
+        // 上下文占用 = **本轮发进模型的 prompt 总量**（含缓存读），不是"历次吞吐累加"。
+        // 2026-11-19 修：原来是 contextTokens + promptTokens + completionTokens，
+        // 那是"这个会话一共处理过多少 token"，多轮之后必然远超窗口，实机就出现了
+        // 「上下文 4% · 44.7K」（44.7K/128K 实际是 35%）这种自相矛盾的读数。
+        // 上下文占用天然是"此刻"的值，覆盖写（=）而不是累加（+=）。
+        contextTokens: result.promptTokens + write,
+        // 直连路径拿不到上游的百分比，就不编：前端会用 contextTokens / contextWindow 自己算并标「≈」。
+        // 窗口必须有值，否则前端算不出百分比（原来直连路径从不下发，导致恒显示「—」）。
+        contextWindow: this.usage.contextWindow > 0 ? this.usage.contextWindow : 128_000,
+        contextPercent: null,
       });
       this.log("usage_direct", {
         in: result.promptTokens,

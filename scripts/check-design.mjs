@@ -123,8 +123,8 @@ for (const file of SHEETS) {
 {
   const css = readCode(TOKENS_FILE);
   const themeBlocks = [
-    [":root（暗）", /:root\s*\{([\s\S]*?)\}/],
-    ['亮（Notion）', /html\[data-mode="light"\]\s*\{([\s\S]*?)\}/],
+    [":root（亮）", /:root\s*\{([\s\S]*?)\}/],
+    ["暗（html[data-mode=dark]）", /html\[data-mode="dark"\]\s*\{([\s\S]*?)\}/],
   ];
   for (const [name, re] of themeBlocks) {
     const m = re.exec(css);
@@ -132,11 +132,11 @@ for (const file of SHEETS) {
       fail(TOKENS_FILE, 1, `缺少主题块：${name}`);
       continue;
     }
-    for (const token of ["--blue", "--seal", "--red", "--brass"]) {
+    for (const token of ["--blue", "--seal", "--red", "--brass", "--ok"]) {
       if (!new RegExp(`${token}\\s*:`).test(m[1])) fail(TOKENS_FILE, 1, `主题「${name}」缺 ${token}`);
     }
     // 文本档必须成对存在：只有填充档 → 小字对比度必然不达标
-    for (const token of ["--blue-text", "--seal-text", "--red-text", "--brass-text"]) {
+    for (const token of ["--blue-text", "--seal-text", "--red-text", "--brass-text", "--ok-text"]) {
       if (!new RegExp(`${token}\\s*:`).test(m[1])) {
         fail(TOKENS_FILE, 1, `主题「${name}」缺 ${token}（填充档与文本档必须成对）`);
       }
@@ -242,9 +242,11 @@ const ratio = (a, b) => {
     }
     blocks.push({ sel, decls });
   }
+  // :root 是亮色（默认）；深色是 html[data-mode="dark"] 整块覆盖。
+  // 两套都先并入 :root，再并入自己的覆盖块（后者生效）。
   const themes = [
-    ["暗", ":root"],
-    ["亮", 'html[data-mode="light"]'],
+    ["亮", ":root"],
+    ["暗", 'html[data-mode="dark"]'],
   ];
   for (const [name, sel] of themes) {
     const t = {};
@@ -252,16 +254,22 @@ const ratio = (a, b) => {
       const parts = b.sel.split(",").map((s) => s.trim());
       if (parts.includes(":root") || parts.includes(sel)) Object.assign(t, b.decls);
     }
-    // 正文四级墨色：在最浅的三种表面上都要过 AA
-    for (const fg of ["--ink", "--ink-2", "--ink-3", "--ink-4"]) {
+    // 墨色：ink / ink-2 / ink-3 是正文，必须 4.5；
+    // ink-4 只用于占位符与禁用态（WCAG 对这两类不做 4.5 要求），阈值 3.0。
+    for (const fg of ["--ink", "--ink-2", "--ink-3"]) {
       for (const bg of ["--desk", "--sheet", "--sheet-3"]) {
         if (!t[fg] || !t[bg]) continue;
         const c = ratio(t[fg], t[bg]);
         if (c < 4.5) fail(TOKENS_FILE, 1, `${name}：${fg} on ${bg} 对比度 ${c.toFixed(2)} < 4.5`);
       }
     }
+    for (const bg of ["--desk", "--sheet", "--sheet-3"]) {
+      if (!t["--ink-4"] || !t[bg]) continue;
+      const c = ratio(t["--ink-4"], t[bg]);
+      if (c < 3) fail(TOKENS_FILE, 1, `${name}：--ink-4 on ${bg} 对比度 ${c.toFixed(2)} < 3.0（占位符/禁用阈值）`);
+    }
     // 文本档功能色：小字用它，必须 4.5
-    for (const fg of ["--blue-text", "--seal-text", "--red-text", "--brass-text"]) {
+    for (const fg of ["--blue-text", "--seal-text", "--red-text", "--brass-text", "--ok-text"]) {
       for (const bg of ["--desk", "--sheet", "--sheet-3"]) {
         if (!t[fg] || !t[bg]) continue;
         const c = ratio(t[fg], t[bg]);
@@ -269,7 +277,7 @@ const ratio = (a, b) => {
       }
     }
     // 填充档：图形/底色阈值 3.0
-    for (const fg of ["--blue", "--seal", "--red", "--brass"]) {
+    for (const fg of ["--blue", "--seal", "--red", "--brass", "--ok"]) {
       if (!t[fg] || !t["--sheet"]) continue;
       const c = ratio(t[fg], t["--sheet"]);
       if (c < 3) fail(TOKENS_FILE, 1, `${name}：${fg} on --sheet 对比度 ${c.toFixed(2)} < 3.0`);
@@ -414,27 +422,30 @@ function scanBareTime(dir) {
 scanBareTime(RENDERER);
 
 // ============================================================
-// 14) 图标名必须在 PATHS 里真实存在
-//     此前 nav 用了 home / cpu 两个不存在的名字，渲染出空 <g>
+// 14) 图标名必须在 Icon 的 NAMES 映射里真实存在
+//     2026-11-19：图标改成 lucide-react 后，表名从 PATHS 变成 NAMES；
+//     这条检查的意义不变 —— 写错名字 <Icon> 会返回 null，那一块就是空白。
 // ============================================================
 {
   const iconFile = path.join(RENDERER, "components/Icon.tsx");
   const iconSrc = fs.readFileSync(iconFile, "utf-8");
   const declared = new Set();
-  const block = /const PATHS[^{]*\{([\s\S]*?)\n\}\s*as const;/.exec(iconSrc);
+  const block = /const NAMES\s*=\s*\{([\s\S]*?)\}\s*as const;/.exec(iconSrc);
   if (!block) {
-    fail(iconFile, 1, "找不到 PATHS 表：图标检查无法进行");
+    fail(iconFile, 1, "找不到 NAMES 表：图标检查无法进行");
   } else {
-    for (const m of block[1].matchAll(/^\s*([a-z][a-z0-9]*)\s*:/gm)) declared.add(m[1]);
+    for (const m of block[1].matchAll(/(?:^|[\s,])(?:"([a-z][a-z0-9-]*)"|([a-z][a-z0-9]*))\s*:/gm)) {
+      declared.add(m[1] ?? m[2]);
+    }
     for (const file of walk(RENDERER)) {
       if (!/\.tsx$/.test(file)) continue;
       const text = fs.readFileSync(file, "utf-8");
       text.split("\n").forEach((line, idx) => {
         for (const m of line.matchAll(/<Icon\s+name="([a-z][a-z0-9]*)"/g)) {
-          if (!declared.has(m[1])) fail(file, idx + 1, `图标 "${m[1]}" 不在 PATHS 表里（会渲染成空 <g>）`);
+          if (!declared.has(m[1])) fail(file, idx + 1, `图标 "${m[1]}" 不在 Icon 的 NAMES 映射里（会渲染成空白）`);
         }
         for (const m of line.matchAll(/icon:\s*"([a-z][a-z0-9]*)"/g)) {
-          if (!declared.has(m[1])) fail(file, idx + 1, `图标 "${m[1]}" 不在 PATHS 表里（会渲染成空 <g>）`);
+          if (!declared.has(m[1])) fail(file, idx + 1, `图标 "${m[1]}" 不在 Icon 的 NAMES 映射里（会渲染成空白）`);
         }
       });
     }
@@ -529,6 +540,8 @@ scanBareTime(RENDERER);
     "tone-auth", "tone-budget", "tone-cleanup", "tone-error", "tone-patrol",
     "tone-quiet", "tone-recover", "tone-seal",
     "author-", "fx", "pet-fx-", "k-", "kind-", "lv-", "tone-", "side-", "step-line",
+    // 沙箱徽章档位类名（2026-11-19）：Feed 里按 c.sandbox.mode 动态拼 sandbox-${mode}
+    "sandbox-appcontainer", "sandbox-restricted", "sandbox-jobonly",
     // 桌宠：PetStage / Pet 组件在 2026-11-15 因素材 20MB 不入库而注释掉，
     // 但样式必须留着——恢复时只取消注释，不该连样式一起重写。
     "pet-lean-l", "pet-lean-r", "pet-shadow-hop", "pet-shadow-stretch",
@@ -547,6 +560,33 @@ scanBareTime(RENDERER);
 }
 
 // ============================================================
+// 18) 页面不许有"导语/标语"（2026-11-19 用户要求）
+//     一个页面如果非要靠一句话才能看懂，那是布局的问题，不是文案的问题。
+//     允许的例外只有三类：
+//       · 组头 <small>（真约束：安全告警 / 必填说明 / 计费影响）
+//       · 空态 .sf-empty（没有内容时告诉用户为什么）
+//       · 表单里的 .sf-hint / .sf-field small（字段级约束）
+// ============================================================
+{
+  const BANNED = [
+    { re: /className="sf-lede"/g, why: "页面导语（.sf-lede）" },
+    { re: /<p className="sf-sub">\{t\("/g, why: "页面副标语（.sf-sub 段落）" },
+  ];
+  for (const file of walk(RENDERER)) {
+    if (!/\.tsx$/.test(file)) continue;
+    const text = fs.readFileSync(file, "utf-8");
+    text.split("\n").forEach((line, idx) => {
+      for (const b of BANNED) {
+        const re = new RegExp(b.re.source, b.re.flags.replace("g", ""));
+        if (re.test(line)) {
+          fail(file, idx + 1, `出现了${b.why}：页面靠一句标语才能看懂就说明布局要改`);
+        }
+      }
+    });
+  }
+}
+
+// ============================================================
 if (violations.length > 0) {
   console.error(`设计约束检查失败（${violations.length} 处）：`);
   for (const v of violations.slice(0, 120)) console.error("  " + v);
@@ -555,5 +595,5 @@ if (violations.length > 0) {
 }
 console.log(
   `设计约束检查通过：${SHEETS.length} 张样式表、零描边、四功能色（填充+文本双档）、令牌单一来源、` +
-    "字号 ≥12px 且全走 token、间距/层级/圆角全走 token、按钮四态齐全、图标名有效、无死类名。",
+    "字号 ≥12px 且全走 token、间距/层级/圆角全走 token、按钮四态齐全、图标名有效、无死类名、无页面标语。",
 );

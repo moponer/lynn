@@ -187,11 +187,14 @@ function Who({
   role,
   tag,
   sub,
+  channel,
 }: {
   icon: IconName;
   name: string;
   tone: "user" | "lynn" | "system" | "tool" | "progress" | "member";
   meta?: string;
+  /** 外部渠道（飞书 / 钉钉 / 企微 / 微信 / QQ）：独立徽标，不塞进名字里 */
+  channel?: string;
   /** 成员头像（群里成员有自己的脸，不再只是一行标题） */
   avatarId?: string;
   /** 岗位（能力域）：只在 tooltip 里出现，不再单独占位 */
@@ -208,6 +211,7 @@ function Who({
       <span className="fv-name" title={hint}>
         {name}
       </span>
+      {channel && <ChannelBadge source={channel} />}
       {tag && <span className="fv-tag">{tag}</span>}
       {sub && (
         <span className="fv-sub mono" title={sub}>
@@ -216,6 +220,59 @@ function Who({
       )}
       {meta && <span className="fv-time mono">{meta}</span>}
     </div>
+  );
+}
+
+/**
+ * 渠道徽标：外部 IM 来的消息挂在谁身上。
+ *
+ * 为什么是"方块 + 一个字"而不是完整渠道名：
+ *  · 名字行只有 42% 宽，写"飞书"就必然截断（2026-11-19 现场就是这个 bug）；
+ *  · 品牌色 + 单字在 16px 下仍可辨，悬停给完整名字。
+ *
+ * 六个渠道的品牌色是各自的官方色，不用语义色——用户认的是品牌。
+ */
+const CHANNEL_META: Record<string, { short: string; name: string; color: string }> = {
+  feishu: { short: "飞", name: "飞书", color: "#3370FF" },
+  wecom: { short: "企", name: "企业微信", color: "#2D7BFF" },
+  "wecom-app": { short: "企", name: "企业微信（自建）", color: "#1E63D6" },
+  dingtalk: { short: "钉", name: "钉钉", color: "#0089FF" },
+  weixin: { short: "微", name: "微信", color: "#07C160" },
+  qq: { short: "Q", name: "QQ", color: "#12B7F5" },
+};
+
+/** 沙箱执行徽章（2026-11-19）：显示这条命令在哪个沙箱档跑、工作目录在哪 */
+const SANDBOX_LABEL: Record<string, I18nKey> = {
+  appcontainer: "feed.sandbox.appcontainer",
+  restricted: "feed.sandbox.restricted",
+  jobonly: "feed.sandbox.jobonly",
+  off: "feed.sandbox",
+};
+
+function SandboxBadge({ sandbox }: { sandbox: NonNullable<FeedCard["sandbox"]> }) {
+  const t = useT();
+  const labelKey = SANDBOX_LABEL[sandbox.mode] ?? "feed.sandbox";
+  const titleParts = [t("feed.sandbox.title").replace("{mode}", t(labelKey))];
+  if (sandbox.cwd) titleParts.push(t("feed.sandbox.cwd").replace("{cwd}", sandbox.cwd));
+  return (
+    <span className={`feed-sandbox sandbox-${sandbox.mode}`} title={titleParts.join("\n")}>
+      <Icon name="shield" size="sm" />
+      {t(labelKey)}
+    </span>
+  );
+}
+
+function ChannelBadge({ source }: { source: string }) {
+  const t = useT();
+  const meta = CHANNEL_META[source] ?? { short: source.slice(0, 1), name: source, color: "#7A808A" };
+  return (
+    <span
+      className="fv-chan"
+      style={{ background: meta.color }}
+      title={`${meta.name} · ${t("feed.viaChannel")}`}
+    >
+      {meta.short}
+    </span>
   );
 }
 
@@ -379,11 +436,14 @@ function FeedViewInner({
         if (c.kind === "user") {
           return (
             <div className="feed-item user" key={c.id}>
-              {/* 外部渠道来的消息要标出来（P20-1）：否则手机问的和本地敲的分不清 */}
+              {/* 外部渠道来的消息要标出来（P20-1）：否则手机问的和本地敲的分不清。
+                  2026-11-19 修：渠道原来塞进名字里（"你（飞书）"），被 fv-name 的 42% 截断成"你（飞…"。
+                  现在拆成独立徽标：名字只写"你"，渠道用带品牌色的小方块跟在后面，永不截断。 */}
               <Who
                 icon="user"
-                name={c.author?.source ? `${t("feed.you")}（${c.author.source}）` : t("feed.you")}
+                name={t("feed.you")}
                 tone="user"
+                channel={c.author?.source}
                 meta={c.meta || c.createdAt}
               />
               <Mentions mentions={c.mentions} pending={awaitingLynn.has(c.id)} />
@@ -488,6 +548,7 @@ function FeedViewInner({
                 {c.count && c.count > 1 ? ` ×${c.count}` : ""}
               </span>
               <span className="feed-title">{c.title}</span>
+              {c.sandbox && <SandboxBadge sandbox={c.sandbox} />}
               {c.meta && <span className="feed-meta mono">{c.meta}</span>}
               {live && <span className="feed-live-text">{t("feed.live")}</span>}
             </summary>

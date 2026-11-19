@@ -497,6 +497,17 @@ export interface FeedCard {
   systemTone?: "cleanup" | "budget" | "recover" | "patrol" | "auth" | "notice" | "error";
   meta?: string;
   body?: string;
+  /**
+   * 沙箱执行信息（2026-11-19）：成员命令在哪个沙箱档跑的、工作目录在哪。
+   * 前端在 tool 卡上显示这枚徽章，用户一眼看到"这条命令是被隔离执行的吗、哪个档"。
+   * 缺省 = 没走沙箱（裸跑，旧行为）。
+   */
+  sandbox?: {
+    /** 档位：appcontainer（仅工作区写+断网）/ restricted（标准用户级写隔离）/ jobonly（仅资源上限） */
+    mode: "appcontainer" | "restricted" | "jobonly" | "off";
+    /** 命令执行的工作目录（相对/绝对，界面短显示） */
+    cwd?: string;
+  };
   members?: { name: string; role: string; color: string; avatarId?: string }[];
   /** 归属工单（「往来」页签按它过滤；空 = 频道） */
   jobId?: string;
