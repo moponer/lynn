@@ -204,6 +204,12 @@ export interface MemberRunInput {
   autoDeleteInWorkspace?: () => boolean;
   /** 出站闸（审计 #2）：false 时成员的 curl/wget/ssh 类命令直接拒；不传 = 只审计不拦 */
   outboundAllowed?: () => boolean;
+  /**
+   * 命令沙箱（2026-11-19 第一阶段）：提供时成员命令走 sandbox-exec（Job Object）。
+   * 不可用如实降级、回调 onSandboxDegraded。不传 = 直接 execa（旧行为）。
+   */
+  sandbox?: ToolkitOptions["sandbox"];
+  onSandboxDegraded?: (reason: string) => void;
   model: { baseUrl: string; apiKey: string; model: string };
   /** 测试注入；默认真流式 */
   chatFn?: MemberChatFn;
@@ -635,6 +641,9 @@ export async function runMemberTask(input: MemberRunInput): Promise<MemberRunRes
     runStartedAt: input.runStartedAt,
     autoDeleteInWorkspace: input.autoDeleteInWorkspace,
     outboundAllowed: input.outboundAllowed,
+    // 命令沙箱（2026-11-19 第一阶段）：jobonly 就够给内存/进程上限 + 干净强杀
+    sandbox: input.sandbox,
+    onSandboxDegraded: input.onSandboxDegraded,
     // 停机要能连正在跑的命令一起杀，否则最长等满 120s 超时
     signal: () => input.signal,
     writableRoots: input.writableRoots,

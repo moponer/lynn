@@ -160,6 +160,7 @@ import { runTurnAndWait } from "./turn-wait";
 import { isValidOpenId } from "./im-openid";
 import { probeFeishuIdentities } from "./im-feishu-probe";
 import type { ImHostDeps } from "./im-dsh-shapes";
+import { sandboxVerdict, runInSandbox } from "./sandbox";
 import { listVersions, rollbackToVersion, KEEP_VERSIONS } from "./plugin-versions";
 import { PluginHost } from "./plugin-host";
 import { PluginSetStore } from "./plugin-set";
@@ -1035,6 +1036,26 @@ interface QueuedInput extends QueueItem {
 }
 
 /**
+ * 一轮的会话工作区快照（2026-11-19）：切群不打断在跑轮次。
+ *
+ * 轮次开始时把当前视图（feed/history/liveCard/cardSeq/ephemeralFrom）的**引用**
+ * 存进来；轮次内部的读写都走这里，而不是 `this.*`。切群只换 `this.*`，
+ * 在跑轮次继续写自己的快照——两群互不串。收轮时把快照写回它所属的 thread。
+ *
+ * `feed`/`history` 用引用而非拷贝：轮次中途新建的卡、追加的消息要实时可见，
+ * 且收轮时能直接拿这份数据落盘，不必再合并。
+ */
+interface TurnContext {
+  /** 这轮所属的会话 id（收轮时据此写回对应 thread 的状态） */
+  sessionId: string;
+  feed: FeedCard[];
+  history: ChatMessage[];
+  liveCard: FeedCard | null;
+  cardSeq: number;
+  ephemeralFrom: number;
+}
+
+/**
  * 成员在群里抛出的疑问 / 风险（2026-11-16）：按任务合并，等风铃答复。
  * 合并是有意的——同一张单连发三条疑问只该叫醒她一次，否则就是新的刷屏源。
  */
@@ -1138,6 +1159,25 @@ export class Kernel {
   private tokensUsed = 0;
   private cardSeq = 0;
   private busy = false;
+  /**
+   * 在跑轮次的工作区快照（2026-11-19 坚实重构：切群不打断在跑轮次）。
+   *
+   * ## 为什么需要它
+   * 内核是单例（一个风铃管所有群），`feed`/`history`/`liveCard`/`cardSeq`/
+   * `ephemeralFrom` 原本是**当前视图**字段——切群时整组被替换成目标群的数据。
+   * 于是"正在跑 A 群的一轮"在切到 B 群后，delta 写进 B 的 liveCard、
+   * 落卡进 B 的 feed、history 也拼到 B——这就是串群。
+   *
+   * ## 怎么解决
+   * 轮次一开始就把"当前视图"的引用快照进 `activeTurn`；轮次内部的所有读写
+   * 走 `curFeed()/curHistory()/curLive()/nextCardId()` 访问器——有 activeTurn
+   * 时读它的，否则读 this 的。切群只改 this.*（用户看到的视图），
+   * 在跑轮次仍写自己快照里的那份，互不干扰。收轮时把快照写回它所属的 thread。
+   *
+   * 这与 OpenClaw/AstrBot/LangBot/LangGraph 的"共享宿主、隔离会话状态"
+   * 是同一思路，只是我们没拆进程，而是在单例里做状态隔离。
+   */
+  private activeTurn: TurnContext | null = null;
   /** L1 进程内扩展运行时（§4.2.1；构造时接 PluginHost） */
   readonly l1: L1Host;
   /** 进行中的成员执行（taskId → 完成时自动回报审查台；M0-09） */
@@ -1531,10 +1571,11 @@ export class Kernel {
       // 不等 RPC 回执：停止要立刻可见；失败由看门狗对账兜住
       void this.host!.abort().catch(() => undefined);
     }
-    if (this.liveCard) {
-      this.liveCard.streaming = false;
-      this.patchCard(this.liveCard, { streaming: false });
-      this.liveCard = null;
+    const liveA = this.curLive();
+    if (liveA) {
+      liveA.streaming = false;
+      this.patchCard(liveA, { streaming: false });
+      this.setCurLive(null);
     }
     this.card({ kind: "system", text: aborted ? "已停止本轮（已产出的内容保留）。" : "已清空排队；当前没有可停的运行。" });
     this.emit({ type: "done", tokens: this.usage.turnOut });
@@ -2013,6 +2054,36 @@ export class Kernel {
     this.notify(ev);
   }
 
+  /**
+   * 轮次工作区访问器（2026-11-19）：有在跑轮次就用它的快照，否则用当前视图。
+   * 所有轮次内部的 feed/history/liveCard/cardSeq 读写都必须走这里，
+   * 这样桌面切群不会把在跑的飞书轮次写串。
+   */
+  private curFeed(): FeedCard[] {
+    return this.activeTurn ? this.activeTurn.feed : this.feed;
+  }
+  private curHistory(): ChatMessage[] {
+    return this.activeTurn ? this.activeTurn.history : this.history;
+  }
+  private curLive(): FeedCard | null {
+    return this.activeTurn ? this.activeTurn.liveCard : this.liveCard;
+  }
+  private setCurLive(card: FeedCard | null): void {
+    if (this.activeTurn) this.activeTurn.liveCard = card;
+    else this.liveCard = card;
+  }
+  private nextCardId(): number {
+    if (this.activeTurn) return ++this.activeTurn.cardSeq;
+    return ++this.cardSeq;
+  }
+  private curEphemeralFrom(): number {
+    return this.activeTurn ? this.activeTurn.ephemeralFrom : this.ephemeralFrom;
+  }
+  private setCurEphemeralFrom(n: number): void {
+    if (this.activeTurn) this.activeTurn.ephemeralFrom = n;
+    else this.ephemeralFrom = n;
+  }
+
   private card(c: Omit<FeedCard, "id" | "createdAt">): FeedCard {
     /**
      * 写作规则（2026-11-15 重做）：**这里一个字都不改**。
@@ -2021,18 +2092,20 @@ export class Kernel {
      * （写作规则进系统提示词），展示层保持与模型输出逐字一致。
      */
     // 同一张单反复出同一种事件（权限拦截 / 外呼审计）：聚合成一张卡计数，不再一屏刷 N 条
-    if (AGGREGATED_BADGES.has(c.badge ?? "") && this.feed.length > 0) {
+    const feed = this.curFeed();
+    if (AGGREGATED_BADGES.has(c.badge ?? "") && feed.length > 0) {
       // 聚合看的是"她那张 live 卡之前"的最后一条：live 卡永远在末尾（见下），
       // 直接取 feed 尾部会把聚合判给她的话，同一张单的拦截记录就重新一张张刷屏。
-      const tailIdx = this.feed.length - 1;
-      const last = this.liveCard && this.feed[tailIdx] === this.liveCard ? this.feed[tailIdx - 1] : this.feed[tailIdx];
+      const tailIdx = feed.length - 1;
+      const live0 = this.curLive();
+      const last = live0 && feed[tailIdx] === live0 ? feed[tailIdx - 1] : feed[tailIdx];
       if (last && last.badge === c.badge && last.jobId === c.jobId) {
         return this.bumpBlocked(last, c);
       }
     }
     const full: FeedCard = {
       ...c,
-      id: `c-${++this.cardSeq}`,
+      id: `c-${this.nextCardId()}`,
       createdAt: new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }),
     };
     /**
@@ -2041,10 +2114,10 @@ export class Kernel {
      * 十几分钟后她的话就被埋在中间。这里让 live 卡**永远保持在末尾**：
      * 新卡插到它前面，而不是 push 到它后面。收轮时 live 卡已在末尾，moveCardToEnd 自然幂等。
      */
-    const live = this.liveCard;
-    const at = live && live !== full && live.streaming ? this.feed.lastIndexOf(live) : -1;
-    if (at >= 0) this.feed.splice(at, 0, full);
-    else this.feed.push(full);
+    const live = this.curLive();
+    const at = live && live !== full && live.streaming ? feed.lastIndexOf(live) : -1;
+    if (at >= 0) feed.splice(at, 0, full);
+    else feed.push(full);
     this.notify({ type: "card", card: full });
     // 单点播报判定：所有卡片（含 emit 转出来的 tool 卡）都从这里过白名单
     this.voice?.sayCard(full);
@@ -2341,17 +2414,18 @@ export class Kernel {
 
   /** 把一张卡挪到"她的实时输出卡"之前（流式期间最新进展永远贴底） */
   private floatAboveLive(card: FeedCard): void {
-    const live = this.liveCard;
+    const live = this.curLive();
     if (!live) return;
-    const i = this.feed.indexOf(card);
-    const l = this.feed.lastIndexOf(live);
+    const feed = this.curFeed();
+    const i = feed.indexOf(card);
+    const l = feed.lastIndexOf(live);
     if (i < 0 || l < 0) return;
     if (i > l) return; // 已经在 live 后面（异常）：不动
     if (i === l - 1) return; // 已经在紧邻位置
-    this.feed.splice(i, 1);
-    const l2 = this.feed.lastIndexOf(live);
-    if (l2 >= 0) this.feed.splice(l2, 0, card);
-    else this.feed.push(card);
+    feed.splice(i, 1);
+    const l2 = feed.lastIndexOf(live);
+    if (l2 >= 0) feed.splice(l2, 0, card);
+    else feed.push(card);
   }
 
   /** 回合状态迁移：所有 UI 的"谁在干什么"都只读这一个字段 */
@@ -3112,7 +3186,19 @@ export class Kernel {
     // 按群独立的 sessionDir，天然不串）；空群才开新会话（Pi 的 --continue 在空目录里可能报错）。
     // 原来这里一律 createFreshSession = true —— 切回一个群，风铃就"忘了"之前聊过什么。
     this.createFreshSession = st.history.length === 0;
-    void this.resetAgentHost();
+    /**
+     * 切群时不打断在跑的轮次（2026-11-19）：
+     * 若有 activeTurn（如飞书轮次正在生成），**不能** resetAgentHost 杀掉它正在用的
+     * agent 进程——否则正文被拦腰截断。做法：只让下一轮的 ensureHost 因 hostStamp
+     * 失效而重建（hostStamp 含 root，切群后 root 已变，本就会重建），这里显式清空
+     * hostStamp 兜底；不 stop 旧 host，让在跑轮次自然用完，收尾后再弃。
+     * 没有 activeTurn 时保持原行为（立即 reset），不影响纯界面切换的性能。
+     */
+    if (this.activeTurn) {
+      this.hostStamp = "";
+    } else {
+      void this.resetAgentHost();
+    }
     this.checkpoints.discard();
     /**
      * silent=true：这次 idle 只是"切了显示"，不是正在跑的轮次结束。
@@ -4687,6 +4773,25 @@ export class Kernel {
       // 默认不给网；这张单在派单时拿了 network 授权才允许 curl/wget/http。
       // 为什么不再看全局权限档：一张单要抓数据不代表下一张也要，按单授权才有分寸。
       outboundAllowed: () => this.taskStore.get(taskId)?.network?.granted === true,
+      /**
+       * 命令沙箱（2026-11-19 第一阶段）：成员命令走 sandbox-exec（Job Object）。
+       * 档位由启动时探一次（sandboxVerdict 有缓存），off 时本层如实降级并记日志。
+       */
+      sandbox: {
+        verdict: () => {
+          const v = sandboxVerdict();
+          return { mode: v.mode, helperPath: v.helperPath };
+        },
+        run: (command, o) =>
+          runInSandbox(command, {
+            timeoutMs: o.timeoutMs,
+            memoryMb: 2048,
+            processes: 64,
+            cwd: o.cwd,
+            env: o.env,
+          }),
+      },
+      onSandboxDegraded: (reason) => this.log("sandbox_degraded", { taskId, reason }),
       // 收件箱：风铃/巡检中途补的指示，成员每轮开头取（催办不杀进程、不重派）
       inbox: (() => {
         const box = this.memberInbox.get(taskId) ?? [];
@@ -5194,10 +5299,11 @@ export class Kernel {
       this.setTurn({ pending: 0 });
       this.chatAbort?.abort();
       if (this.host?.isRunning()) void this.host!.abort().catch(() => undefined);
-      if (this.liveCard) {
-        this.liveCard.streaming = false;
-        this.patchCard(this.liveCard, { streaming: false });
-        this.liveCard = null;
+      const liveH = this.curLive();
+      if (liveH) {
+        liveH.streaming = false;
+        this.patchCard(liveH, { streaming: false });
+        this.setCurLive(null);
       }
     }
     // 5) 一条汇总卡说清"停的是什么、怎么恢复"，不给每张单都留一张
@@ -7615,8 +7721,8 @@ export class Kernel {
    * 正文与思考都必须盯。命中就截掉重复段、落卡说明、主动 abort 本轮，不靠用户点停止。
    */
   private guardRepetition(): void {
-    if (this.repetitionAborted || !this.liveCard) return;
-    const live = this.liveCard;
+    if (this.repetitionAborted || !this.curLive()) return;
+    const live = this.curLive()!;
     const text = live.text ?? "";
     const thinking = live.thinking ?? "";
     const len = text.length + thinking.length;
@@ -7660,38 +7766,40 @@ export class Kernel {
       ev.type === "message_update" && nested?.type === "text_delta" ? nested.delta
         : ev.type === "text_delta" && typeof ev.text === "string" ? ev.text
           : undefined;
-    if (typeof delta === "string" && delta && this.liveCard) {
-      this.liveCard.text = (this.liveCard.text ?? "") + delta;
+    if (typeof delta === "string" && delta && this.curLive()) {
+      const live = this.curLive()!;
+      live.text = (live.text ?? "") + delta;
       // 节流到 ~80ms：渲染层按 cardId 就地更新，不拉全量快照
       const now = Date.now();
       if (now - this.lastDeltaEmit >= 80) {
         this.lastDeltaEmit = now;
         this.notify({
           type: "delta",
-          text: this.liveCard.text,
-          thinking: this.liveCard.thinking,
-          cardId: this.liveCard.id,
+          text: live.text,
+          thinking: live.thinking,
+          cardId: live.id,
         });
       }
     }
     // 思考（reasoning 模型才有）单独收：正文只装 text_delta，两段在界面上必须分得开
     const thinkingDelta =
       ev.type === "message_update" && nested?.type === "thinking_delta" ? nested.delta : undefined;
-    if (typeof thinkingDelta === "string" && thinkingDelta && this.liveCard) {
-      this.liveCard.thinking = (this.liveCard.thinking ?? "") + thinkingDelta;
+    if (typeof thinkingDelta === "string" && thinkingDelta && this.curLive()) {
+      const live = this.curLive()!;
+      live.thinking = (live.thinking ?? "") + thinkingDelta;
       // 思考封顶（2026-11-16）：实机一条思考 13739 字，每 80ms 全量推给渲染层 → 界面发涩
-      if (this.liveCard.thinking.length > 12_000) {
-        const t = this.liveCard.thinking;
-        this.liveCard.thinking = `${t.slice(0, 3000)}\n…（中间 ${t.length - 9000} 字已折叠）…\n${t.slice(-8000)}`;
+      if (live.thinking.length > 12_000) {
+        const t = live.thinking;
+        live.thinking = `${t.slice(0, 3000)}\n…（中间 ${t.length - 9000} 字已折叠）…\n${t.slice(-8000)}`;
       }
       const now = Date.now();
       if (now - this.lastDeltaEmit >= 80) {
         this.lastDeltaEmit = now;
         this.notify({
           type: "delta",
-          text: this.liveCard.text,
-          thinking: this.liveCard.thinking,
-          cardId: this.liveCard.id,
+          text: live.text,
+          thinking: live.thinking,
+          cardId: live.id,
         });
       }
     }
@@ -7811,7 +7919,7 @@ export class Kernel {
    * 模型收到提示后应先用 ask_user 确认，用户确认（第二轮）后自然放行。
    */
   private looksLikeExplicitTaskRequest(): boolean {
-    const users = this.history.filter((m) => m.role === "user");
+    const users = this.curHistory().filter((m) => m.role === "user");
     if (users.length !== 1) return true;
     const text = String(users[0].content ?? "").trim();
     if (!text) return false;
@@ -8008,12 +8116,12 @@ export class Kernel {
       // 写作规则（2026-11-15 重做）：卡片、history、落盘用同一份原文。
       // 曾经的展示层过滤已删除——三处不一致会让「出问题能复核」这件事失效。
       live.text = text;
-      this.history.push({ role: "assistant", content: text });
+      this.curHistory().push({ role: "assistant", content: text });
       // 巡检轮的助手回复也不落时间线：它只服务这一轮，不进长期上下文
-      if (this.ephemeralFrom < 0) this.persist("assistant", text);
+      if (this.curEphemeralFrom() < 0) this.persist("assistant", text);
       this.patchCard(live, { streaming: false });
       // 巡检轮（心跳/卡住处置）不念：那是她自己在盘账，不是给用户的汇报
-      this.voice?.sayReply(live.text ?? text, this.ephemeralFrom >= 0);
+      this.voice?.sayReply(live.text ?? text, this.curEphemeralFrom() >= 0);
     } else {
       /**
        * 本轮一个字都没说（2026-11-13 实机）：模型只出了思考就结束，界面上留下
@@ -8044,12 +8152,13 @@ export class Kernel {
 
   /** 把一张卡挪到 feed 末尾（顺序靠下一次权威快照生效：done/error 会触发整表重拉） */
   private moveCardToEnd(card: FeedCard): void {
-    const i = this.feed.indexOf(card);
-    if (i < 0 || i === this.feed.length - 1) return;
-    this.feed.splice(i, 1);
-    this.feed.push(card);
+    const feed = this.curFeed();
+    const i = feed.indexOf(card);
+    if (i < 0 || i === feed.length - 1) return;
+    feed.splice(i, 1);
+    feed.push(card);
     this.persistThreadSoon();
-    this.log("card_moved_to_end", { id: card.id, from: i, to: this.feed.length - 1 });
+    this.log("card_moved_to_end", { id: card.id, from: i, to: feed.length - 1 });
   }
 
   /**
@@ -8107,7 +8216,7 @@ export class Kernel {
 
   private async runChatRpc(userText: string): Promise<void> {
     const live = this.card({ kind: "lynn", text: "", streaming: true });
-    this.liveCard = live;
+    this.setCurLive(live);
     this.lastModelError = null;
     this.turnErrorReported = false;
     this.repetitionAborted = false;
@@ -8220,7 +8329,7 @@ export class Kernel {
       this.settleCheckpoint();
       this.emit({ type: "done", tokens: this.usage.turnOut });
     } finally {
-      this.liveCard = null;
+      if (this.curLive() === live) this.setCurLive(null);
       if (live.streaming) this.patchCard(live, { streaming: false });
       // 本轮结束：状态行必须收掉，不能留一个永远在走的计时器
       this.setTurn({ activity: undefined, activityName: undefined, activityAt: undefined });
@@ -8248,7 +8357,7 @@ export class Kernel {
     if (picked.note) this.card({ kind: "system", badge: "工具", title: "预算提示", body: picked.note });
     const usedModel = picked.model;
     const live = this.card({ kind: "lynn", text: "", streaming: true });
-    this.liveCard = live;
+    this.setCurLive(live);
     this.setTurn({ activity: "model", activityName: undefined, activityAt: Date.now() });
     // 本回合取消器：session.abort 直接 abort()，fetch 与 SSE body 立即断开
     const controller = new AbortController();
@@ -8266,7 +8375,7 @@ export class Kernel {
       }
       if (streaming) this.guardRepetition();
     };
-    const messages: ChatMessage[] = [{ role: "system", content: this.systemPrompt() }, ...this.history];
+    const messages: ChatMessage[] = [{ role: "system", content: this.systemPrompt() }, ...this.curHistory()];
     // 群内定向说明只改当轮 user 消息（尾部）：历史前缀原样，缓存命中不被 @ 抖动打穿
     if (userText) {
       for (let i = messages.length - 1; i >= 0; i -= 1) {
@@ -8441,7 +8550,7 @@ export class Kernel {
       this.failTurn(fail.code, message, fail.action);
     } finally {
       if (this.chatAbort === controller) this.chatAbort = null;
-      if (this.liveCard === live) this.liveCard = null;
+      if (this.curLive() === live) this.setCurLive(null);
       this.setTurn({ activity: undefined, activityName: undefined, activityAt: undefined });
     }
   }
@@ -8457,6 +8566,26 @@ export class Kernel {
   ): void {
     // 会话可以一条不剩：这时候开口说话，就地开一条再写，不用先点「新建会话」
     this.ensureThreadId();
+    /**
+     * 建立本轮的工作区快照（2026-11-19 坚实重构）。
+     *
+     * 从这一刻起，本轮的所有 feed/history/liveCard 读写走 activeTurn 的快照，
+     * 而不是 this.*。桌面用户切群时 switchThread 只改 this.*（视图），
+     * 在跑的轮次仍写自己快照——两群互不串。
+     *
+     * 前提：一轮内 busy=true 挡住并发，不会出现"上一轮没完就建新 activeTurn"。
+     * 若真出现（异常路径），保守保留旧的，避免覆盖正在写的快照。
+     */
+    if (!this.activeTurn) {
+      this.activeTurn = {
+        sessionId: this.currentThreadId,
+        feed: this.feed,
+        history: this.history,
+        liveCard: this.liveCard,
+        cardSeq: this.cardSeq,
+        ephemeralFrom: this.ephemeralFrom,
+      };
+    }
     // 新一轮：汇报标记归零（收轮时按这两枚标记决定要不要补系统汇总）
     this.reportedThisTurn = false;
     this.pendingFinalReport = null;
@@ -8525,8 +8654,8 @@ export class Kernel {
     this.pendingMemoryNote = "";
     // 巡检轮（心跳/卡住处置）：消息只用于这一轮，结束后从 history 摘掉、不写时间线。
     // 否则每 5 分钟一次巡检会把上下文越撑越大（token 与延迟都跟着涨）。
-    if (opts?.ephemeral) this.ephemeralFrom = this.history.length;
-    this.history.push({ role: "user", content: finalText });
+    if (opts?.ephemeral) this.setCurEphemeralFrom(this.curHistory().length);
+    this.curHistory().push({ role: "user", content: finalText });
     if (!opts?.ephemeral) this.persist("user", finalText);
     this.busy = true;
     this.l1.setBusy(true);
@@ -8537,12 +8666,38 @@ export class Kernel {
     this.setTurn({ phase: "accepted", busy: true, startedAt: new Date().toISOString(), canUndo: false, changedFiles: [] });
     void this.runChat(finalText, opts).finally(() => {
       // 巡检轮收尾：把这轮消息（含工具往返）从 history 摘掉，上下文回到巡检前
-      if (this.ephemeralFrom >= 0) {
-        this.history.splice(this.ephemeralFrom);
-        this.ephemeralFrom = -1;
+      const effFrom = this.curEphemeralFrom();
+      if (effFrom >= 0) {
+        this.curHistory().splice(effFrom);
+        this.setCurEphemeralFrom(-1);
       }
       this.busy = false;
       this.l1.setBusy(false);
+      /**
+       * 收轮：把本轮快照写回它所属的会话，然后清掉 activeTurn。
+       * 若用户中途切了群（currentThreadId ≠ 快照 sessionId），本轮结果
+       * 必须落回原会话的 thread，而不是写进用户当前看的群。
+       */
+      const turnCtx = this.activeTurn;
+      if (turnCtx) {
+        if (turnCtx.sessionId && turnCtx.sessionId !== this.currentThreadId) {
+          // 切群了：把这一轮的 feed/history 写回原会话（不碰当前视图）
+          try {
+            this.threads.saveState(turnCtx.sessionId, {
+              feed: turnCtx.feed.slice(-200),
+              history: turnCtx.history
+                .filter((m) => (m.role === "user" || m.role === "assistant") && typeof m.content === "string")
+                .map((m) => ({ role: m.role as "user" | "assistant", content: m.content as string }))
+                .slice(-200),
+              usage: this.threads.loadState(turnCtx.sessionId).usage,
+            });
+          } catch {
+            /* 落盘失败不影响本轮结束 */
+          }
+        }
+        // 清空：下一轮（drainQueue 起的）会基于当时的 this.* 重新建快照
+        this.activeTurn = null;
+      }
       const phase: TurnPhase = this.turn.phase === "failed" ? "failed" : "idle";
       this.setTurn({ phase, busy: false, startedAt: undefined });
       this.drainQueue();
@@ -8710,16 +8865,17 @@ export class Kernel {
     const now = Date.now();
     const prev = this.lastErrorCard;
     if (shouldMergeError(prev, { code, action: copy.action }, now) && prev?.cardId) {
-      const card = this.feed.find((c) => c.id === prev.cardId) ?? this.threads.loadState(this.currentThreadId ?? "").feed.find((c) => c.id === prev.cardId);
+      const card = this.curFeed().find((c) => c.id === prev.cardId) ?? this.threads.loadState(this.currentThreadId ?? "").feed.find((c) => c.id === prev.cardId);
       if (card) {
         prev.count += 1;
         prev.at = now;
         const bumped = `${copy.title}（同类错误第 ${prev.count} 次；${Math.round(ERROR_MERGE_WINDOW_MS / 60_000)} 分钟内的重复不再单独落卡）`;
         card.text = bumped;
         this.emit({ type: "error", code, message, action: copy.action });
-        if (this.liveCard) {
-          this.liveCard.streaming = false;
-          this.liveCard = null;
+        const live0 = this.curLive();
+        if (live0) {
+          live0.streaming = false;
+          this.setCurLive(null);
         }
         return;
       }
@@ -8734,9 +8890,10 @@ export class Kernel {
       ...(copy.action === "none" ? { meta: "这类错误重试没有意义，所以不提供重试" } : {}),
     });
     this.lastErrorCard = { code, action: copy.action, at: now, cardId: card.id, count: 1 };
-    if (this.liveCard) {
-      this.liveCard.streaming = false;
-      this.liveCard = null;
+    const live1 = this.curLive();
+    if (live1) {
+      live1.streaming = false;
+      this.setCurLive(null);
     }
     this.emit({ type: "error", code, message, action: copy.action });
   }

@@ -137,7 +137,15 @@ export function resetSandboxProbe(): void {
  */
 export function runInSandbox(
   command: string,
-  opts: { appRoot?: string; memoryMb?: number; processes?: number; timeoutMs?: number } = {},
+  opts: {
+    appRoot?: string;
+    memoryMb?: number;
+    processes?: number;
+    timeoutMs?: number;
+    cwd?: string;
+    /** 子进程环境（调用方传剔除密钥 + 补 toolDirs 后的 env）；不传则继承当前进程 */
+    env?: Record<string, string>;
+  } = {},
 ): { ok: boolean; code: number | null; stdout: string; stderr: string; reason?: string } {
   const v = sandboxVerdict(opts.appRoot);
   if (v.mode === "off" || !v.helperPath) {
@@ -156,6 +164,14 @@ export function runInSandbox(
     encoding: "utf8",
     timeout: opts.timeoutMs ?? 120_000,
     maxBuffer: 12 * 1024 * 1024,
+    /**
+     * helper 自己就是 `CreateProcessW(..., cwd=null, ...)`，子进程继承 helper 的 cwd——
+     * 所以把 helper 的 cwd 设成成员工作区，子进程就在正确目录里跑。
+     */
+    cwd: opts.cwd,
+    // 用调用方传的（已剔除密钥的）env；没传则继承当前进程（旧行为）
+    ...(opts.env ? { env: opts.env } : {}),
+    windowsHide: true,
   });
   return {
     ok: res.status === 0,

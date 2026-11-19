@@ -32,6 +32,26 @@ export interface ToolkitOptions {
   commandTimeoutMs?: number;
   /** 单次命令输出上限（默认 8000 字符） */
   outputCap?: number;
+  /**
+   * 命令沙箱（2026-11-19 第一阶段）。
+   *
+   * 提供时：命令优先在 sandbox-exec（Job Object）里跑——内存/进程数上限、
+   * 超时杀整个进程树。沙箱不可用（探针 off / helper 缺失）时**如实降级**
+   * 到直接 execa 执行，并回调 `onSandboxDegraded` 记录"这次没隔离"，绝不假装。
+   *
+   * 不提供 = 保持旧行为（直接 execa，不加沙箱）。测试与直用方不受影响。
+   */
+  sandbox?: {
+    /** 当前可用档位（由内核启动时探一次后注入；off 时不走沙箱） */
+    verdict: () => { mode: "appcontainer" | "jobonly" | "off"; helperPath: string | null };
+    /** 沙箱内执行；不可用时返回 ok:false + reason，由本层降级。env 由本层按 cmd-env 规则生成后传入 */
+    run: (
+      command: string,
+      opts: { cwd: string; timeoutMs: number; env: Record<string, string> },
+    ) => { ok: boolean; code: number | null; stdout: string; stderr: string; reason?: string };
+  };
+  /** 沙箱降级回调：本层因沙箱不可用而退回直接执行时通知壳（写日志，界面上要说清） */
+  onSandboxDegraded?: (reason: string) => void;
   /** 审计回调：命中/放行命令都留痕（M1-11，壳写 audit.jsonl） */
   onAudit?: (ev: {
     kind: "cmd_blocked" | "cmd_net" | "cmd_run" | "cmd_auto";
@@ -408,6 +428,8 @@ export class Toolkit {
   private readonly root: string;
   private readonly commandTimeoutMs: number;
   private readonly outputCap: number;
+  private readonly sandbox?: ToolkitOptions["sandbox"];
+  private readonly onSandboxDegraded?: (reason: string) => void;
   private readonly onAudit?: ToolkitOptions["onAudit"];
   private readonly onBeforeWrite?: ToolkitOptions["onBeforeWrite"];
   private readonly onWriteContent?: ToolkitOptions["onWriteContent"];
@@ -428,6 +450,8 @@ export class Toolkit {
     fs.mkdirSync(this.root, { recursive: true });
     this.commandTimeoutMs = opts.commandTimeoutMs ?? 120_000;
     this.outputCap = opts.outputCap ?? 8_000;
+    this.sandbox = opts.sandbox;
+    this.onSandboxDegraded = opts.onSandboxDegraded;
     this.onAudit = opts.onAudit;
     this.onBeforeWrite = opts.onBeforeWrite;
     this.onWriteContent = opts.onWriteContent;
@@ -970,6 +994,27 @@ export class Toolkit {
     return `${hits.join("\n")}${more}${cutNote}`;
   }
 
+  /**
+   * 超长命令输出的落盘器（2026-11-19 今日复盘）。
+   * 完整原文写进工作区 `_tool-output/`，返回相对路径供成员 read_file 分段读。
+   * 落盘失败（只读盘/无权限）返回 null，调用方退回头尾各留一半——不丢执行。
+   */
+  private commandSpill(): (label: "stdout" | "stderr", full: string) => string | null {
+    return (label, full) => {
+      try {
+        const dir = path.resolve(this.root, "_tool-output");
+        fs.mkdirSync(dir, { recursive: true });
+        const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+        const name = `${label}-${stamp}.txt`;
+        const abs = path.join(dir, name);
+        fs.writeFileSync(abs, full, "utf-8");
+        return `_tool-output/${name}`;
+      } catch {
+        return null;
+      }
+    };
+  }
+
   async runCommand(args: Record<string, unknown>): Promise<string> {
     const command = String(args.command ?? "").trim();
     if (!command) return "命令为空。";
@@ -1049,6 +1094,38 @@ export class Toolkit {
       // ① encoding:null 拿原始 Buffer，才能按 GBK/UTF-8 正确解码（中文 Windows 老程序）；
       // ② timeout + killSignal=SIGKILL：超时直接强杀，不留半个进程占着工作区；
       // ③ 「停」真的杀进程：execa 8 没有 cancelSignal，自己接 AbortSignal。
+      /**
+       * 沙箱分支（2026-11-19 第一阶段）。
+       *
+       * 沙箱可用（jobonly 及以上）时，命令在 sandbox-exec 里跑：
+       *  - Job Object：内存上限、进程数上限、超时/停止时连子进程一起杀；
+       *  - 这是 L1 保底：**不断网、不隔离文件**（那要 AppContainer/WFP，见设计文档）。
+       *
+       * sandbox.run 返回 ok:false 表示"这次没进沙箱"（helper 坏了/档位 off）：
+       * 如实降级到 execa，并回调 onSandboxDegraded 让壳记日志——绝不假装已隔离。
+       */
+      const sb = this.sandbox?.verdict();
+      if (this.sandbox && sb && sb.mode !== "off" && sb.helperPath) {
+        const r = this.sandbox.run(command, {
+          cwd,
+          timeoutMs: this.commandTimeoutMs,
+          // 与 execa 分支完全一致的环境：剔密钥 + 补 toolDirs（见 cmd-env.ts）
+          env: buildCommandEnv(process.env, { toolDirs: posixToolDirsCached() }) as Record<string, string>,
+        });
+        if (r.ok || r.code !== null) {
+          // 成功执行（含非零退出）——沙箱跑通了
+          if (signal?.aborted) return `命令已被用户停止（点「停」）：${command}`;
+          return formatCommandResult({
+            stdout: Buffer.from(r.stdout ?? "", "utf-8"),
+            stderr: Buffer.from(r.stderr ?? "", "utf-8"),
+            exitCode: r.code,
+            budget: this.outputCap,
+            spill: this.commandSpill(),
+          });
+        }
+        // r.ok=false 且 code=null → 沙箱没能启动，降级
+        this.onSandboxDegraded?.(r.reason ?? "沙箱启动失败");
+      }
       const sub = execa(command, {
         shell: true,
         cwd,
@@ -1081,25 +1158,7 @@ export class Toolkit {
           stderr: done.stderr as Buffer | undefined,
           exitCode: done.exitCode,
           budget: this.outputCap,
-          /**
-           * 超长输出落盘（2026-11-19 今日复盘）：
-           * 完整原文写进工作区 `_tool-output/`，返回相对路径供成员 read_file 分段读。
-           * 落盘失败（只读盘/无权限）就返回 null，退回头尾各留一半——不丢执行。
-           */
-          spill: (label, full) => {
-            try {
-              const dir = path.resolve(this.root, "_tool-output");
-              fs.mkdirSync(dir, { recursive: true });
-              const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-              const name = `${label}-${stamp}.txt`;
-              const abs = path.join(dir, name);
-              fs.writeFileSync(abs, full, "utf-8");
-              // 给相对路径（成员的工作目录就是 root），并说明可用 read_file 分段读
-              return `_tool-output/${name}`;
-            } catch {
-              return null;
-            }
-          },
+          spill: this.commandSpill(),
         });
       } finally {
         signal?.removeEventListener("abort", onAbort);

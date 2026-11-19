@@ -66,4 +66,25 @@ const nImVendor = copyTree(
   path.join(repo, "dist", "main", "im", "vendor"),
   "src/main/im/vendor/",
 );
-console.log(`[copy-assets] ${nAssets} files → dist/assets，${nPrompts} files → dist/prompts，${nImVendor} files → dist/main/im/vendor`);
+
+/**
+ * 成员命令沙箱 helper（2026-11-19 第一阶段）。
+ *
+ * `sandbox.ts` 会在 `dist/sandbox-exec.exe` 找它（见 candidatePaths）。
+ * Rust 产物在 `native/sandbox-exec/target/release/`，构建时不复制就会缺，
+ * 表现为"探针 off → 命令降级回裸跑"，白白丢掉资源限制。有就复制，没有不报错
+ * （没装 Rust 的开发机 / 非 Windows 平台本来就没有，探针会如实报 off）。
+ */
+let nSandbox = 0;
+const sandboxExe = path.join(repo, "native", "sandbox-exec", "target", "release", "sandbox-exec.exe");
+if (fs.existsSync(sandboxExe)) {
+  fs.mkdirSync(path.join(repo, "dist"), { recursive: true });
+  fs.copyFileSync(sandboxExe, path.join(repo, "dist", "sandbox-exec.exe"));
+  nSandbox = 1;
+} else {
+  console.warn("[copy-assets] sandbox-exec.exe 不存在（未构建 Rust helper），命令将降级为裸执行");
+}
+console.log(
+  `[copy-assets] ${nAssets} files → dist/assets，${nPrompts} files → dist/prompts，${nImVendor} files → dist/main/im/vendor` +
+    (nSandbox ? "，sandbox-exec.exe → dist/" : ""),
+);
