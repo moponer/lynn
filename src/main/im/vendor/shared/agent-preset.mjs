@@ -1,6 +1,6 @@
 import { t } from './i18n.mjs';
 
-/** Matches DeepSeek Harness agent-preset directory ids. */
+/** Matches 风铃 agent-preset directory ids. */
 export const AGENT_PRESET_ID = /^[a-z0-9][a-z0-9-]*$/;
 
 export const EMPTY_AGENT_PRESET_CATALOG = Object.freeze({

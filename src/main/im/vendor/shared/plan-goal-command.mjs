@@ -43,7 +43,7 @@ function delegatedErrorText(commandName, error) {
     return t('工作区或机器人状态已发生变化，请重试。');
   }
   if (code === 'commands-unavailable') {
-    return t('当前 Host 不支持命令委派，请确认 DSH 命令网关可用。');
+    return t('当前宿主不支持命令委派，请确认风铃命令网关可用。');
   }
   return t('{name} 执行失败，请稍后重试。', { name: commandName });
 }

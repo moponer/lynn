@@ -1146,7 +1146,7 @@ export class TextHarnessBridge {
       const command = text.toLowerCase();
       if (!hasImages && !hasFiles && command === '/help') {
         await this.#bot.sendText(target, [
-          t('{label}机器人已连接 DeepSeek Harness。', { label: this.#descriptor.label }),
+          t('{label}机器人已连接 风铃。', { label: this.#descriptor.label }),
           '',
           t('直接发送文字、图片或文件即可继续当前会话。'),
           ...commandHelpLines(this.#descriptor.key, availableCommandCatalog(SHARED_COMMAND_CATALOG, {

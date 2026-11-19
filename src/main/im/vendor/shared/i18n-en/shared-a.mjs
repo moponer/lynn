@@ -35,8 +35,8 @@ export default {
   '消息处理失败，请稍后重试。': 'Failed to process the message. Please try again later.',
   '卡片已结束，请查看后续消息。': 'This card has ended. Please check the next message.',
   '工具调用「{name}」未成功，请检查工具配置或稍后重试。': 'Tool call "{name}" did not succeed. Check the tool configuration or try again later.',
-  '无法连接处理服务，消息尚未提交。请确认 DeepSeek Harness 正在运行后重试。':
-    'Could not connect to the processing service, so the message was not submitted. Make sure DeepSeek Harness is running, then try again.',
+  '无法连接处理服务，消息尚未提交。请确认 风铃 正在运行后重试。':
+    'Could not connect to the processing service, so the message was not submitted. Make sure 风铃 is running, then try again.',
   '处理服务响应超时，消息尚未开始处理。请稍后重试。':
     'The processing service timed out before the message started. Please try again later.',
   '暂时无法确认任务状态，任务可能已经开始。请先等待或发送 /stop，不要立即重复提交。':
@@ -47,10 +47,10 @@ export default {
     'Task progress is temporarily unavailable and the task may still be running. Wait or send /stop before submitting it again.',
   '处理服务拒绝了机器人连接。请管理员检查 Harness 地址、代理或访问配置后重试。':
     'The processing service rejected the bot connection. Ask an administrator to check the Harness address, proxy, or access settings.',
-  '机器人与 DeepSeek Harness 的接口不兼容。请管理员检查 Harness 地址并更新相关版本。':
-    'The bot and DeepSeek Harness use incompatible APIs. Ask an administrator to check the Harness address and update the related components.',
-  'DeepSeek Harness 暂时无法完成请求，请稍后重试。':
-    'DeepSeek Harness could not complete the request. Please try again later.',
+  '机器人与 风铃 的接口不兼容。请管理员检查 Harness 地址并更新相关版本。':
+    'The bot and 风铃 use incompatible APIs. Ask an administrator to check the Harness address and update the related components.',
+  '风铃 暂时无法完成请求，请稍后重试。':
+    '风铃 could not complete the request. Please try again later.',
   '等待模型回复超时，任务可能仍在运行。请先等待或发送 /stop，不要立即重复提交。':
     'Waiting for the model reply timed out and the task may still be running. Wait or send /stop before submitting it again.',
   '模型凭据缺失或已失效。请管理员检查模型配置后重试。':
@@ -131,7 +131,7 @@ export default {
     'Send text, an image, or a file directly to continue the current session.',
   '直接发送文字、图片、文件或带文字识别结果的语音即可继续当前会话。':
     'Send text, an image, a file, or a voice message already transcribed to text to continue the current session.',
-  '{label}机器人已连接 DeepSeek Harness。': 'The {label} bot is connected to DeepSeek Harness.',
+  '{label}机器人已连接 风铃。': 'The {label} bot is connected to 风铃.',
   '查看最近历史消息（仅私聊）': 'Show recent history (private chats only)',
   '按序号列出当前模型可用推理等级': 'List reasoning efforts for the current model by index',
   '查看或切换当前推理等级': 'Show or switch the current reasoning effort',
@@ -223,8 +223,8 @@ export default {
   '/status  检查连接状态': '/status  Check the connection status',
   '/version  查看插件版本': '/version  Show the plugin version',
   '/help  显示本帮助': '/help  Show this help',
-  '{label}机器人与 DeepSeek Harness 连接正常。':
-    'The {label} bot is connected to DeepSeek Harness and working normally.',
+  '{label}机器人与 风铃 连接正常。':
+    'The {label} bot is connected to 风铃 and working normally.',
   // /status details (shared by every text channel that uses TextHarnessBridge).
   '绑定会话：{session}': 'Session: {session}',
   '绑定会话：未绑定（发送消息后自动创建）':

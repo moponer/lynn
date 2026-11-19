@@ -11,8 +11,8 @@ export default {
     'Локальный Harness не смог выполнить задачу; проверьте сессию Harness и повторите попытку.',
   'Office Job 引用了本机未配置的 Workspace/Preset alias。':
     'Office Job ссылается на alias Workspace/Preset, не настроенный на этой машине.',
-  '你正在本机 DeepSeek Harness 中继续一个来自 AI Office 的任务。':
-    'Вы продолжаете задачу из AI Office в локальном DeepSeek Harness.',
+  '你正在本机 风铃 中继续一个来自 AI Office 的任务。':
+    'Вы продолжаете задачу из AI Office в локальном 风铃.',
   '只在当前 Workspace 内行动。完成后必须返回：结果摘要、改动文件、验证证据、未解决风险。':
     'Действуйте только в текущем Workspace. По завершении верните: краткое резюме результата, изменённые файлы, подтверждения проверки и нерешённые риски.',
   '## 本机 Instruction Preset': '## Локальный Instruction Preset',

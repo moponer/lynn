@@ -35,7 +35,7 @@ const SESSION_LIST_USAGE = [
 // carries the request, so an older Host answers with a clear "not supported".
 const SESSION_ARCHIVE_PREFIX = /^\/(?:sessionarchive|sessarchive)(?=$|\s)/i;
 const SESSION_ARCHIVE_COMMAND = /^\/(?:sessionarchive|sessarchive)(?:[ \t]+([^\s]+))?(?:[ \t]+(--?stop))?$/i;
-const SESSION_ARCHIVE_USAGE = '用法：/sessionarchive Session ID 归档一个会话；/sessionarchive 序号 只预览该序号对应的会话（编号会随列表变化，归档请用完整 ID）。加 --stop 可让 DSH 先停止该会话正在运行的任务';
+const SESSION_ARCHIVE_USAGE = '用法：/sessionarchive Session ID 归档一个会话；/sessionarchive 序号 只预览该序号对应的会话（编号会随列表变化，归档请用完整 ID）。加 --stop 可让 风铃 先停止该会话正在运行的任务';
 // An index is resolved against a list that shifts as soon as a new Session
 // appears (the command's own turn can add one), so an index only previews the
 // target: archiving is destructive and has to name the Session explicitly.
@@ -957,7 +957,7 @@ async function runSessionArchiveCommand(command, harness, conversationKey) {
       return commandResult(t('机器人正在移除或已重新接入，无法归档原会话的会话。'));
     }
     if (error?.code === 'harness-api-not-found') {
-      return commandResult(t('当前 DSH 版本不支持通过机器人归档会话。'));
+      return commandResult(t('当前 风铃 版本不支持通过机器人归档会话。'));
     }
     if (['agent-busy', 'turn-blocked', 'session-archived'].includes(error?.code)) {
       return commandResult(t('该会话仍有任务在运行，请先 /stop，或使用 /sessionarchive <目标> --stop。'));

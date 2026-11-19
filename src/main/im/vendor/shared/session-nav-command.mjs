@@ -569,7 +569,7 @@ async function runDrop(state, harness, key, n, { signal }) {
   const removed = await state?.dropSessionRing?.(key, n);
   if (removed === false) return unknownEntryResult(n);
   const label = renderSessionNumber(entry, { currentSessionId, backTarget: null, forwardTarget: null }, availabilityState);
-  return commandResult(t('已从会话列表移除编号 {n}。注意：Harness 中的会话本身未被删除或归档，仍可在 DSH 中访问。', { n: label }));
+  return commandResult(t('已从会话列表移除编号 {n}。注意：Harness 中的会话本身未被删除或归档，仍可在 风铃 中访问。', { n: label }));
 }
 
 /** /drop all: keep only the bound entry; the sessions themselves are untouched. */
@@ -587,7 +587,7 @@ async function runDropAll(state, key) {
     return commandResult(t('列表里只有当前会话，无需移除。'));
   }
   const removed = await state?.dropSessionRingAllExcept?.(key, currentEntry.n);
-  return commandResult(t('已移除 {count} 条记录，保留编号 {n}（当前会话）。注意：Harness 中的会话本身未被删除或归档，仍可在 DSH 中访问。', {
+  return commandResult(t('已移除 {count} 条记录，保留编号 {n}（当前会话）。注意：Harness 中的会话本身未被删除或归档，仍可在 风铃 中访问。', {
     count: removed,
     n: currentEntry.n,
   }));

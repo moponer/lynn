@@ -29,13 +29,13 @@ const PROVIDER_FAILURES = Object.freeze({
 // 提交超时（stage=prompt.submit 且 harness-timeout）单列文案：与「已提交、结果
 // 未知」区分，明确「提交请求本身超时、是否送达未知」，避免用户误以为任务已运行。
 const PROMPT_SUBMIT_UNCONFIRMED_MESSAGE =
-  '消息提交请求超时，未能确认消息是否已送达 DSH。请稍后到 DSH 查看该会话状态，不要立即重复提交；若持续发生，请将参考号提供给管理员。';
+  '消息提交请求超时，未能确认消息是否已送达 风铃。请稍后到 风铃 查看该会话状态，不要立即重复提交；若持续发生，请将参考号提供给管理员。';
 
 const FAILURE_MESSAGES = Object.freeze({
   HARNESS_INTERACTION_TIMEOUT:
-    '与 DSH 的交互通道在 30 秒内未就绪，本条消息尚未提交执行。请稍后重试。',
+    '与 风铃 的交互通道在 30 秒内未就绪，本条消息尚未提交执行。请稍后重试。',
   HARNESS_CONNECT:
-    '无法连接处理服务，消息尚未提交。请确认 DeepSeek Harness 正在运行后重试。',
+    '无法连接处理服务，消息尚未提交。请确认 风铃 正在运行后重试。',
   HARNESS_TIMEOUT:
     '处理服务响应超时，消息尚未开始处理。请稍后重试。',
   HARNESS_RESULT_UNCERTAIN:
@@ -43,9 +43,9 @@ const FAILURE_MESSAGES = Object.freeze({
   HARNESS_ACCESS:
     '处理服务拒绝了机器人连接。请管理员检查 Harness 地址、代理或访问配置后重试。',
   HARNESS_PROTOCOL:
-    '机器人与 DeepSeek Harness 的接口不兼容。请管理员检查 Harness 地址并更新相关版本。',
+    '机器人与 风铃 的接口不兼容。请管理员检查 Harness 地址并更新相关版本。',
   HARNESS_SERVICE:
-    'DeepSeek Harness 暂时无法完成请求，请稍后重试。',
+    '风铃 暂时无法完成请求，请稍后重试。',
   MODEL_REPLY_TIMEOUT:
     '等待模型回复超时，任务可能仍在运行。请先等待或发送 /stop，不要立即重复提交。',
   MODEL_AUTH:
@@ -57,7 +57,7 @@ const FAILURE_MESSAGES = Object.freeze({
   MODEL_CONTEXT_LIMIT:
     '当前会话内容超过模型上下文上限。请发送 /compact 或 /new 后重试。',
   MODEL_UNAVAILABLE:
-    '当前模型不存在或不支持所选配置。请发送 /models，再用 /model <序号> 为当前聊天重新选择。若要修改后续新会话的默认模型，请到 DSH 设置 → IM机器人 → 对应机器人卡片修改。',
+    '当前模型不存在或不支持所选配置。请发送 /models，再用 /model <序号> 为当前聊天重新选择。若要修改后续新会话的默认模型，请到 风铃 设置 → IM机器人 → 对应机器人卡片修改。',
   MODEL_CONFIG:
     '当前模型不支持这类内容或所选配置。请调整内容、模型或推理等级后重试。',
   MODEL_TIMEOUT:
@@ -75,15 +75,15 @@ const FAILURE_MESSAGES = Object.freeze({
   MODEL_OUTPUT_LIMIT:
     '模型达到输出长度上限，但没有生成可显示的结果。请缩小任务范围后重试。',
   TURN_BLOCKED:
-    '本轮处理被阻止，未能完成。请在 DSH 中查看会话状态和相关提示。',
+    '本轮处理被阻止，未能完成。请在 风铃 中查看会话状态和相关提示。',
   TURN_INTERRUPTED:
     '任务被意外中断，本次未完成。请重试。',
   SESSION_NOT_FOUND:
     '当前会话已不存在。请发送 /new 创建新会话后重试。',
   SESSION_UNREADABLE:
-    '当前会话日志已损坏，无法继续读取。请先到 DSH 查看任务状态，再发送 /new 创建新会话；原会话记录会保留。',
+    '当前会话日志已损坏，无法继续读取。请先到 风铃 查看任务状态，再发送 /new 创建新会话；原会话记录会保留。',
   SESSION_ARCHIVED:
-    '当前会话已归档，无法继续处理。有命令权限时可发送 /new 创建新会话；否则请联系管理员在 DSH 中取消归档，或为你开启命令权限。',
+    '当前会话已归档，无法继续处理。有命令权限时可发送 /new 创建新会话；否则请联系管理员在 风铃 中取消归档，或为你开启命令权限。',
   SESSION_BUSY:
     '当前会话仍在处理上一项任务。请等待完成，或发送 /stop 后重试。',
   SESSION_STALE:
@@ -246,7 +246,7 @@ export function classifyMessageFailure(error, {
           ? '消息提交前的网络请求失败，本条消息尚未提交执行。请检查连接后重试。'
           : '消息在提交前处理失败，尚未提交执行。请重试；若持续发生，请将参考号提供给管理员。';
     } else if (details.submissionState) {
-      message = '消息已尝试提交，但任务结果尚未确认。请先到 DSH 查看状态，不要立即重复提交；若持续发生，请将参考号提供给管理员。';
+      message = '消息已尝试提交，但任务结果尚未确认。请先到 风铃 查看状态，不要立即重复提交；若持续发生，请将参考号提供给管理员。';
     }
   }
   return Object.freeze({
@@ -256,7 +256,7 @@ export function classifyMessageFailure(error, {
     message: typeof userMessage === 'string' && userMessage.trim()
       ? userMessage.trim()
       : t(message) + (code === 'SESSION_ARCHIVED' && error?.promptAccepted === true
-        ? `\n${t('本条消息可能仍在会话队列中，请先到 DSH 查看状态，避免重复提交。')}` : ''),
+        ? `\n${t('本条消息可能仍在会话队列中，请先到 风铃 查看状态，避免重复提交。')}` : ''),
     referenceId: safeReferenceId(referenceId),
     at: Number.isFinite(at) ? at : Date.now(),
   });

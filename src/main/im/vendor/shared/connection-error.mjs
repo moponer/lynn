@@ -13,8 +13,8 @@ const KNOWN_MESSAGES = {
   'webhook-configured': '该 Telegram 机器人已配置 Webhook，请先在原服务中移除 Webhook 后重试。',
   'invalid-device-token': 'AI Office Device Token 无效。',
   'office-hook-unavailable': 'AI Office Hook 尚未上线或地址不正确。',
-  'messages-database-permission-required': '请在 macOS 系统设置中授予 DSH 完全磁盘访问权限，以读取 Messages 数据库。',
-  'messages-automation-permission-required': '请在 macOS 系统设置中允许 DSH 自动控制 Messages。',
+  'messages-database-permission-required': '请在 macOS 系统设置中授予 风铃 完全磁盘访问权限，以读取 Messages 数据库。',
+  'messages-automation-permission-required': '请在 macOS 系统设置中允许 风铃 自动控制 Messages。',
   'messages-permission-required': '先在 macOS 系统设置中授予 Messages 权限。',
 };
 
@@ -116,16 +116,16 @@ export function diagnosticRpcResult(diagnostics, cause, result, context) {
 }
 
 export function connectionHint(details) {
-  if (details.stage === 'qr.encode') return t('本机二维码图片生成失败，请重试；若持续失败，请复制诊断信息并检查 DSH 运行环境。');
+  if (details.stage === 'qr.encode') return t('本机二维码图片生成失败，请重试；若持续失败，请复制诊断信息并检查 风铃 运行环境。');
   const r = details.reason;
   if (r === 'multiple-causes') return t('检测到多个底层原因，请展开诊断详情逐项检查。');
-  if (['ENOTFOUND', 'EAI_AGAIN'].includes(r)) return t('服务域名解析失败，请检查运行 DSH 的机器的 DNS 和网络设置。');
+  if (['ENOTFOUND', 'EAI_AGAIN'].includes(r)) return t('服务域名解析失败，请检查运行 风铃 的机器的 DNS 和网络设置。');
   if (r === 'ECONNREFUSED') return t('目标拒绝连接，请检查服务地址、端口和访问限制。');
   if (['ECONNRESET', 'EPIPE', 'UND_ERR_SOCKET'].includes(r)) return t('连接已中断，请检查网络和目标服务状态。');
-  if (['ENETUNREACH', 'EHOSTUNREACH', 'ERR_NETWORK_ACCESS_DENIED'].includes(r)) return t('目标网络不可达，请检查运行 DSH 的机器的网络出口和访问限制。');
+  if (['ENETUNREACH', 'EHOSTUNREACH', 'ERR_NETWORK_ACCESS_DENIED'].includes(r)) return t('目标网络不可达，请检查运行 风铃 的机器的网络出口和访问限制。');
   if (/CERT|TLS|SSL|ISSUER|SIGNATURE/.test(r ?? '')) return t('TLS 或证书校验失败，请检查系统时间、证书链和网络设置。');
   if (/TIMEOUT/.test(r ?? '') || r === 'ETIMEDOUT' || r === 'timeout') return t('请求超时，请检查目标服务和网络；诊断详情中可查看已知的耗时。');
-  if (r === 'ERR_PROXY_CONNECTION_FAILED' || details.httpStatus === 407) return t('代理连接或认证失败，请检查 DSH 进程使用的代理配置。');
+  if (r === 'ERR_PROXY_CONNECTION_FAILED' || details.httpStatus === 407) return t('代理连接或认证失败，请检查 风铃 进程使用的代理配置。');
   if (['EAUTH', 'AUTHENTICATIONFAILED'].includes(r)) return t('服务认证失败，请检查账号和授权信息。');
   if (['EACCES', 'EPERM', 'EROFS'].includes(r)) return t('操作权限不足，请检查对应资源的访问权限。');
   if (r === 'ENOSPC') return t('磁盘空间不足，请释放空间后重试。');
@@ -135,7 +135,7 @@ export function connectionHint(details) {
   if ([401, 403].includes(details.httpStatus)) return t('服务拒绝了请求，请检查凭据、权限或访问限制；HTTP 状态本身不能确认登录失效。');
   if (details.httpStatus >= 500) return t('目标服务暂时异常，请稍后重试。');
   if (details.httpStatus) return t('目标服务返回了 HTTP 错误，请查看诊断详情。');
-  return t('暂未识别具体原因，请复制诊断信息，并查看相同参考号的 DSH 日志。');
+  return t('暂未识别具体原因，请复制诊断信息，并查看相同参考号的 风铃 日志。');
 }
 
 export function operationStage(operation) {
