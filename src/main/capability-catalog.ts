@@ -368,10 +368,10 @@ export default function activate(api: {
       "SKILL.md": buildSkillMd({
         name: "text-check",
         description:
-          "写稿/改稿前的文本体检：用 text_check 工具量字数、中英文占比、句长分布、重复短语与朗读时长，再决定怎么改。适合周报、公告、对外文档的定稿环节。",
-        allowedTools: ["text_check", "read_file", "write_file", "submit_report"],
+          "写稿/改稿前的文本体检：用 lynn_tool_textstat_analyze 工具量字数、中英文占比、句长分布、重复短语与朗读时长，再决定怎么改。适合周报、公告、对外文档的定稿环节。",
+        allowedTools: ["lynn_tool_textstat_analyze", "read_file", "write_file", "submit_report"],
         body: [
-          "# 文本体检（插件工具 `text_check`）",
+          "# 文本体检（插件工具 `lynn_tool_textstat_analyze`）",
           "",
           "## 什么时候用",
           "- 定稿前：字数是否合口径（比如简报要求 800 字以内/以上）",
@@ -379,9 +379,9 @@ export default function activate(api: {
           "- 公告/对外文案：重复短语多说明车轱辘话，删掉一半不影响信息",
           "",
           "## 怎么用",
-          "1. 把正文传进 `text_check`（也可以先 read_file 再粘）",
+          "1. 派单时要求成员把正文传进 `lynn_tool_textstat_analyze`（这个工具在成员手上，你自己调不到）",
           "2. 只改「确实有问题」的地方：长句拆开、重复片段留一处、字数超标就删掉解释性内容而不是删结论",
-          "3. 改完再跑一遍 `text_check` 做前后对比，把两组数字写进回报",
+          "3. 要求成员改完再跑一遍做前后对比，把两组数字写进回报",
           "",
           "## 边界",
           "- 它只统计，不改写；改稿是人的判断",
@@ -392,8 +392,8 @@ export default function activate(api: {
     skill: {
       name: "text-check",
       description:
-        "写稿/改稿前的文本体检：用 text_check 工具量字数、中英文占比、句长分布、重复短语与朗读时长，再决定怎么改。",
-      allowedTools: ["text_check", "read_file", "write_file", "submit_report"],
+        "写稿/改稿前的文本体检：用 lynn_tool_textstat_analyze 工具量字数、中英文占比、句长分布、重复短语与朗读时长，再决定怎么改。",
+      allowedTools: ["lynn_tool_textstat_analyze", "read_file", "write_file", "submit_report"],
       body: "",
     },
   },
@@ -500,14 +500,14 @@ export default function activate(api: {
       "SKILL.md": buildSkillMd({
         name: "csv-profile",
         description:
-          "拿到 CSV 表格先做体检：用 csv_profile 看行列数、每列类型与空值、数值范围、重复行，再决定怎么清洗与汇总。适合报表核对、导入前检查。",
-        allowedTools: ["csv_profile", "read_file", "write_file", "run_command", "submit_report"],
+          "拿到 CSV 表格先做体检：用 lynn_tool_csv_profile 看行列数、每列类型与空值、数值范围、重复行，再决定怎么清洗与汇总。适合报表核对、导入前检查。",
+        allowedTools: ["lynn_tool_csv_profile", "read_file", "write_file", "run_command", "submit_report"],
         body: [
-          "# CSV 表分析（插件工具 `csv_profile`）",
+          "# CSV 表分析（插件工具 `lynn_tool_csv_profile`）",
           "",
           "## 顺序",
           "1. `read_file` 读表（超过 200KB 只读前 500 行做体检，再决定是否分段）",
-          "2. `csv_profile` 出体检结论：哪列有空、哪列是数值、有没有重复行",
+          "2. 要求成员用 `lynn_tool_csv_profile` 出体检结论（工具在成员手上）：哪列有空、哪列是数值、有没有重复行",
           "3. 按结论决定清洗动作（去重/补空/类型转换），清洗后重新体检一遍对比",
           "",
           "## 口径纪律",
@@ -519,8 +519,8 @@ export default function activate(api: {
     },
     skill: {
       name: "csv-profile",
-      description: "拿到 CSV 表格先做体检：用 csv_profile 看行列数、每列类型与空值、数值范围、重复行。",
-      allowedTools: ["csv_profile", "read_file", "write_file", "run_command", "submit_report"],
+      description: "拿到 CSV 表格先做体检：用 lynn_tool_csv_profile 看行列数、每列类型与空值、数值范围、重复行。",
+      allowedTools: ["lynn_tool_csv_profile", "read_file", "write_file", "run_command", "submit_report"],
       body: "",
     },
   },
@@ -606,10 +606,10 @@ export default function activate(api: {
       "SKILL.md": buildSkillMd({
         name: "text-diff",
         description:
-          "改稿/改配置后的差异核对：用 text_diff 比两份文本，把改了几行、改了哪几句写进回报，而不是只写「已更新」。",
-        allowedTools: ["text_diff", "read_file", "write_file", "submit_report"],
+          "改稿/改配置后的差异核对：用 lynn_tool_diff_compare 比两份文本，把改了几行、改了哪几句写进回报，而不是只写「已更新」。",
+        allowedTools: ["lynn_tool_diff_compare", "read_file", "write_file", "submit_report"],
         body: [
-          "# 文本差异（插件工具 `text_diff`）",
+          "# 文本差异（插件工具 `lynn_tool_diff_compare`）",
           "",
           "## 什么时候用",
           "- 改完稿子要向风铃证明「只改了该改的地方」",
@@ -625,8 +625,8 @@ export default function activate(api: {
     },
     skill: {
       name: "text-diff",
-      description: "改稿/改配置后的差异核对：用 text_diff 比两份文本，把改了几行、改了哪几句写进回报。",
-      allowedTools: ["text_diff", "read_file", "write_file", "submit_report"],
+      description: "改稿/改配置后的差异核对：用 lynn_tool_diff_compare 比两份文本，把改了几行、改了哪几句写进回报。",
+      allowedTools: ["lynn_tool_diff_compare", "read_file", "write_file", "submit_report"],
       body: "",
     },
   },
@@ -690,7 +690,7 @@ export const SKILL_PRESETS: CapPreset[] = [
       name: "data-audit",
       description:
         "核对数字类任务（报表对账、台账核对、口径比对）时使用：定口径 → 独立复算 → 差异逐项归零 → 出结论。含常见口径陷阱与证据要求。",
-      allowedTools: ["office_read_table", "office_write_table", "csv_profile", "read_file", "write_file", "list_dir", "run_command", "submit_report"],
+      allowedTools: ["office_read_table", "office_write_table", "lynn_tool_csv_profile", "read_file", "write_file", "list_dir", "run_command", "submit_report"],
       body: [
         "# 数据核对工作流",
         "",
@@ -701,7 +701,7 @@ export const SKILL_PRESETS: CapPreset[] = [
         "- 缺失值：空值算 0 还是剔除？两种都要给数，别偷偷选一个",
         "",
         "## 2. 独立复算，不复用别人的中间结果",
-        "- 用 `office_read_table` / `csv_profile` 自己读原始表，别拿上游报表的汇总值当输入。",
+        "- 用 `office_read_table` / `lynn_tool_csv_profile` 自己读原始表，别拿上游报表的汇总值当输入。",
         "- 至少两条路径算同一个数（比如按明细求和 vs 按分组汇总再求和），两条对上才算过。",
         "- 计算过程落成文件（脚本或表格），别只在脑内算。",
         "",

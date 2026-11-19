@@ -105,7 +105,16 @@ test("安装插件预置：文件落地、技能随插件目录被发现（插�
   const hit = entries.find((e) => e.name === "text-check");
   assert.ok(hit, "插件里的 SKILL.md 应被发现");
   assert.equal(hit.level, "plugin");
-  assert.ok(hit.allowedTools.includes("text_check"), "技能要声明插件工具，否则激活后工具面收窄会自锁");
+  /**
+   * 技能必须声明**插件注册后的真实全名**（2026-11-19 C1 修）。
+   * 插件 id `lynn.tool.textstat` + 工具短名 `analyze` → `lynn_tool_textstat_analyze`。
+   * 之前这里（和 SKILL.md）写的是短名 `text_check`——那是模型根本找不到的工具名，
+   * 激活后工具面收窄反而自锁。测试改成断言真实全名，防止再退回去。
+   */
+  assert.ok(
+    hit.allowedTools.includes("lynn_tool_textstat_analyze"),
+    `技能要声明插件工具的真实全名（l1ToolFullName 规则），实际：${hit.allowedTools.join("、")}`,
+  );
 
   // 重复安装：不动用户改过的文件
   fs.writeFileSync(path.join(dir, "index.ts"), "// 用户改过\n", "utf-8");
