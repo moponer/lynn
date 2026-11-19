@@ -117,14 +117,31 @@ test("群公告重复写同一内容：不重复发卡（治'群公告重复消�
       .handle("session.snapshot")
       .feed.filter((c) => (c.text ?? "").includes("群公告写好了"));
     assert.equal(noticeCards.length, 1, `同内容只该有 1 张公告卡，实际 ${noticeCards.length}`);
+  } finally {
+    await kernel.dispose();
+  }
+});
 
-    // 内容真变了，才允许再落一张
-    const r3 = kernel.runTool("set_group_notice", { text: "整体：改做 Q4 复盘" });
-    assert.match(String(r3), /写好/);
-    const after = kernel
+test("群公告更新（内容变化）：不再刷对话流卡，只更新右栏那一份（治'11 张公告卡'）", async () => {
+  const { kernel } = setup();
+  try {
+    await kernel.init();
+    const id = kernel.handle("session.snapshot").thread.id;
+    // 首次：落一张卡
+    kernel.runTool("set_group_notice", { text: "第一版公告：整体目标 A" });
+    // 之后三次内容都不同的"更新"（实机就是这样刷了 11 张）
+    kernel.runTool("set_group_notice", { text: "第二版公告：进展 1" });
+    kernel.runTool("set_group_notice", { text: "第三版公告：进展 2" });
+    kernel.runTool("set_group_notice", { text: "第四版公告：进展 3" });
+
+    const cards = kernel
       .handle("session.snapshot")
       .feed.filter((c) => (c.text ?? "").includes("群公告写好了"));
-    assert.equal(after.length, 2, "内容变了应更新公告卡");
+    assert.equal(cards.length, 1, `多次更新只该有 1 张首建卡，实际 ${cards.length}`);
+
+    // 右栏那一份必须是最新的
+    const ann = kernel.handle("session.snapshot").threads.find((t) => t.id === id)?.announcement ?? "";
+    assert.match(ann, /第四版公告/, "右栏公告要反映最新一版");
   } finally {
     await kernel.dispose();
   }

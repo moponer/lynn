@@ -1909,24 +1909,49 @@ export class Kernel {
       // 累计原始次数会把"换着法子找路"误判成"明知做不到还硬来"。
       const sig = ev.command.trim().replace(/\s+/g, " ").slice(0, 200);
       const seen = this.memberBlockedCmds.get(taskId) ?? new Set<string>();
+      const firstTimeForThisCmd = !seen.has(sig);
       seen.add(sig);
       this.memberBlockedCmds.set(taskId, seen);
       this.memberBlocked.set(taskId, seen.size);
-      this.cardTo(threadId, {
-        kind: "tool",
-        badge: "已拦截",
-        jobId: taskId,
-        title: `${member} · ${taskId}`,
-        // 越界被拦不是"成员出错"，是边界在生效：说清它能动哪儿，别让用户以为卡死了
-        body: `命令被纵深防御规则拦下：${ev.why}\n${ev.command}\n\n成员只能在自己的工作区（派单时钉住的目录）里读写。要查别处，把材料复制进工作区，或右键这张单「授权只读访问某个目录」。`,
+      /**
+       * 同一条命令只往对话流说一次（2026-11-19）。
+       *
+       * 成员反复重试同一条越界命令＝在撞墙，这时用户不需要被同一句话刷 N 遍。
+       * `seen` 已按 sig 去重，所以这里"首次见这条命令"才落一条她的叙述；
+       * 后续同一命令的重试只计入 `memberBlocked`（供巡检判断"在撞墙"），
+       * 不再重复写对话流。
+       */
+      if (firstTimeForThisCmd) {
         /**
-         * 语音播报：说清"谁、干了啥、我拦没拦"。
-         * 之前没写 speak → 走 voice-policy 的 "已拦截" 兜底
-         * "有一条命令被拦下，详情看卡片"——但卡片在对话流里不显眼，
-         * 用户找不到。现在把关键信息直接念出来。
+         * 拦截记录**写进对话流、以她的口吻说清四件事**（2026-11-19 用户要求）：
+         *
+         *   谁的命令 → 什么命令（干什么）→ 我怎么处理 → 处理结果
+         *
+         * ## 为什么不再是 badge:"已拦截" 的 tool 卡
+         *
+         * 用户实机反馈："语音说'详情看卡片'，但界面上没有卡片；这个不需要卡片，
+         * 我只需要她告诉我谁的命令、啥命令、她怎么处理、结果。这些介入事项应该
+         * 在对话流里按顺序展示。"
+         *
+         * 所以改成 `kind:"lynn"` 的对话流消息：`card()` 会把它插在 liveCard 之前
+         * （见 card() 的顺序纪律），于是它按发生顺序自然落在对话流里她那轮附近，
+         * 而不是一张需要另找的独立卡。
          */
-        speak: `${member} 想跑「${ev.command.slice(0, 40)}」，被边界拦下了（${ev.why}），我没放行。`,
-      });
+        const cmdShort = ev.command.trim().replace(/\s+/g, " ").slice(0, 80);
+        const why = ev.why ?? "越界";
+        this.cardTo(threadId, {
+          kind: "lynn",
+          jobId: taskId,
+          author: { kind: "lynn", name: "风铃" },
+          text:
+            `我拦了 ${member} 的一条命令：\n${cmdShort}\n` +
+            `原因：${why}（它只能在我给的工作区里读写）。\n` +
+            `处理：没有放行。要查别处，把材料复制进工作区，或右键这张单「授权只读访问某个目录」。`,
+          speak: `${member} 想跑「${cmdShort.slice(0, 40)}」，被边界拦下了（${why}），我没放行。`,
+          // 归属工单：拦截这一下也要计入这张单的"往来"（展开能看完整命令）
+          body: `命令被纵深防御规则拦下：${why}\n${ev.command}\n\n成员只能在自己的工作区（派单时钉住的目录）里读写。要查别处，把材料复制进工作区，或右键这张单「授权只读访问某个目录」。`,
+        });
+      }
     } else if (ev.kind === "cmd_net") {
       this.cardTo(threadId, { kind: "tool", badge: "出站", jobId: taskId, title: `${member} · ${taskId}`, body: `出站命令已审计：${ev.command}` });
     } else if (ev.kind === "cmd_auto") {
@@ -6931,8 +6956,24 @@ export class Kernel {
         return stageTail ? `${reply}\n阶段：${stageTail}` : reply;
       }
       case "set_group_notice": {
-        // 群公告（全局段）：只有风铃能写。
-        // 已有公告且内容相同 → 不重复发卡（防止模型反复调同一个值刷出多张）。
+        /**
+         * 群公告（全局段）：只有风铃能写。
+         *
+         * ## 为什么要改（2026-11-19 实机复盘）
+         *
+         * 用户报"还会看到重复的群公告建立消息"。查线程文件发现同一会话里
+         * 落了 **11 张**「群公告写好了」卡，而且每张内容都不一样——模型把
+         * `set_group_notice` 当成"更新当前状态"在用，每次进展就重写一版公告。
+         * 于是每版都落一张卡，对话流被"群公告写好了"刷屏。
+         *
+         * 群公告本来就该是**右栏里那一份稳定的东西**（Roster.tsx 直接读
+         * `thread.announcement`），不是消息流里一次次追加的通知。
+         *
+         * 所以现在：
+         *  - 首次写（原先没有公告）→ 落**一张**卡，让用户知道公告建起来了；
+         *  - 之后更新 → **只更新右栏那一个**，不再往对话流追加卡（避免刷屏）；
+         *  - 内容没变 → 直接返回"没变"。
+         */
         const text = String(args.text ?? "").trim();
         if (!text) return "群公告不能空：写清整体干什么、谁管哪段、接缝在哪。";
         if (!this.currentThreadId) return "现在没有群（会话）：先开一个群再写公告。";
@@ -6941,6 +6982,12 @@ export class Kernel {
         if (existing && existing === text) {
           return "群公告没变（内容相同），不需要重写。";
         }
+        if (existing) {
+          // 已有公告：只更新右栏那一份，不再刷对话流卡片。
+          this.notify({ type: "thread", threadId: this.currentThreadId });
+          return "群公告已更新（右栏那份就地改了，群里每个人都能看见，我每轮也看得见）。";
+        }
+        // 首次建立公告：只落这一张，作为"公告已建"的一次性提示。
         this.card({
           kind: "lynn",
           text: `群公告写好了：\n${text}`,
